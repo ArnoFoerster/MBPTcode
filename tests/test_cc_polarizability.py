@@ -4,10 +4,11 @@ JCTC 15, 2925 (2019), doi:10.1021/acs.jctc.9b00099.
 
 For the 2-electron systems H2 and He the EOM-CC polarizability is EXACT, so:
 - alpha(0) must match a finite-field FCI polarizability, and
-- the G0WCC@HF ionization potentials must match the paper's Table 1
-  (def2-SVP, GW100 geometry): H2 15.97 eV, He 23.82 eV. The G0W0@HF column
-  (H2 16.24, He 24.32) cross-checks this repo's own GW@RPA on the same
-  systems.
+- the G0WCC@HF ionization potential, with every EE state in the Lehmann sum,
+  must match G0W@HF screened by the FCI response (tests/fci_screened_gw.py)
+  and the paper's Table 1 (def2-SVP, GW100 geometry): H2 15.97 eV, He
+  23.82 eV. The G0W0@HF column (H2 16.24, He 24.32) cross-checks this repo's
+  own GW@RPA on the same systems.
 """
 import os
 import sys
@@ -18,8 +19,9 @@ import numpy as np
 from pyscf import gto, scf, fci
 
 from src.SingleReference.CC.eom import EOMCC
-from src.Base.pyscf_interface import get_dipole_integrals
+from src.Base.pyscf.pyscf_interface import get_dipole_integrals
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from tests.fci_screened_gw import fci_screened_g0w_ip
 
 
 def check_alpha_vs_finite_field_fci():
@@ -54,21 +56,13 @@ def check_alpha_vs_finite_field_fci():
     return ok
 
 
-def check_gwcc_vs_paper():
-    """H2/He at GW100/def2-SVP geometry both have EXACTLY degenerate p-type
-    virtual-orbital excitation manifolds. Independently-solved non-Hermitian
-    left/right Davidson (see eom.py's _biorthogonalize_degenerate) can fail
-    to resolve a fully consistent basis within such a cluster -- confirmed
-    directly: even padding nroots generously and tightening tol to 1e-12
-    still left one direction of a 3-fold-degenerate cluster with a
-    near-exactly-zero L/R overlap for both H2 and He at this geometry/basis.
-    This is a known, NOT-yet-solved limitation (symmetry-adapted trial
-    vectors would fix it properly; out of scope here) -- transition_densities
-    raises rather than silently returning wrong numbers when it detects this,
-    so we catch that specific RuntimeError and report it as a skip, not a
-    pass/fail verdict. The G0W0@HF (RPA) comparison, which doesn't go through
-    this EOM-CC transition-density machinery at all, is unaffected and is a
-    real pass/fail check."""
+def check_gwcc_vs_fci_and_paper():
+    """H2 and He at the GW100 geometry in def2-SVP have exactly degenerate
+    excitations (spin multiplets, p-type shells), so the left and right EOM
+    solves return unrelated bases within a cluster; transition_densities
+    pairs them per cluster. nroots = the whole EE manifold makes the Lehmann
+    sum complete (a dense diagonalization), as in the paper; the IP must
+    then equal the FCI-screened one and the paper's."""
     all_ok = True
     # GW100 geometry R(H2) = 0.74144 A, def2-SVP, HF reference
     cases = [
@@ -77,7 +71,7 @@ def check_gwcc_vs_paper():
     ]
     for name, atom, ip_g0w0_paper, ip_gwcc_paper in cases:
         mol = gto.M(atom=atom, basis='def2-svp', verbose=0)
-        mf = scf.RHF(mol).run()
+        mf = scf.RHF(mol).run(conv_tol=1e-12)
 
         ip_rpa = -calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
                                  df=False, state='homo')
@@ -86,42 +80,36 @@ def check_gwcc_vs_paper():
         print(f"{name} G0W0@HF (repo GW@RPA): {ip_rpa:.3f} eV vs paper "
               f"{ip_g0w0_paper:.2f}: {'OK' if ok else 'FAIL'}")
 
-        try:
-            ip_cc = -calc_qp_energy(mf, selfenergy='GW', polarizability='CCSDT',
-                                    state='homo')
-        except RuntimeError as e:
-            print(f"{name} G0WCC@HF: SKIPPED (known degenerate-root limitation: {e})")
-            continue
-        ok = abs(ip_cc - ip_gwcc_paper) < 0.05
+        nstates = EOMCC(mf, level='ccsdt').manifold_dim('ee')
+        ip_cc = -calc_qp_energy(mf, selfenergy='GW', polarizability='CCSDT',
+                                state='homo', nroots=nstates)
+        ip_fci = fci_screened_g0w_ip(mf)
+        ok = abs(ip_cc - ip_fci) < 1e-5 and abs(ip_cc - ip_gwcc_paper) < 0.05
         all_ok &= ok
-        print(f"{name} G0WCC@HF (exact CC screening): {ip_cc:.3f} eV vs paper "
+        print(f"{name} G0WCC@HF (exact CC screening, {nstates} states): {ip_cc:.6f} eV "
+              f"vs FCI-screened {ip_fci:.6f} (diff {ip_cc - ip_fci:.1e}) and paper "
               f"{ip_gwcc_paper:.2f}: {'OK' if ok else 'FAIL'}")
     return all_ok
 
 
-def check_ccsd_equals_ccsdt_screening_for_2e():
-    """For a 2-electron system T3 == 0 and the SD manifold spans the full
-    sector, so EOM-CCSD and EOM-CCSDT screening must give the same QP.
-    H2/sto-3g (not He/def2-svp): minimal basis, no p-orbital degeneracy, so
-    this doesn't hit the degenerate-root limitation documented above -- keeps
-    this specific check a clean pass/fail."""
+def check_ccsd_screening_is_refused():
+    """EOM-CCSD is not in MBPTcode (pyscf has it); CC
+    screening at the CCSD level is refused at the EOM build, by name."""
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
-    qp_sd = calc_qp_energy(mf, selfenergy='GW', polarizability='CCSD',
-                           state='homo', nroots=4)
-    qp_sdt = calc_qp_energy(mf, selfenergy='GW', polarizability='CCSDT',
-                            state='homo', nroots=4)
-    d = abs(qp_sd - qp_sdt)
-    ok = d < 1e-5
-    print(f"H2/sto-3g: G0WCC with EOM-CCSD == EOM-CCSDT screening for 2e "
-          f"(diff {d:.2e} eV): {'OK' if ok else 'FAIL'}")
+    try:
+        calc_qp_energy(mf, selfenergy='GW', polarizability='CCSD', state='homo', nroots=4)
+        ok = False
+    except ValueError as exc:
+        ok = 'pyscf' in str(exc)
+    print(f"H2/sto-3g: G0WCC with EOM-CCSD screening is refused: {'OK' if ok else 'FAIL'}")
     return ok
 
 
 if __name__ == '__main__':
     all_ok = True
     all_ok &= check_alpha_vs_finite_field_fci()
-    all_ok &= check_gwcc_vs_paper()
-    all_ok &= check_ccsd_equals_ccsdt_screening_for_2e()
+    all_ok &= check_gwcc_vs_fci_and_paper()
+    all_ok &= check_ccsd_screening_is_refused()
     print("\nALL PASSED" if all_ok else "\nFAILURES DETECTED")
     sys.exit(0 if all_ok else 1)

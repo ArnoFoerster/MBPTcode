@@ -13,7 +13,7 @@ Checks:
   2. build_effective_hamiltonian's active_space= keyword reproduces the same
      g_eff as the equivalent manual window/permuted mean field, including a
      scattered window only reachable via permutation
-  3. the unavailable solvers ('pyhast', 'pdaggerq', 'ccsdt') refuse cleanly
+  3. a solver name that is not a backend ('pyhast', 'ccsdt', a typo) is refused
   4. the 'dmrg' backend, run in its own subprocess (see qdpt_dmrg_check.py
      for why), agrees with 'pyscf_fci' on the same downfolded g_eff
 """
@@ -26,9 +26,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.active_space import ActiveSpace
+from src.SingleReference.common.active_space import ActiveSpace
 from src.MultiReference.QDPT.perturbative import build_effective_hamiltonian, run_pipeline
 from src.Solvers.active_space import solve
+from tests.blas_bar import same
 
 H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 
@@ -122,6 +123,10 @@ def check_routes_agree_with_a_frozen_core():
 
 
 def check_active_space_keyword_matches_manual_window():
+    """The keyword and the manual window build one effective Hamiltonian:
+    bitwise on the BLAS the pins record, within the energy class's cross-BLAS
+    bar elsewhere (the two routes reach the same contractions in different
+    call shapes)."""
     mol, mf = _h4()
     nocc, norb = mol.nelectron // 2, mol.nao
     kw = dict(max_pt_order=2, max_vertex=2)
@@ -130,7 +135,7 @@ def check_active_space_keyword_matches_manual_window():
     space = ActiveSpace.from_indices(norb, nocc, [0, 1], [2])
     got, info = build_effective_hamiltonian(mol, mf, active_space=space, **kw)
     contiguous_ok = (info['active_space'] is space
-                     and all(np.array_equal(np.asarray(got[n]), np.asarray(ref[n]))
+                     and all(same(np.asarray(got[n]), np.asarray(ref[n]))
                             for n in (0, 1, 2)))
 
     # a window the energy ordering cannot produce: only the permutation reaches it
@@ -138,7 +143,7 @@ def check_active_space_keyword_matches_manual_window():
     shim = scattered.permuted_mf(mf)
     manual, _ = build_effective_hamiltonian(mol, shim, *scattered.contiguous_counts(), **kw)
     keyed, _ = build_effective_hamiltonian(mol, mf, active_space=scattered, **kw)
-    scattered_ok = all(np.array_equal(np.asarray(keyed[n]), np.asarray(manual[n]))
+    scattered_ok = all(same(np.asarray(keyed[n]), np.asarray(manual[n]))
                       for n in (0, 1, 2))
 
     ok = contiguous_ok and scattered_ok
@@ -153,17 +158,17 @@ def check_unavailable_solvers_refuse_cleanly():
     g_eff, space = build_effective_hamiltonian(mol, mf, 0, 3, max_pt_order=2,
                                                max_vertex=2)
     ok = True
-    for name in ('pyhast', 'pdaggerq', 'ccsdt', 'CCSDT'):
+    for name in ('pyhast', 'pdaggerq', 'ccsdt', 'CCSDT', 'pyscf-fci'):
         try:
             solve(name, g_eff, space['n_orbs'], space['n_elec_active'],
                  space['act_idx'], space['act_occ_idx'], space['act_vir_idx'])
             ok = False
-        except NotImplementedError:
+        except ValueError:
             pass
         except Exception as exc:  # pragma: no cover - diagnostic only
-            print(f"  {name} raised {type(exc).__name__}, not NotImplementedError")
+            print(f"  {name} raised {type(exc).__name__}, not ValueError")
             ok = False
-    print(f"pyhast/pdaggerq/ccsdt/CCSDT all raise NotImplementedError: "
+    print(f"pyhast/pdaggerq/ccsdt/CCSDT/pyscf-fci all raise ValueError: "
           f"{'OK' if ok else 'FAIL'}")
     return ok
 

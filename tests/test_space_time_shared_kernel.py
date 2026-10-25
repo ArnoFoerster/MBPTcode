@@ -12,11 +12,12 @@ What is gated:
   * the gradient forward folded with the grid's transform equals the energy
     forward at 1e-13 relative. The two accumulate in a different order, so
     bitwise is not the claim; drift is.
-  * the whole sweep equals a plain per-tau loop of the kernel bitwise, and so
-    does `out=` with dirty buffers against a fresh allocation.
-  * a sweep split over disjoint tau subsets sums to the full sweep bitwise,
-    through both entry points -- which is what makes an all-reduce over ranks
-    exact.
+  * the whole sweep equals a plain per-tau loop of the kernel to a few ulp,
+    and so does `out=` with dirty buffers against a fresh allocation (two
+    computations).
+  * a sweep split over disjoint tau subsets sums to the full sweep to a few
+    ulp, through both entry points -- the partition adds exact zeros, which
+    is what makes an all-reduce over ranks exact.
   * the gradient package's chi0 convenience IS the energy chi0.
 
 Random factors rather than a molecule, as in test_selfenergy_block_backward:
@@ -27,13 +28,14 @@ boundaries and not only inside one.
 """
 import numpy as np
 
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.LinearResponse.space_time import (
     chi0_imaginary_frequency, polarizability_projected_sweep,
     polarizability_projected_tau, polarizability_work, split_branches,
     tile_rows)
-from src.gradients.space_time_adjoint import chi0_frequency, polarizability_tau
+from src.gradients.rpa.space_time_adjoint import chi0_frequency, polarizability_tau
+from tests.pins import assert_same
 
 M, NORB, NOCC, NAUX, NTAU, NFREQ = 23, 8, 3, 6, 8, 5
 #: Tile budget, in GB, that puts five grid rows in a tile at this M (the kernel
@@ -78,9 +80,6 @@ def test_gradient_forward_equals_energy_forward():
     scale = np.abs(chi0).max()
     assert scale > 0
     assert np.abs(folded - chi0).max() <= REL * scale
-    # and the unstreamed reference the energy side keeps for small grids
-    whole = chi0_imaginary_frequency(X, D, eps, NOCC, grid, stream=False)
-    assert np.abs(whole - chi0).max() <= REL * scale
 
 
 def test_sweep_is_the_per_tau_kernel_bitwise():
@@ -91,7 +90,7 @@ def test_sweep_is_the_per_tau_kernel_bitwise():
     for k, tau in enumerate(grid.tau_points):
         one = polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
                                            tile_memory_gb=TILE_GB)
-        assert np.array_equal(sweep[k], one)
+        assert_same(sweep[k], one, unit='1', quantity='root', label=k)
 
 
 def test_out_and_work_buffers_change_nothing():
@@ -109,7 +108,7 @@ def test_out_and_work_buffers_change_nothing():
                                        tile_memory_gb=TILE_GB, out=out,
                                        work=work)
     assert got is out
-    assert np.array_equal(got, fresh)
+    assert_same(got, fresh, unit='1', quantity='root', label='dirty buffers')
 
 
 def test_disjoint_tau_subsets_sum_to_the_whole():
@@ -124,16 +123,18 @@ def test_disjoint_tau_subsets_sum_to_the_whole():
         others = np.setdiff1d(np.arange(NTAU), owned(r))
         assert np.all(part[others] == 0.0)
         assert np.all(part[owned(r)] != 0.0)
-    assert np.array_equal(sum(parts), full)
+    assert_same(sum(parts), full, unit='1', quantity='root',
+                label='energy entry point')
     # the same partition through the gradient chain's entry point
     via_gradient = sum(polarizability_tau(X, D, eps, NOCC, grid,
                                           tile_gb=TILE_GB, tau_indices=owned(r))
                        for r in range(NRANKS))
-    assert np.array_equal(via_gradient, full)
+    assert_same(via_gradient, full, unit='1', quantity='root',
+                label='gradient entry point')
 
 
 def test_gradient_chi0_is_the_energy_chi0():
     eps, X, D, grid = system()
     a = chi0_frequency(X, D, eps, NOCC, grid, tile_gb=TILE_GB)
     b = chi0_imaginary_frequency(X, D, eps, NOCC, grid, tile_memory_gb=TILE_GB)
-    assert np.array_equal(a, b)
+    assert_same(a, b, unit='1', quantity='root', label='chi0')

@@ -1,14 +1,13 @@
 """ONE assembly of E_0, gated bitwise against every surface that reports it.
 
 E_0 = E_ref + (E_x^HF[rho] - E_xc[rho]) + E_c^dRPA is the plasmon (Klein)
-ground state of Toelle, Kitsaras and Loos (arXiv:2507.02160) Eq. (15). It used
-to be spelled in eight places, and two of them disagreed; `ground_state_energy`
-is now the only one, so what these checks have to establish is that the single
-assembly returns the SAME BITS as each surface's own arithmetic, and that the
-declaration it carries names the functional the number belongs to.
+ground state of Toelle, Kitsaras and Loos (arXiv:2507.02160) Eq. (15).
+`ground_state_energy` is its only spelling, so what these checks establish is
+that the single assembly returns the SAME BITS as each surface's own
+arithmetic, and that the declaration it carries names the functional the
+number belongs to.
 
-Every equivalence gate below is also shown to FAIL, once, under the omission it
-exists to catch, so that none of them is a check that cannot fail:
+What breaks each equivalence gate, and by how much:
 
     E_c^dRPA dropped from the Hartree-Fock total      6.29 eV
     E_x^HF - E_xc dropped from the PBE0 total         8.55 eV
@@ -29,18 +28,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from tests.pins import RECORDING_BLAS, assert_same, bar_under
+from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import GroundState
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, exx_double_counting, ground_state_energy,
     reference_energy)
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
-                                          QuasiparticleSurface, mo_eri)
-from src.gradients.quasi_boson_adjoint import QPqbAdjoint as QPqb
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+                                                QuasiparticleSurface, mo_eri)
+from src.gradients.gwbse.quasi_boson_adjoint import QPqbAdjoint as QPqb
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
+from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -128,8 +130,9 @@ def test_the_rpa_ground_state_is_the_dense_surfaces_own_arithmetic(water):
     e_corr = dense_correlation_energy(mf, water)
     e0 = ground_state_energy(GroundState('rpa', 'hf'), mf, water,
                              e_corr=e_corr)
-    assert e0.total == DenseRPASurface(water, rhf).total_energy(water)
-    assert e0.terms['E_ref'] == float(mf.e_tot)
+    # the surface builds E_c^dRPA again from the same mean field
+    assert_same(e0.total, DenseRPASurface(water, rhf).total_energy(water))
+    assert_same(e0.terms['E_ref'], float(mf.e_tot))
     assert e0.terms['E_x^HF - E_xc'] == 0.0
     assert e0.terms['E_c^dRPA'] == float(e_corr)
 
@@ -151,20 +154,21 @@ def test_the_rpa_ground_state_on_a_kohn_sham_reference(water):
     exchange where the Klein functional wants the exact one -- 8.55 eV.
     """
     mf = pbe0(water)
-    chain = RPAGroundStateChain(water, pbe0, mf=mf)
+    chain = RPAGroundStateChain(water, pbe0, mf=mf, numerics=Numerics(isdf={'counts': g1(water)}))
     e, e_hf, e_c = chain.energy(water, mf)
     e0 = ground_state_energy(declared_ground_state(mf, 'rpa'), mf, water,
                              e_corr=e_c)
-    assert e0.total == e
+    assert_same(e0.total, e)
     assert e0.declaration == GroundState('rpa', 'pbe0')
     assert e0.terms['E_ref'] == float(mf.e_tot)
-    assert e0.terms['E_ref'] + e0.terms['E_x^HF - E_xc'] == e_hf
-    assert e0.terms['E_c^dRPA'] == e_c
+    assert_same(e0.terms['E_ref'] + e0.terms['E_x^HF - E_xc'], e_hf)
+    assert_same(e0.terms['E_c^dRPA'], e_c)
     # the middle term is the double counting AS THE TOTAL CARRIES IT, E_HF
     # minus E_ref, so it differs from the operator expression by the rounding
     # of that subtraction and not by any physics
     assert (e0.terms['E_x^HF - E_xc']
-            == pytest.approx(exx_double_counting(mf, water), abs=1e-14))
+            == pytest.approx(exx_double_counting(mf, water),
+                             abs=bar_under(RECORDING_BLAS, 1e-14)))
 
     perturbed = float(mf.e_tot) + e_c
     assert perturbed != e0.total
@@ -241,9 +245,9 @@ def test_every_surface_declares_the_functional_its_mean_field_carries(water):
     assert (DenseBSESurface(water, scf=pbe0).physics_ground_state
             == GroundState('rpa', 'pbe0'))
 
-    chain = RPAGroundStateChain(water, pbe0, mf=pbe0(water))
+    chain = RPAGroundStateChain(water, pbe0, mf=pbe0(water), numerics=Numerics(isdf={'counts': g1(water)}))
     assert chain.physics_ground_state == GroundState('rpa', 'pbe0')
-    composed = RPABSESurface(water, pbe0, mf=pbe0(water), ground=chain)
+    composed = RPABSESurface(water, pbe0, mf=pbe0(water), ground=chain, numerics=g1_numerics(water))
     assert composed.physics_ground_state == chain.physics_ground_state
 
 
@@ -269,7 +273,8 @@ def test_refreeze_carries_the_spin_and_every_other_constructor_setting(water):
     assert refrozen.physics_ground_state == triplet.physics_ground_state
 
     e_triplet = triplet.total_energy(water)
-    assert refrozen.total_energy(water) == e_triplet
+    # two SCF solves: bitwise on the recording BLAS, energy class bar elsewhere
+    assert_same(refrozen.total_energy(water), e_triplet)
     singlet = DenseBSESurface(water, 'BSE@GW', state=0, qp_orbs=[3, 4, 5],
                               filter_z=False, scf=rhf, auxbasis=None,
                               eri_blocks=True, spin='singlet')
@@ -295,8 +300,8 @@ def _modules_after(statement):
 def test_the_production_energy_does_not_import_the_gradient_package():
     """E_0 is a forward energy, so it must be reachable without src.gradients.
 
-    `exx_double_counting` used to live beside the nuclear derivatives that
-    differentiate it, which made the ground-state energy of a Kohn-Sham
+    `exx_double_counting` must not live beside the nuclear derivatives that
+    differentiate it, which would make the ground-state energy of a Kohn-Sham
     reference unreachable without importing the whole gradient package. The
     control below shows the probe can see an import when there is one.
     """

@@ -2,16 +2,17 @@
 
 An explicitly solved orbital q carries its root of
 
-    w_q = eps_q + xc_q + Sigma_c,qq(w_q),   xc_q = <q|Sigma_x - v_xc|q> + Sigma^env_qq,
+    w'_q = eps_q + xc_q + Sigma_c,qq(w'_q),   xc_q = <q|Sigma_x - v_xc|q>,
 
-Sigma^env the static reaction field of Duchemin, Jacquemin and Blase, J. Chem.
-Phys. 144, 164106 (2016), Eq. (18), zero in the gas phase. Every other way an
+plus Sigma^env_qq, the static reaction field of Duchemin, Jacquemin and
+Blase, J. Chem. Phys. 144, 164106 (2016), Eq. (18), added whole after the
+solve (zero in the gas phase): w_q = w'_q + Sigma^env_qq. Every other way an
 orbital gets an energy freezes a piece of such a root at the reference
 geometry R0 and spends it at every geometry R:
 
-    inside scissor   eps_p(R) + xc_p(R) + [w_p - eps_p - xc_p](R0)
+    inside scissor   eps_p(R) + xc_p(R) + [w'_p - eps_p - xc_p](R0) + Sigma^env_pp(R)
     outside, window  eps_p(R) + [w_q - eps_q - Sigma^env_qq](R0) + Sigma^env_pp(R),
-    edge, demoted    q the explicit orbital nearest p in eps at R0
+    edge             q the explicit orbital nearest p in eps at R0
     adaptive hole    the same with the mean over the hole's frozen probe block
 
 so a frozen shift carries the GW correction alone: Sigma_x - v_xc once (the
@@ -24,7 +25,7 @@ and PCM(toluene), at R0 and at a displaced geometry, and checks:
   solved, to 1e-12 Ha, and on the root the same set solves with no tier
   (`scissor=None`), to the Newton tolerance;
 - (b) the static term each explicit orbital is solved with is the
-  independently built <p|Sigma_x - v_xc|p> plus its own Sigma^env_pp, and
+  independently built <p|Sigma_x - v_xc|p>, without Sigma^env_pp, and
   every frozen shift reproduces its formula above to 1e-12 Ha;
   explicit orbitals keep their R0 route at R; one quasiparticle solved alone
   (`quasiparticle`) is the set's root; and in the gas phase the explicit
@@ -40,12 +41,10 @@ The mechanisms: the pole model ('sop'), the contour deformation with
 Laplace or explicit residues, the inside scissor (scissor='calibrate'), the
 outside scissor of a window, an adaptive set's holes (a partition handed in
 frozen, since on the Kohn-Sham references the selection often solves the
-whole window) and window edges, a root rejected at R0 (demoted to the outside
-scissor; forced here by handing the settle step a pole strength outside
-(0, 1]), and a state whose pole-model verdict was frozen at R0 although its
-own root lies past the Eq. (27) limit.
+whole window) and window edges, and a state whose pole-model verdict was
+frozen at R0 although its own root lies past the Eq. (27) limit.
 
-Slow (every column builds seven chains; the force cells take 16 energies
+Slow (every column builds six chains; the force cells take 16 energies
 each). Run: python tests/test_qp_energy_assembly.py   (or pytest)
 """
 import os
@@ -59,18 +58,19 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (HARTREE_TO_EV, QP_CD_NEWTON_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.declaration import QPStates  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.SingleReference.GW.qp_selection import AdaptivePartition  # noqa: E402
-from src.SingleReference.GW.qp_states import resolve_qp_states  # noqa: E402
-from src.SingleReference.GW.sum_over_poles import compressible  # noqa: E402
-from src.gradients import excited_state  # noqa: E402
-from src.gradients.dense_surfaces import QuasiparticleSurface  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.properties.surfaces import reference_mean_field  # noqa: E402
+from src.Base.numerics.constants import (HARTREE_TO_EV, QP_ROOT_TOL,  # noqa: E402
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.declaration import QPStates
+from src.Base.numerics.numerics import numerics_of
+from src.environments.solvent_screening import SolventScreening
+from src.SingleReference.GW.qp_selection import AdaptivePartition
+from src.SingleReference.GW.qp_states import resolve_qp_states
+from src.SingleReference.GW.sum_over_poles import compressible
+from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.surface_factory import reference_mean_field
+from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
 MOLECULES = {
@@ -100,11 +100,10 @@ STATIC_HA = 1e-9
 #: counted twice or not at all by eV.
 DENSE_EV = 0.05
 #: The contour-deformation chain's set, offsets from the LUMO: the states one
-#: in from the frontier, whose residues at the start lie above the gap where
-#: the Laplace backend carries them.
+#: in from the frontier, their residues taken by the explicit backend (the
+#: Laplace one does not carry every one of them: some lie within the tau
+#: grid's e_min of the gap, or below it).
 CD_STATES = (-3, -2, 1, 2)
-#: The orbital whose R0 root is rejected in the demotion column: LUMO+2.
-DEMOTE_ABOVE_HOMO = 3
 TARGETS = (('singlet', 0), ('triplet', 0))
 #: A budget loose enough that every column's adaptive set leaves holes.
 ADAPTIVE_TOL_MEV = 20.0
@@ -151,70 +150,31 @@ def sigma_x_minus_vxc(mf):
     return np.einsum('mp,mn,np->p', c, o, c)
 
 
-class RecordRoutes:
-    """`qp_set_gradient` that keeps the routes of its last call: the chain
-    reports them in `route_out` and keeps none of its own."""
-
-    def __init__(self):
-        self.real, self.routes = excited_state.qp_set_gradient, {}
-
-    def __call__(self, *args, **kw):
-        out = self.real(*args, **kw)
-        route_out = kw.get('route_out')
-        if route_out and 'routes' in route_out:
-            self.routes = {int(p): r for p, r in route_out['routes'].items()}
-        return out
-
-
-class DemoteOne:
-    """`qp_set_gradient` whose settle step reads a pole strength outside
-    (0, 1] for one orbital, as a root on a negative-weight branch has: the
-    orbital is demoted at R0 exactly as such a root would be."""
-
-    def __init__(self, orbital, inner):
-        self.orbital, self.inner = int(orbital), inner
-
-    def __call__(self, *args, **kw):
-        out = self.inner(*args, **kw)
-        states = [int(p) for p in np.atleast_1d(args[7])]
-        route_out = kw.get('route_out')
-        if self.orbital in states and route_out and 'z' in route_out:
-            route_out['z'] = np.array(route_out['z'], float)
-            route_out['z'][states.index(self.orbital)] = -0.01
-        return out
-
-
-def snapshot(chain, mol, mf, recorder):
+def snapshot(chain, mol, mf):
     """What one forward at `mol` assembled, orbital by orbital."""
-    pieces = chain.kernel_pieces(mol, mf)
-    eps, eps_qp, shift = pieces[6], pieces[7], pieces[14]
-    states = [int(p) for p in chain.qp_set]
-    norb = len(eps)
-    env = np.zeros(norb) if shift is None else np.asarray(shift, float)
-    xc = chain._xc_correction(mf, chain.qp_set, shift)
-    return {'eps': np.asarray(eps, float),
-            'eps_qp': np.asarray(eps_qp, float),
-            'xc': dict(zip(states, np.atleast_1d(xc))),
+    sh = chain.shared_forward(mol, mf)
+    states = [int(p) for p in chain.resolved.qp_set]
+    norb = len(sh.eps)
+    env = (np.zeros(norb) if sh.shift is None
+           else np.asarray(sh.shift, float))
+    return {'eps': np.asarray(sh.eps, float),
+            'eps_qp': np.asarray(sh.eps_qp, float),
+            'xc': dict(zip(states, np.atleast_1d(sh.xc_correction))),
             'env': env, 'sxv': sigma_x_minus_vxc(mf),
-            'routes': dict(recorder.routes)}
+            'routes': dict(chain.qp_diagnostics['routes'])}
 
 
 def build(kind, mol, factory, mf, env, window):
     """One chain of the matrix, by the mechanism it exercises."""
-    common = dict(mf=mf, environment=env, solver='dense')
-    if kind in ('window', 'plain', 'demoted'):
+
+    def chain(qp_partition=None, **route):
         return ExcitedStateChain(
-            mol, factory, qp_window=list(window), residue_route='sop',
-            scissor=None if kind == 'plain' else 'calibrate',
-            outside='scissor', **common)
-    if kind == 'cd':
-        # 'auto': the Laplace backend where the tau grid carries a state's
-        # residues, the explicit one where not, none where it has none
-        nocc = mol.nelectron // 2
-        window = [nocc + k for k in CD_STATES]
-        return ExcitedStateChain(mol, factory, qp_window=window,
-                                 residue_route='auto', outside='scissor',
-                                 **common)
+            mol, factory, mf=mf, environment=env, qp_partition=qp_partition,
+            numerics=g1_numerics(mol, numerics_of({'solver': 'dense', **route})))
+
+    if kind in ('window', 'plain'):
+        return chain(qp_window=list(window), residue_route='sop',
+                     scissor=None if kind == 'plain' else 'calibrate')
     if kind in ('adaptive', 'partition'):
         eps = np.asarray(mf.mo_energy, float)
         cands = list(resolve_qp_states(QPStates('adaptive'), eps,
@@ -223,27 +183,24 @@ def build(kind, mol, factory, mf, env, window):
         select = QPStates('adaptive', tol_meV=ADAPTIVE_TOL_MEV,
                           targets=TARGETS)
         if kind == 'adaptive':
-            return ExcitedStateChain(
-                mol, factory, qp_window=cands, residue_route='sop',
-                scissor='calibrate', outside='scissor', qp_select=select,
-                **common)
+            return chain(qp_window=cands, residue_route='sop',
+                         scissor='calibrate', qp_select=select)
         # handed in frozen: the deepest candidate borrows its neighbour's
         # shift, the highest the mean of the two below it
         holes = {cands[0]: (cands[1],), cands[-1]: tuple(cands[-3:-1])}
         part = AdaptivePartition(
             explicit=[p for p in cands if p not in holes], tier_of=holes,
             candidates=cands, targets=TARGETS, tol_meV=ADAPTIVE_TOL_MEV)
-        return ExcitedStateChain(
-            mol, factory, qp_window=cands, residue_route='sop',
-            scissor='calibrate', outside='scissor', qp_partition=part,
-            **common)
-    return ExcitedStateChain(mol, factory, qp_window=2,
-                             residue_route='explicit', outside='scissor',
-                             **common)
+        return chain(qp_window=cands, residue_route='sop',
+                     scissor='calibrate', qp_partition=part)
+    if kind == 'cd':
+        nocc = mol.nelectron // 2
+        return chain(qp_window=[nocc + k for k in CD_STATES],
+                     residue_route='explicit')
+    return chain(qp_window=2, residue_route='explicit')
 
 
-CHAINS = ('window', 'plain', 'demoted', 'adaptive', 'partition', 'cd',
-          'explicit')
+CHAINS = ('window', 'plain', 'adaptive', 'partition', 'cd', 'explicit')
 
 
 def build_column(name, reference, env_name):
@@ -256,17 +213,10 @@ def build_column(name, reference, env_name):
     env = environment(mol, env_name)
     mf = reference_mean_field(mol, factory, env)
     for kind in CHAINS:
-        recorder = RecordRoutes()
-        with pytest.MonkeyPatch.context() as mp:
-            solve = recorder
-            if kind == 'demoted':
-                solve = DemoteOne(mol.nelectron // 2 - 1 + DEMOTE_ABOVE_HOMO,
-                                  recorder)
-            mp.setattr(excited_state, 'qp_set_gradient', solve)
-            chain = build(kind, mol, factory, mf, env, WINDOWS[name])
-            chain.excitation()
-            at_r0 = snapshot(chain, chain.mol0, chain.mf0, recorder)
-            at_r = snapshot(chain, mol1, chain.mean_field(mol1)[1], recorder)
+        chain = build(kind, mol, factory, mf, env, WINDOWS[name])
+        chain.excitation()
+        at_r0 = snapshot(chain, chain.mol0, chain.mf0)
+        at_r = snapshot(chain, mol1, chain.mean_field(mol1)[1])
         out[kind] = (chain, at_r0, at_r)
     return out
 
@@ -279,18 +229,16 @@ def column(request):
 
 def mechanism(chain, s0, p):
     """How orbital p's energy is assembled on `chain`."""
-    if p in set(int(q) for q in chain.qp_set):
+    if p in set(int(q) for q in chain.resolved.qp_set):
         route = s0['routes'][p]
         if route == 'scissor':
             return 'inside'
         if route == 'sop':
-            past = not compressible(chain.qp_seeds[p], s0['eps'],
+            past = not compressible(chain.resolved.qp_seeds[p], s0['eps'],
                                     chain.nocc)[0]
             return 'route-frozen' if past else 'sop'
         return 'explicit' if route == 'explicit' else 'cd'
-    if p in chain.qp_demoted:
-        return 'demoted'
-    part = chain.qp_partition
+    part = chain.resolved.qp_partition
     if part is not None:
         return 'hole' if p in part.tier_of else 'edge'
     return 'outside'
@@ -308,10 +256,10 @@ def expected(chain, s0, s, p, kind):
     inside-scissor state's root at R0 is the one its calibration solved."""
     if kind == 'inside':
         return (s['eps'][p] + s['xc'][p] - s0['eps'][p] - s0['xc'][p]
-                + chain.qp_seeds[p])
-    explicit = sorted(int(q) for q in chain.qp_set)
+                + chain.resolved.qp_seeds[p] + s['env'][p])
+    explicit = sorted(int(q) for q in chain.resolved.qp_set)
     if kind == 'hole':
-        probes = np.atleast_1d(chain.qp_partition.tier_of[p]).astype(int)
+        probes = np.atleast_1d(chain.resolved.qp_partition.tier_of[p]).astype(int)
     else:
         probes = [min(explicit,
                       key=lambda q: abs(s0['eps'][q] - s0['eps'][p]))]
@@ -330,9 +278,8 @@ def assembly_errors(col):
             worst = 0.0
             if p in s0['xc']:
                 for s in (s0, s1):
-                    worst = max(worst, abs(s['xc'][p] - s['sxv'][p]
-                                           - s['env'][p]))
-            if mech in ('inside', 'outside', 'edge', 'demoted', 'hole'):
+                    worst = max(worst, abs(s['xc'][p] - s['sxv'][p]))
+            if mech in ('inside', 'outside', 'edge', 'hole'):
                 for s in (s0, s1):
                     worst = max(worst, abs(s['eps_qp'][p]
                                            - expected(chain, s0, s, p, mech)))
@@ -346,24 +293,15 @@ def test_every_mechanism_assembles_its_formula(column):
     """(a) and (b): every orbital of every chain, at R0 and at R."""
     errors = assembly_errors(column)
     seen = {mech for _, mech in errors}
-    assert {'inside', 'outside', 'edge', 'hole', 'demoted', 'sop',
+    assert {'inside', 'outside', 'edge', 'hole', 'sop',
             'explicit'} <= seen, seen
     bad = {}
     for (kind, mech), (worst, n) in errors.items():
-        tol = (EXACT_HA if mech in ('inside', 'outside', 'edge', 'demoted',
-                                    'hole') else STATIC_HA)
+        tol = (EXACT_HA if mech in ('inside', 'outside', 'edge', 'hole')
+               else STATIC_HA)
         if worst > tol:
             bad[(kind, mech)] = (worst * HARTREE_TO_EV, n)
     assert not bad, f'eV off the formula, orbitals checked: {bad}'
-
-
-def test_the_adaptive_selection_freezes_a_partition(column):
-    """The selected set's holes, where its budget leaves any (on the
-    Kohn-Sham references it often solves the whole window), are checked
-    like the handed-in partition's."""
-    chain = column['adaptive'][0]
-    assert chain.qp_partition is not None
-    assert set(chain.qp_partition.candidates) >= {int(p) for p in chain.qp_set}
 
 
 def test_an_inside_scissor_state_sits_on_the_untiered_root(column):
@@ -373,7 +311,16 @@ def test_an_inside_scissor_state_sits_on_the_untiered_root(column):
     inside = [p for p, r in s0['routes'].items() if r == 'scissor']
     assert inside
     off = max(abs(s0['eps_qp'][p] - plain['eps_qp'][p]) for p in inside)
-    assert off < QP_CD_NEWTON_TOL, off * HARTREE_TO_EV
+    assert off < QP_ROOT_TOL, off * HARTREE_TO_EV
+
+
+def test_the_adaptive_selection_freezes_a_partition(column):
+    """The selected set's holes, where its budget leaves any (on the
+    Kohn-Sham references it often solves the whole window), are checked
+    like the handed-in partition's."""
+    chain = column['adaptive'][0]
+    assert chain.resolved.qp_partition is not None
+    assert set(chain.resolved.qp_partition.candidates) >= {int(p) for p in chain.resolved.qp_set}
 
 
 def test_explicit_states_keep_their_reference_route(column):
@@ -388,7 +335,7 @@ def test_one_quasiparticle_alone_is_the_set_root(column):
         p = chain.nocc - 1 + offset
         assert s0['routes'][p] in ('sop', 'scissor')
         off = chain.quasiparticle(offset) - s0['eps_qp'][p]
-        assert abs(off) < QP_CD_NEWTON_TOL, (offset, off * HARTREE_TO_EV)
+        assert abs(off) < QP_ROOT_TOL, (offset, off * HARTREE_TO_EV)
 
 
 def test_hartree_fock_gas_stores_what_it_always_stored(column):
@@ -397,9 +344,9 @@ def test_hartree_fock_gas_stores_what_it_always_stored(column):
     if column['reference'] != 'hf' or column['env'] != 'gas':
         pytest.skip('Hartree-Fock in the gas phase only')
     chain, s0, _ = column['window']
-    assert chain.scissor_map
-    for p, shift in chain.scissor_map.items():
-        before = chain.qp_seeds[p] - s0['eps'][p]
+    assert chain.resolved.scissor_map
+    for p, shift in chain.resolved.scissor_map.items():
+        before = chain.resolved.qp_seeds[p] - s0['eps'][p]
         assert abs(s0['xc'][p]) < ROUND_OFF_HA, (p, s0['xc'][p])
         # the round-off of eps_p + xc_p and of the two differences
         ulps = 2 * np.spacing(abs(s0['eps'][p])) + np.spacing(abs(before))
@@ -435,8 +382,9 @@ def test_the_force_is_the_derivative_of_its_energy(reference, env_name):
     chain = build('window', mol, factory, reference_mean_field(
         mol, factory, env), env, WINDOWS['formaldehyde'])
     analytic, _ = chain.excitation_gradient()
-    assert chain.scissor_map
-    assert chain.outside_shift
+    routes = chain.qp_diagnostics['routes']
+    assert 'scissor' in routes.values()
+    assert chain.resolved.outside_shift
     for ia, x in FD_COMPONENTS:
         e = []
         for k in (-2, -1, 1, 2):

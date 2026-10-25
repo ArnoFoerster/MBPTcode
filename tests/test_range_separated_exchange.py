@@ -1,10 +1,9 @@
 """Range-separated hybrids in the skeleton derivatives.
 
-pyscf builds K_eff = hyb K_full + (alpha - hyb) K_lr(omega), and the whole
-gradient chain used to refuse an RSH because every skeleton weighted ONE
-full-range exchange build by `xc_hybrid_coeff`. That scalar is ALPHA, so the
-refusal was protecting against two errors at once: a dropped beta K_lr(omega)
-term AND a wrong weight on the term it kept -- 1.0 on LRC-wPBEh where the
+pyscf builds K_eff = hyb K_full + (alpha - hyb) K_lr(omega). A skeleton that
+weights ONE full-range exchange build by `xc_hybrid_coeff` is wrong for an RSH,
+since that scalar is ALPHA: two errors at once, a dropped beta K_lr(omega)
+term AND a wrong weight on the term it keeps -- 1.0 on LRC-wPBEh where the
 full-range weight is 0.2.
 
 WHAT EACH GATE IS FOR:
@@ -31,12 +30,12 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.isdf_jk import isdf_jk
-from src.gradients.isdf_derivatives import (exchange_channel_skeleton,
-                                            exchange_channels, rsh_split,
-                                            xc_hybrid_coeff)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.gradients.mean_field_response import exchange_channel_skeleton
+from src.Base.pyscf.pyscf_interface import exchange_channels, rsh_split, xc_hybrid_coeff
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
+from tests.isdf_test_grid import g1
 
 WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
 #: Displacement for the finite differences below, in Bohr.
@@ -149,12 +148,14 @@ def test_isdf_mean_field_force_on_a_range_separated_hybrid(mol, xc):
     where a correct force gives 1e-15.
     """
     def scf(m):
-        mf = isdf_jk(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri')
+        mf = isdf_jk_with_force(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
         mf.grids.prune = None
         mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
         mf.kernel()
         return mf
 
+    # at cc-pVDZ, which has a validated interpolation grid
+    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mf = scf(mol)
     require_isdf_gradient_support(mf, 'the ISDF mean-field gradient')
     ana = isdf_mean_field_gradient(mf)
@@ -169,7 +170,7 @@ def test_isdf_mean_field_force_on_a_range_separated_hybrid(mol, xc):
                 v.append(scf(gto.M(
                     atom=[(mol.atom_symbol(i), tuple(c[i]))
                           for i in range(mol.natm)],
-                    basis='sto-3g', unit='Bohr', verbose=0)).e_tot)
+                    basis='cc-pvdz', unit='Bohr', verbose=0)).e_tot)
             fd[atom, axis] = (v[1] - v[0]) / (2 * STEP)
     assert np.abs(ana - fd).max() < 1e-7
     assert np.abs(ana.sum(axis=0)).max() < 1e-13

@@ -29,9 +29,9 @@ import math
 import numpy as np
 import scipy.linalg
 
-from src.Base.eri_blocks import MOEriBlocks
-from src.Base.utils.grids import minimax_time_grid
-from src.Base.utils.time_frequency import minimax_points_for_accuracy
+from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.Base.utils.grids.grids import minimax_time_grid
+from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
@@ -43,7 +43,10 @@ from src.SingleReference.GW.quasi_boson import QPqb
 _K_LIVE = 3
 # kernel_laplace's grid target: max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled
 # to [1, R] (time_frequency.laplace_test_error, relative=True), the relative error of
-# every term; the absolute residual lets terms far above min D drift as R grows
+# every p = 1 term; the absolute residual lets terms far above min D drift as R grows.
+# The grid is fitted to 1/x only: the p = 2 terms (the derivative image, weights
+# w_t τ_t) are not bounded by it, pointwise 2e-9 on [0.3, 8], 8e-9 on [0.3, 40],
+# 3.4e-8 on [0.01, 100]; water 6-31G, every vector: <= 1.2e-10
 _LAPLACE_TARGET = 1e-9
 
 

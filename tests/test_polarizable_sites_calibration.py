@@ -37,13 +37,13 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.Base.constants import BOHR_TO_ANGSTROM, POLARIZABILITY_SCF_TOL
-from src.Base.polarizable_sites import (calibrated_site_alphas,
-                                        collective_polarizability,
-                                        finite_field_polarizability,
-                                        isotropic_polarizability,
-                                        rpa_polarizability,
-                                        sites_for_molecule)
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, POLARIZABILITY_SCF_TOL
+from src.environments.polarizable_sites import (calibrated_site_alphas,
+                                                collective_polarizability,
+                                                finite_field_polarizability,
+                                                isotropic_polarizability,
+                                                rpa_polarizability,
+                                                sites_for_molecule)
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 

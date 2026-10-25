@@ -25,17 +25,85 @@ from pyscf.pbc import df, gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
+from src.Base.numerics.constants import (PBC_ISDF_CHOLESKY_STOP,
+                                         PBC_ISDF_REGULARIZATION)
 from src.SingleReference.Periodic.pbc_isdf import (build_isdf_kpts,
-                                                   build_isdf_kpts_per_q,
                                                    collocation_kpts,
+                                                   coulomb_matrix_q,
                                                    interpolating_vectors_q,
+                                                   isdf_prepare,
                                                    kpoint_minus_map,
+                                                   pivoted_cholesky,
                                                    select_points_cholesky_kpts,
                                                    thc_eri_kpts,
-                                                   thc_eri_kpts_per_q,
                                                    uniform_grid)
 
 KMESH = [2, 1, 1]
+
+
+# The q-dependent-points factorization, a diagnostic of the q = 0 points
+# assumption that only this file runs.
+
+def build_isdf_kpts_per_q(cell, mo_coeff, kpts, npoints, mesh=None,
+                          coulG_fn=None, regularization=PBC_ISDF_REGULARIZATION,
+                          ke_cutoff=None, check_kernel=True):
+    """DIAGNOSTIC ONLY: the same factorization with q-DEPENDENT points.
+
+    Returns (X_by_q, V, info) where X_by_q[q][k] is (npoints_q, nmo). The
+    extra q index on X is the whole reason this cannot be used in production:
+    it is exactly the separability that the q=0-points assumption buys, and
+    losing it would put back the O(N_k^2) the method exists to remove. This
+    exists so the cost of that assumption can be MEASURED rather than
+    believed.
+
+    Note the per-q point counts need not agree with each other or with q=0:
+    the pair densities at different transfers have different numerical ranks,
+    which is itself worth seeing.
+    """
+    ctx = isdf_prepare(cell, mo_coeff, kpts, npoints=npoints, mesh=mesh,
+                       ke_cutoff=ke_cutoff, coulG_fn=coulG_fn)
+    Phi, kminus = ctx['Phi'], ctx['kminus']
+
+    X_by_q, V, counts = [], [], []
+    for q in range(len(kpts)):
+        pts = (ctx['points'] if q == 0
+               else select_points_q(Phi, kminus, q, npoints))
+        zeta = interpolating_vectors_q(Phi, kminus, q, pts, regularization)
+        X_by_q.append([P[pts] for P in Phi])
+        V.append(coulomb_matrix_q(ctx['cell'], zeta, ctx['coords'],
+                                  ctx['weight'], ctx['kpts'][q],
+                                  coulG_fn=coulG_fn, mesh=ctx['mesh'],
+                                  check_kernel=check_kernel))
+        counts.append(len(pts))
+    return X_by_q, V, {'kminus': kminus, 'counts': counts,
+                       'coords': ctx['coords'], 'weight': ctx['weight'],
+                       'mesh': ctx['mesh']}
+
+
+def select_points_q(Phi_list, kminus, q, npoints, tol=PBC_ISDF_CHOLESKY_STOP):
+    """Pivoted Cholesky on S^q for q != 0 -- diagnostic only (per_q_points)."""
+    ngrid = Phi_list[0].shape[0]
+    rho = [np.einsum('ri,ri->r', P, P.conj(), optimize=True).real for P in Phi_list]
+    d = np.zeros(ngrid)
+    for k in range(len(Phi_list)):
+        d += rho[kminus[q, k]] * rho[k]
+    def column(p):
+        col = np.zeros(ngrid, dtype=np.complex128)
+        for k, Phi_k in enumerate(Phi_list):
+            Phi_kq = Phi_list[kminus[q, k]]
+            col += (Phi_kq @ Phi_kq[p].conj()) * (Phi_k @ Phi_k[p].conj()).conj()
+        return col
+
+    return pivoted_cholesky(d, column, npoints, tol, np.complex128)[0]
+
+
+def thc_eri_kpts_per_q(X_by_q, V, kminus, k1, k2, k3, k4):
+    """`thc_eri_kpts` for the q-dependent-points diagnostic."""
+    q = kminus[k1, k2]
+    Xq = X_by_q[q]
+    P12 = np.einsum('mi,mj->mij', Xq[k1].conj(), Xq[k2], optimize=True)
+    P34 = np.einsum('mk,ml->mkl', Xq[k3].conj(), Xq[k4], optimize=True)
+    return np.einsum('mij,mn,nkl->ijkl', P12, V[q], P34, optimize=True)
 
 
 def _diamond():

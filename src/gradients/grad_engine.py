@@ -31,13 +31,16 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf import grad as _pyscf_grad  # registers mf.Gradients()
 
-from src.Base.constants import DERIV_BLOCK_BYTES, ORBITAL_MULTIPLIER_TOL
-from src.Base.eri_blocks import MOEriBlocks
-from src.SingleReference.LinearResponse.rpa_energy import xc_hybrid_coeff
+from src.Base.numerics.constants import DERIV_BLOCK_BYTES
+from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.df_assembly import df_densities, two_electron_skeleton_df
-from src.gradients.isdf_derivatives import (fock_partial_Y,
-                                            fock_partial_skeleton, solve_lambda)
+from src.gradients.mean_field_response import (fock_partial_Y,
+                                               fock_partial_skeleton,
+                                               solve_lambda)
 from src.gradients.multipliers import solve_orbital_multipliers
+from src.gradients.one_electron import one_electron_skeleton
+from src.gradients.skeleton_tiles import shell_runs
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +90,8 @@ def _y_fold_lambda(Lam, F_mo, eri_mo, nocc):
     return Y
 
 
-def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps,
-                      tol=ORBITAL_MULTIPLIER_TOL, verbose=False):
+def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, numerics=None,
+                      verbose=False):
     """Solve antisym(Y_E + Y[fold(Lambda)]) = 0 for symmetric zero-diag Lambda.
 
     The dense route's entry to `solve_orbital_multipliers`: the matvec is the
@@ -97,7 +100,7 @@ def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps,
     """
     return solve_orbital_multipliers(
         lambda Lam: _y_fold_lambda(Lam, F_mo, eri_mo, nocc),
-        Y_E, eps, tol=tol, verbose=verbose)
+        Y_E, eps, numerics=numerics, verbose=verbose)
 
 
 # ---------------------------------------------------------------------------
@@ -124,25 +127,9 @@ def _permutation_sum(G_ao):
 
 
 def _shell_blocks(mol, max_bytes):
-    """Shell ranges whose (grad mu nu|lam sig) block fits in max_bytes."""
-    ao_loc = mol.ao_loc_nr()
-    nao = mol.nao
-    per_ao = 3 * nao ** 3 * 8
-    blocks = []
-    sh0 = 0
-    while sh0 < mol.nbas:
-        sh1 = sh0 + 1
-        # int() because ao_loc_nr() is int32 and per_ao is 3 nao^3 * 8 bytes:
-        # 3.6e7 at 114 basis functions, 1.4e8 at 180. The product overflows
-        # int32 past 60 and 15 AOs respectively, wraps negative, and the test
-        # then passes for every block -- so the loop runs to the end of the
-        # molecule and asks for the whole tensor instead of a chunk of it.
-        while (sh1 < mol.nbas
-               and int(ao_loc[sh1 + 1] - ao_loc[sh0]) * per_ao <= max_bytes):
-            sh1 += 1
-        blocks.append((sh0, sh1))
-        sh0 = sh1
-    return blocks
+    """Shell ranges whose (grad mu nu|lam sig) block, 3 nao^3 * 8 bytes per
+    AO of its leading index, fits in max_bytes (`skeleton_tiles.shell_runs`)."""
+    return shell_runs(mol.ao_loc_nr(), max_bytes // (3 * mol.nao ** 3 * 8))
 
 
 def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
@@ -170,25 +157,6 @@ def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
     for iatm in range(mol.natm):
         p0, p1 = aoslices[iatm, 2:]
         out[:, iatm, :] = per_ao[:, :, p0:p1].sum(axis=2)
-    return out
-
-
-def one_electron_skeleton(mol, mf, gamma_ao_list, M_ao_list):
-    """sum_ab gamma_ab dh_ab/dR_A + sum_ab M_ab dS_ab/dR_A for every target."""
-    hgen = mf.Gradients().hcore_generator(mol)
-    s1 = -mol.intor('int1e_ipovlp', comp=3)
-    aoslices = mol.aoslice_by_atom()
-    out = np.zeros((len(gamma_ao_list), mol.natm, 3))
-    for iatm in range(mol.natm):
-        p0, p1 = aoslices[iatm, 2:]
-        dh_all = hgen(iatm)
-        for xyz in range(3):
-            dS = np.zeros((mol.nao, mol.nao))
-            dS[p0:p1, :] += s1[xyz, p0:p1, :]
-            dS[:, p0:p1] += s1[xyz, p0:p1, :].T
-            for k, (g_ao, M_ao) in enumerate(zip(gamma_ao_list, M_ao_list)):
-                out[k, iatm, xyz] = (np.einsum('ab,ab->', g_ao, dh_all[xyz])
-                                     + np.einsum('ab,ab->', M_ao, dS))
     return out
 
 
@@ -263,7 +231,7 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
              omitted, which repeats an N^5 transform the caller already paid for.
     auxmol:  auxiliary basis for the factorized skeleton contraction. Only
              consistent when eri_mo is the RI four-index tensor from the SAME
-             auxiliary basis (`Base.eri_blocks.df_eri_mo`) -- differentiating a
+             auxiliary basis (`SingleReference.common.eri_blocks.df_eri_mo`) -- differentiating a
              fitted energy with exact derivative integrals is not a gradient.
 
     A Kohn-Sham reference is routed to `kohn_sham_correlation_gradients`: the
@@ -315,7 +283,7 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
                       'Lambda': Lam, 'M': Mmat})
 
     # Back-transform ONCE per target and contract the derivative integrals in
-    # the AO basis: the MO transform is what used to run per atom and direction.
+    # the AO basis, not an MO transform per atom and direction.
     gam_ao = [C @ g @ C.T for g, _, _ in dens]
     M_ao = [C @ m @ C.T for _, _, m in dens]
     if auxmol is None:

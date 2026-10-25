@@ -20,11 +20,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.DensityMatrix.density_matrix import (
-    MP2DensityMatrixSolverUnrestricted, MP3DensityMatrixSolverUnrestricted,
-)
+from tests.mpn_density_oracle import (MP2DensityMatrixSolverUnrestricted, MP3DensityMatrixSolverUnrestricted)
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
 
 
 CASES = [
@@ -81,7 +79,7 @@ if __name__ == '__main__':
         # Laplace mode (production default, laplace_ntau=6): the driver never
         # materializes any of the four O(nv^3*no^3) t3_2_* tensors -- see
         # mpn_density_driver_unrestricted.py's compute_delta_gamma3 docstring
-        # and generate_mp3_t3_laplace_unrestricted.py. Cross-checked against
+        # and generate_mpn_laplace.py. Cross-checked against
         # the oracle's own laplace_ntau=8 path (same pattern as
         # test_mpn_density_restricted.py).
         ref3_lap_blocks = ref3.compute_gamma3_blocks(laplace_ntau=8)

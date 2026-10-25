@@ -26,10 +26,11 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (BSE_DAVIDSON_CONV_TOL, BSE_FORCE_RESIDUAL_TOL,
-                                ISDF_GRADIENT_FLOOR)
+from src.Base.numerics.constants import (BSE_DAVIDSON_CONV_TOL, BSE_FORCE_RESIDUAL_TOL,
+                                         ISDF_GRADIENT_FLOOR)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.utils.mpi_grid import distributed
+from src.Base.numerics.numerics import numerics_of
+from src.Base.utils.parallel.mpi_grid import distributed
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_one_fit_forces_follow_their_energy import (BAR, COMPONENTS,
                                                            SOP_NOISY, STEP, at,
@@ -43,7 +44,7 @@ def chain(mol, tol):
     spec = SurfaceSpec(GroundState('dft', 'hf'), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'bse_adjoint': 'grid', 'bse_conv_tol': tol})
+                       numerics=numerics_of({'bse_adjoint': 'grid', 'bse_conv_tol': tol}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       sop_scf)
 

@@ -1,7 +1,7 @@
-# GENERATED CODE -- restricted (spin-blocked) Lambda-CCSDT residuals
-# (Lambda1/Lambda2/Lambda3, full Lambda-CCSDT) -- see this module's
-# generator script's docstring for equations/conventions.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
+# Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).
+# See that module's docstring for the equations/conventions.
 # allow numpy built with MKL to consume more threads for tensordot -- but only
 # if the caller hasn't already pinned the thread count (same convention as
 # amplitudes.py's generalized-pipeline counterpart)
@@ -40,32 +40,32 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     l1_res -= 0.5 * _tmp10
     l1_res -= 0.5 * _tmp10
     _tmp11 = einsum('ke,ijmcba,cbaijk->em', f_aa[o, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res -= 0.0833333 * _tmp11
+    l1_res -= 0.0833333333333333 * _tmp11
     _tmp12 = einsum('ke,imjcba,cbaikj->em', f_aa[o, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res -= 0.0833333 * _tmp12
-    l1_res -= 0.0833333 * _tmp12
-    l1_res -= 0.0833333 * _tmp12
+    l1_res -= 0.0833333333333333 * _tmp12
+    l1_res -= 0.0833333333333333 * _tmp12
+    l1_res -= 0.0833333333333333 * _tmp12
     _tmp13 = einsum('ke,mjicba,cbakji->em', f_aa[o, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res -= 0.0833333 * _tmp13
-    l1_res -= 0.0833333 * _tmp13
-    l1_res -= 0.0833333 * _tmp13
+    l1_res -= 0.0833333333333333 * _tmp13
+    l1_res -= 0.0833333333333333 * _tmp13
+    l1_res -= 0.0833333333333333 * _tmp13
     _tmp14 = einsum('ke,mjicba,cbakji->em', f_aa[o, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res -= 0.0833333 * _tmp14
-    l1_res -= 0.0833333 * _tmp14
-    l1_res -= 0.0833333 * _tmp14
+    l1_res -= 0.0833333333333333 * _tmp14
+    l1_res -= 0.0833333333333333 * _tmp14
+    l1_res -= 0.0833333333333333 * _tmp14
     _tmp15 = einsum('mc,ijkeba,cbaijk->em', f_aa[o, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res -= 0.0833333 * _tmp15
+    l1_res -= 0.0833333333333333 * _tmp15
     _tmp16 = einsum('mc,ijkeba,cbaijk->em', f_aa[o, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res -= 0.0833333 * _tmp16
-    l1_res -= 0.0833333 * _tmp16
-    l1_res -= 0.0833333 * _tmp16
-    l1_res -= 0.0833333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp16
     _tmp17 = einsum('mc,ijkeba,cbaijk->em', f_aa[o, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res -= 0.0833333 * _tmp17
-    l1_res -= 0.0833333 * _tmp16
-    l1_res -= 0.0833333 * _tmp16
-    l1_res -= 0.0833333 * _tmp17
-    l1_res -= 0.0833333 * _tmp17
+    l1_res -= 0.0833333333333333 * _tmp17
+    l1_res -= 0.0833333333333333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp16
+    l1_res -= 0.0833333333333333 * _tmp17
+    l1_res -= 0.0833333333333333 * _tmp17
     _tmp18 = einsum('maei,ia->em', g_aaaa[o, v, v, o], l1_aa, optimize=True)
     l1_res += 1 * _tmp18
     _tmp19 = einsum('maei,ia->em', g_abab[o, v, v, o], l1_bb, optimize=True)
@@ -306,53 +306,53 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     l1_res += 0.25 * _tmp119
     l1_res += 0.25 * _tmp119
     _tmp121 = einsum('lmek,ijkcba,cbaijl->em', g_aaaa[o, o, v, o], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res += 0.0833333 * _tmp121
+    l1_res += 0.0833333333333333 * _tmp121
     _tmp122 = einsum('mlek,ijkcba,cbaijl->em', g_abab[o, o, v, o], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res -= 0.0833333 * _tmp122
-    l1_res -= 0.0833333 * _tmp122
-    l1_res -= 0.0833333 * _tmp122
+    l1_res -= 0.0833333333333333 * _tmp122
+    l1_res -= 0.0833333333333333 * _tmp122
+    l1_res -= 0.0833333333333333 * _tmp122
     _tmp123 = einsum('lmek,ikjcba,cbailj->em', g_aaaa[o, o, v, o], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp123
-    l1_res += 0.0833333 * _tmp123
-    l1_res += 0.0833333 * _tmp123
+    l1_res += 0.0833333333333333 * _tmp123
+    l1_res += 0.0833333333333333 * _tmp123
+    l1_res += 0.0833333333333333 * _tmp123
     _tmp124 = einsum('mlek,ijkcba,cbaijl->em', g_abab[o, o, v, o], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res -= 0.0833333 * _tmp124
-    l1_res -= 0.0833333 * _tmp124
-    l1_res -= 0.0833333 * _tmp124
+    l1_res -= 0.0833333333333333 * _tmp124
+    l1_res -= 0.0833333333333333 * _tmp124
+    l1_res -= 0.0833333333333333 * _tmp124
     _tmp125 = einsum('lmek,kjicba,cbalji->em', g_aaaa[o, o, v, o], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp125
-    l1_res += 0.0833333 * _tmp125
-    l1_res += 0.0833333 * _tmp125
-    l1_res -= 0.0833333 * _tmp124
-    l1_res -= 0.0833333 * _tmp124
-    l1_res -= 0.0833333 * _tmp124
+    l1_res += 0.0833333333333333 * _tmp125
+    l1_res += 0.0833333333333333 * _tmp125
+    l1_res += 0.0833333333333333 * _tmp125
+    l1_res -= 0.0833333333333333 * _tmp124
+    l1_res -= 0.0833333333333333 * _tmp124
+    l1_res -= 0.0833333333333333 * _tmp124
     _tmp126 = einsum('lmek,kjicba,cbalji->em', g_aaaa[o, o, v, o], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res += 0.0833333 * _tmp126
-    l1_res += 0.0833333 * _tmp126
-    l1_res += 0.0833333 * _tmp126
+    l1_res += 0.0833333333333333 * _tmp126
+    l1_res += 0.0833333333333333 * _tmp126
+    l1_res += 0.0833333333333333 * _tmp126
     _tmp127 = einsum('mlek,ijkcba,cbaijl->em', g_abab[o, o, v, o], l3_bbbbbb, t3_bbbbbb, optimize=True)
-    l1_res -= 0.0833333 * _tmp127
+    l1_res -= 0.0833333333333333 * _tmp127
     _tmp128 = einsum('lkej,imjcba,cbailk->em', g_aaaa[o, o, v, o], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res += 0.0833333 * _tmp128
+    l1_res += 0.0833333333333333 * _tmp128
     _tmp129 = einsum('lkej,imjcba,cbailk->em', g_abab[o, o, v, o], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp129
-    l1_res += 0.0833333 * _tmp129
-    l1_res += 0.0833333 * _tmp129
-    l1_res += 0.0833333 * _tmp129
-    l1_res += 0.0833333 * _tmp129
-    l1_res += 0.0833333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
+    l1_res += 0.0833333333333333 * _tmp129
     _tmp130 = einsum('lkej,jmicba,cbakli->em', g_aaaa[o, o, v, o], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp130
-    l1_res += 0.0833333 * _tmp130
-    l1_res += 0.0833333 * _tmp130
+    l1_res += 0.0833333333333333 * _tmp130
+    l1_res += 0.0833333333333333 * _tmp130
+    l1_res += 0.0833333333333333 * _tmp130
     _tmp131 = einsum('lkej,mijcba,cbalik->em', g_abab[o, o, v, o], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res += 0.0833333 * _tmp131
+    l1_res += 0.0833333333333333 * _tmp131
     _tmp132 = einsum('klej,mijcba,cbakli->em', g_abab[o, o, v, o], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res -= 0.0833333 * _tmp132
-    l1_res += 0.0833333 * _tmp131
-    l1_res -= 0.0833333 * _tmp132
-    l1_res += 0.0833333 * _tmp131
-    l1_res -= 0.0833333 * _tmp132
+    l1_res -= 0.0833333333333333 * _tmp132
+    l1_res += 0.0833333333333333 * _tmp131
+    l1_res -= 0.0833333333333333 * _tmp132
+    l1_res += 0.0833333333333333 * _tmp131
+    l1_res -= 0.0833333333333333 * _tmp132
     _tmp133 = einsum('lmck,ijkeba,cbaijl->em', g_aaaa[o, o, v, o], l3_aaaaaa, t3_aaaaaa, optimize=True)
     l1_res -= 0.25 * _tmp133
     _tmp134 = einsum('mlkc,ijkeba,abcijl->em', g_abab[o, o, o, v], l3_aaaaaa, t3_aabaab, optimize=True)
@@ -382,32 +382,32 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     _tmp144 = einsum('mlkc,kjieba,cbaijl->em', g_abab[o, o, o, v], l3_abbabb, t3_bbbbbb, optimize=True)
     l1_res += 0.25 * _tmp144
     _tmp145 = einsum('mced,ijkcba,dbaijk->em', g_aaaa[o, v, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res += 0.0833333 * _tmp145
+    l1_res += 0.0833333333333333 * _tmp145
     _tmp146 = einsum('mced,ijkcba,dbaijk->em', g_aaaa[o, v, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp146
-    l1_res += 0.0833333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp146
     _tmp147 = einsum('mced,ijkabc,abdijk->em', g_abab[o, v, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp147
-    l1_res += 0.0833333 * _tmp146
-    l1_res += 0.0833333 * _tmp146
-    l1_res += 0.0833333 * _tmp147
+    l1_res += 0.0833333333333333 * _tmp147
+    l1_res += 0.0833333333333333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp147
     _tmp148 = einsum('mced,ijkcba,dbaijk->em', g_aaaa[o, v, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res += 0.0833333 * _tmp148
+    l1_res += 0.0833333333333333 * _tmp148
     _tmp149 = einsum('mced,ijkbca,bdaijk->em', g_abab[o, v, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res += 0.0833333 * _tmp149
+    l1_res += 0.0833333333333333 * _tmp149
     _tmp150 = einsum('mced,ijkabc,abdijk->em', g_abab[o, v, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res += 0.0833333 * _tmp150
-    l1_res += 0.0833333 * _tmp146
-    l1_res += 0.0833333 * _tmp146
-    l1_res += 0.0833333 * _tmp147
-    l1_res += 0.0833333 * _tmp148
-    l1_res += 0.0833333 * _tmp149
-    l1_res += 0.0833333 * _tmp150
-    l1_res += 0.0833333 * _tmp148
-    l1_res += 0.0833333 * _tmp149
-    l1_res += 0.0833333 * _tmp150
+    l1_res += 0.0833333333333333 * _tmp150
+    l1_res += 0.0833333333333333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp146
+    l1_res += 0.0833333333333333 * _tmp147
+    l1_res += 0.0833333333333333 * _tmp148
+    l1_res += 0.0833333333333333 * _tmp149
+    l1_res += 0.0833333333333333 * _tmp150
+    l1_res += 0.0833333333333333 * _tmp148
+    l1_res += 0.0833333333333333 * _tmp149
+    l1_res += 0.0833333333333333 * _tmp150
     _tmp151 = einsum('mced,ijkcba,dbaijk->em', g_abab[o, v, v, v], l3_bbbbbb, t3_bbbbbb, optimize=True)
-    l1_res += 0.0833333 * _tmp151
+    l1_res += 0.0833333333333333 * _tmp151
     _tmp152 = einsum('kced,ijmcba,dbaijk->em', g_aaaa[o, v, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
     l1_res -= 0.25 * _tmp152
     _tmp153 = einsum('cked,ijmcba,abdijk->em', g_abab[v, o, v, v], l3_aaaaaa, t3_aabaab, optimize=True)
@@ -439,26 +439,26 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     _tmp165 = einsum('kced,mjiabc,abdkji->em', g_abab[o, v, v, v], l3_abbabb, t3_abbabb, optimize=True)
     l1_res -= 0.25 * _tmp165
     _tmp166 = einsum('mbcd,ijkbea,cdaijk->em', g_aaaa[o, v, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l1_res += 0.0833333 * _tmp166
+    l1_res += 0.0833333333333333 * _tmp166
     _tmp167 = einsum('mbcd,ijkbea,cdaijk->em', g_aaaa[o, v, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp167
+    l1_res += 0.0833333333333333 * _tmp167
     _tmp168 = einsum('mbcd,ijkaeb,cadijk->em', g_abab[o, v, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res += 0.0833333 * _tmp168
+    l1_res += 0.0833333333333333 * _tmp168
     _tmp169 = einsum('mbdc,ijkaeb,adcijk->em', g_abab[o, v, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l1_res -= 0.0833333 * _tmp169
-    l1_res += 0.0833333 * _tmp167
-    l1_res += 0.0833333 * _tmp168
-    l1_res -= 0.0833333 * _tmp169
+    l1_res -= 0.0833333333333333 * _tmp169
+    l1_res += 0.0833333333333333 * _tmp167
+    l1_res += 0.0833333333333333 * _tmp168
+    l1_res -= 0.0833333333333333 * _tmp169
     _tmp170 = einsum('mbcd,ijkeba,cdaijk->em', g_abab[o, v, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l1_res -= 0.0833333 * _tmp170
-    l1_res -= 0.0833333 * _tmp170
-    l1_res += 0.0833333 * _tmp167
-    l1_res += 0.0833333 * _tmp168
-    l1_res -= 0.0833333 * _tmp169
-    l1_res -= 0.0833333 * _tmp170
-    l1_res -= 0.0833333 * _tmp170
-    l1_res -= 0.0833333 * _tmp170
-    l1_res -= 0.0833333 * _tmp170
+    l1_res -= 0.0833333333333333 * _tmp170
+    l1_res -= 0.0833333333333333 * _tmp170
+    l1_res += 0.0833333333333333 * _tmp167
+    l1_res += 0.0833333333333333 * _tmp168
+    l1_res -= 0.0833333333333333 * _tmp169
+    l1_res -= 0.0833333333333333 * _tmp170
+    l1_res -= 0.0833333333333333 * _tmp170
+    l1_res -= 0.0833333333333333 * _tmp170
+    l1_res -= 0.0833333333333333 * _tmp170
     _tmp171 = einsum('kmec,ijba,baik,cj->em', g_aaaa[o, o, v, v], l2_aaaa, t2_aaaa, t1_aa, optimize=True)
     l1_res += 0.5 * _tmp171
     _tmp172 = einsum('mkec,ijba,baik,cj->em', g_abab[o, o, v, v], l2_abab, t2_abab, t1_bb, optimize=True)
@@ -633,108 +633,108 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     _tmp245 = einsum('mbcd,kjieba,daij,ck->em', g_abab[o, v, v, v], l3_abbabb, t2_bbbb, t1_aa, optimize=True)
     l1_res += 0.5 * _tmp245
     _tmp246 = einsum('lmed,ijkcba,cbaijl,dk->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp246
+    l1_res += 0.0833333333333333 * _tmp246
     _tmp247 = einsum('mled,ijkcba,cbaijl,dk->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp247
-    l1_res -= 0.0833333 * _tmp247
-    l1_res -= 0.0833333 * _tmp247
+    l1_res -= 0.0833333333333333 * _tmp247
+    l1_res -= 0.0833333333333333 * _tmp247
+    l1_res -= 0.0833333333333333 * _tmp247
     _tmp248 = einsum('lmed,ikjcba,cbailj,dk->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp248
-    l1_res += 0.0833333 * _tmp248
-    l1_res += 0.0833333 * _tmp248
+    l1_res += 0.0833333333333333 * _tmp248
+    l1_res += 0.0833333333333333 * _tmp248
+    l1_res += 0.0833333333333333 * _tmp248
     _tmp249 = einsum('mled,ijkcba,cbaijl,dk->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp249
-    l1_res -= 0.0833333 * _tmp249
-    l1_res -= 0.0833333 * _tmp249
+    l1_res -= 0.0833333333333333 * _tmp249
+    l1_res -= 0.0833333333333333 * _tmp249
+    l1_res -= 0.0833333333333333 * _tmp249
     _tmp250 = einsum('lmed,kjicba,cbalji,dk->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp250
-    l1_res += 0.0833333 * _tmp250
-    l1_res += 0.0833333 * _tmp250
-    l1_res -= 0.0833333 * _tmp249
-    l1_res -= 0.0833333 * _tmp249
-    l1_res -= 0.0833333 * _tmp249
+    l1_res += 0.0833333333333333 * _tmp250
+    l1_res += 0.0833333333333333 * _tmp250
+    l1_res += 0.0833333333333333 * _tmp250
+    l1_res -= 0.0833333333333333 * _tmp249
+    l1_res -= 0.0833333333333333 * _tmp249
+    l1_res -= 0.0833333333333333 * _tmp249
     _tmp251 = einsum('lmed,kjicba,cbalji,dk->em', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp251
-    l1_res += 0.0833333 * _tmp251
-    l1_res += 0.0833333 * _tmp251
+    l1_res += 0.0833333333333333 * _tmp251
+    l1_res += 0.0833333333333333 * _tmp251
+    l1_res += 0.0833333333333333 * _tmp251
     _tmp252 = einsum('mled,ijkcba,cbaijl,dk->em', g_abab[o, o, v, v], l3_bbbbbb, t3_bbbbbb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp252
+    l1_res -= 0.0833333333333333 * _tmp252
     _tmp253 = einsum('lmed,ijkcba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp253
+    l1_res += 0.0833333333333333 * _tmp253
     _tmp254 = einsum('lmed,ijkcba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp254
-    l1_res += 0.0833333 * _tmp254
+    l1_res += 0.0833333333333333 * _tmp254
+    l1_res += 0.0833333333333333 * _tmp254
     _tmp255 = einsum('mled,ijkabc,abdijk,cl->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp255
-    l1_res += 0.0833333 * _tmp254
-    l1_res += 0.0833333 * _tmp254
-    l1_res -= 0.0833333 * _tmp255
+    l1_res -= 0.0833333333333333 * _tmp255
+    l1_res += 0.0833333333333333 * _tmp254
+    l1_res += 0.0833333333333333 * _tmp254
+    l1_res -= 0.0833333333333333 * _tmp255
     _tmp256 = einsum('lmed,ijkcba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    l1_res += 0.0833333 * _tmp256
+    l1_res += 0.0833333333333333 * _tmp256
     _tmp257 = einsum('mled,ijkbca,bdaijk,cl->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp257
+    l1_res -= 0.0833333333333333 * _tmp257
     _tmp258 = einsum('mled,ijkabc,abdijk,cl->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp258
-    l1_res += 0.0833333 * _tmp254
-    l1_res += 0.0833333 * _tmp254
-    l1_res -= 0.0833333 * _tmp255
-    l1_res += 0.0833333 * _tmp256
-    l1_res -= 0.0833333 * _tmp257
-    l1_res -= 0.0833333 * _tmp258
-    l1_res += 0.0833333 * _tmp256
-    l1_res -= 0.0833333 * _tmp257
-    l1_res -= 0.0833333 * _tmp258
+    l1_res -= 0.0833333333333333 * _tmp258
+    l1_res += 0.0833333333333333 * _tmp254
+    l1_res += 0.0833333333333333 * _tmp254
+    l1_res -= 0.0833333333333333 * _tmp255
+    l1_res += 0.0833333333333333 * _tmp256
+    l1_res -= 0.0833333333333333 * _tmp257
+    l1_res -= 0.0833333333333333 * _tmp258
+    l1_res += 0.0833333333333333 * _tmp256
+    l1_res -= 0.0833333333333333 * _tmp257
+    l1_res -= 0.0833333333333333 * _tmp258
     _tmp259 = einsum('mled,ijkcba,dbaijk,cl->em', g_abab[o, o, v, v], l3_bbbbbb, t3_bbbbbb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp259
+    l1_res -= 0.0833333333333333 * _tmp259
     _tmp260 = einsum('lked,ijmcba,cbaijl,dk->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp260
+    l1_res -= 0.0833333333333333 * _tmp260
     _tmp261 = einsum('lked,ijmcba,cbaijl,dk->em', g_abab[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp261
+    l1_res -= 0.0833333333333333 * _tmp261
     _tmp262 = einsum('lked,imjcba,cbailj,dk->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp262
+    l1_res -= 0.0833333333333333 * _tmp262
     _tmp263 = einsum('lked,imjcba,cbailj,dk->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp263
-    l1_res -= 0.0833333 * _tmp262
-    l1_res -= 0.0833333 * _tmp263
-    l1_res -= 0.0833333 * _tmp262
-    l1_res -= 0.0833333 * _tmp263
+    l1_res -= 0.0833333333333333 * _tmp263
+    l1_res -= 0.0833333333333333 * _tmp262
+    l1_res -= 0.0833333333333333 * _tmp263
+    l1_res -= 0.0833333333333333 * _tmp262
+    l1_res -= 0.0833333333333333 * _tmp263
     _tmp264 = einsum('lked,mjicba,cbalji,dk->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp264
+    l1_res -= 0.0833333333333333 * _tmp264
     _tmp265 = einsum('lked,mjicba,cbalji,dk->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp265
-    l1_res -= 0.0833333 * _tmp264
-    l1_res -= 0.0833333 * _tmp265
-    l1_res -= 0.0833333 * _tmp264
-    l1_res -= 0.0833333 * _tmp265
+    l1_res -= 0.0833333333333333 * _tmp265
+    l1_res -= 0.0833333333333333 * _tmp264
+    l1_res -= 0.0833333333333333 * _tmp265
+    l1_res -= 0.0833333333333333 * _tmp264
+    l1_res -= 0.0833333333333333 * _tmp265
     _tmp266 = einsum('lked,mjicba,cbalji,dk->em', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp266
+    l1_res -= 0.0833333333333333 * _tmp266
     _tmp267 = einsum('lked,mjicba,cbalji,dk->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp267
-    l1_res -= 0.0833333 * _tmp266
-    l1_res -= 0.0833333 * _tmp267
-    l1_res -= 0.0833333 * _tmp266
-    l1_res -= 0.0833333 * _tmp267
+    l1_res -= 0.0833333333333333 * _tmp267
+    l1_res -= 0.0833333333333333 * _tmp266
+    l1_res -= 0.0833333333333333 * _tmp267
+    l1_res -= 0.0833333333333333 * _tmp266
+    l1_res -= 0.0833333333333333 * _tmp267
     _tmp268 = einsum('lked,ijmcba,cbailk,dj->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp268
+    l1_res -= 0.0833333333333333 * _tmp268
     _tmp269 = einsum('lked,imjcba,cbailk,dj->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res += 0.0833333 * _tmp269
-    l1_res += 0.0833333 * _tmp269
-    l1_res += 0.0833333 * _tmp269
-    l1_res += 0.0833333 * _tmp269
-    l1_res += 0.0833333 * _tmp269
-    l1_res += 0.0833333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
+    l1_res += 0.0833333333333333 * _tmp269
     _tmp270 = einsum('lked,mjicba,cbakli,dj->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp270
-    l1_res -= 0.0833333 * _tmp270
-    l1_res -= 0.0833333 * _tmp270
+    l1_res -= 0.0833333333333333 * _tmp270
+    l1_res -= 0.0833333333333333 * _tmp270
+    l1_res -= 0.0833333333333333 * _tmp270
     _tmp271 = einsum('lked,mjicba,cbalik,dj->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp271
+    l1_res -= 0.0833333333333333 * _tmp271
     _tmp272 = einsum('kled,mjicba,cbakli,dj->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res += 0.0833333 * _tmp272
-    l1_res -= 0.0833333 * _tmp271
-    l1_res += 0.0833333 * _tmp272
-    l1_res -= 0.0833333 * _tmp271
-    l1_res += 0.0833333 * _tmp272
+    l1_res += 0.0833333333333333 * _tmp272
+    l1_res -= 0.0833333333333333 * _tmp271
+    l1_res += 0.0833333333333333 * _tmp272
+    l1_res -= 0.0833333333333333 * _tmp271
+    l1_res += 0.0833333333333333 * _tmp272
     _tmp273 = einsum('lked,ijmcba,dbaijl,ck->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
     l1_res += 0.25 * _tmp273
     _tmp274 = einsum('kled,ijmcba,abdijl,ck->em', g_abab[o, o, v, v], l3_aaaaaa, t3_aabaab, t1_aa, optimize=True)
@@ -766,31 +766,31 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     _tmp286 = einsum('lked,mjiabc,abdlji,ck->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
     l1_res += 0.25 * _tmp286
     _tmp287 = einsum('lmcd,ijkeba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp287
+    l1_res -= 0.0833333333333333 * _tmp287
     _tmp288 = einsum('mldc,ijkeba,dbaijk,cl->em', g_abab[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp288
+    l1_res -= 0.0833333333333333 * _tmp288
     _tmp289 = einsum('lmcd,ijkeba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp289
     _tmp290 = einsum('mldc,ijkeba,dbaijk,cl->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp290
-    l1_res -= 0.0833333 * _tmp289
-    l1_res -= 0.0833333 * _tmp290
-    l1_res -= 0.0833333 * _tmp289
-    l1_res -= 0.0833333 * _tmp290
-    l1_res -= 0.0833333 * _tmp289
-    l1_res -= 0.0833333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp290
     _tmp291 = einsum('lmcd,ijkeba,dbaijk,cl->em', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp291
+    l1_res -= 0.0833333333333333 * _tmp291
     _tmp292 = einsum('mldc,ijkeba,dbaijk,cl->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp292
-    l1_res -= 0.0833333 * _tmp289
-    l1_res -= 0.0833333 * _tmp290
-    l1_res -= 0.0833333 * _tmp289
-    l1_res -= 0.0833333 * _tmp290
-    l1_res -= 0.0833333 * _tmp291
-    l1_res -= 0.0833333 * _tmp292
-    l1_res -= 0.0833333 * _tmp291
-    l1_res -= 0.0833333 * _tmp292
+    l1_res -= 0.0833333333333333 * _tmp292
+    l1_res -= 0.0833333333333333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp289
+    l1_res -= 0.0833333333333333 * _tmp290
+    l1_res -= 0.0833333333333333 * _tmp291
+    l1_res -= 0.0833333333333333 * _tmp292
+    l1_res -= 0.0833333333333333 * _tmp291
+    l1_res -= 0.0833333333333333 * _tmp292
     _tmp293 = einsum('lmcd,ijkeba,dbaijl,ck->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
     l1_res += 0.25 * _tmp293
     _tmp294 = einsum('mlcd,ijkeba,abdijl,ck->em', g_abab[o, o, v, v], l3_aaaaaa, t3_aabaab, t1_aa, optimize=True)
@@ -820,26 +820,26 @@ def l1_aa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab
     _tmp304 = einsum('mlcd,kjieba,dbaijl,ck->em', g_abab[o, o, v, v], l3_abbabb, t3_bbbbbb, t1_aa, optimize=True)
     l1_res += 0.25 * _tmp304
     _tmp305 = einsum('lmcd,ijkeba,cdaijk,bl->em', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp305
+    l1_res -= 0.0833333333333333 * _tmp305
     _tmp306 = einsum('lmcd,ijkeba,cdaijk,bl->em', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    l1_res -= 0.0833333 * _tmp306
+    l1_res -= 0.0833333333333333 * _tmp306
     _tmp307 = einsum('mlcd,ijkeab,cadijk,bl->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res += 0.0833333 * _tmp307
+    l1_res += 0.0833333333333333 * _tmp307
     _tmp308 = einsum('mldc,ijkeab,adcijk,bl->em', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, t1_bb, optimize=True)
-    l1_res -= 0.0833333 * _tmp308
-    l1_res -= 0.0833333 * _tmp306
-    l1_res += 0.0833333 * _tmp307
-    l1_res -= 0.0833333 * _tmp308
+    l1_res -= 0.0833333333333333 * _tmp308
+    l1_res -= 0.0833333333333333 * _tmp306
+    l1_res += 0.0833333333333333 * _tmp307
+    l1_res -= 0.0833333333333333 * _tmp308
     _tmp309 = einsum('mlcd,ijkeba,cdaijk,bl->em', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, t1_bb, optimize=True)
-    l1_res += 0.0833333 * _tmp309
-    l1_res += 0.0833333 * _tmp309
-    l1_res -= 0.0833333 * _tmp306
-    l1_res += 0.0833333 * _tmp307
-    l1_res -= 0.0833333 * _tmp308
-    l1_res += 0.0833333 * _tmp309
-    l1_res += 0.0833333 * _tmp309
-    l1_res += 0.0833333 * _tmp309
-    l1_res += 0.0833333 * _tmp309
+    l1_res += 0.0833333333333333 * _tmp309
+    l1_res += 0.0833333333333333 * _tmp309
+    l1_res -= 0.0833333333333333 * _tmp306
+    l1_res += 0.0833333333333333 * _tmp307
+    l1_res -= 0.0833333333333333 * _tmp308
+    l1_res += 0.0833333333333333 * _tmp309
+    l1_res += 0.0833333333333333 * _tmp309
+    l1_res += 0.0833333333333333 * _tmp309
+    l1_res += 0.0833333333333333 * _tmp309
     _tmp310 = einsum('jmeb,ia,aj,bi->em', g_aaaa[o, o, v, v], l1_aa, t1_aa, t1_aa, optimize=True)
     l1_res += 1 * _tmp310
     _tmp311 = einsum('mjeb,ia,aj,bi->em', g_abab[o, o, v, v], l1_bb, t1_bb, t1_bb, optimize=True)
@@ -1476,58 +1476,58 @@ def l2_aaaa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aaba
     l2_res += 0.25 * _tmp90
     l2_res -= 0.25 * _tmp90.transpose(0, 1, 3, 2)
     _tmp91 = einsum('knef,ijmcba,cbaijk->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l2_res -= 0.0833333 * _tmp91
-    l2_res += 0.0833333 * _tmp91.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp91
+    l2_res += 0.0833333333333333 * _tmp91.transpose(0, 1, 3, 2)
     _tmp92 = einsum('knef,imjcba,cbaikj->efnm', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp92
-    l2_res += 0.0833333 * _tmp92.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp92
-    l2_res += 0.0833333 * _tmp92.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp92
-    l2_res += 0.0833333 * _tmp92.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp92
+    l2_res += 0.0833333333333333 * _tmp92.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp92
+    l2_res += 0.0833333333333333 * _tmp92.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp92
+    l2_res += 0.0833333333333333 * _tmp92.transpose(0, 1, 3, 2)
     _tmp93 = einsum('knef,mjicba,cbakji->efnm', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp93
-    l2_res += 0.0833333 * _tmp93.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp93
-    l2_res += 0.0833333 * _tmp93.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp93
-    l2_res += 0.0833333 * _tmp93.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp93
+    l2_res += 0.0833333333333333 * _tmp93.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp93
+    l2_res += 0.0833333333333333 * _tmp93.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp93
+    l2_res += 0.0833333333333333 * _tmp93.transpose(0, 1, 3, 2)
     _tmp94 = einsum('knef,mjicba,cbakji->efnm', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp94
-    l2_res += 0.0833333 * _tmp94.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp94
-    l2_res += 0.0833333 * _tmp94.transpose(0, 1, 3, 2)
-    l2_res -= 0.0833333 * _tmp94
-    l2_res += 0.0833333 * _tmp94.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp94
+    l2_res += 0.0833333333333333 * _tmp94.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp94
+    l2_res += 0.0833333333333333 * _tmp94.transpose(0, 1, 3, 2)
+    l2_res -= 0.0833333333333333 * _tmp94
+    l2_res += 0.0833333333333333 * _tmp94.transpose(0, 1, 3, 2)
     _tmp95 = einsum('kjef,imncba,cbaikj->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l2_res += 0.0833333 * _tmp95
+    l2_res += 0.0833333333333333 * _tmp95
     _tmp96 = einsum('kjef,nmicba,cbajki->efnm', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res += 0.0833333 * _tmp96
-    l2_res += 0.0833333 * _tmp96
-    l2_res += 0.0833333 * _tmp96
+    l2_res += 0.0833333333333333 * _tmp96
+    l2_res += 0.0833333333333333 * _tmp96
+    l2_res += 0.0833333333333333 * _tmp96
     _tmp97 = einsum('mnec,ijkfba,cbaijk->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l2_res -= 0.0833333 * _tmp97
-    l2_res += 0.0833333 * _tmp97.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp97
+    l2_res += 0.0833333333333333 * _tmp97.transpose(1, 0, 2, 3)
     _tmp98 = einsum('mnec,ijkfba,cbaijk->efnm', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
     _tmp99 = einsum('mnec,ijkfba,cbaijk->efnm', g_aaaa[o, o, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp99
-    l2_res += 0.0833333 * _tmp99.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp98
-    l2_res += 0.0833333 * _tmp98.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp99
-    l2_res += 0.0833333 * _tmp99.transpose(1, 0, 2, 3)
-    l2_res -= 0.0833333 * _tmp99
-    l2_res += 0.0833333 * _tmp99.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp99
+    l2_res += 0.0833333333333333 * _tmp99.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp98
+    l2_res += 0.0833333333333333 * _tmp98.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp99
+    l2_res += 0.0833333333333333 * _tmp99.transpose(1, 0, 2, 3)
+    l2_res -= 0.0833333333333333 * _tmp99
+    l2_res += 0.0833333333333333 * _tmp99.transpose(1, 0, 2, 3)
     _tmp100 = einsum('knec,ijmfba,cbaijk->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
     l2_res += 0.25 * _tmp100
     l2_res -= 0.25 * _tmp100.transpose(1, 0, 2, 3)
@@ -1612,11 +1612,11 @@ def l2_aaaa_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aaba
     l2_res += 0.25 * _tmp116
     l2_res -= 0.25 * _tmp116.transpose(1, 0, 2, 3)
     _tmp117 = einsum('mnbc,ijkefa,bcaijk->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
-    l2_res += 0.0833333 * _tmp117
+    l2_res += 0.0833333333333333 * _tmp117
     _tmp118 = einsum('mnbc,ijkefa,bcaijk->efnm', g_aaaa[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res += 0.0833333 * _tmp118
-    l2_res += 0.0833333 * _tmp118
-    l2_res += 0.0833333 * _tmp118
+    l2_res += 0.0833333333333333 * _tmp118
+    l2_res += 0.0833333333333333 * _tmp118
+    l2_res += 0.0833333333333333 * _tmp118
     _tmp119 = einsum('knbc,ijmefa,bcaijk->efnm', g_aaaa[o, o, v, v], l3_aaaaaa, t3_aaaaaa, optimize=True)
     l2_res -= 0.25 * _tmp119
     l2_res += 0.25 * _tmp119.transpose(0, 1, 3, 2)
@@ -2315,74 +2315,74 @@ def l2_abab_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aaba
     l2_res -= 0.25 * _tmp194
     l2_res -= 0.25 * _tmp194
     _tmp195 = einsum('knef,cbaijk,ijmcba->efmn', g_abab[o, o, v, v], t3_aaaaaa, l3_aaaaaa, optimize=True)
-    l2_res -= 0.0833333 * _tmp195
+    l2_res -= 0.0833333333333333 * _tmp195
     _tmp196 = einsum('knef,cbaikj,imjcba->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp196
+    l2_res -= 0.0833333333333333 * _tmp196
     _tmp197 = einsum('knef,cbakji,mjicba->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp197
-    l2_res -= 0.0833333 * _tmp196
-    l2_res -= 0.0833333 * _tmp197
+    l2_res -= 0.0833333333333333 * _tmp197
+    l2_res -= 0.0833333333333333 * _tmp196
+    l2_res -= 0.0833333333333333 * _tmp197
     _tmp198 = einsum('knef,cbakji,mjicba->efmn', g_abab[o, o, v, v], t3_abbabb, l3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp198
-    l2_res -= 0.0833333 * _tmp196
-    l2_res -= 0.0833333 * _tmp197
-    l2_res -= 0.0833333 * _tmp198
-    l2_res -= 0.0833333 * _tmp198
+    l2_res -= 0.0833333333333333 * _tmp198
+    l2_res -= 0.0833333333333333 * _tmp196
+    l2_res -= 0.0833333333333333 * _tmp197
+    l2_res -= 0.0833333333333333 * _tmp198
+    l2_res -= 0.0833333333333333 * _tmp198
     _tmp199 = einsum('mkef,cbaijk,ijncba->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp199
-    l2_res -= 0.0833333 * _tmp199
+    l2_res -= 0.0833333333333333 * _tmp199
+    l2_res -= 0.0833333333333333 * _tmp199
     _tmp200 = einsum('mkef,cbaijk,ijncba->efmn', g_abab[o, o, v, v], t3_abbabb, l3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp200
-    l2_res -= 0.0833333 * _tmp200
-    l2_res -= 0.0833333 * _tmp199
-    l2_res -= 0.0833333 * _tmp200
-    l2_res -= 0.0833333 * _tmp200
-    l2_res -= 0.0833333 * _tmp200
-    l2_res -= 0.0833333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp199
+    l2_res -= 0.0833333333333333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp200
+    l2_res -= 0.0833333333333333 * _tmp200
     _tmp201 = einsum('mkef,cbaijk,ijncba->efmn', g_abab[o, o, v, v], t3_bbbbbb, l3_bbbbbb, optimize=True)
-    l2_res -= 0.0833333 * _tmp201
+    l2_res -= 0.0833333333333333 * _tmp201
     _tmp202 = einsum('kjef,imncba,cbaikj->efmn', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res += 0.0833333 * _tmp202
-    l2_res += 0.0833333 * _tmp202
-    l2_res += 0.0833333 * _tmp202
-    l2_res += 0.0833333 * _tmp202
-    l2_res += 0.0833333 * _tmp202
-    l2_res += 0.0833333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
+    l2_res += 0.0833333333333333 * _tmp202
     _tmp203 = einsum('kjef,mincba,cbakij->efmn', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l2_res += 0.0833333 * _tmp203
+    l2_res += 0.0833333333333333 * _tmp203
     _tmp204 = einsum('jkef,mincba,cbajki->efmn', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp204
-    l2_res += 0.0833333 * _tmp203
-    l2_res -= 0.0833333 * _tmp204
-    l2_res += 0.0833333 * _tmp203
-    l2_res -= 0.0833333 * _tmp204
+    l2_res -= 0.0833333333333333 * _tmp204
+    l2_res += 0.0833333333333333 * _tmp203
+    l2_res -= 0.0833333333333333 * _tmp204
+    l2_res += 0.0833333333333333 * _tmp203
+    l2_res -= 0.0833333333333333 * _tmp204
     _tmp205 = einsum('mnec,abcijk,ijkabf->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp205
-    l2_res -= 0.0833333 * _tmp205
-    l2_res -= 0.0833333 * _tmp205
+    l2_res -= 0.0833333333333333 * _tmp205
+    l2_res -= 0.0833333333333333 * _tmp205
+    l2_res -= 0.0833333333333333 * _tmp205
     _tmp206 = einsum('mnec,bcaijk,ijkbfa->efmn', g_abab[o, o, v, v], t3_abbabb, l3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp206
-    l2_res -= 0.0833333 * _tmp206
-    l2_res -= 0.0833333 * _tmp206
+    l2_res -= 0.0833333333333333 * _tmp206
+    l2_res -= 0.0833333333333333 * _tmp206
+    l2_res -= 0.0833333333333333 * _tmp206
     _tmp207 = einsum('mnec,abcijk,ijkabf->efmn', g_abab[o, o, v, v], t3_abbabb, l3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp207
-    l2_res -= 0.0833333 * _tmp207
-    l2_res -= 0.0833333 * _tmp207
+    l2_res -= 0.0833333333333333 * _tmp207
+    l2_res -= 0.0833333333333333 * _tmp207
+    l2_res -= 0.0833333333333333 * _tmp207
     _tmp208 = einsum('mnec,cbaijk,ijkfba->efmn', g_abab[o, o, v, v], t3_bbbbbb, l3_bbbbbb, optimize=True)
-    l2_res -= 0.0833333 * _tmp208
+    l2_res -= 0.0833333333333333 * _tmp208
     _tmp209 = einsum('mncf,cbaijk,ijkeba->efmn', g_abab[o, o, v, v], t3_aaaaaa, l3_aaaaaa, optimize=True)
-    l2_res -= 0.0833333 * _tmp209
+    l2_res -= 0.0833333333333333 * _tmp209
     _tmp210 = einsum('mncf,cbaijk,ijkeba->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp210
-    l2_res -= 0.0833333 * _tmp210
-    l2_res -= 0.0833333 * _tmp210
-    l2_res -= 0.0833333 * _tmp210
-    l2_res -= 0.0833333 * _tmp210
-    l2_res -= 0.0833333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
+    l2_res -= 0.0833333333333333 * _tmp210
     _tmp211 = einsum('mncf,cbaijk,ijkeba->efmn', g_abab[o, o, v, v], t3_abbabb, l3_abbabb, optimize=True)
-    l2_res -= 0.0833333 * _tmp211
-    l2_res -= 0.0833333 * _tmp211
-    l2_res -= 0.0833333 * _tmp211
+    l2_res -= 0.0833333333333333 * _tmp211
+    l2_res -= 0.0833333333333333 * _tmp211
+    l2_res -= 0.0833333333333333 * _tmp211
     _tmp212 = einsum('knec,imjabf,abcikj->efmn', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
     l2_res += 0.25 * _tmp212
     _tmp213 = einsum('knec,mjiabf,abckji->efmn', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
@@ -2474,20 +2474,20 @@ def l2_abab_residual(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aaba
     _tmp251 = einsum('kjfc,cbaikj,mineba->efmn', g_bbbb[o, o, v, v], t3_bbbbbb, l3_abbabb, optimize=True)
     l2_res -= 0.25 * _tmp251
     _tmp252 = einsum('mnbc,ijkeaf,bacijk->efmn', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res += 0.0833333 * _tmp252
+    l2_res += 0.0833333333333333 * _tmp252
     _tmp253 = einsum('mncb,ijkeaf,acbijk->efmn', g_abab[o, o, v, v], l3_aabaab, t3_aabaab, optimize=True)
-    l2_res -= 0.0833333 * _tmp253
-    l2_res += 0.0833333 * _tmp252
-    l2_res -= 0.0833333 * _tmp253
+    l2_res -= 0.0833333333333333 * _tmp253
+    l2_res += 0.0833333333333333 * _tmp252
+    l2_res -= 0.0833333333333333 * _tmp253
     _tmp254 = einsum('mnbc,ijkefa,bcaijk->efmn', g_abab[o, o, v, v], l3_abbabb, t3_abbabb, optimize=True)
-    l2_res += 0.0833333 * _tmp254
-    l2_res += 0.0833333 * _tmp254
-    l2_res += 0.0833333 * _tmp252
-    l2_res -= 0.0833333 * _tmp253
-    l2_res += 0.0833333 * _tmp254
-    l2_res += 0.0833333 * _tmp254
-    l2_res += 0.0833333 * _tmp254
-    l2_res += 0.0833333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp252
+    l2_res -= 0.0833333333333333 * _tmp253
+    l2_res += 0.0833333333333333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp254
+    l2_res += 0.0833333333333333 * _tmp254
     _tmp255 = einsum('knbc,bacikj,imjeaf->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)
     l2_res -= 0.25 * _tmp255
     _tmp256 = einsum('knbc,backji,mjieaf->efmn', g_abab[o, o, v, v], t3_aabaab, l3_aabaab, optimize=True)

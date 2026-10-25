@@ -24,16 +24,18 @@ side that has to be matched on the other, not a tolerance:
     branch, which has no broadening to set -- and no denominator is singular
     at the roots measured here.
   * a Hartree-Fock reference, where <Sigma_x - v_xc> vanishes identically:
-    `_static_correction` returns exact zeros and `QPqb.delta` is zeros, so
-    NEITHER side adds an explicit exchange term. Both solve
+    `_static_correction` (the shared builder, -K/2 - (v_eff - J) of the mean
+    field's own J and K) returns zeros to rounding, 1.4e-15 Ha at most
+    (water/cc-pVDZ), and `QPqb.delta` is zeros, so NEITHER side adds an
+    explicit exchange term. Both solve
     w = eps_p + Sigma_c(w) with Sigma_x already inside eps_p.
-  * qp_solver='newton', the nearest-root rule, matching `QPqb`'s Newton
-    started from eps_p. No root selection is in play: every Z below is > 0.94,
+  * the global largest-weight rule, as `QPqb`'s
+    secular solve. No root selection is in play: every Z below is > 0.94,
     so there is one quasiparticle and no satellite to choose between.
 
 WHAT WAS MEASURED, in eV, on RHF references converged to conv_tol_grad 1e-11.
 "tight" is the production residual driven to |f| < 1e-14 Ha by the
-repository's own `solve_qp_equation_newton`; "driver" is `calc_qp_energy`.
+repository's own scan and bisection; "driver" is `calc_qp_energy`.
 
   system         p  orbital  qb energy         |tight-qb|  |driver-qb|  Z
   water/sto-3g   4  HOMO      -8.999245032650    1.1e-14     2.0e-09    0.967283
@@ -49,55 +51,57 @@ repository's own `solve_qp_equation_newton`; "driver" is `calc_qp_energy`.
 Z is the same on both sides to 3e-6 (the quasi-boson slope is analytic, the
 production one a central difference of the residual at 1e-4 Ha).
 
-THE VERDICT. The physics is identical: (A, B) bitwise, the RPA spectrum to
+THE VERDICT. The physics is identical: (A, B) to a few ulp, the RPA spectrum to
 1.0e-13 Ha, Sigma_c to 1.1e-15 Ha at both eps_p and the root, and the two
 quasiparticle roots to 2.7e-14 eV -- six orders below the 1e-8 eV the gate
 asserts. Neither side is wrong.
 
-THE PLAN'S 1e-8 eV IS NOT REACHABLE THROUGH `calc_qp_energy`, and the whole
-residual is attributed: `solve_qp_equation_newton` stops at
-|f(w)| < QP_NEWTON_TOL = 1e-6 Ha and `calc_qp_energy` exposes no way to ask
-for less, so the driver returns a point w_drv off the root by exactly
-Z * f(w_drv) -- reproduced below to 7.2e-14 eV on every row, worst case
-1.2e-5 eV on the water/cc-pVDZ LUMO. That is a stopping rule, not a term:
-`QPqb.solve_diag` converges the same equation to |dw| < 1e-12 Ha, and
-qp_solver='pole_strength' (production's default, which bisects to
-QP_GRAPHICAL_TOL = 1e-8 Ha) lands 5.8e-8 eV away instead of 1.2e-5.
+THE 1e-8 eV BAR IS NOT REACHABLE THROUGH `calc_qp_energy`, and the whole
+residual is attributed: the driver bisects to QP_GRAPHICAL_TOL = 1e-8 Ha
+and `calc_qp_energy` exposes no way to ask for less, so it returns a point
+w_drv off the root by exactly Z * f(w_drv). That is a stopping rule, not a
+term: `QPqb` solves the same secular equation to 1e-12 Ha.
 
 A keyword the route does not have: `return_z=True` is REFUSED on
 mode='casida', whose continuation is 'spectral' -- only the three contour
 continuations return their Newton slope. The production Z below therefore
 comes from `qp_equation.pole_strength` on the same residual.
 
-THE GATE WAS SHOWN TO FAIL. `ScaledSigmaQPqb` below -- the production class
-with its correlation self-energy and slope scaled by SIGMA_SCALE and nothing
-else -- put in place of `QPqb` for one run moves the quasi-boson root by
-9.9e-8 to 1.6e-6 eV, above GATE_EV on all nine rows, and fails
+WHAT BREAKS THE GATE. `ScaledSigmaQPqb` below -- the production class with its
+correlation self-energy and slope scaled by SIGMA_SCALE and nothing else --
+in place of `QPqb` moves the quasi-boson root by 9.9e-8 to 1.6e-6 eV, above
+GATE_EV on all nine rows, and breaks
 `test_the_correlation_self_energy_is_the_same_function` (6.3e-8 Ha where
 SIGMA_TOL is 1e-12), `test_the_quasiparticle_root_is_the_same_number`
 (1.6e-6 eV where GATE_EV is 1e-8) and
-`test_the_driver_differs_only_by_its_newton_stopping_rule` (1.6e-6 eV left
-unattributed). The three that stand on the screening alone -- the bitwise
-(A, B) pair, the vanishing static shift and the broadening -- still pass,
+`test_the_driver_differs_only_by_its_stopping_rule` (1.6e-6 eV left
+unattributed). The three that stand on the screening alone -- the few-ulp
+(A, B) pair, the vanishing static shift and the broadening -- do not see it,
 which is the point of keeping them separate: they cannot see a self-energy
 that drifted.
 """
+import pathlib
+
 import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.Base.constants import (DEFAULT_BROADENING_ETA, HARTREE_TO_EV,
-                                QP_NEWTON_TOL)
-from src.Base.pyscf_interface import get_orbital_energies
+from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, HARTREE_TO_EV,
+                                         QP_GRAPHICAL_TOL, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.SingleReference.GW.qp_energy import (_static_correction,
                                               _two_electron_integrals,
                                               calc_qp_energy)
-from src.SingleReference.GW.quasi_boson import QPqb, build_rpa_AB
+from src.SingleReference.GW.quasi_boson import QPqb
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
-from src.Solvers.qp_equation import pole_strength, solve_qp_equation_newton
+from src.Solvers.qp_equation import (pole_strength,
+                                     solve_qp_equation_pole_strength)
+from tests.pins import assert_same, bar_under, recorded_blas
 
 #: The three references every number is measured on.
 SYSTEMS = (('water/sto-3g', 'O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; '
@@ -115,41 +119,46 @@ GATE_EV = 1e-8
 #: sum. Measured 1.0e-13 and 1.1e-15.
 SPECTRUM_TOL = 1e-12
 SIGMA_TOL = 1e-12
+#: Hartree the Casida route's HF static term may sit off zero: -K/2 - (v_eff -
+#: J) cancels to rounding, 1.4e-15 at most on these references. That bar holds
+#: on the BLAS of tests/one_fit_pins.json (the workstation); another BLAS
+#: rounds the cancellation differently (2.06e-14 on a cluster's MKL 2025.3), and
+#: holds the energy bar of tests/pins.py instead.
+STATIC_ROUNDING_HA = bar_under(
+    recorded_blas(pathlib.Path(__file__).resolve().parent
+                  / 'one_fit_pins.json'), 1e-14)
 
 #: How well w_drv - w* = Z * f(w_drv) accounts for the driver's whole
 #: departure from the root, in eV. Measured 7.2e-14.
 ATTRIBUTION_EV = 1e-10
 
-#: The residual the tight root is driven to, in Hartree, and the Newton cap
-#: that reaches it. Six orders below QP_NEWTON_TOL, so the root it returns is
-#: the equation's and not the stopping rule's.
+#: The bracket the tight root is bisected to, in Hartree: six orders below
+#: QP_GRAPHICAL_TOL, so the root it returns is the equation's and not the
+#: stopping rule's.
 TIGHT_TOL = 1e-14
-TIGHT_MAX_ITER = 400
 
-#: The perturbation the gate was shown to fail under.
+#: The perturbation the gate must catch.
 SIGMA_SCALE = 1.0 + 1e-6
 
 
 class ScaledSigmaQPqb(QPqb):
     """`QPqb` with the correlation self-energy and its slope scaled.
 
-    Nothing else changes: the bosons, the couplings and the Newton are the
-    production ones, so the root moves by the scale alone.
+    Nothing else changes: the bosons, the pole positions and the secular solve
+    are the production ones, so the root moves by the scale alone.
     """
 
-    def sigma(self, p, w):
-        return SIGMA_SCALE * super().sigma(p, w)
-
-    def sigma_prime(self, p, w):
-        return SIGMA_SCALE * super().sigma_prime(p, w)
+    def _pole_arrays(self, p):
+        nh, ph, npp, pp = super()._pole_arrays(p)
+        return SIGMA_SCALE * nh, ph, SIGMA_SCALE * npp, pp
 
 
 def rhf_reference(atom, basis, unit):
     """(mol, mf, eri, nocc) on a tightly converged RHF and its full MO ERI."""
     mol = gto.M(atom=atom, basis=basis, unit=unit, verbose=0)
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
@@ -175,7 +184,7 @@ def casida_stack(mol, mf, nocc, eta):
     A, B = lr.build_casida_matrices(nocc, lBSE=False, W_aux=None,
                                     triplet=False)
     omega, X, Y = CasidaSolver(A, B).solve(tda=False)
-    xc = _static_correction(mf, mol, se, None, None, 'alpha', False)
+    xc = _static_correction(mf, mol, None, None, 'alpha', False)
     return {'eps': np.asarray(eps, float), 'se': se, 'A': A, 'B': B,
             'omega': omega, 'X': X, 'Y': Y, 'xc': xc, 'nocc': nocc}
 
@@ -211,7 +220,7 @@ def gate():
         stack = casida_stack(mol, mf, nocc, 0.0)
         states = sorted(orbitals(nocc).values())
         driver = calc_qp_energy(mf, df=False, eta=0.0, mode='casida',
-                                qp_solver='newton', state=states)
+                                state=states)
         rows[name] = {'mol': mol, 'mf': mf, 'eri': eri, 'nocc': nocc,
                       'qp': qp, 'stack': stack,
                       'driver': {p: driver[p]['GW'] for p in states}}
@@ -219,7 +228,7 @@ def gate():
 
 
 def test_the_two_routes_build_the_same_dense_rpa_problem(gate):
-    """One (A, B) pair, bitwise, and one boson spectrum.
+    """One (A, B) pair, to a few ulp, and one boson spectrum.
 
     `build_rpa_AB` and `LinearResponseSolver.build_casida_matrices(lBSE=False)`
     are separate routines over the same exact (ia|jb) with the same factor-2
@@ -231,14 +240,15 @@ def test_the_two_routes_build_the_same_dense_rpa_problem(gate):
         qp, stack = row['qp'], row['stack']
         A, B, _ = build_rpa_AB(np.asarray(row['mf'].mo_energy, float),
                                row['eri'], row['nocc'])
-        assert np.array_equal(A, stack['A']), name
-        assert np.array_equal(B, stack['B']), name
+        assert_same(A, stack['A'], quantity='root', label=(name, 'A'))
+        assert_same(B, stack['B'], quantity='root', label=(name, 'B'))
         spread = np.abs(np.sort(qp.omega) - np.sort(stack['omega'])).max()
         assert spread < SPECTRUM_TOL, f'{name}: RPA spectrum {spread:.3e} Ha'
 
 
 def test_the_hartree_fock_reference_leaves_no_static_shift(gate):
-    """<Sigma_x - v_xc> is identically zero on both sides, not small.
+    """<Sigma_x - v_xc> is zero on both sides: identically on the quasi-boson
+    side, to the rounding of one K - K cancellation on the Casida side.
 
     G0W0 removes the static potential the mean field already counted, and on a
     gas-phase Hartree-Fock reference v_xc IS Sigma_x. Both routes therefore
@@ -246,7 +256,7 @@ def test_the_hartree_fock_reference_leaves_no_static_shift(gate):
     that did not check this could be comparing two different equations.
     """
     for name, row in gate.items():
-        assert not np.any(row['stack']['xc']), name
+        assert np.abs(row['stack']['xc']).max() < STATIC_ROUNDING_HA, name
         assert not np.any(row['qp'].delta), name
 
 
@@ -270,8 +280,8 @@ def test_the_correlation_self_energy_is_the_same_function(gate):
 def test_the_quasiparticle_root_is_the_same_number(gate):
     """The two roots agree at GATE_EV; the pole strengths agree with them.
 
-    The production residual is driven to TIGHT_TOL by the repository's own
-    Newton, so what is compared is the equation and not a stopping rule. Every
+    The production residual is bisected to TIGHT_TOL by the repository's
+    own global finder, so what is compared is the equation and not a stopping rule. Every
     Z here is above 0.94: one quasiparticle per orbital, so the nearest-root
     and largest-weight rules cannot disagree and no root selection enters.
     """
@@ -280,9 +290,8 @@ def test_the_quasiparticle_root_is_the_same_number(gate):
         for label, p in orbitals(row['nocc']).items():
             w_qb, z_qb = qp.solve_diag(p)
             f = production_residual(stack, p)
-            w_tight = solve_qp_equation_newton(f, stack['eps'][p],
-                                               tol=TIGHT_TOL,
-                                               max_iter=TIGHT_MAX_ITER)
+            w_tight = solve_qp_equation_pole_strength(f, stack['eps'][p],
+                                                      tol=TIGHT_TOL)
             d = abs(w_tight - w_qb) * HARTREE_TO_EV
             assert d <= GATE_EV, f'{name} {label}: {d:.3e} eV'
             z_casida = pole_strength(f, w_tight)
@@ -290,11 +299,11 @@ def test_the_quasiparticle_root_is_the_same_number(gate):
             assert abs(z_casida - z_qb) < 1e-5, f'{name} {label}'
 
 
-def test_the_driver_differs_only_by_its_newton_stopping_rule(gate):
-    """`calc_qp_energy` stops at QP_NEWTON_TOL, and that accounts for all of it.
+def test_the_driver_differs_only_by_its_stopping_rule(gate):
+    """`calc_qp_energy` stops at QP_GRAPHICAL_TOL, and that accounts for all of it.
 
-    `solve_qp_equation_newton` returns the first iterate with
-    |f(w)| < QP_NEWTON_TOL and `calc_qp_energy` passes no tolerance through, so
+    The scan bisects each bracket to QP_GRAPHICAL_TOL and `calc_qp_energy`
+    passes no tolerance through, so
     the driver's number is a point on the residual rather than its zero. Near
     the root f(w) = (w - w*)/Z, so the whole departure is Z * f(w_drv) -- and
     it is, to ATTRIBUTION_EV. Nothing is left over for a missing term.
@@ -306,7 +315,7 @@ def test_the_driver_differs_only_by_its_newton_stopping_rule(gate):
             f = production_residual(stack, p)
             w_drv = row['driver'][p] / HARTREE_TO_EV
             residual = f(w_drv)
-            assert abs(residual) < QP_NEWTON_TOL, f'{name} {label}'
+            assert abs(w_drv - w_qb) < QP_GRAPHICAL_TOL, f'{name} {label}'
             predicted = pole_strength(f, w_drv) * residual
             left_over = abs((w_drv - w_qb) - predicted) * HARTREE_TO_EV
             assert left_over < ATTRIBUTION_EV, \
@@ -325,16 +334,15 @@ def test_the_zero_broadening_is_load_bearing(gate):
         broadened = casida_stack(row['mol'], row['mf'], row['nocc'],
                                  DEFAULT_BROADENING_ETA)
         for label, p in orbitals(row['nocc']).items():
-            roots = [solve_qp_equation_newton(production_residual(s, p),
-                                              s['eps'][p], tol=TIGHT_TOL,
-                                              max_iter=TIGHT_MAX_ITER)
+            roots = [solve_qp_equation_pole_strength(
+                         production_residual(s, p), s['eps'][p], tol=TIGHT_TOL)
                      for s in (row['stack'], broadened)]
             shift = abs(roots[1] - roots[0]) * HARTREE_TO_EV
             assert shift > GATE_EV, f'{name} {label}: {shift:.3e} eV'
 
 
 def test_a_scaled_correlation_self_energy_moves_the_root_past_the_gate(gate):
-    """The perturbation the gate was shown to fail under, as a measurement.
+    """The perturbation the gate must catch, as a measurement.
 
     Scaling Sigma_c by SIGMA_SCALE and nothing else moves the quasi-boson root
     off the production one by more than GATE_EV on every row, so

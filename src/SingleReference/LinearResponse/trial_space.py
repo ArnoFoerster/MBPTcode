@@ -1,5 +1,7 @@
-"""The Casida Davidson's trial space cut by pair rows over ranks: pyscf's
-`real_eig`, owned, with every pair-space-long array partitioned.
+"""The Casida Davidson's own loop (`casida_rows`), its trial space cut by
+pair rows over ranks: pyscf's `real_eig` with every pair-space-long array
+partitioned and Ritz pairs tracked above the requested roots. Serially it runs
+on one tile as long as the pair space.
 
 Replicated, every rank holds the four trial-space holders V, W,
 U1 = A V + B W and U2 = A W + B V whole -- 32 bytes per pair per trial pair --
@@ -38,16 +40,19 @@ linear-dependence tests, when the space restarts -- is read off reduced or
 lockstepped small matrices, so it is the same on every rank and the
 collectives pair.
 
-RESTARTS take the nroots Ritz vectors as real_eig does, and their products as
-the same combinations of the stored products,
-A (V x + W y) + B (W x + V y) = U1 x + U2 y, instead of applying the action
-to them again.
+RESTARTS take the lowest max(2 nroots, tracked) Ritz vectors, at most the
+space_inc a cycle corrects (real_eig takes the nroots requested ones), and their products as the same combinations of the
+stored products, A (V x + W y) + B (W x + V y) = U1 x + U2 y, instead of
+applying the action to them again.
 
 ONE TILE. On one rank with one tile every expression is the one real_eig
 evaluates: a tile's addend is real_eig's own sum, a sum over one tile is that
 addend, and the square root of a squared norm is the norm again
 (sqrt(fl(x^2)) = |x| in binary floating point), so a solve without restarts
-returns real_eig's bits.
+handed real_eig's space_inc, whose tracked pairs are no more than real_eig
+corrects, and settled where its requested roots converge, takes real_eig's
+decisions on real_eig's sums. `davidson._davidson_root` hands it the tracked
+pairs as space_inc instead, so it corrects fewer pairs a cycle than real_eig.
 """
 import time
 
@@ -57,9 +62,10 @@ from pyscf.lib.linalg_helper import _sort_elast
 from pyscf.tdscf._lr_eig import (TDDFT_subspace_eigen_solver, _asym_dot,
                                  _sym_dot)
 
-from src.Base.constants import DAVIDSON_PAIR_TILE
-from src.Base.utils.mpi_grid import (allgather_ranges, contiguous_block,
-                                     lockstep, ordered_sum)
+from src.Base.numerics.constants import (DAVIDSON_ACTION_SYMMETRY_TOL, DAVIDSON_LINDEP,
+                                         DAVIDSON_PAIR_TILE)
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, contiguous_block,
+                                              lockstep, ordered_sum)
 
 
 #: The owned loop's own time outside the block action, each piece timed
@@ -67,6 +73,17 @@ from src.Base.utils.mpi_grid import (allgather_ranges, contiguous_block,
 #: result gathers, the reductions of the small matrices, and the checked
 #: locksteps of the subspace solution and the Gram-Schmidt coefficients.
 SUBSPACE_PIECES = ('rows', 'small', 'gather', 'reduce', 'lockstep')
+
+
+class ActionNotSymmetric(RuntimeError):
+    """A Casida block action whose projected A or B is not symmetric beyond
+    round-off: the action is wrong, and so is every root solved on it.
+    `asymmetry` is the measured skew part relative to max |a|
+    (`projected_asymmetry`)."""
+
+    def __init__(self, message, asymmetry):
+        super().__init__(message)
+        self.asymmetry = float(asymmetry)
 
 
 class PairRows:
@@ -175,18 +192,46 @@ def pair_tiles(n_pair, tile=None):
     return [(p0, min(p0 + tile, n_pair)) for p0 in range(0, n_pair, tile)]
 
 
+def projected_asymmetry(a, a_skew, b_skew):
+    """max(|a_skew|, |b_skew|) / max |a|: the parts of the projected A and B
+    that a symmetric action leaves to round-off, relative to the block."""
+    scale = np.abs(a).max()
+    if scale == 0.0:
+        return 0.0
+    return float(max(np.abs(a_skew).max(), np.abs(b_skew).max()) / scale)
+
+
+def _sym_skew_dot(V, U1, m0, m1):
+    """(`_sym_dot`, its skew part): real_eig's (V^T U1 + U1^T V)[m0:m1, :m1]
+    / 2 to the bit, and V^T U1 - U1^T V there, round-off for a symmetric
+    operator however wrong its value."""
+    p = V[:, m0:m1].T.dot(U1[:, :m1])
+    q = U1[:, m0:m1].T.dot(V[:, :m1])
+    skew = p - q
+    p += q
+    p *= .5
+    return p, skew
+
+
 def projection_addend(V, W, U1, U2, m0, m1):
-    """One tile's (4, m1 - m0, m1) share of the projected blocks a, b, sigma
-    and pi: real_eig's `_sym_dot`/`_asym_dot` sums on the tile's holders."""
-    a = _sym_dot(V, U1, m0, m1)
-    a += _sym_dot(W, U2, m0, m1)
-    b = _sym_dot(V, U2, m0, m1)
-    b += _sym_dot(W, U1, m0, m1)
+    """One tile's (6, m1 - m0, m1) share of the projected blocks a, b, sigma
+    and pi -- real_eig's `_sym_dot`/`_asym_dot` sums on the tile's holders
+    -- and of the skew parts of a and b, which real_eig's symmetrization
+    hides: an action that is not symmetric is iterated as its symmetric
+    part."""
+    a, a_skew = _sym_skew_dot(V, U1, m0, m1)
+    a2, skew = _sym_skew_dot(W, U2, m0, m1)
+    a += a2
+    a_skew += skew
+    b, b_skew = _sym_skew_dot(V, U2, m0, m1)
+    b2, skew = _sym_skew_dot(W, U1, m0, m1)
+    b += b2
+    b_skew += skew
     sigma = _sym_dot(V, V, m0, m1)
     sigma -= _sym_dot(W, W, m0, m1)
     pi = _asym_dot(V, W, m0, m1)
     pi -= _asym_dot(W, V, m0, m1)
-    return np.stack([a, b, sigma, pi])
+    return np.stack([a, b, sigma, pi, a_skew, b_skew])
 
 
 def ritz_rows(V, W, U1, U2, m1, x, y, w):
@@ -296,16 +341,30 @@ def gram_schmidt_rows(rows, V, W, X_new, Y_new, count, m1, lindep):
     """(V_new, W_new, kept): `count` new directions, given as this rank's
     (tile rows, count) blocks, projected off the held space and its partner
     space and orthonormalized with their partners, as pyscf's
-    `VW_Gram_Schmidt_fill_holder` does whole; the kept directions come back
-    as (kept, tile rows) blocks. X_new and Y_new are projected in place."""
+    `VW_Gram_Schmidt_fill_holder` does whole but projected twice; the kept
+    directions come back as (kept, tile rows) blocks. X_new and Y_new are
+    projected in place.
+
+    Twice, as classical Gram-Schmidt needs to hold orthogonality (and as
+    `warm_trial_space` does): a correction that lies almost wholly inside the
+    held space keeps, after one projection, the round-off of the part
+    removed, and the combination that normalizes it multiplies that
+    round-off by up to lindep^-1/2. Projected once, formaldehyde BSE on the
+    ISDF level-G1 grid in
+    toluene (240 pairs, 4 roots at 1e-9, the Eq. (18) after-solve QP
+    energies) drifted from orthonormality by 2.5e-4 at 112 held pairs and
+    0.4 at 232, until V - W lost rank and the projected (A-B) block broke
+    down with min eig(A-B) = 0.15 Ha; projected twice the drift stays at
+    6e-8 up to the whole pair space."""
     t = time.time()
-    addends = [overlap_addend(v[:, :m1], w[:, :m1], x, y)
-               for v, w, x, y in zip(V, W, X_new, Y_new)]
-    t = rows.lap('rows', t)
-    ox, oy = rows.join(addends, (2, m1, count))
-    t = time.time()
-    for v, w, x, y in zip(V, W, X_new, Y_new):
-        project_rows(v[:, :m1], w[:, :m1], x, y, ox, oy)
+    for _ in range(2):
+        addends = [overlap_addend(v[:, :m1], w[:, :m1], x, y)
+                   for v, w, x, y in zip(V, W, X_new, Y_new)]
+        t = rows.lap('rows', t)
+        ox, oy = rows.join(addends, (2, m1, count))
+        t = time.time()
+        for v, w, x, y in zip(V, W, X_new, Y_new):
+            project_rows(v[:, :m1], w[:, :m1], x, y, ox, oy)
     addends = [gram_addend(x, y) for x, y in zip(X_new, Y_new)]
     t = rows.lap('rows', t)
     s11, s21 = rows.join(addends, (2, count, count))
@@ -327,24 +386,131 @@ def gram_schmidt_rows(rows, V, W, X_new, Y_new, count, m1, lindep):
     return V_new, W_new, ca.shape[1]
 
 
-def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
-                  x0sym=None, max_cycle=50, space_inc=None, max_space=None,
-                  lindep=1e-12, verbose=logger.WARN, trace=None):
-    """pyscf's `real_eig` on this rank's pair rows: (conv, e, xy) as it
-    returns them, xy the nroots Ritz vectors [X, Y] gathered whole.
+def warm_trial_space(X, Y, x0, lindep):
+    """The first trial batch of a warm-started Davidson: (k', 2N) rows
+    [V, W], the guess vectors [X, Y] -- (N, k) each, a previous geometry's
+    roots carried into this one's orbitals -- and then the unit-vector rows
+    of the cold guess `x0`, each block projected off everything before it
+    and its partner space and orthonormalized with its own partners
+    (`symmetric_coefficients`), as real_eig holds a trial space: the rows
+    and their x/y-swapped partners one orthonormal set of 2k' vectors.
+
+    The guess comes first, so a cold direction it already spans drops at
+    `lindep` instead of crowding it; the cold rows stay because they span
+    what the previous roots do not -- a root that moves into the lowest few
+    from above has nothing else to be found from. Whole arrays on every
+    rank: the batch is a function of replicated inputs alone and the same at
+    any rank count, and `casida_rows` cuts it into its tiles as it does the
+    cold one.
+    """
+    n = x0.shape[1] // 2
+    V, W = np.zeros((n, 0)), np.zeros((n, 0))
+    for x_new, y_new in ((X, Y), (x0[:, :n].T, x0[:, n:].T)):
+        x_new = np.array(x_new, dtype=float, order='C')
+        y_new = np.array(y_new, dtype=float, order='C')
+        # twice, as classical Gram-Schmidt needs to hold orthogonality
+        for _ in range(2):
+            ox, oy = overlap_addend(V, W, x_new, y_new)
+            project_rows(V, W, x_new, y_new, ox, oy)
+        coefficients = symmetric_coefficients(*gram_addend(x_new, y_new),
+                                              lindep)
+        if coefficients is None:
+            continue
+        v, w = combine_rows(x_new, y_new, *coefficients)
+        V, W = np.hstack([V, v.T]), np.hstack([W, w.T])
+    return np.hstack([V.T, W.T])
+
+
+def _orthonormal_corrections(rows, Vh, Wh, XY_new, count, m1, lindep,
+                             xt_ir=None):
+    """(V, W, kept, irreps): the corrections `XY_new`, this rank's (count,
+    2 tile rows) blocks, projected off the held space and orthonormalized
+    with their partners (`gram_schmidt_rows`), each irrep of `xt_ir` apart
+    where one is given; `irreps` labels the kept directions (None without
+    `xt_ir`). XY_new is projected in place."""
+    tiles = rows.tiles
+    X_new = [xy[:, :p1 - p0].T for xy, (p0, p1) in zip(XY_new, tiles)]
+    Y_new = [xy[:, p1 - p0:].T for xy, (p0, p1) in zip(XY_new, tiles)]
+    if xt_ir is None:
+        V, W, kept = gram_schmidt_rows(rows, Vh, Wh, X_new, Y_new, count, m1,
+                                       lindep)
+        return V, W, kept, None
+    xt_orth_ir = []
+    parts = []
+    for ir in set(xt_ir):
+        idx = np.nonzero(xt_ir == ir)[0]
+        parts.append(gram_schmidt_rows(
+            rows, Vh, Wh, [X[:, idx] for X in X_new],
+            [Y[:, idx] for Y in Y_new], idx.size, m1, lindep))
+        xt_orth_ir.append([ir] * parts[-1][2])
+    kept = sum(part[2] for part in parts)
+    if kept == 0:
+        return None, None, 0, None
+    V = [np.vstack([part[0][i] for part in parts]) for i in range(len(tiles))]
+    W = [np.vstack([part[1][i] for part in parts]) for i in range(len(tiles))]
+    return V, W, kept, np.hstack(xt_orth_ir)
+
+
+def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
+                ntrack=None, x0sym=None, space_inc=None,
+                max_space=None, verbose=logger.WARN,
+                trace=None, resize=None,
+                symmetry_tol=DAVIDSON_ACTION_SYMMETRY_TOL):
+    """The Casida Davidson on this rank's pair rows, tracking Ritz pairs above
+    the requested ones: (conv, e, xy, lower).
+
+    conv: the `nroots` requested roots' |r| <= tol_residual.
+    e, xy: the Ritz values and vectors [X, Y], gathered whole, of the
+        requested roots and the tracked extra pairs above them.
+    lower: the lowest bound theta - r_S of a tracked extra pair left
+        unsettled where the solve stopped (inf where every one settled);
+        a requested root above it may not be the lowest.
 
     aop: the whole (k, 2N) batch [V, W] in, this rank's rows of
         U1 = A V + B W and U2 = A W + B V out, (k, rows) each.
     precond: this rank's (k, 2 tile rows) blocks of the residuals [R_x, R_y]
         and the k Ritz values in, the corrections as blocks of that shape out.
-    rows: the `PairRows` of this rank.
-    space_inc, max_space: real_eig's corrections per cycle and the trial
-        pairs held before it restarts.
+    rows: the `PairRows` of this rank; one tile as long as the pair space is
+        pyscf's `real_eig` arithmetic.
+    ntrack: the Ritz pairs tracked, the requested ones included (nroots by
+        default).
+    space_inc, max_space: the Ritz pairs corrected per cycle while a
+        requested root is unconverged (at least ntrack) and the trial pairs
+        held before the space restarts on its lowest max(2 nroots, ntrack)
+        Ritz vectors, at most space_inc.
     trace: optional list, one dict per cycle appended: the decisions the
-        cycle took, every one the same on every rank.
+        cycle took, every one the same on every rank; 'intervals' counts the
+        Ritz pairs whose r_S it measured, one block action each.
+    symmetry_tol: the largest skew part V^T A V - (A V)^T V (and B's) of
+        the projected blocks on each cycle's new trial pairs, relative to
+        max |a|, that a symmetric action leaves (`projected_asymmetry`);
+        above it the action is refused (`ActionNotSymmetric`), whatever the
+        residuals say.
+    resize: optional, `precond`'s signature: the corrections with every one
+        sized to the length the lindep test accepts, asked for only where a
+        cycle kept no direction of `precond`'s (the cycle's 'rescued').
+
+    THE ITERATION is real_eig's while a requested root is unconverged: every
+    unconverged pair among the lowest space_inc is corrected. Where the
+    requested roots have converged, a tracked extra pair is settled once it
+    has converged or its residual interval clears the highest requested root,
+    theta - r_S > omega_nroots, and the solve stops when every one is
+    settled; until then the unsettled extras alone are corrected. A root
+    whose Ritz value starts above the next root up is so reached rather than
+    converged past.
+
+    THE INTERVAL is in the metric S = [[A, B], [B, A]], in which H = J S,
+    J = diag(1, -1), is self-adjoint: for any z and theta an eigenvalue of
+    H lies within r_S = |H z - theta z|_S / |z|_S of theta. H z - theta z =
+    J R for the Casida residual R = S z - theta J z, so
+    r_S^2 = R^T (J S J) R / z^T S z, one block action on [R_x, -R_y] per
+    unconverged extra pair; S not positive definite (an unstable reference)
+    raises LinAlgError.
     """
     log = logger.new_logger(verbose=verbose)
     n = x0.shape[1] // 2
+    ntrack = nroots if ntrack is None else max(int(ntrack), nroots)
+    space_inc = ntrack if space_inc is None else max(int(space_inc), ntrack)
     if x0sym is not None:
         x0_ir = np.asarray(x0sym)
     tiles = rows.tiles
@@ -361,6 +527,36 @@ def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
     V = W = None
     count = len(x0)
     fresh_start = True
+    w = np.zeros(0)
+    extra = np.zeros(0, int)
+    settled = np.zeros(0, bool)
+    r_s = None
+
+    def interval(idx):
+        """r_S of the Ritz pairs `idx` of the last cycle: one block action
+        on their [R_x, -R_y], two joined sums."""
+        k = len(idx)
+        U1, U2 = aop(rows.gather([R_x[:, idx].T for _, _, R_x, _ in ritz],
+                                 [-R_y[:, idx].T for _, _, _, R_y in ritz],
+                                 k))
+        t = time.time()
+        U1, U2 = rows.split(U1), rows.split(U2)
+        addends = []
+        for (X, Y, R_x, R_y), u1, u2 in zip(ritz, U1, U2):
+            x, y, rx, ry = X[:, idx], Y[:, idx], R_x[:, idx], R_y[:, idx]
+            # R^T (J S J) R and z^T S z = z . (R + theta J z)
+            jsj = np.sum(rx * u1.T, axis=0) - np.sum(ry * u2.T, axis=0)
+            szz = (np.sum(x * rx, axis=0) + np.sum(y * ry, axis=0)
+                   + w[idx] * (np.sum(x * x, axis=0) - np.sum(y * y, axis=0)))
+            addends.append(np.stack([jsj, szz]))
+        rows.lap('rows', t)
+        jsj, szz = rows.join(addends, (2, k))
+        if np.any(jsj < 0) or np.any(szz <= 0):
+            raise np.linalg.LinAlgError(
+                'S = [[A, B], [B, A]] is not positive definite on a tracked '
+                'Ritz pair: the Casida residual interval does not exist')
+        return np.sqrt(jsj / szz)
+
     for icyc in range(max_cycle):
         t = time.time()
         if fresh_start:
@@ -377,8 +573,8 @@ def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
         elif fresh_start:
             # the restart products, combinations of the held ones
             xk, yk, m_old = kept
-            V = [X[:, :nroots].T for X, _, _, _ in ritz]
-            W = [Y[:, :nroots].T for _, Y, _, _ in ritz]
+            V = [X[:, :xk.shape[1]].T for X, _, _, _ in ritz]
+            W = [Y[:, :xk.shape[1]].T for _, Y, _, _ in ritz]
             U1, U2 = [], []
             for u1, u2 in zip(U1h, U2h):
                 p = u1[:, :m_old].dot(xk)
@@ -405,9 +601,18 @@ def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
         addends = [projection_addend(Vh[i], Wh[i], U1h[i], U2h[i], m0, m1)
                    for i in range(len(tiles))]
         rows.lap('rows', t)
-        a_block, b_block, sigma_block, pi_block = rows.join(
-            addends, (4, m1 - m0, m1))
+        a_block, b_block, sigma_block, pi_block, a_skew, b_skew = rows.join(
+            addends, (6, m1 - m0, m1))
         t = time.time()
+        asymmetry = projected_asymmetry(a_block, a_skew, b_skew)
+        if asymmetry > symmetry_tol:
+            raise ActionNotSymmetric(
+                f'Casida-form Davidson failed: the block action is not '
+                f'symmetric, its projected A and B on the {m1 - m0} new trial '
+                f'pairs of cycle {icyc} carry a skew part of '
+                f'{asymmetry:.2e} of max |a| against {symmetry_tol:g}. The '
+                'action is wrong (a grid or pair row block out of place, a '
+                'kernel not symmetric), not merely unconverged.', asymmetry)
         a[:m1, m0:m1] = a_block.T
         a[m0:m1, :m1] = a_block
         b[:m1, m0:m1] = b_block.T
@@ -470,29 +675,50 @@ def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
         rows.lap('rows', t)
         r_norms = rows.join(r2, (x.shape[1],)) ** .5
         t = time.time()
-        kept = (x[:, :nroots], y[:, :nroots], m1)
+        nkeep = min(ntrack, len(w))
+        # a restart keeps the Tamm-Dancoff loop's 2 nroots, or the tracked
+        nrestart = min(max(2 * nroots, ntrack), len(w))
+        kept = (x[:, :nrestart], y[:, :nrestart], m1)
         if x0sym is not None:
             xt_ir = v_ir[:space_inc]
-            x0_ir = v_ir[:nroots]
+            x0_ir = v_ir[:nrestart]
 
         max_r_norm = max(r_norms[:nroots])
         conv = r_norms[:nroots] <= tol_residual
+        extra = np.arange(min(nroots, nkeep), nkeep)
+        settled = r_norms[extra] <= tol_residual
+        r_s = None                   # r_S of the extras, 0 where converged
+        if all(conv) and not settled.all():
+            rows.lap('small', t)
+            r_s = np.zeros(len(extra))
+            r_s[~settled] = interval(extra[~settled])
+            t = time.time()
+            settled |= w[extra] - r_s > e.max()
         step = {'cycle': icyc, 'fresh': bool(fresh_start), 'new': int(count),
                 'applied': int(count) if icyc == 0 or not fresh_start else 0,
-                'm1': int(m1), 'r_norms': r_norms.copy(),
-                'conv': tuple(bool(c) for c in conv), 'kept': None}
+                'm1': int(m1), 'omega': w.copy(), 'r_norms': r_norms.copy(),
+                'asymmetry': asymmetry,
+                'conv': tuple(bool(c) for c in conv), 'kept': None,
+                'settled': tuple(bool(s) for s in settled),
+                'r_s': None if r_s is None else r_s.copy(),
+                'intervals': 0 if r_s is None else int(np.count_nonzero(
+                    r_norms[extra] > tol_residual))}
         if trace is not None:
             trace.append(step)
         for k, ek in enumerate(e[:nroots]):
             log.debug1('root %d  |r|= %4.3g  e= %s  max|de|= %4.3g',
                        k, r_norms[k], ek, de[k])
-        if all(conv):
+        if all(conv) and settled.all():
             log.debug('converged %d %d  |r|= %4.3g', icyc, len(conv),
                       max_r_norm)
             rows.lap('small', t)
             break
 
-        r_index = r_norms > tol_residual
+        if all(conv):
+            r_index = np.zeros(len(w), dtype=bool)
+            r_index[extra[~settled]] = True
+        else:
+            r_index = r_norms > tol_residual
         t = rows.lap('small', t)
         dx = [np.vstack([R_x[:, r_index], R_y[:, r_index]]).T
               for _, _, R_x, R_y in ritz]
@@ -502,46 +728,59 @@ def real_eig_rows(aop, x0, precond, rows, tol_residual=1e-5, nroots=1,
         # the preconditioner's own tile work, its norms' pieces aside
         rows.clock['rows'] += (time.time() - t
                                - (sum(rows.clock.values()) - timed))
-        t = time.time()
-        X_new = [xy[:, :p1 - p0].T for xy, (p0, p1) in zip(XY_new, tiles)]
-        Y_new = [xy[:, p1 - p0:].T for xy, (p0, p1) in zip(XY_new, tiles)]
-        rows.lap('rows', t)
         n_new = int(np.count_nonzero(r_index))
-        if x0sym is None:
-            V, W, count = gram_schmidt_rows(rows, Vh, Wh, X_new, Y_new, n_new,
-                                            m1, lindep)
-        else:
+        if x0sym is not None:
             xt_ir = xt_ir[r_index]
-            xt_orth_ir = []
-            parts = []
-            for ir in set(xt_ir):
-                idx = np.nonzero(xt_ir == ir)[0]
-                parts.append(gram_schmidt_rows(
-                    rows, Vh, Wh, [X[:, idx] for X in X_new],
-                    [Y[:, idx] for Y in Y_new], idx.size, m1, lindep))
-                xt_orth_ir.append([ir] * parts[-1][2])
-            count = sum(part[2] for part in parts)
-            if len(parts) > 0:
-                V = [np.vstack([part[0][i] for part in parts])
-                     for i in range(len(tiles))]
-                W = [np.vstack([part[1][i] for part in parts])
-                     for i in range(len(tiles))]
-                xt_ir = np.hstack(xt_orth_ir)
-                xs_ir = np.hstack([xs_ir, xt_ir])
-        X_new = Y_new = XY_new = dx = None
+        V, W, count, xt_new = _orthonormal_corrections(
+            rows, Vh, Wh, XY_new, n_new, m1, DAVIDSON_LINDEP,
+            None if x0sym is None else xt_ir)
+        # A CYCLE THAT KEEPS NOTHING IS RE-SIZED ONCE before it stops the
+        # solve: a correction from |r| above the sizing threshold keeps its
+        # raw length r / (d - omega), and one too short for DAVIDSON_LINDEP is
+        # dropped however much of it lies outside the space (benzene/cc-pVDZ
+        # BSE on the ISDF level-G1 grid, bare preconditioner: root 3 of 12 at
+        # |r| = 1.5e-5, a correction 6.3e-6 long with 0.1 of it outside). Only
+        # where the pair space has not run out, whose stop the dense
+        # completion owns; a solve that keeps a direction every cycle never
+        # comes here.
+        rescued = (count == 0 and resize is not None and n_new > 0
+                   and n_new <= n - m1)
+        if rescued:
+            V, W, count, xt_new = _orthonormal_corrections(
+                rows, Vh, Wh, resize(dx, w[r_index]), n_new, m1,
+                DAVIDSON_LINDEP,
+                None if x0sym is None else xt_ir)
+        if x0sym is not None and count > 0:
+            xt_ir = xt_new
+            xs_ir = np.hstack([xs_ir, xt_ir])
+        XY_new = dx = None
         step['kept'] = int(count)
+        step['rescued'] = bool(rescued)
 
         if count == 0:
             log.debug('Linear dependency in trial subspace. |r| for each '
                       'state %s', r_norms)
             break
-        log.debug('real_lr_eig %d %d  |r|= %4.3g  e= %s  max|de|= %4.3g',
+        log.debug('casida_rows %d %d  |r|= %4.3g  e= %s  max|de|= %4.3g',
                   icyc, m1, max_r_norm, e, de[np.argmax(abs(de))])
         fresh_start = m1 + count > max_space
 
     if len(e) < min(n, nroots):
         log.warn(f'Not enough eigenvectors (len(x0)={len(e)}, '
                  f'nroots={nroots})')
-    xy = rows.gather([X[:, :nroots].T for X, _, _, _ in ritz],
-                     [Y[:, :nroots].T for _, Y, _, _ in ritz], len(e))
-    return conv[:nroots], e[:nroots], xy
+    lower = np.inf
+    if not settled.all():
+        # stopped with an extra unsettled: its interval, measured here where
+        # the last cycle did not measure it, bounds what may lie below
+        if r_s is None:
+            r_s = np.zeros(len(extra))
+            r_s[~settled] = interval(extra[~settled])
+            if trace is not None:
+                trace[-1]['intervals'] = int(np.count_nonzero(~settled))
+            settled |= w[extra] - r_s > e.max()
+        if not settled.all():
+            lower = float(np.min((w[extra] - r_s)[~settled]))
+    nkeep = min(ntrack, len(w))
+    xy = rows.gather([X[:, :nkeep].T for X, _, _, _ in ritz],
+                     [Y[:, :nkeep].T for _, Y, _, _ in ritz], nkeep)
+    return conv[:nroots], w[:nkeep], xy, lower

@@ -1,3 +1,5 @@
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_qdpt_evaluators.py.
 """QDPT active-space effective Hamiltonian g_eff (sectors 0 to max_vertex), spin-orbital.
 
 Machine-generated from the Wick-contracted MP2/MP3 downfolding diagrams, for

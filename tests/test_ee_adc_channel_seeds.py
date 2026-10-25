@@ -11,7 +11,7 @@ a degenerate pair. The check is that the singlet channel at nroots=3 returns pys
 RADC's three lowest singlets to 1e-3 eV, each with parity +1, and warns of nothing.
 
 Reference: pyscf RADC, nroots=5, same reference and fitting set: 5.4443, 6.8020,
-7.6729, 7.6729, 8.1812 eV (run 2026-09-28_benzene-radc-pyscf-5roots).
+7.6729, 7.6729, 8.1812 eV.
 
 Before it, without an SCF: at max_subspace=0 and one root the seeds number one,
 as solve_symmetric keeps room for, and the solve runs.
@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.ADC.eeADC.ee_driver import _open_seeds, solve_ee_adc
+from src.SingleReference.ADC.eeADC.ee_driver import _open_seeds
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988

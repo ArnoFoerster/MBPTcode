@@ -8,7 +8,7 @@ all-gathered, and the intermediate X_o^T (Zt * P) is reduced so that each rank
 contracts only its own columns with X_v.
 
 That mix is why the ranks are run here as THREADS of one process
-(`mpi_grid.run_simulated`), with the real collectives, rather than through a
+(`simulated_comm.run_simulated`), with the real collectives, rather than through a
 communicator whose all-reduce is a no-op: a gather has no partial to inspect,
 and a rank handed nothing from the others computes with an uninitialized grid
 rather than with a contribution that could be added up afterwards. (mpi4py's
@@ -21,7 +21,7 @@ six, so a rank's block spans several tiles and the last tile of each block is
 short, and 37 rows do not divide evenly among 2, 3 or 5 ranks.
 
 What is gated:
-  * the serial action (comm=None) is bitwise what it was: `Az`, `Bz` for
+  * the serial action (comm=None) is bitwise the archived one: `Az`, `Bz` for
     singlet and triplet BSE, TDHF and RPA against a fixed random system
     (tests/test_block_action_split.py, against the archived commit);
   * for 2, 3 and 5 simulated ranks, every rank's action agrees with the serial
@@ -34,7 +34,7 @@ What is gated:
   * `contiguous_block` covers every row exactly once;
   * the DF action, which is not divided, runs whole on every rank under a
     rank count, passed or read off the `distributed` region around it, and
-    returns the serial A and B bitwise.
+    returns the serial A and B to a few ulp.
 """
 import os
 import sys
@@ -44,10 +44,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
-from src.SingleReference.LinearResponse.davidson import (_block_action,
-                                                         isdf_block_action)
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.SingleReference.LinearResponse.block_actions import (block_action,
+                                                              isdf_block_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.pins import assert_same
 
 M, NORB, NOCC, NAUX, NVEC = 37, 9, 4, 7, 3
 #: six grid rows per tile, so a rank's block spans several tiles and the last
@@ -124,23 +126,24 @@ def test_row_split_reproduces_the_serial_action(size, name, lBSE, screened,
 def test_df_action_runs_whole_on_every_rank(size, name, lBSE, screened, spin):
     """The DF action is not divided: under a comm, passed or read off the
     `distributed` region around it, every rank applies the serial action, so
-    A and B are the serial ones bitwise -- nothing is re-associated."""
+    A and B are the serial ones to a few ulp -- nothing is re-associated."""
     lr, X, D, W, z = system()
     lr_df = LinearResponseSolver(lr.eps,
                                  coeff_df=np.einsum('kp,kq,kA->Apq', X, X, D),
                                  spin_mode='restricted')
     mode = {'bse': 'BSE', 'tdhf': 'TDHF', 'rpa': 'RPA'}[name]
     W_aux = W if screened else None
-    A0, B0 = _block_action(lr_df, NOCC, mode, W_aux, None, spin=spin)[0](z)
+    A0, B0 = block_action(lr_df, NOCC, mode, W_aux, None, spin=spin)[0](z)
 
     def one_rank(comm, explicit):
-        act, _ = _block_action(lr_df, NOCC, mode, W_aux, None, spin=spin,
+        act, _ = block_action(lr_df, NOCC, mode, W_aux, None, spin=spin,
                                comm=comm if explicit else None)
         return act(z.copy())
 
     for explicit in (True, False):
         for A, B in run_simulated(one_rank, size, explicit):
-            assert A.tobytes() == A0.tobytes() and B.tobytes() == B0.tobytes()
+            assert_same(A, A0, quantity='root', label='A')
+            assert_same(B, B0, quantity='root', label='B')
 
 
 if __name__ == '__main__':

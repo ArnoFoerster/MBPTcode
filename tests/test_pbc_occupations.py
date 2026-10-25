@@ -20,10 +20,10 @@ Checks:
      zero ordered pairs with e_n <= e_m across all k-pairs; A - B accordingly
      positive on the retained space and the Casida solve well posed. Plus the
      guard raising on occupations that are not monotone.
-  2. EXACT REDUCTION to the integer-occupation path -- chi0 at several
-     frequencies and transfers, the RPA A/B blocks, and the diagonal
-     self-energy -- to machine precision. This is what makes the new path safe
-     to prefer: it is the same code path for a gapped system.
+  2. THE GAPPED CASE: with integer occupations chi0 at several frequencies
+     and transfers, the RPA A/B blocks and the diagonal self-energy equal the
+     occupied-virtual formulas written out in the test, to machine precision;
+     the QP equation has one root there, near its linearization.
   3. What the integer collapse costs on the metal, and that the new path does
      not consult `dfints.nocc` at all.
   4. Internal consistency on the metal: the spectral W from the
@@ -38,9 +38,9 @@ Checks:
      property every other check here misses. All of the above are pointwise --
      a reduction, a consistency relation, a limit at fixed geometry. The
      integer collapse fails in a way none of them can see: nocc changes in
-     STEPS as the cell is strained, so E_c jumps. That was found by an
-     equation-of-state scan of BCC Li and not by any unit test, so it gets one
-     here.
+     STEPS as the cell is strained, so E_c jumps. An equation-of-state scan of
+     BCC Li shows it where a pointwise unit test does not, so it gets a check
+     of its own.
 """
 import os
 import sys
@@ -59,15 +59,18 @@ from src.SingleReference.Periodic.pbc_damped_integrals import build_dfintegrals_
 from src.SingleReference.Periodic import pbc_casida as pc
 from src.SingleReference.Periodic import pbc_self_energy as pse
 from src.SingleReference.Periodic.pbc_rpa import ri_rpa_ecorr_from_dfints
-from src.SingleReference.Periodic.pbc_isdf_rpa import chemical_potential_occ
+from src.SingleReference.Periodic.pbc_amplitudes import get_chi_a, project_XpY
+from src.SingleReference.Periodic.pbc_isdf_rpa import chemical_potential
+from src.Base.numerics.constants import PBC_OCCUPATION_THRESHOLD
 from src.SingleReference.Periodic.pbc_occupations import (
-    DEFAULT_OCCUPATION_THRESHOLD, fermi_level, fermi_level_from_mf,
+    fermi_level, fermi_level_from_mf,
     is_integer_occupation,
-    check_occupation_monotonic, transition_pairs, transition_layout,
-    build_chi0_aux_occ, build_rpa_matrices_occ, solve_rpa_spectral_occ,
-    build_W_aux_spectral_occ, solve_rpa_all_q_occ, sigma_c_diag_occ,
-    qp_energy_g0w0_occ, qp_energy_root_occ)
-from src.Base.utils.matsubara import beta_from_mf
+    check_occupation_monotonic, transition_pairs, transition_layout)
+from src.SingleReference.Periodic.pbc_casida import (
+    build_chi0_aux, build_rpa_matrices, solve_rpa_spectral, build_W_aux_spectral)
+from src.SingleReference.Periodic.pbc_self_energy import (
+    solve_rpa_all_q, sigma_c_diag, qp_energy_g0w0)
+from src.Base.utils.grids.matsubara import beta_from_mf
 from pyscf.pbc import scf as pbcscf
 
 
@@ -180,7 +183,7 @@ def test_get_fermi_is_not_the_smearing_chemical_potential(mf):
 
 
 def test_the_heuristic_degrades_where_it_matters():
-    """chemical_potential_occ is good with NO partial occupations and bad with
+    """chemical_potential is good with NO partial occupations and bad with
     them -- i.e. worst in the regime it exists for.
 
     Synthetic so the two regimes can be exhibited side by side without two
@@ -199,7 +202,7 @@ def test_the_heuristic_degrades_where_it_matters():
     assert not ((f_gap > 0.5) & (f_gap < 1.5)).any()
     mu_root = fermi_level(e_gap, sigma, nelec, nkpts=1)
     assert abs(mu_root - mu_true) < 1e-6
-    assert abs(chemical_potential_occ(e_gap, f_gap) - mu_true) < 0.05
+    assert abs(chemical_potential(e_gap, f_gap) - mu_true) < 0.05
 
     # (b) bands straddling mu: partial occupations, and the heuristic drifts
     e_met = mu_true + np.sort(rng.normal(scale=0.05, size=(4, 6)), axis=1)
@@ -207,7 +210,7 @@ def test_the_heuristic_degrades_where_it_matters():
     mu_root = fermi_level(e_met, sigma, f_met.sum() / 4, nkpts=4)
     assert abs(mu_root - mu_true) < 1e-6, mu_root
     assert ((f_met > 0.5) & (f_met < 1.5)).any()
-    heur_err = abs(chemical_potential_occ(e_met, f_met) - mu_true)
+    heur_err = abs(chemical_potential(e_met, f_met) - mu_true)
     assert heur_err > 10 * abs(mu_root - mu_true), heur_err
 
 
@@ -268,10 +271,11 @@ def test_casida_is_well_posed(dfints_metal):
     """A - B positive and the solve returning real positive frequencies."""
     ok = True
     for q in (0, 1):
-        A, B = build_rpa_matrices_occ(dfints_metal, dfints_metal.kconserv_pair[q])
+        A, B = build_rpa_matrices(dfints_metal, dfints_metal.kconserv_pair[q])
         AmB = A - B
-        offdiag = np.sqrt(max(np.linalg.norm(AmB) ** 2
-                              - np.linalg.norm(np.diag(AmB)) ** 2, 0.0))
+        # measured on the off-diagonal itself: |A - B|^2 - |diag|^2 cancels to
+        # sqrt(eps) |A - B|, 3e-7 here, whatever the off-diagonal holds
+        offdiag = np.linalg.norm(AmB - np.diag(np.diag(AmB)))
         d = np.diag(AmB).real
         ok &= check(offdiag < 1e-12 * max(np.linalg.norm(AmB), 1.0),
                     f'q={q}: A - B is diagonal', f'offdiag {offdiag:.1e}')
@@ -283,82 +287,110 @@ def test_casida_is_well_posed(dfints_metal):
     assert ok
 
 
-# ------------------------------------------------------- 2. exact reduction
+# ------------------------------------------------------- 2. the gapped case
 
-def test_reduction_to_integer_path(dfints_gapped):
+def _chi0_ov(dfints, kc, omega):
+    """(4/nk) sum_{ki, i occ, a virt} L_ia f(omega, e_i - e_a) L_ia^*, the
+    occupied-virtual polarizability of a gap (pyscf's get_rho_response)."""
+    e = np.asarray(dfints.mo_energy)
+    nocc = dfints.nocc
+    naux = dfints.Lblock(0, kc[0]).shape[0]
+    Pi = np.zeros((naux, naux), dtype=np.complex128)
+    for ki in range(dfints.nkpts):
+        ka = kc[ki]
+        Lov = dfints.Lblock(ki, ka)[:, :nocc[ki], nocc[ka]:]
+        d = e[ki, :nocc[ki]][:, None] - e[ka, nocc[ka]:][None, :]
+        Pi += 4.0 / dfints.nkpts * np.einsum(
+            'Pia,Qia->PQ', Lov * (d / (omega ** 2 + d * d))[None], Lov.conj())
+    return Pi
+
+
+def test_the_gapped_case(dfints_gapped):
     ok = check(is_integer_occupation(dfints_gapped.mo_occ),
                'the gapped slab has integer occupations')
+    nk = dfints_gapped.nkpts
+    e = np.asarray(dfints_gapped.mo_energy)
     worst_chi = worst_A = worst_B = 0.0
-    for q in range(dfints_gapped.nkpts):
+    for q in range(nk):
         kc = dfints_gapped.kconserv_pair[q]
         for omega in (0.0, 0.3, 1.7):
-            a = pc.build_chi0_aux(dfints_gapped, kc, omega)
-            b = build_chi0_aux_occ(dfints_gapped, kc, omega)
+            a = _chi0_ov(dfints_gapped, kc, omega)
+            b = build_chi0_aux(dfints_gapped, kc, omega)
             worst_chi = max(worst_chi,
                             np.abs(a - b).max() / max(np.abs(a).max(), 1e-30))
-        A0, B0 = pc.build_rpa_matrices(dfints_gapped, kc)
-        A1, B1 = build_rpa_matrices_occ(dfints_gapped, kc)
+        # the occupied-virtual Casida blocks: D + (2/nk) M^H M and (2/nk) M^H M
+        M, offsets, N, nocc, nvirt = pc.stacked_Lov(dfints_gapped, kc)
+        D = np.concatenate([(e[kc[k], nocc[kc[k]]:][None, :]
+                             - e[k, :nocc[k]][:, None]).ravel() for k in range(nk)])
+        B0 = (2.0 / nk) * M.conj().T @ M
+        A0 = np.diag(D) + B0
+        A1, B1 = build_rpa_matrices(dfints_gapped, kc)
         ok &= check(A0.shape == A1.shape,
-                    f'q={q}: the transition spaces have the same size',
+                    f'q={q}: the transition space is the occupied-virtual one',
                     f'{A0.shape[0]}')
         worst_A = max(worst_A, np.abs(A0 - A1).max())
         worst_B = max(worst_B, np.abs(B0 - B1).max())
     ok &= check(worst_chi < 1e-13,
-                'chi0 reduces to build_chi0_aux at every q and frequency',
+                'chi0 is the occupied-virtual polarizability at every q and frequency',
                 f'{worst_chi:.1e}')
     ok &= check(worst_A < 1e-13 and worst_B < 1e-13,
-                'and the Casida blocks reduce to build_rpa_matrices',
+                'and the Casida blocks are the occupied-virtual ones',
                 f'A {worst_A:.1e}, B {worst_B:.1e}')
 
+    # Sigma_c with the binary occupied/virtual label and the occupied-virtual
+    # amplitudes: the pairs come in the same (k, i, a) order, so the
+    # eigenvectors serve both
     nocc = dfints_gapped.nocc[0]
-    eps = np.asarray(dfints_gapped.mo_energy)[0][nocc - 1].real
+    eig = solve_rpa_all_q(dfints_gapped)
+    eps = e[0][nocc - 1].real
     freqs = [eps, eps + 0.2]
-    old = pse.sigma_c_diag(dfints_gapped, pse.solve_rpa_all_q(dfints_gapped), 0, nocc - 1, freqs)
-    new = sigma_c_diag_occ(dfints_gapped, solve_rpa_all_q_occ(dfints_gapped), 0, nocc - 1, freqs)
+
+    def amp2(q, X, Y):
+        rho = project_XpY(dfints_gapped, dfints_gapped.kconserv_pair[q], X, Y)
+        return np.abs(get_chi_a(dfints_gapped, q, rho, 0)[:, nocc - 1, :]) ** 2
+
+    old = pse.spectral_sigma(dfints_gapped, eig, 0, freqs, amp2,
+                             pse.integer_hole_weight(dfints_gapped))
+    new = sigma_c_diag(dfints_gapped, eig, 0, nocc - 1, freqs)
     ok &= check(np.abs(old - new).max() < 1e-13,
-                'and the diagonal self-energy reduces to sigma_c_diag',
+                'and the diagonal self-energy is the occupied-virtual sum',
                 f'{np.abs(old - new).max():.1e}, Sigma_c = {old[0]:.8f}')
 
-    # The QP energy on top of it. This is the reduction that matters for the
-    # wrapper's existence: pointing a metal at the integer entry point returns
-    # a NUMBER, because sigma_c_diag labels the internal orbital by a binary
-    # occupied/virtual flag rather than failing on fractional occupations.
-    qp_old = pse.qp_energy_g0w0(dfints_gapped, pse.solve_rpa_all_q(dfints_gapped), 0, nocc - 1)
-    qp_new, Z = qp_energy_g0w0_occ(dfints_gapped, solve_rpa_all_q_occ(dfints_gapped),
-                                   0, nocc - 1)
-    ok &= check(abs(qp_old - qp_new) < 1e-12,
-                'and the linearized QP energy reduces to qp_energy_g0w0',
-                f'{qp_old:.8f} vs {qp_new:.8f} Ha, Z = {Z:.4f}')
-
     # The root solve, checked HERE because this is where it can be checked:
-    # Z = 0.99 on this gapped slab, so the linearization is trustworthy and the
-    # two must agree. That agreement is what licenses the root solve on a metal,
-    # where Z goes negative and there is nothing to compare against.
-    root = qp_energy_root_occ(dfints_gapped, solve_rpa_all_q_occ(dfints_gapped), 0, nocc - 1)
+    # Z = 0.99 on this gapped slab, so the linearization about eps is
+    # trustworthy and the two must agree. That agreement is what licenses the
+    # root solve on a metal, where Z goes negative and there is nothing to
+    # compare against.
+    s0, s1 = sigma_c_diag(dfints_gapped, eig, 0, nocc - 1, [eps, eps + 1e-3])
+    Z_lin = 1.0 / (1.0 - (s1 - s0) / 1e-3)
+    qp_lin = eps + Z_lin * s0
+    root = qp_energy_g0w0(dfints_gapped, eig, 0, nocc - 1)
     ok &= check(root['bracketed'] and root['nroots'] == 1,
                 'the QP equation has exactly ONE root near eps when gapped',
                 f"nroots={root['nroots']}, roots={[f'{r:.6f}' for r in root['roots']]}")
-    ok &= check(abs(root['qp'] - qp_new) < 5e-3,
+    ok &= check(abs(root['qp'] - qp_lin) < 5e-3,
                 'and the root solve agrees with the linearization where Z ~ 1',
-                f"root {root['qp']:.8f} vs linearized {qp_new:.8f} Ha, "
+                f"root {root['qp']:.8f} vs linearized {qp_lin:.8f} Ha, "
                 f"Z_root = {root['Z']:.4f}")
 
     # The pole-strength floor. A root ON a pole of Sigma_c solves the equation
     # with Z -> 0 and carries no spectral weight -- it is not a quasiparticle.
     # Bulk Al at 6x6x6 returned exactly that: a single bracketed root with
-    # z_min = -3.2e-06, clean in every other column. Driving z_min above this
-    # system's honest Z proves the filter FIRES without needing a pathological
-    # system to hand.
-    strict = qp_energy_root_occ(dfints_gapped,
-                                solve_rpa_all_q_occ(dfints_gapped), 0,
-                                nocc - 1, z_min=0.999)
-    ok &= check(not strict['bracketed'] and strict['n_rejected'] >= 1,
-                'a root below the pole-strength floor is REJECTED, not '
-                'returned as the least-bad option',
-                f"n_rejected={strict['n_rejected']}, "
-                f"reason={strict.get('reject_reason', '')[:44]}")
-    ok &= check(np.isnan(strict['qp']),
-                'and the caller gets NaN rather than a plausible number')
+    # Z = -3.2e-06, clean in every other column. Driving z_min above this
+    # system's honest Z proves the flag FIRES without needing a pathological
+    # system to hand; the root itself is kept (warn and flag, no refusal), so
+    # it is the same root as above.
+    with pytest.warns(RuntimeWarning, match='no quasiparticle'):
+        strict = qp_energy_g0w0(dfints_gapped, eig, 0, nocc - 1, z_min=0.999)
+    ok &= check(not strict['quasiparticle'] and strict['n_small_z'] >= 1,
+                'a root below the pole-strength floor is FLAGGED and warned',
+                f"n_small_z={strict['n_small_z']}, Z={strict['Z']:.4f}")
+    ok &= check(strict['bracketed'] and abs(strict['qp'] - root['qp']) < 1e-12
+                and set(strict) == set(root),
+                'and the caller still gets the root, with the same keys',
+                f"{strict['qp']:.8f} vs {root['qp']:.8f} Ha")
+    ok &= check(root['quasiparticle'] and root['n_small_z'] == 0,
+                'while the default floor passes it as a quasiparticle')
     assert ok
 
 
@@ -368,7 +400,7 @@ def test_integer_collapse_costs(dfints_metal):
     f = np.asarray(dfints_metal.mo_occ, dtype=float)
     nocc = (f > 1e-8).sum(axis=1)
     kc = dfints_metal.kconserv_pair[0]
-    n_int = pc._transition_layout(dfints_metal, kc)[1]
+    n_int = pc.ov_layout(dfints_metal, kc)[1]
     _, _, n_occ = transition_layout(dfints_metal, kc)
 
     dead = int((nocc >= dfints_metal.nmo).sum())
@@ -381,11 +413,11 @@ def test_integer_collapse_costs(dfints_metal):
                 f'{n_int} integer vs {n_occ} occupation-weighted at q=0')
 
     # The new path does not consult dfints.nocc at all.
-    A1, _ = build_rpa_matrices_occ(dfints_metal, kc)
+    A1, _ = build_rpa_matrices(dfints_metal, kc)
     saved = np.array(dfints_metal.nocc, copy=True)
     try:
         dfints_metal.nocc = np.maximum(saved - 1, 0)
-        A2, _ = build_rpa_matrices_occ(dfints_metal, kc)
+        A2, _ = build_rpa_matrices(dfints_metal, kc)
     finally:
         dfints_metal.nocc = saved
     ok &= check(np.abs(A1 - A2).max() == 0.0,
@@ -398,11 +430,11 @@ def test_integer_collapse_costs(dfints_metal):
 
 def test_spectral_w_matches_inversion(dfints_metal):
     kc = dfints_metal.kconserv_pair[0]
-    Omega, rho = solve_rpa_spectral_occ(dfints_metal, kc)
+    Omega, rho = solve_rpa_spectral(dfints_metal, kc)
     ok = True
     for omega in (0.0, 0.5, 2.0):
-        Wsp = build_W_aux_spectral_occ(dfints_metal, Omega, rho, omega=omega)
-        Pi = build_chi0_aux_occ(dfints_metal, kc, omega)
+        Wsp = build_W_aux_spectral(dfints_metal, Omega, rho, omega=omega)
+        Pi = build_chi0_aux(dfints_metal, kc, omega)
         Wdir = np.linalg.inv(np.eye(Pi.shape[0]) - Pi)
         rel = np.abs(Wsp - Wdir).max() / np.abs(Wdir).max()
         ok &= check(rel < 1e-12,
@@ -415,17 +447,17 @@ def test_spectral_w_matches_inversion(dfints_metal):
 
 def test_threshold(dfints_metal):
     kc = dfints_metal.kconserv_pair[0]
-    base = build_chi0_aux_occ(dfints_metal, kc, 0.0, threshold=1e-12)
+    base = build_chi0_aux(dfints_metal, kc, 0.0, threshold=1e-12)
     scale = np.abs(base).max()
     ok = True
     counts = {}
     print(f"       {'threshold':>10} {'pairs':>7} {'chi0 change':>13}")
     for th in (1e-2, 1e-4, 1e-6, 1e-8):
-        x = build_chi0_aux_occ(dfints_metal, kc, 0.0, threshold=th)
+        x = build_chi0_aux(dfints_metal, kc, 0.0, threshold=th)
         counts[th] = transition_layout(dfints_metal, kc, threshold=th)[2]
         rel = np.abs(x - base).max() / scale
         print(f"       {th:10.0e} {counts[th]:7d} {rel:13.2e}")
-        if th <= DEFAULT_OCCUPATION_THRESHOLD:
+        if th <= PBC_OCCUPATION_THRESHOLD:
             ok &= check(rel < 1e-12,
                         f'threshold {th:.0e} leaves chi0 unchanged')
     ok &= check(counts[1e-2] < counts[1e-8],
@@ -454,7 +486,7 @@ def test_smearing_limit():
     for sigma in (0.05, 0.02, 0.005):
         mu = 0.5 * (e[:, nocc:].min() + e[:, :nocc - 1 + 1].max())
         occ = 2.0 / (1.0 + np.exp((e - mu) / sigma))
-        chi = build_chi0_aux_occ(dfints, kc, 0.0, mo_occ=occ, threshold=1e-12)
+        chi = build_chi0_aux(dfints, kc, 0.0, mo_occ=occ, threshold=1e-12)
         rel = np.abs(chi - ref).max() / np.abs(ref).max()
         dev = np.abs(occ - np.round(occ / 2.0) * 2.0).max()
         print(f"       {sigma:11.4f} {dev:14.2e} {rel:10.2e}")

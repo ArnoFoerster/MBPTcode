@@ -4,8 +4,8 @@ of the excitation, as expectation values over the exciton wavefunction."""
 import numpy as np
 from pyscf import scf
 
-from src.Base.pyscf_interface import get_orbital_energies
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.pyscf.pyscf_interface import get_orbital_energies
+from src.Base.orbital_spaces import get_occ_virt_indices
 
 
 def exciton_descriptors(mf, mol, nocc, X, Y):

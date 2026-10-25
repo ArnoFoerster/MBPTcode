@@ -38,11 +38,15 @@ from pyscf import dft, gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import distributed_df
-from src.Base.distributed_df import distributed_mean_field, release_distributed
-from src.Base.distributed_isdf_jk import distributed_isdf_jk
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import distributed, run_simulated
+from src.Base.factorization import distributed_df
+from src.Base.factorization.distributed_df import distributed_mean_field, release_distributed
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from tests.blas_bar import PIN_FILE, assert_same
+from tests.pins import RECORDING_BLAS, blas_identity, matches, recorded_blas
+from tests.isdf_test_grid import g1
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -62,7 +66,7 @@ def fresh(route, xc):
     warnings.simplefilter('ignore')
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
     mf = dft.RKS(mol, xc=xc)
-    mf = (isdf_jk(mf, auxbasis=AUX) if route == 'isdf'
+    mf = (isdf_jk_with_force(mf, auxbasis=AUX, counts=g1(mf)) if route == 'isdf'
           else mf.density_fit(auxbasis=AUX))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
@@ -106,6 +110,15 @@ def bitwise(a, b):
             and a.tobytes() == b.tobytes())
 
 
+def same_grid_entry(a, b):
+    """A grid entry of two builds: float arrays to a few ulp (`matches`),
+    everything else as `bitwise` reads it."""
+    if (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)
+            and a.dtype.kind == 'f' and b.dtype.kind == 'f'):
+        return matches(a, b, RECORDING_BLAS, unit='1', quantity='root')
+    return bitwise(a, b)
+
+
 def run(route, xc, size):
     """Per rank: grid builds in the SCF and in the next get_fock, the grid
     after each, energy and orbitals."""
@@ -144,9 +157,16 @@ def assert_rank_zeros_grid(out):
     built = {name for name in ('grids', 'nlcgrids')
              if out[0]['held'][name, 'coords'] is not None}
     assert 'grids' in built
-    want = {(name, m): 1 for name in built
-            for m in ('build', 'prune_by_density_')}
-    assert out[0]['scf'] == want, out[0]['scf']
+    # Rank 0 builds each grid exactly once. Whether it then prunes it through
+    # `prune_by_density_` once depends on the pyscf version (observed: pyscf
+    # 2.12.1 calls the method once, 2.13.1 not at all in these SCFs), so the
+    # count is at most one; no grid is built or pruned twice.
+    scf = out[0]['scf']
+    assert set(scf) <= {(name, m) for name in built
+                        for m in ('build', 'prune_by_density_')}, scf
+    for name in built:
+        assert scf.get((name, 'build')) == 1, scf
+        assert scf.get((name, 'prune_by_density_'), 0) <= 1, scf
     for r in range(1, size):
         assert out[r]['scf'] == {}, (r, out[r]['scf'])
         for key, value in out[0]['held'].items():
@@ -176,14 +196,21 @@ def serial():
 @pytest.mark.parametrize('xc,size', ISDF_CASES)
 def test_isdf_scf_leaves_rank_zeros_grid(serial, xc, size):
     """The ISDF-K SCF: rank 0's grid on every rank, rank 0 its one builder,
-    and one rank the serial SCF bit for bit."""
+    and one rank the serial SCF to a few ulp (two SCF runs)."""
     out = run('isdf', xc, size)
     assert_rank_zeros_grid(out)
     if size == 1:
         grid, e, mo = serial[xc]
-        assert out[0]['e'] == e and out[0]['mo'] == mo
+        # one rank is the serial SCF to a few ulp on the recording BLAS; on
+        # another the two SCF solves agree in the energy class bar (orbital
+        # bytes are not comparable there)
+        assert_same(out[0]['e'], e, label='energy')
+        if blas_identity() == recorded_blas(PIN_FILE):
+            assert_same(np.frombuffer(out[0]['mo']), np.frombuffer(mo),
+                        unit='1', quantity='vector', label='orbitals')
+        # two grid builds: to a few ulp
         for key, value in grid.items():
-            assert bitwise(out[0]['held'][key], value), key
+            assert same_grid_entry(out[0]['held'][key], value), key
     else:
         n = out[0]['held']['grids', 'weights'].size
         print(f'\n{xc} at {size} ranks: {n} points on every rank')
@@ -206,6 +233,12 @@ def test_without_the_lockstep_a_rank_prunes_its_own(monkeypatch):
     out = run('isdf', 'pbe0', 2)
     assert out[1]['scf'] == {}
     assert out[1]['held']['grids', 'coords'] is None
+    if ('grids', 'prune_by_density_') not in out[0]['scf']:
+        # pyscf 2.13.1 (cluster) does not call `prune_by_density_` in these SCFs
+        # (2.12.1 calls it once): no rank prunes, the two grids have the same
+        # point count, and the defect cannot show as a differing count.
+        assert out[1]['fock'] == {('grids', 'build'): 1}, out[1]['fock']
+        pytest.skip('this pyscf does not prune the SCF grid by density')
     assert out[1]['fock'] == {('grids', 'build'): 1,
                               ('grids', 'prune_by_density_'): 1}
     n0 = out[0]['after']['grids', 'weights'].size

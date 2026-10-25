@@ -81,17 +81,20 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base import constants
-from src.Base.environment import PointCharges
-from src.Base.fragment_localization import FragmentOrbitals
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.fragment_diabatic import (DiabaticGradient, DiabaticSurface,
-                                             linear_vibronic_coupling)
-from src.properties import fragment_bse
-from src.properties.diabatic import displaced_along, diabatic_derivative, step_ladder
-from src.gradients.bse_isdf import bse_solve
-from src.properties.fragment_bse import (BSEOperator, FeshbachOracle,
+from src.Base.numerics import constants
+from src.environments.environment import PointCharges
+from src.fragments.localization import FragmentOrbitals
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.fragment_diabatic import DiabaticGradient, DiabaticSurface
+from src.gradients.gwbse import fragment_bse
+from src.Base.geometry.geometry import displaced
+from tests.fragment_diabatic_fd import (derivative_ladder, diabatic_derivative,
+                                     linear_vibronic_coupling)
+from tests.isdf_test_grid import g1
+from src.gradients.gwbse.bse_isdf import bse_solve
+from src.gradients.gwbse.fragment_bse import (BSEOperator, FeshbachOracle,
                                          FragmentPartition, to_local)
+from src.Base.numerics.numerics import numerics_of
 
 ETHYLENE = [('C', (0, 0, 0.667)), ('C', (0, 0, -0.667)),
             ('H', (0, 0.923, 1.238)), ('H', (0, -0.923, 1.238)),
@@ -104,6 +107,17 @@ BOTH_CT = {(0, 1): 1, (1, 0): 1}
 #: below every diabat, because in this field a site moves up past the mean.
 CHARGES = ([[-5.0, 0, 0], [9.0, 0, 0], [2.0, 6.0, 0]], [0.3, -0.3, 0.2])
 OMEGA0_CHARGED = 0.31
+#: Omega_0 for the neutral dimer. The pole guard asks it below the lowest
+#: eigenvalue on Q by FRAGMENT_POLE_MARGIN (0.01 Ha). With one state per site
+#: that eigenvalue is 0.3161 Ha (Tamm-Dancoff) and 0.3133 Ha (full BSE), so
+#: Omega_0 must stay under 0.3061 and 0.3033 Ha; the default, the mean of the
+#: two site states (0.3207 Ha), is refused. The lowest site state is 0.3189 Ha.
+OMEGA0 = 0.30
+#: The pole guard's test (full BSE, iterative): far enough below Q's lowest
+#: eigenvalue (0.3133 Ha) that five Davidson cycles decide it with a warning,
+#: while one cycle cannot (Ritz value 0.029 Ha, |r| 0.16 at 0.28 Ha; at 0.30 Ha
+#: five cycles stopped 0.003 Ha short of the pole and could not decide).
+OMEGA0_GUARD = 0.28
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 
 
@@ -117,32 +131,30 @@ def factory(mol):
 @pytest.fixture(scope='module')
 def chain():
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-    return ExcitedStateChain(mol, factory, bse_tda=True, auxbasis=AUX)
+    return ExcitedStateChain(mol, factory, bse_tda=True, numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol)}))
 
 
 @pytest.fixture(scope='module')
 def charged_chain():
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-    return ExcitedStateChain(mol, factory, bse_tda=True, auxbasis=AUX,
-                             environment=PointCharges(*CHARGES))
+    return ExcitedStateChain(mol, factory, bse_tda=True, environment=PointCharges(*CHARGES), numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol)}))
 
 
 @pytest.fixture(scope='module')
 def full_chain():
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-    return ExcitedStateChain(mol, factory, bse_tda=False, auxbasis=AUX)
+    return ExcitedStateChain(mol, factory, bse_tda=False, numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol)}))
 
 
 @pytest.fixture(scope='module')
 def charged_full_chain():
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-    return ExcitedStateChain(mol, factory, bse_tda=False, auxbasis=AUX,
-                             environment=PointCharges(*CHARGES))
+    return ExcitedStateChain(mol, factory, bse_tda=False, environment=PointCharges(*CHARGES), numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol)}))
 
 
 @pytest.fixture(scope='module')
 def gradient(chain):
-    return DiabaticGradient(chain, FRAGMENTS, SITES)
+    return DiabaticGradient(chain, FRAGMENTS, SITES, omega0=OMEGA0)
 
 
 def force_iterative(monkeypatch):
@@ -169,7 +181,7 @@ def orbitals(chain):
 
 @pytest.fixture(scope='module')
 def partition(operator, orbitals):
-    return FragmentPartition.build(operator, orbitals, SITES)
+    return FragmentPartition.build(operator, orbitals, SITES, omega0=OMEGA0)
 
 
 def test_localization_is_orthonormal_stationary_and_assigned(chain, orbitals):
@@ -252,7 +264,10 @@ def test_root_gradient_is_the_supermolecular_root_gradient(chain, operator):
     ref, info = chain.excitation_gradient()
     omega = np.linalg.eigvalsh(operator.dense)[0]
     assert abs(info['omega'] - omega) < 1e-10
-    grad = DiabaticGradient(chain, FRAGMENTS, SITES, omega0=omega)
+    # two states per site: the lowest root (0.3136 Ha) lies within the pole
+    # margin of Q's lowest eigenvalue with one (0.3161 Ha), and Omega_0 must
+    # equal the root here; with two Q starts at 0.3369 Ha
+    grad = DiabaticGradient(chain, FRAGMENTS, TWO_PER_SITE, omega0=omega)
     g, d = grad.root_gradient(omega)
     assert np.abs(g - ref).max() < 1e-8 * max(1.0, np.abs(ref).max())
     assert np.abs(d['canonical']).max() < 1e-10
@@ -261,9 +276,9 @@ def test_root_gradient_is_the_supermolecular_root_gradient(chain, operator):
 
 def test_element_gradients_match_finite_differences(chain, gradient):
     direction = random_direction(chain.mol0.natm, 7)
-    ladder = step_ladder(chain, FRAGMENTS, SITES, direction,
-                         omega0=gradient.partition.omega0,
-                         steps=(1e-3, 5e-4))
+    ladder = derivative_ladder(chain, FRAGMENTS, SITES, direction,
+                               omega0=gradient.partition.omega0,
+                               steps=(1e-3, 5e-4))
     fd = ladder['richardson'][-1]
     scale = np.abs(fd).max()
     for a, b in ((0, 0), (1, 1), (0, 1)):
@@ -300,8 +315,8 @@ def test_charge_transfer_diabat_surface_gradient(charged_chain):
     mol0 = charged_chain.mol0
 
     def central(h):
-        return (surf.total_energy(displaced_along(mol0, direction, h))
-                - surf.total_energy(displaced_along(mol0, direction, -h))) / (2 * h)
+        return (surf.total_energy(displaced(mol0, h * direction))
+                - surf.total_energy(displaced(mol0, -h * direction))) / (2 * h)
     # Richardson over (1e-3, 5e-4): a single central difference leaves an h^2
     # error of a few 1e-5 relative on a direction where the slope is small
     fd = (4.0 * central(5e-4) - central(1e-3)) / 3.0
@@ -333,8 +348,9 @@ def test_iterative_gradient_matches_dense(chain, gradient, monkeypatch):
             < 1e-7 * np.abs(ref).max()
 
 
-#: Two states in each site block; Omega_0 near the lowest site states, since
-#: the default (their mean) comes within the margin of Q's lowest state.
+#: Two states in each site block; Omega_0 near the lowest site states. Q's
+#: lowest eigenvalue is 0.3369 Ha (both kernels), so Omega_0 may go up to
+#: 0.3269 Ha; the two site states of a block lie at 0.3189 and 0.3346 Ha.
 TWO_PER_SITE = {0: 2, 1: 2}
 OMEGA0_TWO = 0.30
 
@@ -368,7 +384,8 @@ def full_operator(full_chain):
 
 @pytest.fixture(scope='module')
 def full_partition(full_operator, orbitals):
-    return FragmentPartition.build(full_operator, orbitals, SITES)
+    return FragmentPartition.build(full_operator, orbitals, SITES,
+                                   omega0=OMEGA0)
 
 
 def test_full_bse_partition_is_the_exact_feshbach_elimination(
@@ -412,7 +429,9 @@ def test_full_bse_root_gradient_is_the_supermolecular_root_gradient(
     omega = bse_solve(full_operator.dense[:n, :n],
                       full_operator.dense[:n, n:])[0][0]
     assert abs(info['omega'] - omega) < 1e-10
-    grad = DiabaticGradient(full_chain, FRAGMENTS, SITES, omega0=omega)
+    # two states per site, as in the Tamm-Dancoff gate: the lowest root lies
+    # within the pole margin of Q's lowest eigenvalue with one (0.3133 Ha)
+    grad = DiabaticGradient(full_chain, FRAGMENTS, TWO_PER_SITE, omega0=omega)
     g, d = grad.root_gradient(omega)
     assert np.abs(g - ref).max() < 1e-8 * max(1.0, np.abs(ref).max())
     assert np.abs(d['canonical']).max() < 1e-10
@@ -426,7 +445,7 @@ def test_full_bse_elements_in_point_charges_match_finite_differences(
 
 
 def test_full_bse_iterative_gradient_matches_dense(full_chain, monkeypatch):
-    dense = DiabaticGradient(full_chain, FRAGMENTS, SITES)
+    dense = DiabaticGradient(full_chain, FRAGMENTS, SITES, omega0=OMEGA0)
     ref = {ab: dense.element(*ab)[0] for ab in ((0, 0), (0, 1))}
     force_iterative(monkeypatch)
     iterative = DiabaticGradient(full_chain, FRAGMENTS, SITES, route='isdf',
@@ -441,13 +460,13 @@ def test_an_unconverged_pole_guard_decides_or_says_it_cannot(
         full_chain, orbitals, full_partition, monkeypatch):
     isdf = BSEOperator.from_chain(full_chain, route='isdf')[0]
     force_iterative(monkeypatch)
-    converged = FragmentPartition.build(isdf, orbitals, SITES)
+    converged = FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
     monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 1)
     with pytest.raises(RuntimeError, match='cannot decide'):
-        FragmentPartition.build(isdf, orbitals, SITES)
+        FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
     monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 5)
     with pytest.warns(RuntimeWarning, match='pole guard'):
-        short = FragmentPartition.build(isdf, orbitals, SITES)
+        short = FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
     # the guard decides; Sigma never depended on it
     assert np.abs(short.a_eff - converged.a_eff).max() < 1e-12
     assert abs(short.q_lowest - full_partition.q_lowest) < 1e-4

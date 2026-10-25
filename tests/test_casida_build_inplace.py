@@ -7,7 +7,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.pyscf_interface import (
+from tests.pins import RECORDING_BLAS, matches
+
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_density_fitting_coefficients)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, gram_product)
@@ -126,11 +128,14 @@ if __name__ == '__main__':
             nocc, lBSE=True, W_aux=w_full_copy_s)
         A_t_ref, B_t_ref = lr_full.build_casida_matrices(
             nocc, lBSE=True, W_aux=w_full_copy_t, triplet=True)
+        # two builds each: to a few ulp
         all_ok &= check(
-            np.array_equal(A_s, A_s_ref) and np.array_equal(B_s, B_s_ref),
+            matches(A_s, A_s_ref, RECORDING_BLAS, quantity='root')
+            and matches(B_s, B_s_ref, RECORDING_BLAS, quantity='root'),
             f'{label} full BSE singlet: reused vs fresh-copy W_aux')
         all_ok &= check(
-            np.array_equal(A_t, A_t_ref) and np.array_equal(B_t, B_t_ref),
+            matches(A_t, A_t_ref, RECORDING_BLAS, quantity='root')
+            and matches(B_t, B_t_ref, RECORDING_BLAS, quantity='root'),
             f'{label} full BSE triplet: reused vs fresh-copy W_aux')
         all_ok &= check(np.array_equal(w_full, w_full_before),
                         f'{label} full: W_aux untouched by the builds')
@@ -139,10 +144,11 @@ if __name__ == '__main__':
         # C_ovᵀ (1 - C_ov χ₀ C_ovᵀ)⁻¹ C_ov = V (1 - χ₀ V)⁻¹ makes the full-ERI
         # kernel equal to the DF one, so the DF einsum reference applies.
         # B takes W_aux from the caller (imaginary axis, η = 0). A screens its
-        # direct term inside the builder at ω = 0 on the real axis, which
-        # carries the solver's η, at the eps_screen gaps when those are given.
+        # direct term inside the builder with the static pair resolvent
+        # (A + B)^-1, which carries no η either, at the eps_screen gaps when
+        # those are given.
         w_swap_df = df_static_screening(eps, coeff, nocc, 0.0)
-        w_dir_df = df_static_screening(eps, coeff, nocc, lr_full.eta)
+        w_dir_df = df_static_screening(eps, coeff, nocc, 0.0)
         norb = len(eps)
         eps_qp = (eps + np.where(np.arange(norb) < nocc, -0.03, 0.05)
                   + 1e-3 * np.arange(norb))

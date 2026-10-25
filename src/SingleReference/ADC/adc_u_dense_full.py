@@ -3,14 +3,13 @@ first-order C-block batch builders (g-free capable via GProxy)."""
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-from src.SingleReference.ADC.adc_u_utils import u2_denominators
 
 
 def build_supermatrix(s, nocc, static_correction=None, g=None):
     """(nH, nH) spin-orbital ADC(3) supermatrix. g overrides s.g (the
     DF route passes a B-reconstructed tensor)."""
     if g is None:
-        s._require_dense_g('build_supermatrix (dense ADC(3) supermatrix)')
+        s.require_dense_g('build_supermatrix (dense ADC(3) supermatrix)')
         g = s.g
     eps = s.eps
     norb = s.norb
@@ -18,7 +17,6 @@ def build_supermatrix(s, nocc, static_correction=None, g=None):
     virt = np.arange(nocc, norb)
     nvirt = len(virt)
     p_ = np.arange(norb)
-    eps_o, eps_v = eps[occ], eps[virt]
 
     d = s.dimensions(nocc)
     nH = d['nH']
@@ -59,8 +57,8 @@ def build_supermatrix(s, nocc, static_correction=None, g=None):
     g_cdpa = g_cd_pq[:, :, :, virt]                       # (nvirt,nvirt,norb,nvirt): g[c,d,p,a]
     # EN-dressed when u2_denom_dress is set; identical to the bare arrays
     # otherwise. Built once and shared with the g_Xoca/g_Xvki terms below,
-    # which use the SAME denominators (see _u2_denominators).
-    denom_ij_cd, denom_ab_kl = s._u2_denominators(nocc)
+    # which use the SAME denominators (see u2_denominators).
+    denom_ij_cd, denom_ab_kl = s.u2_denominators(nocc)
     corr_cd = 0.5 * _cached_einsum('ijcd,cdpa->ijap', g_ijcd / denom_ij_cd, g_cdpa, optimize=True)
 
     g_Xoca = g[np.ix_(occ, occ, virt, virt)]             # generic occ,occ,virt,virt: g[X,Y,c,a]
@@ -117,8 +115,8 @@ def build_supermatrix(s, nocc, static_correction=None, g=None):
 def C_2h1p_block(s, nocc, ket_idx, bra_idx=None):
     """First-order C_2h1p block for the ket configs (optionally bra-
     restricted) -- delta-times-bare-integral; GProxy when s.g is None."""
-    g = s.g if s.g is not None else s._g_proxy()
-    i_2h, j_2h, a_2h = s._configs_2h1p(nocc)
+    g = s.g if s.g is not None else s.g_proxy()
+    i_2h, j_2h, a_2h = s.configs_2h1p(nocc)
     bi = np.arange(len(i_2h)) if bra_idx is None else bra_idx
     I, J, A = i_2h[bi][:, None], j_2h[bi][:, None], a_2h[bi][:, None]
     K, L, C = i_2h[ket_idx][None, :], j_2h[ket_idx][None, :], a_2h[ket_idx][None, :]
@@ -134,8 +132,8 @@ def C_2h1p_block(s, nocc, ket_idx, bra_idx=None):
 
 def C_2p1h_block(s, nocc, ket_idx, bra_idx=None):
     """Mirror of C_2h1p_block (occ<->virt roles swapped)."""
-    g = s.g if s.g is not None else s._g_proxy()
-    i_2p, a_2p, b_2p = s._configs_2p1h(nocc)
+    g = s.g if s.g is not None else s.g_proxy()
+    i_2p, a_2p, b_2p = s.configs_2p1h(nocc)
     bi = np.arange(len(i_2p)) if bra_idx is None else bra_idx
     I, A, B = i_2p[bi][:, None], a_2p[bi][:, None], b_2p[bi][:, None]
     K, C, D = i_2p[ket_idx][None, :], a_2p[ket_idx][None, :], b_2p[ket_idx][None, :]

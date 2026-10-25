@@ -33,7 +33,7 @@ from src.SingleReference.ADC.spin_adapt import (apply_ops, build_class_T,
                                                 build_T,
                                                 _class_signs_closed_form,
                                                 _class_configs, _class_ops)
-from src.Base.pyscf_interface import (get_orbital_energies,
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                  get_two_electron_integrals_chemist,
                                  get_antisymmetrized_spin_eri)
 

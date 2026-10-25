@@ -14,9 +14,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.DensityMatrix.density_matrix import MP2DensityMatrixSolverUnrestricted, MP3DensityMatrixSolverUnrestricted
+from tests.mpn_density_oracle import (MP2DensityMatrixSolverUnrestricted, MP3DensityMatrixSolverUnrestricted)
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, get_two_electron_integrals_chemist
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, get_two_electron_integrals_chemist
 
 
 if __name__ == '__main__':

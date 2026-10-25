@@ -4,6 +4,8 @@ CP2K's aug-MOLOPT families, all-electron bases with tiered RI sets built for GW
 and BSE, are read from CP2K at run time and registered as PySCF basis names:
 
 ```python
+from pyscf import gto
+
 from src.Base.basis.cp2k_basis import register
 
 basis, aux = register('aug-SZV-MOLOPT-ae', max_error=1e-4)

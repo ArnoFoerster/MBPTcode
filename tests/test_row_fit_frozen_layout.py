@@ -8,19 +8,18 @@ wherever a pair crosses `pair_tol`, a step in the surface the force cannot see.
 Formaldehyde/cc-pVDZ drops one pair of the reference screen when a hydrogen
 moves 0.1 Bohr along y.
 """
-import os
 import sys
 
 import numpy as np
 import pytest
 from pyscf import gto, scf
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..'))
-
-from src.Base import separable_ri  # noqa: E402
-from src.gradients.factor_chain import FrozenFactorization  # noqa: E402
-from src.gradients.rpa_ground_state import RPAGroundStateChain  # noqa: E402
+from src.Base.factorization import separable_ri
+from src.Base.numerics.numerics import Numerics
+from src.gradients.rpa.factor_chain import FrozenFactorization
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
 
 ATOM = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.58; H 0 -0.94 -0.58'
 
@@ -43,10 +42,11 @@ def _displaced(mol, atom, axis, h):
 
 def test_the_row_fit_keeps_the_reference_pairs_at_a_displaced_geometry():
     mol = gto.M(atom=ATOM, basis='cc-pvdz', verbose=0)
-    fac = FrozenFactorization(mol, sliced=True, fit='rows')
+    fac = FrozenFactorization(mol, Numerics(isdf={'fit': 'rows', 'counts': g1(mol)},
+                                            layout={'sliced': True}))
     chain = RPAGroundStateChain(mol, _rhf, factorization=fac)
     m = _displaced(mol, 2, 1, 0.1)
-    here = separable_ri.test_set_layout(m, fac.coords(m))
+    here = separable_ri.fit_test_set_layout(m, fac.coords(m))
     # the case is only a test if the geometry's own screen differs
     assert len(here[0]) != len(fac.layout[0])
     mf = chain.mean_field(m)[1]
@@ -58,7 +58,8 @@ def test_the_row_fit_keeps_the_reference_pairs_at_a_displaced_geometry():
     d_frozen = frozen.metric_root_rows(auxmol, chain.environment_at(m))
     d_here = rescreened.metric_root_rows(auxmol, chain.environment_at(m))
     assert np.abs(d_frozen - d_here).max() > 0.0
-    assert np.array_equal(d, d_frozen)
+    assert_same(d, d_frozen, unit='1', quantity='root',
+                label='the chain fits on the frozen layout')
 
 
 if __name__ == '__main__':

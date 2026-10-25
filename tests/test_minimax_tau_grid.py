@@ -1,5 +1,5 @@
-"""Validates src/Base/utils/grids.py::minimax_time_grid (the GreenX minimax
-imaginary-time grid, tabulated in src/Base/utils/minimax_tau_data.json from
+"""Validates src/Base/utils/grids/grids.py::minimax_time_grid (the GreenX minimax
+imaginary-time grid, tabulated in src/Base/utils/grids/minimax_tau_data.json from
 GreenX GX-TimeFrequency/src/minimax_tau.F90) by checking the Laplace-transform
 identity it exists to provide:
 
@@ -33,10 +33,10 @@ sys.path.insert(0, ROOT)
 import numpy as np
 import pytest
 
-from src.Base.utils.grids import (_load_minimax_data, _load_minimax_tau_data,
-                                  _table_row, minimax_frequency_grid,
-                                  minimax_time_grid, minimax_tau_supported_sizes)
-from src.Base.utils.time_frequency import COSINE_TW, minimax_transform_weights
+from src.Base.utils.grids.grids import (_load_minimax_data, load_minimax_tau_data,
+                                        _table_row, minimax_frequency_grid,
+                                        minimax_time_grid, minimax_tau_supported_sizes)
+from src.Base.utils.grids.time_frequency import COSINE_TW, minimax_transform_weights
 
 # (grid_size, e_min, e_max, tolerance) on ranges each grid_size is tabulated for
 IN_TABLE = [
@@ -135,7 +135,7 @@ def test_the_two_axes_carry_opposite_powers_of_the_stretch(ntau, e_min, e_max):
     carry opposite powers of it; carrying the same power moves every product by
     e_ratio^2 and the transform fit collapses with it.
     """
-    tau_row, e_ratio = _table_row(_load_minimax_tau_data()[str(ntau)],
+    tau_row, e_ratio = _table_row(load_minimax_tau_data()[str(ntau)],
                                   ntau, e_min, e_max)
     omega_row, _ = _table_row(_load_minimax_data()[str(ntau)],
                               ntau, e_min, e_max)

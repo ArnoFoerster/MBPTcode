@@ -37,18 +37,22 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import (dfactor_adjoint,
                                             dfactor_adjoint_gauges)
-from src.gradients.reaction_field_adjoint import (reaction_field_backward,
-                                                  reaction_field_shift,
-                                                  static_screening)
+from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
+                                                        reaction_field_shift,
+                                                        static_screening)
 from src.properties.characters import ct_character, roots
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import RECORDING_BLAS, matches
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -82,7 +86,9 @@ def check(ok, label, detail=''):
 
 def scf_factory(mol):
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -104,7 +110,7 @@ def solvated(mol, mf, solvent='water'):
     surface, and the reference any future analytic gradient has to reproduce.
     """
     return ExcitedStateChain(mol, scf_factory, mf=mf,
-                             environment=SolventScreening(mol, solvent=solvent))
+                             environment=SolventScreening(mol, solvent=solvent), numerics=g1_numerics(mol))
 
 
 # --------------------------------------------------------------------------
@@ -112,18 +118,19 @@ def test_the_chain_environment_is_the_single_source_of_truth(water):
     """A screening attached only to the MEAN FIELD reaches a gas-phase chain
     nowhere -- not even half way.
 
-    This is the invariant the environment seam buys, and it replaces a real
-    defect. The reaction field has two halves: the substitution v -> v + vtilde,
+    This is the invariant the environment seam buys. The reaction field has two
+    halves: the substitution v -> v + vtilde,
     which lives in the auxiliary gauge a chain builds for itself, and the static
     COHSEX Sigma^solv, which production's one-body term reads off the mean
-    field. A chain that owned only the first inherited the second by accident,
+    field. A chain that owned only the first would inherit the second by
+    accident,
     and HALF A REACTION FIELD IS WORSE THAN NEITHER: Sigma^solv alone closes
     the quasiparticle gap by 3.5 eV with no matching screening in the BSE
-    kernel, and water's S1 collapsed to 4.97 eV against 8.46 gas-phase and 8.14
+    kernel, and water's S1 collapses to 4.97 eV against 8.46 gas-phase and 8.14
     solvated.
 
-    Now the chain evaluates that term with ITS OWN environment attached, so a
-    gas-phase chain is bitwise gas-phase whatever the mean field carries, and a
+    The chain evaluates that term with ITS OWN environment attached, so a
+    gas-phase chain is gas-phase whatever the mean field carries, and a
     solvated chain gets both halves without anything being attached at all.
 
     EACH PROBE GETS ITS OWN CHAIN, all four built on the clean mean field
@@ -133,11 +140,12 @@ def test_the_chain_environment_is_the_single_source_of_truth(water):
     Newton at its own previous answer and stops 1.5e-15 Ha from where it
     stopped the first time. That is below the 1e-11 convergence tolerance and
     has nothing to do with what the mean field carries. Two chains built the
-    same way are bitwise identical, so that is the comparison.
+    same way agree to a few ulp (two forwards, `matches` of tests/pins.py,
+    not bitwise), so that is the comparison.
     """
     mol, mf = water
-    gas_chain, stray_chain = (ExcitedStateChain(mol, scf_factory, mf=mf),
-                              ExcitedStateChain(mol, scf_factory, mf=mf))
+    gas_chain, stray_chain = (ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol)),
+                              ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol)))
     sol, sol_attached = solvated(mol, mf), solvated(mol, mf)
 
     def probe(chain):
@@ -156,10 +164,10 @@ def test_the_chain_environment_is_the_single_source_of_truth(water):
         print(f'       {name:12s} gas {g * HARTREE_TO_EV:9.4f}   '
               f'gas chain, screened mf {h * HARTREE_TO_EV:9.4f}   '
               f'solvated {f * HARTREE_TO_EV:9.4f} eV')
-    ok = check(np.array_equal(gas, stray),
-               'a gas-phase chain is BITWISE gas-phase whatever the mean field '
+    ok = check(matches(stray, gas, RECORDING_BLAS),
+               'a gas-phase chain is gas-phase whatever the mean field '
                'carries', f'max |d| {np.abs(stray - gas).max():.1e} Ha')
-    ok &= check(np.array_equal(full, full_attached),
+    ok &= check(matches(full_attached, full, RECORDING_BLAS),
                 'and a solvated chain does not double count an attachment',
                 f'max |d| {np.abs(full_attached - full).max():.1e} Ha')
     gap_gas = gas[2] - gas[1]
@@ -171,9 +179,9 @@ def test_the_chain_environment_is_the_single_source_of_truth(water):
 
 
 def test_solvated_chain_moves(water):
-    """The fix: Omega and eps^QP move, with the image-charge sign structure."""
+    """Omega and eps^QP move, with the image-charge sign structure."""
     mol, mf = water
-    gas = ExcitedStateChain(mol, scf_factory, mf=mf)
+    gas = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     sol = solvated(mol, mf)
     ip_g, ea_g = -gas.quasiparticle(0, mol, mf), -gas.quasiparticle(1, mol, mf)
     ip_s, ea_s = -sol.quasiparticle(0, mol, mf), -sol.quasiparticle(1, mol, mf)
@@ -192,7 +200,7 @@ def test_solvated_chain_moves(water):
     ok &= check((ip_s - ea_s) < (ip_g - ea_g),
                 'the quasiparticle gap closes (image-charge, Born)')
     ok &= check(abs(om_s - om_g) > 1e-6, 'the BSE excitation moves at all',
-                f'{(om_s - om_g) * HARTREE_TO_EV * 1000:+.1f} meV')
+                f'{(om_s - om_g) * HARTREE_TO_MEV:+.1f} meV')
     assert ok
 
 
@@ -204,7 +212,7 @@ def test_matches_production_gw(water):
     `static_exchange_matrix`'s. The gas-phase pair is printed too, because the
     agreement is only meaningful if the SHIFT agrees, not just the total."""
     mol, mf = water
-    gas = ExcitedStateChain(mol, scf_factory, mf=mf)
+    gas = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     sol = solvated(mol, mf)
     radii = gas.radii
     ok = True
@@ -236,7 +244,7 @@ def test_every_gradient_entry_point_now_carries_the_environment(water):
     """
     mol, mf = water
     sol = solvated(mol, mf)
-    gas = ExcitedStateChain(mol, scf_factory, mf=mf)
+    gas = ExcitedStateChain(mol, scf_factory, mf=mf, numerics=g1_numerics(mol))
     hits = 0
     for name, args in (('excitation_gradient', ()), ('quasiparticle_gradient', (0,)),
                        ('total_gradient', ())):
@@ -244,8 +252,8 @@ def test_every_gradient_entry_point_now_carries_the_environment(water):
         gg = getattr(gas, name)(*args)[0]
         # a force, and not the gas-phase one
         hits += int(np.isfinite(g).all() and np.abs(g - gg).max() > 1e-5)
-    check(hits == 3, 'every gradient entry point returns a solvated force '
-                     'that differs from the gas-phase one', f'{hits}/3')
+    assert check(hits == 3, 'every gradient entry point returns a solvated force '
+                            'that differs from the gas-phase one', f'{hits}/3')
 
 
 def test_one_fit_and_one_static_screening_serve_both_gauges(water):
@@ -262,7 +270,7 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
     The static screening is shared the same way: [1 - chi0(0)]^-1 in the
     dressed gauge IS the BSE kernel's W and the dressed half of Eq. (18) at
     once, so the forward builds the pair and the reverse is handed it. Nothing
-    is reordered there, so that half is bitwise.
+    is reordered there, so that half agrees to a few ulp (two calls).
     """
     mol, mf = water
     chain = solvated(mol, mf)
@@ -273,7 +281,7 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
     env = chain.environment_at(mol)
     kw = dict(layout=chain.layout, pts_local=chain.pts_local,
               atom_of_point=chain.owner, frames=chain.frames,
-              with_frames=chain.with_frames)
+              with_frames=False)
     # Random adjoints rather than the chain's own: the branch is linear in
     # them, so this covers every direction a state could land on it.
     rng = np.random.default_rng(0)
@@ -296,15 +304,16 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
                                   grid=chain.w_grid, screening=pair)
     own = reaction_field_shift(x_mo, d, d_bare, eps, chain.nocc,
                                grid=chain.w_grid)
-    ok &= check(np.array_equal(shared, own),
-                'Eq. (18) off the shared screening is BITWISE the one that '
+    ok &= check(matches(shared, own, RECORDING_BLAS),
+                'Eq. (18) off the shared screening is to a few ulp the one that '
                 'rebuilds it', f'max |d| = {np.abs(shared - own).max():.1e} Ha')
     w = rng.standard_normal(len(eps)) * 1e-3
     fwd = reaction_field_backward(w, x_mo, d, d_bare, eps, chain.nocc,
                                   grid=chain.w_grid, screening=pair)
     rebuilt = reaction_field_backward(w, x_mo, d, d_bare, eps, chain.nocc,
                                       grid=chain.w_grid)
-    ok &= check(all(np.array_equal(p, q) for p, q in zip(fwd, rebuilt)),
+    ok &= check(all(matches(p, q, RECORDING_BLAS, quantity='gradient')
+                    for p, q in zip(fwd, rebuilt)),
                 'and so is its adjoint on (eps, X, D_dressed, D_bare)')
     assert ok
 
@@ -344,7 +353,7 @@ def test_ct_beats_local():
     blue-shifted +2186 meV at eps = 2.5 -- the reaction field reached the BSE
     kernel for every orbital pair but reached the diagonal only inside the
     quasiparticle window, and the local root's hole sat outside it
-    (`ExcitedStateChain._env_static_outside`). A check that only ever compares
+    (`QuasiparticleSet.env_static_outside`). A check that only ever compares
     two numbers cannot see both of them move; the cancellation the physics
     rests on is an absolute statement about ONE of them.
     """
@@ -355,7 +364,10 @@ def test_ct_beats_local():
     for eps in eps_list:
         ch = ExcitedStateChain(
             mol, scf_factory, mf=mf,
-            environment=(None if eps < 1.001 else SolventScreening(mol, eps=eps)))
+            # the optical response alone on the gas-phase SCF, declared
+            environment=(None if eps < 1.001 else SolventScreening(
+                mol, eps=eps, frozen_polarization=True)),
+            numerics=g1_numerics(mol))
         om, xn, yn, _ = roots(ch, mol, mf)
         table[eps] = (om, xn, yn, ct_character(ch, mf, xn, yn, F2_ATOMS))
 
@@ -376,8 +388,8 @@ def test_ct_beats_local():
         j_ct, o_ct = follow(x0[:, i_ct], y0[:, i_ct], xn, yn)
         j_lo, o_lo = follow(x0[:, i_loc], y0[:, i_loc], xn, yn)
         worst_ovl = min(worst_ovl, o_ct, o_lo)
-        d_ct = (om[j_ct] - om0[i_ct]) * HARTREE_TO_EV * 1000
-        d_lo = (om[j_lo] - om0[i_loc]) * HARTREE_TO_EV * 1000
+        d_ct = (om[j_ct] - om0[i_ct]) * HARTREE_TO_MEV
+        d_lo = (om[j_lo] - om0[i_loc]) * HARTREE_TO_MEV
         shifts[eps] = (d_ct, d_lo)
         print(f'       {eps:5.2f} {d_ct:+9.1f}  ({o_ct:.2f}, {ct[j_ct]:.2f})'
               f'      {d_lo:+9.1f}  ({o_lo:.2f}, {ct[j_lo]:.2f})')

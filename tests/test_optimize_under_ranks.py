@@ -57,7 +57,8 @@ far past the gate. Measured, with 1e-3 Ha/Bohr added to one Cartesian
 component -- five orders above the 1e-8 floor the gate is derived from:
 
     on rank 0   1.42e-03 Bohr from the serial minimum, 1400x the gate
-    on rank 1   1.46e-13 Bohr, bitwise the unperturbed distributed answer
+    on rank 1   1.46e-13 Bohr, the unperturbed distributed answer (another
+                run, so to a few ulp)
 
 With the boundary's result lockstep removed the rank-1 defect is not
 harmless: rank 1 walks on its own force, leaves the walk at a different point,
@@ -84,8 +85,8 @@ share, so a walk that changed into its own directory would move the others'.
 Its final geometry is geomeTRIC's own arithmetic rather than an evaluated
 point, so it is the one walk whose geometry lock in `rank_zero_walk` is not
 already implied by `surface.evaluate`; rank 1's is moved by 1e-12 relative
-here, and every rank must still return rank 0's. SHOWN TO FAIL with the
-geometry lockstep removed from `rank_zero_walk`: rank 1 returns its own.
+here, and every rank must still return rank 0's. With the geometry lockstep
+removed from `rank_zero_walk`, rank 1 returns its own.
 
 Every check ASSERTS: pytest discards a returned verdict and passes on False.
 """
@@ -99,13 +100,18 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import GEOM_OPT_CONV
+from src.properties.optimize import derived_walk
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (GEOM_OPT_CONV, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.utils.mpi_grid import current_comm, run_simulated
+from src.Base.utils.parallel.mpi_grid import current_comm
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.properties.excitations import (SurfaceSpec,
                                         calc_adiabatic_excitation)
 from src.properties.optimize import optimize
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS = 'cc-pvdz'
 #: `systems.py`'s water, the fastest end-to-end case in the suite.
@@ -119,9 +125,9 @@ GEOMETRY_FLOOR = 1e-6
 #: geometry gate is derived from, and the smallest kind of defect that can
 #: move a minimum at all: a rescaling cannot (see the module docstring).
 FORCE_OFFSET = 1e-3
-#: The first trust radius of a ground-state walk, the one `relax_ground_state`
+#: The walk of a ground state, the first trust radius `relax_ground_state`
 #: uses: the excited-state default of 0.1 Bohr is for a fragile surface.
-GROUND_TRUST = 0.3
+GROUND_WALK = Numerics(walk={'trust': 0.3})
 #: The optimizer MODULE; `src.properties` re-exports its `optimize` function
 #: under the same name, which shadows the submodule as a package attribute.
 OPTIMIZER = importlib.import_module('src.properties.optimize')
@@ -136,7 +142,9 @@ def built(mol):
     the Lagrangian assumes the occupied-virtual Fock block vanishes.
     """
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     return mf
 
 
@@ -202,9 +210,11 @@ def bse_surface(factory):
         excitation=Excitation('singlet')), mol
 
 
-def walked(surface, mol, **kw):
+def walked(surface, mol, steps=None, **kw):
     """What one walk is compared on: the geometry, the record's decisions,
-    and the whole record."""
+    and the whole record; `steps` caps the walk (`derived_walk`)."""
+    if steps is not None:
+        kw['numerics'] = derived_walk(surface, 'a capped test walk', max_cycle=steps)
     mol_opt, info = optimize(surface, mol, verbose=False, **kw)
     return {'coords': mol_opt.atom_coords(), 'cycles': info['cycles'],
             'converged': info['converged'], 'energy': info['energy'],
@@ -216,7 +226,7 @@ def ground_walk(factory, **kw):
     """A full relaxation of the mean-field ground state, on every rank of the
     context it runs in."""
     surface, mol = mean_field_surface(factory)
-    return walked(surface, mol, trust=GROUND_TRUST, **kw)
+    return walked(surface, mol, numerics=GROUND_WALK, **kw)
 
 
 def same_record(a, b):
@@ -234,6 +244,28 @@ def same_record(a, b):
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         return (type(a) is type(b) and len(a) == len(b)
                 and all(same_record(x, y) for x, y in zip(a, b)))
+    return a == b
+
+
+def close_record(a, b):
+    """Two walk records of two RUNS hold the same entries: numbers to a few
+    ulp (`matches` of tests/pins.py, on the gradient class bar off the
+    recording BLAS), since two runs stand on two sets of SCFs and are never
+    bitwise, everything else as `same_record` compares it."""
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        a, b = np.asarray(a), np.asarray(b)
+        if a.dtype.kind == 'f' and b.dtype.kind == 'f':
+            return matches(a, b, RECORDING_BLAS, quantity='gradient')
+        return same_record(a, b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(close_record(a[k], b[k])
+                                             for k in a
+                                             if k != 'final_surface')
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return (type(a) is type(b) and len(a) == len(b)
+                and all(close_record(x, y) for x, y in zip(a, b)))
+    if isinstance(a, (float, np.floating)) and isinstance(b, (float, np.floating)):
+        return matches(a, b, RECORDING_BLAS, quantity='gradient')
     return a == b
 
 
@@ -300,14 +332,14 @@ def test_the_refreeze_loop_runs_over_the_ranks(size):
 def test_one_bse_at_gw_step_is_the_serial_step():
     """One optimizer step on the full cubic surface, which is two chains' sweeps.
 
-    `max_cycle=1` is one accepted step and two gradients -- the driving force
+    One step (`steps=1`) is one accepted step and two gradients -- the driving force
     at R0 and the force where it lands -- which is all a BSE@GW walk needs to
     show that the geometry the ranks stepped to is rank 0's.
     """
     reference, bar = serial_walk(
-        lambda: walked(*bse_surface(converged), max_cycle=1))
+        lambda: walked(*bse_surface(converged), steps=1))
     results = run_simulated(
-        lambda comm: walked(*bse_surface(built), max_cycle=1), 2)
+        lambda comm: walked(*bse_surface(built), steps=1), 2)
 
     assert reference['cycles'] == 1
     assert_same_walk(reference, results, bar)
@@ -323,16 +355,18 @@ def test_the_adiabatic_entry_point_relaxes_both_surfaces_over_the_ranks():
     `ExcitedStateChain` and the ground state is the mean field's own energy,
     whose only stage is the SCF.
 
-    `max_cycle=1` is one step on each surface, which is what makes this
+    One step on each surface (walk.max_cycle 1) is what makes this
     affordable; the walks themselves are gated above.
     """
     def one_run(factory):
         mol = own_water()
+        # both surfaces walk on the spec's numerics: one step each
         spec = SurfaceSpec(GroundState('dft', 'hf'),
-                           qp_states=QPStates('frontier'))
+                           qp_states=QPStates('frontier'),
+                           numerics=Numerics(walk={'max_cycle': 1}))
         record = calc_adiabatic_excitation(
             spec, Excitation('singlet'), mol, factory, refreeze=0,
-            engine='cartesian', max_cycle=1, verbose=False)
+            engine='cartesian', verbose=False)
         return {'adiabatic_eV': record['adiabatic_eV'],
                 'cycles': record['cycles'],
                 'ground_cycles': record['ground_cycles'],
@@ -367,7 +401,7 @@ def test_a_refusal_on_the_driver_reaches_every_rank():
     """
     def one_rank(comm):
         surface, mol = mean_field_surface(built)
-        with pytest.raises(ValueError, match='force threshold'):
+        with pytest.raises(ValueError, match='no convergence'):
             optimize(surface, mol, verbose=False,
                      conv={'grad_max': 1e-4, 'opt_grad_max': 1e-5})
         return 'refused'
@@ -378,11 +412,12 @@ def test_a_refusal_on_the_driver_reaches_every_rank():
 def offset_walk(rank):
     """A ground-state walk with `rank`'s own force wrong by FORCE_OFFSET."""
     surface, mol = mean_field_surface(built)
-    return walked(OffsetForce(surface, rank=rank), mol, trust=GROUND_TRUST)
+    return walked(OffsetForce(surface, rank=rank), mol, numerics=GROUND_WALK)
 
 
 def test_a_worker_ranks_own_force_decides_nothing():
-    """Rank 1's force wrong by 1e-3 Ha/Bohr: the answer must not move at all.
+    """Rank 1's force wrong by 1e-3 Ha/Bohr: the answer must not move beyond
+    the few ulp a second run of the clean walk moves it.
 
     The boundary's property stated as a measurement. `surface.evaluate` hands
     every rank rank 0's force, so a defect in what the surface returns ON
@@ -392,11 +427,15 @@ def test_a_worker_ranks_own_force_decides_nothing():
     clean = run_simulated(lambda comm: ground_walk(built), 2)
     results = run_simulated(lambda comm: offset_walk(rank=1), 2)
 
+    # two runs, each on its own SCFs: the same walk to a few ulp, not
+    # bitwise (a leaked defect moves the geometry by 1e-3 Bohr, and the
+    # record's forces by as much)
     for rank, reference in zip(results, clean):
         assert rank['cycles'] == reference['cycles']
-        assert np.array_equal(rank['coords'], reference['coords'])
-        assert rank['energy'] == reference['energy']
-        assert same_record(rank['info'], reference['info'])
+        assert_same(rank['coords'], reference['coords'], unit='1',
+                    quantity='root', label='coords')
+        assert_same(rank['energy'], reference['energy'], label='energy')
+        assert close_record(rank['info'], reference['info'])
     assert np.array_equal(results[0]['coords'], results[1]['coords'])
 
 
@@ -463,8 +502,8 @@ def test_a_rank_whose_step_drifted_returns_rank_zeros_record(monkeypatch):
     The evaluations are rank 0's regardless (`surface.evaluate` locks the
     geometry), and `rank_zero_walk` locks the geometry and the record the
     walk returns, so rank 1's own `step_max` entries never reach its caller.
-    SHOWN TO FAIL with the record's lockstep removed from `rank_zero_walk`:
-    rank 1's history then carries its own step lengths.
+    With the record's lockstep removed from `rank_zero_walk`, rank 1's history
+    carries its own step lengths.
     """
     real = OPTIMIZER._rfo_step
 

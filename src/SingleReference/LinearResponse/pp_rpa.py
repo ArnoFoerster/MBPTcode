@@ -35,7 +35,7 @@ adc_r_faddeev.solve_ladder_amplitudes_restricted) needs no eigenvectors.
 import numpy as np
 import scipy.linalg as la
 
-from src.Base.eri_blocks import g_slice
+from src.SingleReference.common.eri_blocks import g_slice
 
 
 def pair_indices(n):

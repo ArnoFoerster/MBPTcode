@@ -26,10 +26,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.separable_ri import optimize_atomic_radii
-from src.Base.solvent_screening import (attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.factorization.separable_ri import optimize_atomic_radii
+from src.environments.solvent_screening import (attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from tests.isdf_test_grid import g1
 
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
 CONTINUATIONS = ('pade', 'cd', 'laplace', 'sop')
@@ -47,7 +48,8 @@ def build():
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
     auxbasis = str(mol.basis) + '-ri'
-    radii = {el: optimize_atomic_radii(el, mol.basis, auxbasis)[0]
+    radii = {el: optimize_atomic_radii(el, mol.basis, auxbasis,
+                                      counts=g1(mol))[0]
              for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})}
     return mol, mf, radii
 

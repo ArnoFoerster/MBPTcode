@@ -4,7 +4,8 @@ the serial ISDFJK SCF, and the rules its handle is written to.
 Gated, cc-pVDZ at 148 points per atom, tiles of `TILE` points so that every
 rank count owns a different set of them (water 7 tiles, ethylene 14):
   * one rank and no region is the serial ISDFJK SCF itself: the factory
-    hands back None and `distributed_mean_field` is `mf.kernel()`, bitwise;
+    hands back None and `distributed_mean_field` is `mf.kernel()`, to a few
+    ulp (two SCF runs);
   * at 2, 3 and 8 ranks, water and ethylene, PBE0 and LRC-wPBEh: the
     converged energy within the SCF's own `CONV_TOL` of the serial ISDF-K
     energy and the same on every rank, the orbitals one set of bits across
@@ -82,21 +83,24 @@ from pyscf.dft import numint
 from pyscf.lib import numpy_helper
 from pyscf.scf import jk as pyscf_jk
 
-from src.Base import distributed_df as dist_df
-from src.Base import distributed_isdf_jk as dist_isdf
-from src.Base import separable_ri
-from src.Base.constants import BLAS_WRAP_MIN_THREADS, COMPOSED_GRAD_K
-from src.Base.distributed_df import distributed_mean_field, release_distributed
-from src.Base.distributed_isdf_jk import (ISDF_BLAS_KEYS, distributed_isdf_jk,
-                                          distributed_isdf_storage)
-from src.Base.isdf_jk import ISDFJK, isdf_jk
-from src.Base.utils import threads
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.factorization import distributed_df as dist_df
+from src.Base.factorization import distributed_isdf_jk as dist_isdf
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import BLAS_WRAP_MIN_THREADS, COMPOSED_GRAD_K
+from src.Base.factorization.distributed_df import distributed_mean_field, release_distributed
+from src.Base.factorization.distributed_isdf_jk import (ISDF_BLAS_KEYS, distributed_isdf_jk,
+                                                        distributed_isdf_storage)
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel import threads
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests import test_force_serial_shaped as shape_blas
 from tests.reduction_bounds import exact_offset, regrouped, rounding_bound
 from tests.test_distributed_isdf_scf_mpi import main as mpi_main
 from tests.test_distributed_isdf_scf_mpi import memory_faults, tile_addends
 from tests.test_force_serial_shaped import racing_dgemm
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -156,22 +160,22 @@ _NOTE_LOCK = threading.Lock()
 #: The handle's GEMM stages of a distributed ISDF-K SCF, by the call `note`
 #: keys them on: each must run on the whole node pool.
 GEMM_STAGES = {
-    ('dpotrf', 'src.Base.separable_ri', 'fit_rows'): "the fit's Cholesky",
-    ('_trsm', 'src.Base.separable_ri', 'fit_rows'): "the fit's trsm",
-    ('dot', 'src.Base.distributed_isdf_jk', '_interaction_rows'):
+    ('dpotrf', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's Cholesky",
+    ('trsm', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's trsm",
+    ('dot', 'src.Base.factorization.distributed_isdf_jk', '_interaction_rows'):
         "G and Z's rows",
-    ('dot', 'src.Base.distributed_isdf_jk', '_exchange_rows'): 'the K builds',
-    ('cho_factor', 'src.Base.distributed_isdf_jk', '__init__'):
+    ('dot', 'src.Base.factorization.distributed_isdf_jk', '_exchange_rows'): 'the K builds',
+    ('cho_factor', 'src.Base.factorization.distributed_isdf_jk', '__init__'):
         "the DF-J metric's factor",
-    ('cho_solve', 'src.Base.distributed_isdf_jk', '__call__'):
+    ('cho_solve', 'src.Base.factorization.distributed_isdf_jk', '__call__'):
         "the DF-J metric's solve"}
 #: Its stages of pyscf's OpenMP and libcint: each must run at one BLAS thread.
 OPENMP_STAGES = {
-    ('nr_rks', 'src.Base.distributed_df', 'partial_xc'): 'nr_rks on the grid',
-    ('get_jk', 'src.Base.distributed_isdf_jk', '__call__'): 'the DF-J passes',
-    ('getints3c', 'src.Base.separable_ri', '__call__'):
+    ('nr_rks', 'src.Base.factorization.distributed_df', 'partial_xc'): 'nr_rks on the grid',
+    ('get_jk', 'src.Base.factorization.distributed_isdf_jk', '__call__'): 'the DF-J passes',
+    ('getints3c', 'src.Base.factorization.separable_ri', '__call__'):
         "the fit's three-centre integrals",
-    ('intor', 'src.Base.distributed_isdf_jk', '_interaction_rows'):
+    ('intor', 'src.Base.factorization.distributed_isdf_jk', '_interaction_rows'):
         'the metric slabs'}
 
 
@@ -221,7 +225,7 @@ def on_the_node_pool(set_attr):
     set_attr: `monkeypatch.setattr`, or `setattr` in a subprocess."""
     set_attr(threads, 'threadpool_limits', NodePoolLimit)
     set_attr(threads, 'blas_threads', node_pool_threads)
-    set_attr(threads, '_pool_is_ours', lambda: True)
+    set_attr(threads, 'pool_is_ours', lambda: True)
 
 
 def pooled(shape_factor):
@@ -256,7 +260,7 @@ def fresh(atom, xc):
     warnings.simplefilter('ignore')
     mol = gto.M(atom=atom, basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol) if xc == 'hf' else dft.RKS(mol, xc=xc)
-    mf = isdf_jk(mf, auxbasis='cc-pvdz-ri')
+    mf = isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=g1(mf))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
 
@@ -278,7 +282,10 @@ def converge(size, atom, xc, tile=TILE):
         out = dict(e=mf.e_tot, mo=digest(mf.mo_coeff), cycles=mf.cycles,
                    with_df=type(mf.with_df).__name__,
                    storage=distributed_isdf_storage(mf, comm),
-                   timings=dict(mf._distributed_timings))
+                   timings=dict(mf._distributed_timings),
+                   # what this rank's thread reads of the BLAS pool: a
+                   # simulated rank is a thread, which reads nothing (0)
+                   blas=threads.blas_threads() or 0)
         release_distributed(mf)
         return out
     return run_simulated(one, size)
@@ -297,16 +304,18 @@ def serial():
 
 
 def test_one_rank_is_the_serial_isdfjk():
-    """No communicator: no handle, and the driver is `mf.kernel()` bit for
-    bit on the mean field's own ISDFJK."""
+    """No communicator: no handle, and the driver is `mf.kernel()` on the
+    mean field's own ISDFJK (two SCF runs: the same to a few ulp, not
+    bitwise)."""
     ref = fresh(WATER, 'pbe0')
     ref.kernel()
     mf = fresh(WATER, 'pbe0')
     assert distributed_isdf_jk(mf, None) is None
     distributed_mean_field(mf, comm=None)
     assert isinstance(mf.with_df, ISDFJK)
-    assert mf.e_tot == ref.e_tot
-    assert np.array_equal(mf.mo_coeff, ref.mo_coeff)
+    assert_same(mf.e_tot, ref.e_tot, label='one rank against serial')
+    assert_same(mf.mo_coeff, ref.mo_coeff, unit='1', quantity='vector',
+                label='one rank against serial')
     assert getattr(mf, '_distributed', None) is None
 
 
@@ -328,8 +337,7 @@ def test_scf_matches_serial(serial, name, xc, size):
     assert all(r['with_df'] == 'ISDFJK' for r in res)
     assert all(r['timings']['scf_requests_k'] > 0 for r in res)
     # built before the SCF, the handle records the interaction and K only
-    outside = threads.blas_threads() or 0
-    assert all(r['timings'][key] == outside for r in res
+    assert all(r['timings'][key] == r['blas'] for r in res
                for key in ISDF_BLAS_KEYS[1:]), [r['timings'] for r in res]
 
 
@@ -662,7 +670,7 @@ def test_each_stage_runs_on_its_pool(monkeypatch):
     seen = collections.defaultdict(set)
     on_the_node_pool(monkeypatch.setattr)
     monkeypatch.setattr(dist_isdf, 'np', CountingNumpy(seen))
-    for owner, name in ((separable_ri, '_trsm'),
+    for owner, name in ((separable_ri, 'trsm'),
                         (scipy.linalg.lapack, 'dpotrf'),
                         (scipy.linalg, 'cho_factor'),
                         (scipy.linalg, 'cho_solve'), (numint, 'nr_rks'),
@@ -721,6 +729,10 @@ def test_the_loop_algebra_takes_the_pool(monkeypatch):
             ('dot', 'pyscf.scf.diis', 'get_err_vec_orth'): NODE_THREADS,
             ('nr_rks', dist_df.__name__, 'partial_xc'): 1,
             ('get_jk', dist_isdf.__name__, '__call__'): 1}
+    # pyscf 2.13 solves through SCF._eigh (an orthogonalizing basis given),
+    # pyscf 2.12 through hf.eig: one eigensolve either way
+    seen[('eigh', 'pyscf.scf.hf', 'eig')] |= seen.pop(
+        ('eigh', 'pyscf.scf.hf', '_eigh'), set())
     table = {key: sorted(seen.get(key, ())) for key in want}
     assert all(table[key] == [count] for key, count in want.items()), table
 
@@ -736,8 +748,8 @@ def test_one_pass_serves_both_operators(serial):
     column tiles: once a density has shown K_lr asked for after K, the next
     density's K request makes both and K_lr's is answered from that pass;
     a request on another density makes its own pass, and a follower whose
-    request never came is forgotten. Every K and K_lr is bitwise the one a
-    pass of its own makes, and the passes are counted."""
+    request never came is forgotten. Every K and K_lr is the one a pass of
+    its own makes, to a few ulp (two passes), and the passes are counted."""
     mf = serial['water', 'lrc-wpbeh']
     handle = dist_isdf.DistributedISDFJK(fresh(WATER, 'lrc-wpbeh').with_df,
                                          comm=None, tile=TILE).build()
@@ -762,7 +774,7 @@ def test_one_pass_serves_both_operators(serial):
     faults = []
     for d, omega, passes in requests:
         vk = handle.get_jk(densities[d], with_j=False, omega=omega)[1]
-        if not np.array_equal(vk, refs[d, omega]):
+        if not matches(vk, refs[d, omega], RECORDING_BLAS, quantity='root'):
             faults.append(f'K({d}, {omega}) is not its own pass\'s')
         if handle.timings['scf_isdf_k_passes'] != passes:
             faults.append(f"{handle.timings['scf_isdf_k_passes']} passes "

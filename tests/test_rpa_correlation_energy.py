@@ -7,7 +7,9 @@ import numpy as np
 from pyscf import gto, scf, df
 from pyscf.gw.rpa import RPA as PyscfRPA
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients, \
+from src.Base.numerics.constants import RPA_ENERGY_NFREQ_MINIMAX
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients, \
     get_two_electron_integrals_chemist
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida, \
@@ -36,7 +38,7 @@ if __name__ == '__main__':
         lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted')
 
         e_casida = rpa_correlation_energy_casida(lr, nocc)
-        e_ac = rpa_correlation_energy_imaginary_axis(lr, nocc, nfreq=20, grid='minimax')
+        e_ac = rpa_correlation_energy_imaginary_axis(lr, nocc, grid='minimax', numerics=Numerics(quadrature={'nfreq_rpa': 20}))
 
         rpa_ref = PyscfRPA(mf)
         rpa_ref.verbose = 0
@@ -64,11 +66,24 @@ if __name__ == '__main__':
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted')
 
     e_casida = rpa_correlation_energy_casida(lr, nocc)
-    e_ac_gl = rpa_correlation_energy_imaginary_axis(lr, nocc, nfreq=30, grid='gauss_legendre')
+    e_ac_gl = rpa_correlation_energy_imaginary_axis(lr, nocc, grid='gauss_legendre', numerics=Numerics(quadrature={'nfreq_rpa': 30}))
     ok = abs(e_casida - e_ac_gl) < 1e-5
     all_ok &= ok
     print(f"HF/6-31g gauss_legendre(nfreq=30) vs Casida: AC={e_ac_gl:.8f}  "
           f"Casida={e_casida:.8f}  diff={abs(e_casida-e_ac_gl):.2e}  {'OK' if ok else 'FAIL'}")
+
+    # --- the default call: minimax at RPA_ENERGY_NFREQ_MINIMAX points, which the
+    # GreenX tables carry, and Gauss-Legendre at RPA_ENERGY_NFREQ ---
+    e_default = rpa_correlation_energy_imaginary_axis(lr, nocc)
+    e_minimax = rpa_correlation_energy_imaginary_axis(
+        lr, nocc, numerics=Numerics(quadrature={'nfreq_rpa': RPA_ENERGY_NFREQ_MINIMAX}))
+    e_default_gl = rpa_correlation_energy_imaginary_axis(lr, nocc, grid='gauss_legendre')
+    ok = (e_default == e_minimax and abs(e_casida - e_default) < 1e-6
+          and abs(e_casida - e_default_gl) < 1e-5)
+    all_ok &= ok
+    print(f"HF/6-31g default calls: minimax={e_default:.10f}  "
+          f"gauss_legendre={e_default_gl:.10f}  Casida={e_casida:.10f}  "
+          f"{'OK' if ok else 'FAIL'}")
 
     # --- full-ERI (non-DF) Casida-trace route should agree closely with the DF route ---
     eri = get_two_electron_integrals_chemist(mol, mf, representation='spatial')

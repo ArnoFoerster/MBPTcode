@@ -13,10 +13,12 @@ import types
 import numpy as np
 import pytest
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.sum_over_poles import compressible
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.qp_space_time import (calibrate_scissor, frozen_scissor,
-                                         scissor_route)
+from src.gradients.gwbse.conventions import FrozenConventions
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.SingleReference.GW.qp_states import (calibrate_scissor,
+                                              frozen_scissor, scissor_route)
 
 #: A core state, two inner-valence ones, then the frontier.
 EPS = np.array([-11.0, -1.35, -1.20, -0.62, -0.35, 0.18, 0.44])
@@ -130,19 +132,18 @@ def _stub_surface(scissor, excluded=(1,)):
     on, without the arithmetic.
     """
     surface = object.__new__(ExcitedStateChain)
-    surface.qp_set = np.array([1, 3])
+    surface.settings = Numerics()
+    # the contour-deformation grid is already fixed
+    surface.conventions = FrozenConventions(qp_set=np.array([1, 3]),
+                                            cd_sized=True)
     surface.nocc = NOCC
-    surface.gw_grid = surface.nu = surface.wt = None
     surface.residue_route = 'sop'
-    surface.pole_offsets, surface.qp_seeds, surface.scissor_map = {}, {}, {}
-    surface.sop_poles = {}
     surface.scissor = scissor
     surface.n_poles = 12
     surface.sop_stride = None
     surface.tile_gb = None
+    surface.timer = None
     surface.mf0 = types.SimpleNamespace(mo_energy=EPS)
-    # the contour-deformation grid is already fixed
-    surface.cd_sized = True
     return surface
 
 
@@ -158,10 +159,10 @@ def _stub_solve(monkeypatch, surface, excluded=(1,), root=-1.50):
                 if p in excluded else 'sop'
             roots[p] = root if p in excluded else float(EPS[p])
         calls.append(dict(routes))
-        kw['route_out'].update(routes=routes, roots=roots, pole_offsets={})
+        kw['route_out'].update(routes=routes, roots=roots, weights={})
         return (np.zeros(2), np.zeros(2))
 
-    monkeypatch.setattr('src.gradients.excited_state.qp_set_gradient', fake)
+    monkeypatch.setattr('src.gradients.gwbse.qp_set.qp_set_gradient', fake)
     return calls
 
 
@@ -174,12 +175,12 @@ def test_a_calibrated_solve_is_repeated_so_the_gradient_reads_the_shift(
     """
     surface = _stub_surface('calibrate')
     calls = _stub_solve(monkeypatch, surface)
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    surface.quasiparticles.qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 2, 'the solve must run again once a shift is on file'
     assert calls[0][1] == 'laplace', 'the first pass measures it on the axis'
     assert calls[1][1] == 'scissor', 'the second pass must SPEND it'
-    assert surface.scissor_map[1] == pytest.approx(-1.50 - EPS[1])
-    assert 3 not in surface.scissor_map, 'a compressible state is not tiered'
+    assert surface.resolved.scissor_map[1] == pytest.approx(-1.50 - EPS[1])
+    assert 3 not in surface.resolved.scissor_map, 'a compressible state is not tiered'
 
 
 def test_calibration_tiers_what_the_route_excluded_not_what_reach_rereads(
@@ -188,11 +189,11 @@ def test_calibration_tiers_what_the_route_excluded_not_what_reach_rereads(
     reading of reach at its root would say."""
     surface = _stub_surface('calibrate', excluded=())
     calls = _stub_solve(monkeypatch, surface, excluded=())
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    surface.quasiparticles.qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 2, 'the solve that froze the roots repeats from them'
-    assert surface.scissor_map == {}
+    assert surface.resolved.scissor_map == {}
     del calls[:]
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    surface.quasiparticles.qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 1, 'nothing to calibrate or freeze, so no repeat'
 
 
@@ -202,9 +203,9 @@ def test_an_uncalibrated_surface_repeats_only_the_freezing_solve(
     started again from them; a solve with every root on file runs once."""
     surface = _stub_surface(None)
     calls = _stub_solve(monkeypatch, surface)
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    surface.quasiparticles.qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 2
-    assert surface.scissor_map == {}
+    assert surface.resolved.scissor_map == {}
     del calls[:]
-    surface._qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
+    surface.quasiparticles.qp_set_solve(None, None, EPS, 0.0, np.zeros(2), np.zeros(2))
     assert len(calls) == 1

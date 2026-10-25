@@ -24,13 +24,10 @@ inner product to reassociate.
 Gated on water/cc-pVDZ and ethylene/cc-pVDZ Hartree-Fock (ethylene's 888 grid
 points make the row blocks more than a handful of rows):
 
-  * the serial action is bitwise the roots and vectors of the tree before any
-    rank split (`BASELINE_COMMIT`), unpacked into a temporary directory and
-    run in its own process with its W frequency axis moved onto rW, the range
-    its transform is fitted over;
-  * at 2 and 3 simulated ranks the roots lie within 1e-11 Ha of the serial
-    ones (the split reassociates the sums it reduces), and every rank returns
-    the same bits after the same number of cycles;
+  * at 2 and 3 simulated ranks the roots lie within the Davidson tolerance's
+    bar of the serial ones (`davidson_root_bar`; the split reassociates the
+    sums it reduces), and every rank returns the same bits after the same
+    number of cycles;
   * every rank reports its own block-action count and time, collected in
     `davidson_block_action_by_rank`;
   * the per-rank head work, read off the shapes of the GEMM the action runs,
@@ -39,15 +36,16 @@ points make the row blocks more than a handful of rows):
     separately for the gathered z X_v^T, the reduced tail and the kernel rows
     this rank builds;
   * the reassociated kernel rows agree with the serial association to 1e-13
-    relative, and the TDHF rows are bitwise the same either way.
+    relative, and the TDHF rows are the same either way to a few ulp.
+
+There is no comparison with an older tree: the serial-against-distributed
+gates hold the split itself, and a tolerance against a tree from before the
+Davidson and the GW layer moved on purpose would measure those changes.
 """
 import copy
 import os
-import subprocess
 import sys
-import tarfile
 import warnings
-from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -55,14 +53,17 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.utils.mpi_grid import (contiguous_block, run_simulated,
-                                     simulated_world)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated, simulated_world
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse import davidson
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_block_action,
-                                                         solve_bse_isdf)
+from src.SingleReference.LinearResponse import block_actions
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.SingleReference.LinearResponse.trial_space import ActionNotSymmetric
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same, bitwise, davidson_root_bar
 
 SIZES = [2, 3]
 NROOTS = 3
@@ -73,11 +74,13 @@ MOLECULES = {
                  'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321'),
 }
 #: Ha. The row split sums the ranks' partials in rank order instead of inside
-#: one GEMM, so a distributed root differs from the serial one in its last
-#: bits.
-ROOT_TOL = 1e-11
+#: one GEMM, so a distributed Davidson takes another path to roots certified
+#: only to its residual tolerance: the bar follows the tolerance the solves
+#: ask for (`davidson_root_bar`).
+CONV_TOL = Numerics().bse.conv_tol
+ROOT_TOL = davidson_root_bar(CONV_TOL)
 #: The perturbation one rank's slice carries, and the smallest root shift
-#: that counts as the answer having noticed it; both lie well above ROOT_TOL.
+#: that counts as the answer having noticed it.
 SLICE_SCALE = 1.0 + 1e-6
 MOVED = 1e-9
 #: Relative to max|Zt|. The distributed association of this rank's kernel rows
@@ -85,56 +88,6 @@ MOVED = 1e-9
 #: order, separated by double-precision rounding over an naux-long sum
 #: (1.5e-16 at water, 1.1e-15 at ethylene).
 REASSOCIATION_TOL = 1e-13
-
-REPO = Path(__file__).resolve().parents[1]
-#: A tree whose block action is not split over ranks, so the bitwise gate
-#: compares against code that cannot move a bit for the reason tested here.
-BASELINE_COMMIT = '3ae688706f409591b2304d9a7ef653122aa36be6'
-#: The archived probe's thread caps, so it does not size itself against the
-#: whole machine.
-THREAD_CAPS = {name: '2' for name in
-               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
-#: Built fresh in its own process against the unpacked tree, on the same two
-#: molecules the fixture below builds.
-SERIAL_PROBE = '''
-import sys
-import warnings
-
-sys.path.insert(0, {archive!r})
-
-import numpy as np
-from pyscf import gto, scf
-
-from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
-
-import src.SingleReference.GW.space_time as _archived_space_time
-from src.Base.utils.grids import minimax_frequency_grid as _minimax_frequency_grid
-from src.Base.utils.time_frequency import SELF_ENERGY_PAD as _PAD
-
-# the one change since the pinned commit: W's frequencies span rW, the range
-# its transform back to tau is fitted over, not the bare window
-_archived_space_time.minimax_frequency_grid = (
-    lambda n, e_min, e_max: _minimax_frequency_grid(n, _PAD[0] * e_min,
-                                                    _PAD[1] * e_max))
-
-warnings.simplefilter('ignore')
-out = {{}}
-for name, atom in {molecules!r}.items():
-    mol = gto.M(atom=atom, basis={basis!r}, verbose=0)
-    mf = scf.RHF(mol).density_fit(auxbasis={auxbasis!r})
-    mf.kernel()
-    nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis={auxbasis!r})
-    omega, X, Y, _ = solve_bse_isdf(mf, mol, nocc, nroots={nroots}, probe=False,
-                                    progress=False, factors=factors)
-    out[name + '_omega'] = np.asarray(omega)
-    out[name + '_X'] = np.asarray(X)
-    out[name + '_Y'] = np.asarray(Y)
-np.savez({out!r}, **out)
-'''
-
 
 class _MatmulLog(np.ndarray):
     """A trial vector that records the shapes of every matmul it enters.
@@ -193,7 +146,7 @@ def build(name):
     mf = scf.RHF(mol).density_fit(auxbasis=AUXBASIS)
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    factors = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(name=name, mol=mol, mf=mf, nocc=nocc, factors=factors,
                 W_aux=W_aux, npts=factors[0].shape[0],
@@ -208,57 +161,16 @@ def cases():
 
 @pytest.fixture(scope='module')
 def serial_roots(cases):
-    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank,
-    with the bare diagonal preconditioner (the only one the archived Davidson
-    has)."""
+    """The three lowest BSE@G0W0 roots of each molecule, this tree, one rank.
+
+    Divided by the bare d, asked for; the default is the screened diagonal."""
     out = {}
     for name, c in cases.items():
         omega, X, Y, _ = solve_bse_isdf(c['mf'], c['mol'], c['nocc'],
-                                        nroots=NROOTS, probe=False,
-                                        progress=False, factors=c['factors'],
-                                        preconditioner='bare')
+                                        numerics=Numerics(bse={'nroots': NROOTS, 'preconditioner': 'bare'}), probe=False,
+                                        progress=False, factors=c['factors'])
         out[name] = (omega, X, Y)
     return out
-
-
-@pytest.fixture(scope='session')
-def archive(tmp_path_factory):
-    """The block action before the split, unpacked into a temporary directory."""
-    out = tmp_path_factory.mktemp('block_action_baseline')
-    tar = out.parent / f'{BASELINE_COMMIT}.tar'
-    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
-                           '-o', str(tar), BASELINE_COMMIT],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    with tarfile.open(tar) as fh:
-        fh.extractall(out)
-    assert (out / 'src' / 'SingleReference' / 'LinearResponse'
-            / 'davidson.py').is_file()
-    return out
-
-
-@pytest.fixture(scope='session')
-def archived_roots(archive, tmp_path_factory):
-    """(omega, X, Y) per molecule from the pre-split code, its own process."""
-    tmp = tmp_path_factory.mktemp('block_action_reference')
-    script = tmp / 'probe.py'
-    npz = tmp / 'roots.npz'
-    script.write_text(SERIAL_PROBE.format(
-        archive=str(archive), molecules=MOLECULES, basis=BASIS,
-        auxbasis=AUXBASIS, nroots=NROOTS, out=str(npz)))
-    env = dict(os.environ, **THREAD_CAPS)
-    env.pop('PYTHONPATH', None)
-    proc = subprocess.run([sys.executable, str(script)], cwd=str(archive),
-                          capture_output=True, text=True, env=env)
-    assert proc.returncode == 0, proc.stderr
-    return dict(np.load(npz))
-
-
-def bitwise(a, b):
-    """True when two arrays agree bit for bit, shape and dtype included."""
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
 
 
 def rank_copy(c):
@@ -270,22 +182,11 @@ def rank_copy(c):
     return mf, tuple(np.array(a, copy=True) for a in c['factors'])
 
 
-@pytest.mark.parametrize('name', sorted(MOLECULES))
-def test_serial_roots_are_bitwise_the_archived_ones(name, serial_roots,
-                                                    archived_roots):
-    """With one rank owning every grid row, the roots and vectors are bitwise
-    the archived pre-split code's."""
-    omega, X, Y = serial_roots[name]
-    assert bitwise(archived_roots[name + '_omega'], omega)
-    assert bitwise(archived_roots[name + '_X'], X)
-    assert bitwise(archived_roots[name + '_Y'], Y)
-
-
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('name', sorted(MOLECULES))
 def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
                                                  size):
-    """The roots of the split action within ROOT_TOL of the serial ones (the
+    """The roots of the split action within `davidson_root_bar` of the serial ones (the
     reduced terms sum in rank order, so not bitwise), bitwise across the
     ranks after the same cycle count, and the per-rank block-action counters.
 
@@ -299,10 +200,10 @@ def test_distributed_roots_and_per_rank_counters(cases, serial_roots, name,
 
     def one_rank(comm):
         mf, factors = rank_copy(c)
-        om, X, Y, info = solve_bse_isdf(mf, c['mol'], c['nocc'], nroots=NROOTS,
+        om, X, Y, info = solve_bse_isdf(mf, c['mol'], c['nocc'], numerics=Numerics(bse={'nroots': NROOTS, 'preconditioner': 'bare'}),
                                         probe=False, progress=False,
                                         factors=factors, distribute=True,
-                                        comm=comm, preconditioner='bare')
+                                        comm=comm)
         return om, X, Y, info
 
     out = run_simulated(one_rank, size)
@@ -364,6 +265,12 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
     quasiparticle stage's own reductions out of the gate. The patch is
     asserted to have run, so the gate cannot pass on a collective the action
     does not make.
+
+    The two pieces differ in what the answer is. Scaling the gathered slice
+    of one rank makes the action non-symmetric, and the Davidson refuses such
+    an action (`ActionNotSymmetric`) instead of returning moved roots, so the
+    gathered piece is asserted to be refused. Scaling the reduced tail keeps
+    the projected action symmetric and must move the roots.
     """
     c = cases['water']
     target = size - 1
@@ -371,7 +278,7 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
 
     def one_rank(comm):
         mf, factors = rank_copy(c)
-        om, _, _, _ = solve_bse_isdf(mf, c['mol'], c['nocc'], nroots=NROOTS,
+        om, _, _, _ = solve_bse_isdf(mf, c['mol'], c['nocc'], numerics=Numerics(bse={'nroots': NROOTS}),
                                      probe=False, progress=False, qp=False,
                                      factors=factors, distribute=True,
                                      comm=comm)
@@ -379,8 +286,8 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
 
     clean = run_simulated(one_rank, size)[0]
 
-    real_gather = davidson.allgather_blocks
-    real_reduce = davidson.reduce_scatter_rows
+    real_gather = block_actions.allgather_blocks
+    real_reduce = block_actions.reduce_scatter_rows
     tail_shape = (c['npts'], c['nocc'])                 # in owner order
 
     def gather(a, comm):
@@ -398,8 +305,13 @@ def test_a_perturbed_rank_slice_moves_the_roots(cases, monkeypatch, size,
             fired.append(1)
         return real_reduce(a, comm, out=out)
 
-    monkeypatch.setattr(davidson, 'allgather_blocks', gather)
-    monkeypatch.setattr(davidson, 'reduce_scatter_rows', reduce)
+    monkeypatch.setattr(block_actions, 'allgather_blocks', gather)
+    monkeypatch.setattr(block_actions, 'reduce_scatter_rows', reduce)
+    if piece == 'gathered_zXv':
+        with pytest.raises(ActionNotSymmetric):
+            run_simulated(one_rank, size)
+        assert fired, f'the {piece} perturbation never ran'
+        return
     moved = run_simulated(one_rank, size)[0]
     assert fired, f'the {piece} perturbation never ran'
     assert np.abs(moved - clean).max() > MOVED
@@ -411,7 +323,8 @@ def test_reassociated_kernel_rows_match_the_serial_association(cases, name,
                                                                size):
     """This rank's rows of the screened kernel in the distributed association
     against the serial one: different bits (the inner product differs),
-    agreeing to REASSOCIATION_TOL; the TDHF rows are bitwise the same."""
+    agreeing to REASSOCIATION_TOL; the TDHF rows are the same to a few ulp
+    (the test forms the serial rows again)."""
     c = cases[name]
     D, W_aux, npts = c['factors'][1], c['W_aux'], c['npts']
     comms = simulated_world(size)
@@ -419,13 +332,14 @@ def test_reassociated_kernel_rows_match_the_serial_association(cases, name,
         r0, r1 = contiguous_block(npts, r, size)
         D_mine = D[r0:r1]
         serial = D_mine @ (W_aux @ D.T)
-        assert bitwise(davidson._screened_rows(D_mine, D, W_aux), serial)
-        rows = davidson._screened_rows(D_mine, D, W_aux, comms[r])
+        assert_same(block_actions._screened_rows(D_mine, D, W_aux), serial,
+                    quantity='root', label=(size, r, 'serial association'))
+        rows = block_actions._screened_rows(D_mine, D, W_aux, comms[r])
         assert not bitwise(rows, serial)        # the other order, and it fired
         assert (np.abs(rows - serial).max()
                 <= REASSOCIATION_TOL * np.abs(serial).max())
-        assert bitwise(davidson._screened_rows(D_mine, D, None, comms[r]),
-                       D_mine @ D.T)
+        assert_same(block_actions._screened_rows(D_mine, D, None, comms[r]),
+                    D_mine @ D.T, quantity='root', label=(size, r, 'TDHF'))
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -440,14 +354,14 @@ def test_a_perturbed_kernel_row_block_moves_the_roots(cases, monkeypatch,
 
     def one_rank(comm):
         mf, factors = rank_copy(c)
-        om, _, _, _ = solve_bse_isdf(mf, c['mol'], c['nocc'], nroots=NROOTS,
+        om, _, _, _ = solve_bse_isdf(mf, c['mol'], c['nocc'], numerics=Numerics(bse={'nroots': NROOTS}),
                                      probe=False, progress=False, qp=False,
                                      factors=factors, distribute=True,
                                      comm=comm)
         return om
 
     clean = run_simulated(one_rank, size)[0]
-    real_rows = davidson._screened_rows
+    real_rows = block_actions._screened_rows
 
     def rows(D_mine, D, W_aux, comm=None):
         if (W_aux is not None and comm is not None
@@ -456,7 +370,7 @@ def test_a_perturbed_kernel_row_block_moves_the_roots(cases, monkeypatch,
             return (SLICE_SCALE * (D_mine @ W_aux)) @ D.T
         return real_rows(D_mine, D, W_aux, comm)
 
-    monkeypatch.setattr(davidson, '_screened_rows', rows)
+    monkeypatch.setattr(block_actions, '_screened_rows', rows)
     moved = run_simulated(one_rank, size)[0]
     assert fired, 'the kernel-row perturbation never ran'
     assert np.abs(moved - clean).max() > MOVED

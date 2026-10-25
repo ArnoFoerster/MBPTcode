@@ -20,7 +20,7 @@ Exact through third order, like ADC(3) and Faddeev-ADC(3); from fourth order
 on it lacks Faddeev's sequences of different pairs (and treats the spectator
 as distinguishable in the eh channel), which is what the comparison isolates.
 
-The eh phonons are those of adc_r_faddeev._eh_channel (route 'phonon'), so
+The eh phonons are those of adc_r_faddeev.eh_channel (route 'phonon'), so
 the channel treatments 'rpa', 'first_order' and 'off' carry over; Sigma(2) is
 ADC.second_order. There is no Hermitian upfolded form
 (-2 Sigma(2) has negative residues), so quasiparticles come from the
@@ -33,17 +33,20 @@ Faddeev operator with only that pair on, or in closed form (pp_term='poles'):
 that operator is block-diagonal in the spectator, so one pair
 diagonalization per spin gives all its poles and residues.
 """
+
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.numerical_flags import flag
 from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC.second_order import sigma2_poles
-from src.SingleReference.ADC.solve import _LanczosState, _lanczos_extend
+from src.SingleReference.ADC.solve import ADCNotConverged, LanczosState, lanczos_extend
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.pp_rpa import (
     build_pprpa_matrices_restricted, pair_indices, singlet_pair_indices)
 from src.SingleReference.LinearResponse.riccati import channel_corrections_from_amplitudes
+from src.Solvers.qp_equation import solve_qp_equation_scan
 
 LANCZOS_BLOCK = 20          # steps added per extension of a resolvent Lanczos
 LANCZOS_MAX_STEPS = 2000
@@ -57,18 +60,21 @@ class _Resolvent:
     ONE Lanczos run started at u (Gauss quadrature of the spectral measure):
     Sigma(w) = |u|^2 sum_j S_0j^2 / (w - theta_j) with (theta, S) the Ritz
     pairs of the tridiagonal. Extended in blocks until Sigma(w) at the w asked
-    for stops changing. The recurrence is solve._lanczos_extend without
+    for stops changing. The recurrence is solve.lanczos_extend without
     reorthogonalization or stored vectors: loss of orthogonality only
-    duplicates converged Ritz values, which the quadrature tolerates."""
+    duplicates converged Ritz values, which the quadrature tolerates. A
+    Sigma(w) not settled in LANCZOS_MAX_STEPS warns (ADCNotConverged), the
+    last value is used and `settled` turns False."""
 
     def __init__(self, matvec, u):
         self.matvec = matvec
         self.norm2 = float(u @ u)
-        self.state = _LanczosState(u, keep_vectors=False)
+        self.state = LanczosState(u, keep_vectors=False)
         self._ritz_cache = {}
+        self.settled = True
 
     def _extend(self, nsteps):
-        _lanczos_extend(self.matvec, self.state, nsteps, reorth=False)
+        lanczos_extend(self.matvec, self.state, nsteps, reorth=False)
 
     def _ritz(self, n):
         """(theta, weights) of the n-step tridiagonal, kept per n: a root scan
@@ -108,8 +114,11 @@ class _Resolvent:
             if abs(s1 - s0) < SIGMA_CF_TOL:
                 return s1, d1
             if n >= LANCZOS_MAX_STEPS:
-                raise RuntimeError(f"_Resolvent: Sigma({w}) not settled in "
-                                   f"{n} Lanczos steps (last change {abs(s1 - s0):.2e})")
+                flag('flex_resolvent_not_settled', f"FLEX resolvent: Sigma({w}) not settled in {n} Lanczos "
+                              f"steps (last change {abs(s1 - s0):.2e}); the last value "
+                              f"is used (converged=False)", ADCNotConverged, stacklevel=3)
+                self.settled = False
+                return s1, d1
             self._extend(LANCZOS_BLOCK)
 
 
@@ -228,11 +237,11 @@ class FlexSelfEnergy:
             for treat in dict.fromkeys(eh_triplets):
                 self.eh[('triplet', treat)] = (
                     ccd['eh']['triplet'] if treat == 'rpa' else
-                    FR._eh_channel(eps, O, 'triplet', B, None, 'phonon', treat))
+                    FR.eh_channel(eps, O, 'triplet', B, None, 'phonon', treat))
             self._pp_channels = None
             if ladders:
                 self._pp_channels = {
-                    'eh': {spin: FR._eh_channel(eps, O, spin, B, None, 'riccati', 'off')
+                    'eh': {spin: FR.eh_channel(eps, O, spin, B, None, 'riccati', 'off')
                            for spin in ('singlet', 'triplet')},
                     'pp': ccd['pp'], 'hh': ccd['hh']}
             return
@@ -251,7 +260,7 @@ class FlexSelfEnergy:
                       'dN': np.zeros((n, n)), 'omega': omega, 'X': X,
                       'Y': np.zeros((n, n))}
             else:
-                ch = FR._eh_channel(eps, O, spin, B, None, 'phonon', treat)
+                ch = FR.eh_channel(eps, O, spin, B, None, 'phonon', treat)
             self.eh[(spin, treat)] = ch
         self._pp_channels = None
         if not ladders:
@@ -263,14 +272,14 @@ class FlexSelfEnergy:
             for key in ('pp', 'hh'):
                 for spin in ('singlet', 'triplet'):
                     base[key][spin]['T'] = np.zeros_like(base[key][spin]['T'])
-            base['eh']['triplet'] = FR._eh_channel(eps, O, 'triplet', B, None,
+            base['eh']['triplet'] = FR.eh_channel(eps, O, 'triplet', B, None,
                                                    'riccati', 'off')
         else:
             pp, hh = FR.ladder_channels(eps, O, B, None)
-            base = {'eh': {'triplet': FR._eh_channel(eps, O, 'triplet', B, None,
+            base = {'eh': {'triplet': FR.eh_channel(eps, O, 'triplet', B, None,
                                                      'riccati', 'off')},
                     'pp': pp, 'hh': hh}
-        base['eh']['singlet'] = FR._eh_channel(eps, O, 'singlet', B, None,
+        base['eh']['singlet'] = FR.eh_channel(eps, O, 'singlet', B, None,
                                                'riccati', 'off')
         self._pp_channels = base
 
@@ -349,7 +358,7 @@ class FlexSelfEnergy:
             if self._pp_channels is None:
                 raise ValueError("built with ladders=False: no pp/hh ladder channels")
             if self._pp_phonons is None:
-                self._pp_pieces = FR._Pieces(self.s, self.nocc, None, 'riccati',
+                self._pp_pieces = FR.Pieces(self.s, self.nocc, None, 'riccati',
                                              self._pp_channels)
                 self._pp_phonons = ladder_pair_phonons(
                     self.eps, self.nocc, self._pp_channels['pp']['t'], self.B)
@@ -385,44 +394,33 @@ class FlexSelfEnergy:
         s2, ds2 = self._sigma2(p, w)
         return se + sp - 2 * s2, dse + dsp - 2 * ds2
 
-    def sigma_poles(self, p, which='flex', eh_triplet='rpa'):
-        """(residues, poles) of Sigma_pp, for scanning the QP equation for all
-        its roots: exact for the eh and Sigma(2) terms, and for the operator
-        term (pp pair, or the full Faddeev operator) the Ritz representation of
-        its Lanczos run as far as it has been extended, i.e. converged at the
-        energies evaluated so far (start one at the HF eigenvalue first)."""
-        if which == 'flex':
-            key = 'pp'
-            re, pe = self.eh_poles(p, eh_triplet)
-            r2, p2 = self.sigma2_poles(p)
-            if self.pp_term == 'poles':
-                wt, th = self.ladder_poles(p)
-                return np.concatenate([re, wt, -2 * r2]), np.concatenate([pe, th, p2])
-        else:
-            key = ('faddeev', eh_triplet)
-        self.sigma_operator(key, p, self.eps[p])
-        th, wt = self._resolvents[(key, p)].ritz()
-        if which == 'flex':
-            return np.concatenate([re, wt, -2 * r2]), np.concatenate([pe, th, p2])
-        return wt, th
-
     def solve_qp(self, p, which='flex', static=0.0, eh_triplet='rpa',
                  tol=QP_NEWTON_TOL, max_iter=QP_NEWTON_MAX_ITER, w0=None):
-        """Diagonal QP w = eps_p + static + Sigma_pp(w) by Newton, from w0
-        (default eps_p + static); which='flex' or 'faddeev'. Returns
-        {'e', 'Z', 'converged', 'niter'}."""
+        """Diagonal QP w = eps_p + static + Sigma_pp(w) by the one root finder
+        of `Solvers.qp_equation`: bracketed about eps_p + static, refined on
+        the closed-form slope, the largest Z kept; with w0, the root that
+        follows it. which='flex' or 'faddeev'. Returns {'e', 'Z',
+        'converged', 'niter'}, niter the self-energy evaluations; converged is
+        False when no root was found or a Lanczos resolvent of orbital p did
+        not settle."""
         if which == 'flex':
             sig = lambda q, x: self.sigma_flex(q, x, eh_triplet)
         else:
             sig = lambda q, x: self.sigma_operator(('faddeev', eh_triplet), q, x)
-        w = self.eps[p] + static if w0 is None else w0
-        for it in range(1, max_iter + 1):
-            s, ds = sig(p, w)
-            f = w - self.eps[p] - static - s
-            step = f / (1.0 - ds)
-            w -= step
-            if abs(step) < tol:
-                s, ds = sig(p, w)
-                return {'e': w, 'Z': 1.0 / (1.0 - ds), 'converged': True,
-                        'niter': it}
-        return {'e': w, 'Z': 1.0 / (1.0 - ds), 'converged': False, 'niter': max_iter}
+        calls = [0]
+
+        def residual(w):
+            calls[0] += 1
+            return w - self.eps[p] - static - sig(p, w)[0]
+
+        def fprime(w):
+            return 1.0 - sig(p, w)[1]
+
+        # No root in the widest scan is (NaN, NaN) with a QPNoRoot warning.
+        w, z = solve_qp_equation_scan(residual, fprime,
+                                      float(self.eps[p] + static),
+                                      follow=w0, tol=tol, max_iter=max_iter,
+                                      label=f'FLEX orbital {p}')
+        settled = all(r.settled for (_, q), r in self._resolvents.items() if q == p)
+        return {'e': w, 'Z': z, 'converged': bool(np.isfinite(w)) and settled,
+                'niter': calls[0]}

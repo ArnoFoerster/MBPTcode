@@ -9,7 +9,8 @@ energies within |g| / gap ~ 1e-8 Ha, gated at 1e-7), in fewer cycles.
 The record is read off pyscf's own `callback`, which sees every cycle's
 locals and is called after the cycle's arithmetic, so attaching it moves no
 number: the mean field converged with it is the one converged without it,
-bit for bit (two runs of one serial SCF on one machine repeat their bits).
+to a few ulp (`assert_same` of tests/pins.py: two SCF runs are two
+computations, so the gate is not bitwise).
 Under ranks every rank runs pyscf's loop and every rank's history holds the
 same cycles; the converged arrays are rank 0's (`distributed_mean_field`).
 """
@@ -23,13 +24,14 @@ from pyscf import dft, gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import SCF_HISTORY_GRAD_MARKS  # noqa: E402
-from src.Base.distributed_df import distributed_mean_field  # noqa: E402
-from src.Base.isdf_jk import isdf_jk  # noqa: E402
-from src.Base.scf_convergence import (SCFHistory, WarmStart, newton_finished,  # noqa: E402
-                                      scf_record, warm_started)
-from src.Base.separable_ri import resolve_isdf_grid  # noqa: E402
-from src.Base.utils.mpi_grid import run_simulated  # noqa: E402
+from src.Base.numerics.constants import SCF_HISTORY_GRAD_MARKS  # noqa: E402
+from src.Base.factorization.distributed_df import distributed_mean_field  # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.pyscf.scf_convergence import (SCFHistory, WarmStart, newton_finished,  # noqa: E402
+                                            scf_record, warm_started)
+from src.Base.factorization.separable_ri import resolve_isdf_grid  # noqa: E402
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from tests.pins import assert_same  # noqa: E402
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4615'
 
@@ -47,16 +49,18 @@ def built(mol, conv_tol=1e-12, conv_tol_grad=1e-9):
 
 
 def test_history_moves_no_number():
-    """With and without the callback: the same energy and orbitals bit for
-    bit, a history of exactly pyscf's cycles, ending below conv_tol_grad."""
+    """With and without the callback: the same energy and orbitals (two SCF
+    runs, so to a few ulp, not bitwise), a history of exactly pyscf's
+    cycles, ending below conv_tol_grad."""
     plain = built(water())
     plain.kernel()
     watched = built(water())
     history = SCFHistory()
     history.attach(watched)
     watched.kernel()
-    assert watched.e_tot == plain.e_tot
-    assert np.array_equal(watched.mo_coeff, plain.mo_coeff)
+    assert_same(watched.e_tot, plain.e_tot, label='e_tot')
+    assert_same(watched.mo_coeff, plain.mo_coeff, unit='1', quantity='vector',
+                label='mo_coeff')
     (run,) = history.summary()
     assert run['cycles'] == watched.cycles == plain.cycles
     assert run['converged'] is True
@@ -96,14 +100,15 @@ def test_warm_start_is_the_same_mean_field_in_fewer_cycles():
     geometry lands on the cold start's mean field within the convergence it
     was run to (1e-10 Ha, orbital energies 1e-7 Ha at conv_tol_grad 1e-9)
     and takes fewer cycles; a holder that has seen no SCF leaves the guess
-    to pyscf, bit for bit."""
+    to pyscf, to a few ulp (two SCF runs)."""
     holder = WarmStart()
     first = warm_started(built(water()), holder)
     first.kernel()
     reference = built(water())
     reference.kernel()
     # nothing held yet: pyscf's own guess, and so pyscf's own run
-    assert first.e_tot == reference.e_tot and holder.declined == 1
+    assert_same(first.e_tot, reference.e_tot, label='no warm start')
+    assert holder.declined == 1
     warm = warm_started(built(displaced()), holder)
     warm.kernel()
     cold = built(displaced())
@@ -160,7 +165,7 @@ def isdf_water(xc):
     counts, n_start = resolve_isdf_grid('G1', 'cc-pvdz', ['H', 'O'],
                                         auxbasis='cc-pvdz-ri')
     mf = (scf.RHF(mol) if xc == 'hf' else dft.RKS(mol, xc=xc))
-    return isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=counts, n_start=n_start)
+    return isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=counts, n_start=n_start)
 
 
 def density_fitted(xc):

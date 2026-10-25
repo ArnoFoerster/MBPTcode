@@ -39,7 +39,28 @@ per tile from I_kc,ld = (kc|ld):
     singlet  K = 2 (ia|kc) - (ic|ka),   T = [2 (ia|kc) - (ic|ka)] / D
     triplet  K =           - (ic|ka),   T =           - (ic|ka)  / D
 
-with x_oo, x_vv the occupied/virtual MP2 density-like contractions. Per
+with x_oo, x_vv the occupied/virtual MP2 density-like contractions.
+
+Spin-component scaling (SCS/SOS-ADC(2), Hellweg, Gruen and Haettig, Phys.
+Chem. Chem. Phys. 10, 4119 (2008)) weights every doubles configuration by its
+spin class, c_os for an opposite-spin pair and c_ss for a same-spin pair, in
+both places doubles enter: the MP1 amplitudes of M2 and the folded coupling.
+With tau = (kc|ld) / D the opposite-spin and t_ss = tau - tau~ the same-spin
+amplitude of a closed shell,
+
+    singlet  T = c_os tau + c_ss (tau - tau~)      (x_oo, x_vv, K T + T K)
+    triplet  T = c_ss (tau - tau~) - c_os tau      (K T + T K; x_oo, x_vv as
+                                                   the singlet's)
+    singlet  R = w [c_os G + c_ss (G - G~)],
+             |Y|^2 = sum w^2 [c_os G^2 / 2 + c_ss (G - G~)^2 / 4]
+    triplet  R = w [c_os (H - H^T) + c_ss (S - S~)],
+             |Y|^2 = sum w^2 [c_os (H - H^T)^2 / 2 + c_ss (S - S~)^2 / 4]
+
+c_os = c_ss = 1 is ADC(2). Scaling the coupling on one side, as SCS-CC2's
+Jacobian does, has the eigenvalues of the symmetric problem with the couplings
+scaled by sqrt(c), whose doubles weight is the scaled |Y|^2 above.
+
+Per
 matrix-vector product the cost is four GEMMs of shape
 (n_tile nvir) x naux x (nocc nvir) per tile, O(nocc^2 nvir^2 naux) in all, and
 the memory a few (n_tile nvir, nocc nvir) blocks plus the factors.
@@ -60,7 +81,7 @@ interaction on the solvated orbitals: correlation inside a frozen reaction
 field, the PTE convention of PCM-ADC (Lunkenheimer and Koehn, J. Chem. Theory
 Comput. 9, 977 (2013); Mewes et al., J. Phys. Chem. A 119, 5446 (2015)).
 At ADC(1) this is pyscf's TDA in PCM with a non-equilibrium (optical)
-response, which the tests check to rounding. The other half of the response
+response. The other half of the response
 to the excitation, the reaction field of the state's difference density, is
 added after the solve when asked for (ee_ri_density, ee_state_specific).
 """
@@ -68,16 +89,18 @@ import numpy as np
 from pyscf import df as pyscf_df
 from pyscf import lib
 
-from src.Base.constants import (EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
-                                 EE_RI_EXCHANGE_CHUNK, EE_RI_FOLD_DIAG_EXPONENT,
-                                 EE_RI_FOLD_DIAG_GAP,
-                                 EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
-                                 EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
-                                 EE_RI_TILE_GB)
-from src.Base.utils.mpi_grid import (NodeShared, allgather_ranges, current_comm,
-                                     exchange_blocks, ordered_chain_sum, ordered_sum,
-                                     reduce_sum)
-from src.Base.utils.threads import openmp_threads, row_map
+from src.Base.numerics.constants import (BYTES_PER_GB, EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
+                                         EE_RI_EXCHANGE_ARRAYS, EE_RI_EXCHANGE_CHUNK,
+                                         EE_RI_FOLD_DIAG_EXPONENT, EE_RI_FOLD_DIAG_GAP,
+                                         EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
+                                         EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
+                                         EE_RI_FOLD_TILE_ARRAYS, EE_RI_TILE_GB)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import tile_width
+from src.Base.utils.parallel.mpi_grid import (NodeShared, allgather_ranges, current_comm,
+                                              exchange_blocks, ordered_chain_sum, ordered_sum,
+                                              reduce_sum)
+from src.Base.utils.parallel.threads import openmp_threads, row_map
 
 try:
     import cupy as cp
@@ -160,8 +183,9 @@ def aux_chunks(naux, nv, size, width=None):
     sum over chunks in chunk order (ordered_chain_sum) has the one-rank bits
     at every rank count. That covers the B_vv sums; the occupied tiles keep
     their bits across rank counts only at one tile size (RIFoldADC2's kt)."""
-    step = width or max(1, min(EE_RI_EXCHANGE_CHUNK, int(
-        EE_RI_TILE_GB * 1024 ** 3 / (8.0 * 3 * nv * nv))))
+    step = width or tile_width(8.0 * EE_RI_EXCHANGE_ARRAYS * nv * nv,
+                               EE_RI_EXCHANGE_CHUNK,
+                               Numerics(layout={'tile_gb': EE_RI_TILE_GB}))
     chunks = [(p0, min(p0 + step, naux)) for p0 in range(0, naux, step)]
     return chunks, [c * size // len(chunks) for c in range(len(chunks))]
 
@@ -285,7 +309,8 @@ class _DoublesGPU:
     """The doubles kernel of an RIFoldADC2 on this rank's GPU (CuPy, FP64): the
     factor L auxiliary-major and the orbital energies resident; per tile the
     pair GEMMs H = Bt L^T and H^T = L Bt^T, one fused pass forming
-    Gt = 2 S - S~ (singlet, S = H + H^T) or 2 H - S~ (triplet), one fused pass
+    Gt = 2 S - S~ (singlet, S = H + H^T) or 2 H - S~ (triplet), spin-component
+    scaled where the operator is (module docstring), one fused pass
     scaling it by (w - D)^-1 with D_kcld = e_c + e_d - e_k - e_l formed on
     the fly, the Gam GEMM and the B_oo half of the back-transformation. Gam
     goes back to the host, where the B_vv half is formed by the chunks' owners.
@@ -300,7 +325,9 @@ class _DoublesGPU:
         const long long k = q / nv;
         const long long x = ((k * nv + d) * no + l) * nv + c;   // (k, d, l, c)
         const double sx = H[x] + HT[x];
-        G = singlet ? 2.0 * (H[i] + HT[i]) - sx : 2.0 * H[i] - sx;
+        if (!scaled) { G = singlet ? 2.0 * (H[i] + HT[i]) - sx : 2.0 * H[i] - sx; }
+        else if (singlet) { G = (c_os + c_ss) * (H[i] + HT[i]) - c_ss * sx; }
+        else { G = c_os * (H[i] - HT[i]) + c_ss * (H[i] + HT[i] - sx); }
     """
     _R = r"""
         long long q = i; const long long d = q % nv; q /= nv;
@@ -326,13 +353,19 @@ class _DoublesGPU:
         const long long x = ((k * nv + d) * no + l) * nv + c;
         const double y = 1.0 / (w - (ev[c] + ev[d] - eo[k0 + k] - eo[l]));
         const double s = H[i] + HT[i], sx = H[x] + HT[x];
-        if (singlet) { N = y * y * s * (s - 0.5 * sx); }
+        if (scaled && singlet) {
+            N = y * y * (0.5 * c_os * s * s + 0.25 * c_ss * (s - sx) * (s - sx)); }
+        else if (scaled) { const double a = H[i] - HT[i], b = s - sx;
+            N = y * y * (0.5 * c_os * a * a + 0.25 * c_ss * b * b); }
+        else if (singlet) { N = y * y * s * (s - 0.5 * sx); }
         else { const double a = H[i] - HT[i], b = s - sx;
                N = y * y * (0.5 * a * a + 0.25 * b * b); }
     """
     # overlap summand of the images of columns r at wr and s at ws,
     # y = 1 / ((wr - D)(ws - D)): singlet y S_r (S_s - S~_s/2), triplet
-    # y [(H_r - H^T_r)(H_s - H^T_s) / 2 + (S_r - S~_r)(S_s - S~_s) / 4]
+    # y [(H_r - H^T_r)(H_s - H^T_s) / 2 + (S_r - S~_r)(S_s - S~_s) / 4];
+    # scaled, _N's weights: singlet y [c_os S_r S_s / 2
+    # + c_ss (S_r - S~_r)(S_s - S~_s) / 4], triplet c_os and c_ss on the two terms
     _O = r"""
         long long q = i; const long long d = q % nv; q /= nv;
         const long long l = q % no; q /= no; const long long c = q % nv;
@@ -342,7 +375,12 @@ class _DoublesGPU:
         const double y = 1.0 / ((wr - D) * (ws - D));
         const double sr = Hr[i] + HTr[i], ss = Hs[i] + HTs[i];
         const double sxs = Hs[x] + HTs[x];
-        if (singlet) { O = y * sr * (ss - 0.5 * sxs); }
+        if (scaled && singlet) { const double sxr = Hr[x] + HTr[x];
+            O = y * (0.5 * c_os * sr * ss + 0.25 * c_ss * (sr - sxr) * (ss - sxs)); }
+        else if (scaled) { const double sxr = Hr[x] + HTr[x];
+            O = y * (0.5 * c_os * (Hr[i] - HTr[i]) * (Hs[i] - HTs[i])
+                     + 0.25 * c_ss * (sr - sxr) * (ss - sxs)); }
+        else if (singlet) { O = y * sr * (ss - 0.5 * sxs); }
         else { const double sxr = Hr[x] + HTr[x];
                O = y * (0.5 * (Hr[i] - HTr[i]) * (Hs[i] - HTs[i])
                         + 0.25 * (sr - sxr) * (ss - sxs)); }
@@ -358,8 +396,12 @@ class _DoublesGPU:
         self.Boo = cp.asarray(np.ascontiguousarray(f.Boo))          # (no, no, naux)
         self.eo, self.ev = cp.asarray(f.eo), cp.asarray(f.ev)
         self.singlet = op.spin == 'singlet'
+        # spin-component scaling: (scaled, c_os, c_ss); unscaled keeps ADC(2)'s
+        # own arithmetic
+        self.scs = ((False, 1.0, 1.0) if op.scs is None else (True,) + op.scs)
         self.k_gt = cp.ElementwiseKernel(
-            'raw float64 H, raw float64 HT, int64 nv, int64 no, bool singlet',
+            'raw float64 H, raw float64 HT, int64 nv, int64 no, bool singlet, '
+            'bool scaled, float64 c_os, float64 c_ss',
             'float64 G', self._GT, 'ee_fold_gt')
         self.k_r = cp.ElementwiseKernel(
             'raw float64 G, raw float64 eo, raw float64 ev, int64 k0, int64 nv, '
@@ -369,12 +411,14 @@ class _DoublesGPU:
             'int64 no, float64 w', 'float64 R', self._R2, 'ee_fold_r2')
         self.k_n = cp.ElementwiseKernel(
             'raw float64 H, raw float64 HT, raw float64 eo, raw float64 ev, '
-            'int64 k0, int64 nv, int64 no, float64 w, bool singlet', 'float64 N',
+            'int64 k0, int64 nv, int64 no, float64 w, bool singlet, '
+            'bool scaled, float64 c_os, float64 c_ss', 'float64 N',
             self._N, 'ee_fold_n')
         self.k_o = cp.ElementwiseKernel(
             'raw float64 Hr, raw float64 HTr, raw float64 Hs, raw float64 HTs, '
             'raw float64 eo, raw float64 ev, int64 k0, int64 nv, int64 no, '
-            'float64 wr, float64 ws, bool singlet', 'float64 O', self._O, 'ee_fold_o')
+            'float64 wr, float64 ws, bool singlet, bool scaled, float64 c_os, '
+            'float64 c_ss', 'float64 O', self._O, 'ee_fold_o')
 
     def upload(self, BtT):
         """The dressed factor of one column, (naux, no nv), on the device."""
@@ -400,7 +444,7 @@ class _DoublesGPU:
         nv, no = self.nv, self.no
         H, HT = self._pair(Btg, k0, k1)
         G = cp.empty_like(H)
-        self.k_gt(H, HT, nv, no, self.singlet, G)
+        self.k_gt(H, HT, nv, no, self.singlet, *self.scs, G)
         del H, HT
         R = cp.empty_like(G)
         gams = np.empty((len(nodes), (k1 - k0) * nv, self.naux))
@@ -418,10 +462,11 @@ class _DoublesGPU:
         nv, no = self.nv, self.no
         H, HT = self._pair(Btg, k0, k1)
         N = cp.empty_like(H)
-        self.k_n(H, HT, self.eo, self.ev, k0, nv, no, float(omega), self.singlet, N)
+        self.k_n(H, HT, self.eo, self.ev, k0, nv, no, float(omega), self.singlet,
+                 *self.scs, N)
         nrm = float(N.sum())
         G = N                                                       # reused
-        self.k_gt(H, HT, nv, no, self.singlet, G)
+        self.k_gt(H, HT, nv, no, self.singlet, *self.scs, G)
         del H, HT
         R = cp.empty_like(G)
         self.k_r(G, self.eo, self.ev, k0, nv, no, float(omega), R)
@@ -436,8 +481,38 @@ class _DoublesGPU:
         Hs, HTs = (Hr, HTr) if Bgs is Bgr else self._pair(Bgs, k0, k1)
         O = cp.empty_like(Hr)
         self.k_o(Hr, HTr, Hs, HTs, self.eo, self.ev, k0, nv, no, float(wr),
-                 float(ws), self.singlet, O)
+                 float(ws), self.singlet, *self.scs, O)
         return float(O.sum())
+
+
+class SpinScaling:
+    """The (c_os, c_ss) weights of the doubles of spin-component scaled ADC(2),
+    (1, 1) for ADC(2) itself. G is a pair tensor (k, c, l, d) and Gx its
+    exchange partner G_kdlc; on the triplet A = H - H^T and S = H + H^T - S~
+    of the doubles' pair tensor H."""
+
+    def __init__(self, scaling):
+        self.cos, self.css = (1.0, 1.0) if scaling is None else scaling
+
+    def singlet(self, G, Gx):
+        """(c_os + c_ss) G - c_ss Gx: the singlet amplitude's numerator."""
+        return (self.cos + self.css) * G - self.css * Gx
+
+    def triplet(self, G, Gx):
+        """(c_ss - c_os) G - c_ss Gx: the triplet amplitude's numerator."""
+        return (self.css - self.cos) * G - self.css * Gx
+
+    def triplet_image(self, A, S):
+        """c_os A + c_ss S: the triplet folded image's numerator."""
+        return self.cos * A + self.css * S
+
+    def singlet_overlap(self, gr, xr, gs, xs):
+        """The singlet summand of sum_K Y_K Y'_K over w w'."""
+        return 0.5 * self.cos * gr * gs + 0.25 * self.css * (gr - xr) * (gs - xs)
+
+    def triplet_overlap(self, ar, sr, as_, ss):
+        """The triplet summand of sum_K Y_K Y'_K over w w'."""
+        return 0.5 * self.cos * ar * as_ + 0.25 * self.css * sr * ss
 
 
 class RIFoldADC2:
@@ -450,7 +525,8 @@ class RIFoldADC2:
     process's OpenMP count); aux_chunk the width of the auxiliary chunks
     (default: aux_chunks' rule), which split factors were built with; device
     'gpu' runs the doubles kernel on this rank's GPU (_DoublesGPU), 'cpu' on
-    the host.
+    the host. scaling: None (ADC(2)) or the spin-component factors
+    (c_os, c_ss) of SCS/SOS-ADC(2) (module docstring).
 
     Over MPI ranks (comm, default the current one) the occupied tiles are
     dealt round-robin and every tile's contribution is summed in tile order
@@ -464,7 +540,7 @@ class RIFoldADC2:
 
     def __init__(self, factors, spin, level='adc2', reaction_field=None,
                  tile_gb=EE_RI_TILE_GB, threads=None, comm=None, aux_chunk=None,
-                 device='cpu'):
+                 device='cpu', scaling=None):
         if spin not in SPINS:
             raise ValueError(f'spin={spin!r}; the folded route solves one '
                              f'channel, one of {SPINS}')
@@ -472,7 +548,12 @@ class RIFoldADC2:
             raise ValueError(f'level={level!r}; expected one of {LEVELS}')
         if device not in DEVICES:
             raise ValueError(f'device={device!r}; expected one of {DEVICES}')
+        if scaling is not None and (len(scaling) != 2 or min(scaling) < 0):
+            raise ValueError(f'scaling={scaling!r}; expected (c_os, c_ss) >= 0')
         self.f, self.spin, self.level = factors, spin, level
+        # (c_os, c_ss), or None for ADC(2); the CPU arithmetic is weights'
+        self.scs = None if scaling is None else tuple(float(c) for c in scaling)
+        self.weights = SpinScaling(self.scs)
         self.rf = reaction_field
         self.threads = int(threads or openmp_threads())
         self.tile_gb = tile_gb
@@ -493,8 +574,8 @@ class RIFoldADC2:
                       (self.comm.Get_rank(), self.comm.Get_size()))
         # occupied orbitals per tile: what tile_gb allows, and no more than
         # gives every rank a tile
-        per_k = 8.0 * nv * no * nv * 5
-        self.kt = int(max(1, min(-(-no // size), tile_gb * 1024 ** 3 // per_k)))
+        per_k = 8.0 * nv * no * nv * EE_RI_FOLD_TILE_ARRAYS
+        self.kt = tile_width(per_k, -(-no // size), Numerics(layout={'tile_gb': tile_gb}))
         self.tiles = [(k0, min(k0 + self.kt, no)) for k0 in range(0, no, self.kt)]
         # (tile index, (k0, k1)) of this rank's tiles
         self.my_tiles = [(t, self.tiles[t])
@@ -543,6 +624,30 @@ class RIFoldADC2:
     # ---- one-time pieces --------------------------------------------------
 
     def _setup(self):
+        """The diagonal of the singles block, and at adc2 the MP1 amplitude pass:
+        e_mp2, the x_oo and x_vv intermediates and the second-order diagonal."""
+        no, nv = self.no, self.nv
+        diag = self._first_order_diagonal()
+        self.x_oo = np.zeros((no, no))
+        self.x_vv = np.zeros((nv, nv))
+        if self.level == 'adc1':
+            self.diag = diag
+            return
+        tot = self._amplitude_pass()
+        self.e_mp2 = float(tot[0])
+        xdiag = tot[1:1 + no * nv].reshape(no, nv)
+        self.x_oo = tot[1 + no * nv:1 + no * nv + no * no].reshape(no, no)
+        self.x_vv = tot[1 + no * nv + no * no:].reshape(nv, nv)
+        self.xo = self.x_oo + self.x_oo.T
+        self.xv = self.x_vv + self.x_vv.T
+        diag = (diag + (np.diag(self.xo)[:, None] + np.diag(self.xv)[None, :]).ravel()
+                - xdiag.ravel())
+        self.diag = diag
+        self._fold_diag_setup()
+
+    def _first_order_diagonal(self):
+        """The orbital-energy differences plus the first-order (and reaction
+        field) diagonal of the singles block, (no nv,)."""
         f, no, nv = self.f, self.no, self.nv
         coul = np.einsum('pP,pP->p', f.L, f.L, optimize=True)        # (ia|ia)
         # (ii|aa) = sum_P B_iiP B_aaP, summed over the auxiliary chunks in order
@@ -556,11 +661,14 @@ class RIFoldADC2:
         diag = self.delta + first
         if self.rf is not None and self.spin == 'singlet':
             diag = diag + 2.0 * self.rf.diagonal()
-        self.x_oo = np.zeros((no, no))
-        self.x_vv = np.zeros((nv, nv))
-        if self.level == 'adc1':
-            self.diag = diag
-            return
+        return diag
+
+    def _amplitude_pass(self):
+        """One pass over this rank's occupied tiles, summed in tile order:
+        [e_mp2, the x diagonal, x_oo, x_vv] packed, the spin channel's MP1
+        amplitudes of each tile kept for M's products while they fit
+        EE_RI_AMPLITUDE_CACHE_GB on this rank."""
+        no, nv = self.no, self.nv
         singlet = self.spin == 'singlet'
         parts = []
         # the spin channel's MP1 amplitudes of each tile, kept for M's
@@ -574,11 +682,12 @@ class RIFoldADC2:
                 A = I[k, c0:c1]
                 Ax = I[k, :, :, c0:c1].transpose(2, 1, 0)
                 D = self._denom(k0 + k, c0, c1)
-                N = 2.0 * A - Ax
-                t = N / D
+                # scaled amplitudes; K (2 A - Ax, -Ax) stays bare
+                t = self.weights.singlet(A, Ax) / D
                 tau[k, c0:c1] = t
                 e = -float(np.sum(A * t))
-                xd = (N * t).sum(0) if singlet else (Ax * Ax / D).sum(0)
+                xd = ((2.0 * A - Ax) * t).sum(0) if singlet else (
+                    -Ax * self.weights.triplet(A, Ax) / D).sum(0)
                 return e, xd
 
             # one addend per tile, packed [e_mp2, x diag, x_oo, x_vv]
@@ -596,25 +705,15 @@ class RIFoldADC2:
             xv_t = np.zeros((nv, nv))
             for k in range(kt):
                 xv_t += 0.5 * (I[k].reshape(nv, -1) @ tau[k].reshape(nv, -1).T)
-            if kept + tau.nbytes / 1024 ** 3 <= EE_RI_AMPLITUDE_CACHE_GB:
+            if kept + tau.nbytes / BYTES_PER_GB <= EE_RI_AMPLITUDE_CACHE_GB:
                 # singlet: tau is T itself; triplet: T = -(ic|ka) / D, from I
                 self._T[t] = tau if singlet else self._triplet_amplitudes(I, k0)
-                kept += tau.nbytes / 1024 ** 3
+                kept += tau.nbytes / BYTES_PER_GB
             del I, tau
             parts.append((t, np.concatenate([[e_t], xd_t.ravel(), xo_t.ravel(),
                                              xv_t.ravel()])))
-        tot = ordered_sum(parts, self.comm, shape=(1 + no * nv + no * no + nv * nv,),
-                          onto=np.zeros(1 + no * nv + no * no + nv * nv))
-        self.e_mp2 = float(tot[0])
-        xdiag = tot[1:1 + no * nv].reshape(no, nv)
-        self.x_oo = tot[1 + no * nv:1 + no * nv + no * no].reshape(no, no)
-        self.x_vv = tot[1 + no * nv + no * no:].reshape(nv, nv)
-        self.xo = self.x_oo + self.x_oo.T
-        self.xv = self.x_vv + self.x_vv.T
-        diag = (diag + (np.diag(self.xo)[:, None] + np.diag(self.xv)[None, :]).ravel()
-                - xdiag.ravel())
-        self.diag = diag
-        self._fold_diag_setup()
+        return ordered_sum(parts, self.comm, shape=(1 + no * nv + no * no + nv * nv,),
+                           onto=np.zeros(1 + no * nv + no * no + nv * nv))
 
     def _fold_diag_setup(self):
         """The Laplace sums of fold_diagonal, once: with 1/x = sum_t W_t e^(-t x)
@@ -644,7 +743,7 @@ class RIFoldADC2:
         P, H = np.zeros((nt, nv)), np.empty((nt, no))
         deal = [list(range(r, nv, self.size)) for r in range(self.size)]
         rank = self.rank
-        nb = max(1, int(self.tile_gb * 1024 ** 3 // (8.0 * naux * nv)))
+        nb = max(1, int(self.tile_gb * BYTES_PER_GB // (8.0 * naux * nv)))
         for b in range(max(1, -(-len(deal[0]) // nb))):
             batch = [d[b * nb:(b + 1) * nb] for d in deal]
             rows = self._bvv_rows(batch)
@@ -708,11 +807,14 @@ class RIFoldADC2:
                  + EE_RI_FOLD_DIAG_HOLE * hole.T).ravel()
 
     def _triplet_amplitudes(self, I, k0):
-        """T[k, c, l, d] = -(kd|lc) / D_kcld of a tile, from I = (kc|ld)."""
+        """T[k, c, l, d] = -(kd|lc) / D_kcld of a tile, from I = (kc|ld);
+        spin-component scaled, [(c_ss - c_os) (kc|ld) - c_ss (kd|lc)] / D."""
         T = np.empty_like(I)
 
         def seg(k, c0, c1):
-            T[k, c0:c1] = -I[k, :, :, c0:c1].transpose(2, 1, 0) / self._denom(k0 + k, c0, c1)
+            Ax = I[k, :, :, c0:c1].transpose(2, 1, 0)
+            T[k, c0:c1] = (self.weights.triplet(I[k, c0:c1], Ax)
+                           / self._denom(k0 + k, c0, c1))
         self._rows(I.shape[0], seg)
         return T
 
@@ -727,8 +829,9 @@ class RIFoldADC2:
         T = np.empty_like(I)
 
         def seg(k, c0, c1):
-            T[k, c0:c1] = (2.0 * I[k, c0:c1] - I[k, :, :, c0:c1].transpose(2, 1, 0)
-                           ) / self._denom(k0 + k, c0, c1)
+            T[k, c0:c1] = (self.weights.singlet(I[k, c0:c1],
+                                                I[k, :, :, c0:c1].transpose(2, 1, 0))
+                           / self._denom(k0 + k, c0, c1))
         self._rows(k1 - k0, seg)
         return T
 
@@ -934,8 +1037,8 @@ class RIFoldADC2:
         nv, L = self.nv, self.f.L
         kt = k1 - k0
         H, HT = self._pair(BtT, k0, k1)
-        singlet = self.spin == 'singlet'
-        if singlet:
+        wt = self.weights
+        if self.spin == 'singlet':
             def seg_g(k, c0, c1):
                 H[k, c0:c1] += HT[k, c0:c1]
             self._rows(kt, seg_g)
@@ -945,8 +1048,8 @@ class RIFoldADC2:
                 G = H[k, c0:c1]
                 Gx = H[k, :, :, c0:c1].transpose(2, 1, 0)
                 w = 1.0 / (omega - self._denom(k0 + k, c0, c1))
-                R[k, c0:c1] = w * (2.0 * G - Gx)
-                return float(np.sum(w * w * G * (G - 0.5 * Gx)))
+                R[k, c0:c1] = w * wt.singlet(G, Gx)
+                return float(np.sum(w * w * wt.singlet_overlap(G, Gx, G, Gx)))
         else:
             R = np.empty_like(H)
 
@@ -954,10 +1057,10 @@ class RIFoldADC2:
                 Hb, Tb = H[k, c0:c1], HT[k, c0:c1]
                 Sx = (H[k, :, :, c0:c1] + HT[k, :, :, c0:c1]).transpose(2, 1, 0)
                 w = 1.0 / (omega - self._denom(k0 + k, c0, c1))
-                R[k, c0:c1] = w * (2.0 * Hb - Sx)
                 A = Hb - Tb
                 S = Hb + Tb - Sx
-                return float(np.sum(w * w * (0.5 * A * A + 0.25 * S * S)))
+                R[k, c0:c1] = w * wt.triplet_image(A, S)
+                return float(np.sum(w * w * wt.triplet_overlap(A, S, A, S)))
         nrm = sum(self._rows(kt, seg_r))
         Gam = R.reshape(kt * nv, -1) @ L
         del H, HT, R
@@ -1002,21 +1105,25 @@ class RIFoldADC2:
     def _images_tile(self, k0, k1, BtT, nodes, derivative):
         """One tile at the frequencies nodes: (Gam (p, kt nv, naux), the B_oo
         half of its images (p, no nv)), derivative[q] as fold_images'."""
-        nv, no, L = self.nv, self.no, self.f.L
+        nv, L = self.nv, self.f.L
         kt = k1 - k0
         H, HT = self._pair(BtT, k0, k1)
         # S = H + H^T, held in HT
         def seg_s(k, c0, c1):
             HT[k, c0:c1] += H[k, c0:c1]
         self._rows(kt, seg_s)
+        wt = self.weights
         if self.spin == 'singlet':
-            # Gt = 2 S - S~, held in H: R = w Gt at every frequency
+            # Gt = (c_os + c_ss) S - c_ss S~, held in H: R = w Gt at every frequency
             def seg_g(k, c0, c1):
-                H[k, c0:c1] = 2.0 * HT[k, c0:c1] - HT[k, :, :, c0:c1].transpose(2, 1, 0)
+                H[k, c0:c1] = wt.singlet(HT[k, c0:c1],
+                                         HT[k, :, :, c0:c1].transpose(2, 1, 0))
         else:
-            # Gt = 2 H - S~, held in H
+            # Gt = c_os (2 H - S) + c_ss (S - S~), held in H
             def seg_g(k, c0, c1):
-                H[k, c0:c1] = 2.0 * H[k, c0:c1] - HT[k, :, :, c0:c1].transpose(2, 1, 0)
+                S = HT[k, c0:c1]
+                H[k, c0:c1] = wt.triplet_image(2.0 * H[k, c0:c1] - S,
+                                               S - HT[k, :, :, c0:c1].transpose(2, 1, 0))
         self._rows(kt, seg_g)
         Gt, R = H, HT
         gams = np.empty((nodes.size, kt * nv, self.f.naux))
@@ -1033,7 +1140,6 @@ class RIFoldADC2:
         """sum_K Y_K(ur, wr) Y_K(us, ws), the doubles images' overlap."""
         if self.level == 'adc1':
             return 0.0
-        nv, no, L = self.nv, self.no, self.f.L
         same = ur is us or np.array_equal(ur, us)
         Br = self._dressed(ur)
         Bs = Br if same else self._dressed(us)
@@ -1044,7 +1150,7 @@ class RIFoldADC2:
                      for t, (k0, k1) in self.my_tiles]
             return float(ordered_sum(parts, self.comm, shape=(1,),
                                      onto=np.zeros(1))[0])
-        singlet = self.spin == 'singlet'
+        singlet, wt = self.spin == 'singlet', self.weights
         parts = []
         for t, (k0, k1) in self.my_tiles:
             kt = k1 - k0
@@ -1058,10 +1164,9 @@ class RIFoldADC2:
                 xr = (Hr[k, :, :, c0:c1] + Tr[k, :, :, c0:c1]).transpose(2, 1, 0)
                 xs = (Hs[k, :, :, c0:c1] + Ts[k, :, :, c0:c1]).transpose(2, 1, 0)
                 if singlet:
-                    gr, gs = hr + tr, hs + ts
-                    return float(np.sum(w2 * gr * (gs - 0.5 * xs)))
-                return float(np.sum(w2 * (0.5 * (hr - tr) * (hs - ts)
-                                           + 0.25 * (hr + tr - xr) * (hs + ts - xs))))
+                    return float(np.sum(w2 * wt.singlet_overlap(hr + tr, xr, hs + ts, xs)))
+                return float(np.sum(w2 * wt.triplet_overlap(hr - tr, hr + tr - xr,
+                                                            hs - ts, hs + ts - xs)))
 
             parts.append((t, np.array([sum(self._rows(kt, seg))])))
         return float(ordered_sum(parts, self.comm, shape=(1,),
@@ -1167,7 +1272,7 @@ def drive(op, solve):
     runs `solve` on a stand-in whose products every rank computes together,
     the other ranks serve them; rank 0's return value (keep it to arrays and
     lists: it is pickled) comes back on every rank. Serially, solve(op)."""
-    from src.Base.utils.krylov import root_driven_solve
+    from src.Base.utils.linear_algebra.krylov import root_driven_solve
     comm = op.comm
     if comm is None or comm.Get_size() == 1:
         return solve(op)

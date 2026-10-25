@@ -38,7 +38,7 @@ from src.SingleReference.Periodic.pbc_damped_integrals import build_dfintegrals_
 from src.SingleReference.Periodic.pbc_rpa import ri_rpa_ecorr
 from src.SingleReference.Periodic.pbc_solvent_screening import (
     SlabDielectricEnvironment, build_dfintegrals_screened)
-from src.Base.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 
 
 

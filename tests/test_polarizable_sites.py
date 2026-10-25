@@ -26,10 +26,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.polarizable_sites import (THOLE_FACTOR,
-                                        dipole_interaction_matrix,
-                                        induced_dipoles, polarization_energy,
-                                        response_matrix)
+from src.environments.polarizable_sites import (THOLE_FACTOR,
+                                                dipole_interaction_matrix,
+                                                induced_dipoles, polarization_energy,
+                                                response_matrix)
 
 ALPHA = 5.0          # Bohr^3, near a heavy-atom polarizability
 FAR = 400.0          # Bohr; T falls as r^-3, so this is ~1e-8 of alpha^-1
@@ -85,7 +85,7 @@ def test_damping_bounds_the_coupling_where_undamped_it_diverges():
     """The claim is about SCALING, not a fixed ratio. Quartering the separation
     multiplies the undamped coupling by 64; the damped one must stay bounded.
 
-    A fixed-ratio assertion is what this test had first, and it fails: the
+    A fixed-ratio assertion fails: the
     ratio is 35 at 0.5 Bohr and 5 at 1.0, because the damping is only partial
     there. Bounded-versus-divergent is the property; "always ten times smaller"
     is not.

@@ -3,11 +3,11 @@
 The screened interaction is built two independent ways and must agree:
  - inversion:  W = (I - Pi0(omega))^{-1}, Pi0 from build_chi0_aux (itself
    validated == pyscf get_rho_response in test_pbc_casida.py).
- - spectral:   W = I - (4/nkpts) sum_S rho_S rho_S^H Omega/(nu^2+Omega^2), from
-   the Kresse RPA eigenpairs.
+ - spectral:   W = I - (2/nkpts) sum_S rho_S rho_S^H Omega/(nu^2+Omega^2), from
+   the Kresse RPA eigenpairs (rho carries sqrt(f_m - f_n)).
 
 Agreement at ALL frequencies validates the eigenpairs (values AND vectors)
-jointly and locks the -4/nkpts spectral normalization. Also checks the
+jointly and locks the -2/nkpts spectral normalization. Also checks the
 imaginary-axis vs real-axis forms coincide in the static (omega=0) limit.
 """
 import os
@@ -20,7 +20,15 @@ from pyscf.pbc import gto, scf
 
 from src.SingleReference.Periodic.pbc_integrals import PBCDFIntegrals
 from src.SingleReference.Periodic.pbc_casida import (
-    solve_rpa_spectral, build_W_aux_spectral, build_W_aux_inversion)
+    build_chi0_aux, solve_rpa_spectral, build_W_aux_spectral)
+
+
+def build_W_aux_inversion(dfints, kconserv, omega, mo_energy=None, imaginary=True):
+    """W^q(omega) = (I - Pi0(omega))^{-1}, with Pi0 from build_chi0_aux:
+    independent of the Casida eigensolve."""
+    Pi = build_chi0_aux(dfints, kconserv, omega, mo_energy=mo_energy,
+                        imaginary=imaginary)
+    return np.linalg.inv(np.eye(Pi.shape[0]) - Pi)
 
 if __name__ == '__main__':
     all_ok = True

@@ -8,14 +8,29 @@ determinant-wise (Jiang & Engel) distinction.
 """
 import numpy as np
 
-from src.Base.pyscf_interface import get_two_electron_integrals_chemist
-from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import _denom_restricted
+from src.Base.pyscf.pyscf_interface import get_two_electron_integrals_chemist
+from src.SingleReference.common.mp_amplitudes import orbital_denominator, orbital_denominator_axes
 from src.SingleReference.EpsteinNesbet.shifts import (
     epstein_nesbet_shift_restricted_spinadapted,
     epstein_nesbet_shift_restricted_spinresolved)
 from src.SingleReference.LinearResponse.linear_response import (
     static_screened_coulomb_aux, static_screened_coulomb_chemist,
     static_screened_coulomb_chemist_uhf)
+
+
+def hp_diagonals_df(B_aa, O, vidx_abs, W_aux=None):
+    """(direct, exchange), each (V, O), of the hole-particle channel from the DF
+    factor: direct <ai|ai> = sum_Q B[Q,a,a] B[Q,i,i] (screened, sum_PQ B[P,a,a]
+    W_aux[P,Q] B[Q,i,i], when W_aux is given), exchange <ai|ia> = sum_Q
+    B[Q,a,i]^2."""
+    Bv = B_aa[:, vidx_abs][:, :, vidx_abs]   # (naux, V, V)
+    Bo = B_aa[:, :O, :O]                      # (naux, O, O)
+    Bvo = B_aa[:, vidx_abs][:, :, :O]         # (naux, V, O)
+    diag_v = np.einsum('Qaa->Qa', Bv, optimize=True)
+    diag_o = np.einsum('Qii->Qi', Bo, optimize=True)
+    direct = diag_v.T @ diag_o if W_aux is None else diag_v.T @ (W_aux @ diag_o)
+    exchange = np.einsum('Qai,Qai->ai', Bvo, Bvo, optimize=True)
+    return direct, exchange
 
 
 def restricted_channel_shifts(dress, B_aa, g_oooo, g_vvvv, O, vidx_abs,
@@ -40,7 +55,7 @@ def restricted_channel_shifts(dress, B_aa, g_oooo, g_vvvv, O, vidx_abs,
     Engel Eq. 20 with a MINUS sign per (particle,hole) pair:
         Delta^EN = <ij||ij> + <ab||ab> - <ai||ai> - <aj||aj> - <bi||bi> - <bj||bj>
     with the antisymmetrized or plain integral chosen per pair by its spins
-    (EpsteinNesbetDenominators._delta does that bookkeeping)."""
+    (EpsteinNesbetDenominators.shift does that bookkeeping)."""
     # spin_adapted=True is the only mode a CSF solver can represent: it averages the two
     # spin cases into ONE shift per channel, so D_same == D_opp and the dressed
     # amplitudes stay spin-pure. False gives the determinant-wise (Jiang & Engel) shifts,
@@ -76,14 +91,7 @@ def restricted_channel_shifts(dress, B_aa, g_oooo, g_vvvv, O, vidx_abs,
             direct_hp = np.einsum('aiai->ai', g_vovo, optimize=True)    # (V,O)
             exchange_hp = np.einsum('aiia->ai', g_voov, optimize=True)  # (V,O)
         elif B_aa is not None:
-            # DF-native: <ai|ai> = sum_Q B[Q,a,a]*B[Q,i,i], <ai|ia> = sum_Q B[Q,a,i]^2
-            Bv = B_aa[:, vidx_abs][:, :, vidx_abs]   # (naux, V, V)
-            Bo = B_aa[:, :O, :O]                      # (naux, O, O)
-            Bvo = B_aa[:, vidx_abs][:, :, :O]         # (naux, V, O)
-            diag_v = np.einsum('Qaa->Qa', Bv, optimize=True)
-            diag_o = np.einsum('Qii->Qi', Bo, optimize=True)
-            direct_hp = diag_v.T @ diag_o
-            exchange_hp = np.einsum('Qai,Qai->ai', Bvo, Bvo, optimize=True)
+            direct_hp, exchange_hp = hp_diagonals_df(B_aa, O, vidx_abs)
         else:
             raise ValueError("hp=True requires either dense g_vovo/g_voov or B_aa "
                              "(DF integrals)")
@@ -119,7 +127,7 @@ class EpsteinNesbetDenominators:
 
     Spin bookkeeping for the opposite-spin case, in the abab convention
     [h0=i(alpha), h1=k(beta), p0=c(alpha), p1=a(beta)] (matches
-    static_correction._build_dressed_denoms_uhf's abab branch exactly): the SAME-spin hp
+    static_correction.build_dressed_denoms_uhf's abab branch exactly): the SAME-spin hp
     pairs are (p0,h0) and (p1,h1); the two cross pairs (p0,h1) and (p1,h0) are
     opposite-spin and carry no exchange.
 
@@ -176,7 +184,7 @@ class EpsteinNesbetDenominators:
             s[ax] = self.V
         return tuple(s)
 
-    def _delta(self, layout, spin):
+    def shift(self, layout, spin):
         """Jiang & Engel's Delta for one spin case:
             same: Delta = <h0 h1||h0 h1> + <p0 p1||p0 p1> - sum_{4 pairs} <p h||p h>
             opp : hh/pp use the no-exchange <..|..>; of the 4 hp pairs only
@@ -204,7 +212,7 @@ class EpsteinNesbetDenominators:
         D = self._bare(layout)
         if not self.dressed:
             return D
-        return D - self._LAYOUTS[layout][2] * self._delta(layout, spin)
+        return D - self._LAYOUTS[layout][2] * self.shift(layout, spin)
 
     @property
     def spin_adapted(self):
@@ -274,7 +282,7 @@ class EpsteinNesbetDenominators:
         return D - t                                              # bare_sign = +1
 
 
-def _build_dressed_e_ai(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
+def build_dressed_e_ai(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
     """
     Epstein-Nesbet-dressed inverse denominator 1/D for the t1^(2) singles
     amplitude (Jiang & Engel Eq. 21):
@@ -297,26 +305,17 @@ def _build_dressed_e_ai(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
     singles = u2_denom_dress.get('singles', True)
     if singles is False:
         return None
-    D_bare = _denom_restricted(eps, 1, O, V)
+    D_bare = orbital_denominator(eps[:O], eps[O:O + V], 1)
 
     if B_aa is not None:
-        vidx_abs = np.arange(O, O + V)
-        Bv = B_aa[:, vidx_abs][:, :, vidx_abs]   # (naux, V, V)
-        Bo = B_aa[:, :O, :O]                      # (naux, O, O)
-        Bvo = B_aa[:, vidx_abs][:, :, :O]          # (naux, V, O)
-        diag_v = np.einsum('Qaa->Qa', Bv, optimize=True)   # (naux, V)
-        diag_o = np.einsum('Qii->Qi', Bo, optimize=True)   # (naux, O)
-        if singles == 'screened':
-            # (aa|W|ii) = sum_PQ B[P,a,a] W_aux[P,Q] B[Q,i,i], with W_aux the
-            # (naux,naux) static inverse-dielectric metric (bare part included).
-            W_aux = static_screened_coulomb_aux(eps, B_aa, O)
-            direct_hp = diag_v.T @ (W_aux @ diag_o)          # (V,O)
-        else:
-            direct_hp = diag_v.T @ diag_o          # (V,O): sum_Q B[Q,a,a]*B[Q,i,i]
-        exchange_hp = np.einsum('Qai,Qai->ai', Bvo, Bvo, optimize=True)  # (V,O)
+        # (aa|W|ii) = sum_PQ B[P,a,a] W_aux[P,Q] B[Q,i,i] when screened, with
+        # W_aux the (naux,naux) static inverse-dielectric metric (bare part
+        # included); sum_Q B[Q,a,a] B[Q,i,i] when bare
+        W_aux = static_screened_coulomb_aux(eps, B_aa, O) if singles == 'screened' else None
+        direct_hp, exchange_hp = hp_diagonals_df(B_aa, O, np.arange(O, O + V), W_aux=W_aux)
     else:
-        # (aa|ii) and (ai|ai) gathered without the O(V*O) python loop this
-        # used to run (~110k iterations at hexacene/cc-pVQZ scale).
+        # (aa|ii) and (ai|ai) gathered without an O(V*O) python loop
+        # (~110k iterations at hexacene/cc-pVQZ scale).
         vsl = slice(O, O + V)
         if singles == 'screened':
             W = static_screened_coulomb_chemist(eps, eri_chemist, O)
@@ -330,7 +329,7 @@ def _build_dressed_e_ai(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
     return 1.0 / D_dressed
 
 
-def _build_dressed_e_abij(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
+def build_dressed_e_abij(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None):
     """(e_abij_aaaa, e_abij_abab): the EN-dressed inverse T2^(1) denominators
     for the SAME-spin and OPPOSITE-spin amplitudes, each (V,V,O,O).
 
@@ -340,13 +339,13 @@ def _build_dressed_e_abij(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None
     legitimate p==q term). A single array built from the spin-summed 2J-K
     shift with its diagonal zeroed, applied to both blocks, is NOT any
     determinant's denominator -- the two must stay separate, matching the
-    UHF path (_build_dressed_denoms_uhf).
+    UHF path (build_dressed_denoms_uhf).
 
     The layout here is [a,b,i,j] (particles first), so relative to
     EpsteinNesbetDenominators' 'ackl' key the hole/particle axes coincide and the SAME
     spin pairing applies: (p0,h0) = (a,i) and (p1,h1) = (b,j) are the
     same-spin hp pairs, the two cross pairs are opposite-spin."""
-    D_bare = _denom_restricted(eps, 2, O, V)
+    D_bare = orbital_denominator(eps[:O], eps[O:O + V], 2)
     vidx_abs = np.arange(O, O + V)
     g_oooo = g_vvvv = g_vovo = g_voov = None
     if B_aa is None and eri_chemist is not None:
@@ -363,7 +362,7 @@ def _build_dressed_e_abij(u2_denom_dress, eps, O, V, B_aa=None, eri_chemist=None
         # D_bare here is (holes - particles) in [a,b,i,j] order, i.e. exactly
         # EpsteinNesbetDenominators' 'abkl' layout (particles @ (0,1), holes @ (2,3),
         # bare_sign = +1 -> D = D_bare - Delta).
-        return dens._delta('abkl', spin)
+        return dens.shift('abkl', spin)
 
     if not dens.dressed:
         return 1.0 / D_bare, 1.0 / D_bare
@@ -382,7 +381,7 @@ def _extract_singles_shift_uhf(eri, no, W=None):
     -- unlike _extract_d_hp (which reads the diagonal of an already-
     antisymmetrized g and so cannot isolate J from K), this needs J and K
     separately because only J gets screened. Same layout convention as
-    _build_dressed_e_ai (direct 'aaii->ai', exchange 'aiai->ai'). Returns
+    build_dressed_e_ai (direct 'aaii->ai', exchange 'aiai->ai'). Returns
     (V, O)."""
     v = slice(no, eri.shape[0])
     direct = np.einsum('aaii->ai', (eri if W is None else W)[v, v, :no, :no],
@@ -391,9 +390,15 @@ def _extract_singles_shift_uhf(eri, no, W=None):
     return direct - exchange
 
 
-def _build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bbbb, nocc_a, nocc_b, ncore,
+def build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bbbb, nocc_a, nocc_b, ncore,
                               mol=None, mf_eval=None):
-    """mol/mf_eval: only needed (and only used) when u2_denom_dress['singles']
+    """The EN-dressed UHF denominators D (not 1/D: MPnDensityDriverUnrestricted's
+    custom_denom divides by them, while the restricted builders
+    build_dressed_e_ai/_e_abij return the inverse its e_ai/e_abij multiply by),
+    keyed 'aaaa', 'bbbb', 'abab' (doubles, [a,b,i,j]) and 'aa', 'bb' (singles,
+    [a,i]).
+
+    mol/mf_eval: only needed (and only used) when u2_denom_dress['singles']
     == 'screened' -- builds the raw per-spin chemist ERI and the static-RPA-
     screened same-spin tensors from them (an extra O(norb^4) AO->MO
     transform, paid only in that case, not on the bare/doubles-only/hh-hp
@@ -423,45 +428,24 @@ def _build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bb
 
     custom_denom = {}
 
-    # 1. aaaa sector
-    D_bare_aaaa = (ea[:Oa].reshape(1, 1, Oa, 1) + ea[:Oa].reshape(1, 1, 1, Oa)
-                   - ea[Oa:].reshape(Va, 1, 1, 1) - ea[Oa:].reshape(1, Va, 1, 1))
-    shift_aaaa = np.zeros_like(D_bare_aaaa)
-    if hh:
-        d_h_a = _extract_d_h(g_aaaa_w, Oa)
-        shift_aaaa += d_h_a.reshape(1, 1, Oa, Oa)
-    if pp:
-        d_p_a = _extract_d_p(g_aaaa_w, Oa)
-        shift_aaaa += d_p_a.reshape(Va, Va, 1, 1)
-    if hp:
-        d_hp_a = _extract_d_hp(g_aaaa_w, Oa)
-        shift_aaaa -= d_hp_a.reshape(Va, 1, Oa, 1)
-        shift_aaaa -= d_hp_a.reshape(Va, 1, 1, Oa)
-        shift_aaaa -= d_hp_a.reshape(1, Va, Oa, 1)
-        shift_aaaa -= d_hp_a.reshape(1, Va, 1, Oa)
-    custom_denom['aaaa'] = D_bare_aaaa - shift_aaaa
-
-    # 2. bbbb sector
-    D_bare_bbbb = (eb[:Ob].reshape(1, 1, Ob, 1) + eb[:Ob].reshape(1, 1, 1, Ob)
-                   - eb[Ob:].reshape(Vb, 1, 1, 1) - eb[Ob:].reshape(1, Vb, 1, 1))
-    shift_bbbb = np.zeros_like(D_bare_bbbb)
-    if hh:
-        d_h_b = _extract_d_h(g_bbbb_w, Ob)
-        shift_bbbb += d_h_b.reshape(1, 1, Ob, Ob)
-    if pp:
-        d_p_b = _extract_d_p(g_bbbb_w, Ob)
-        shift_bbbb += d_p_b.reshape(Vb, Vb, 1, 1)
-    if hp:
-        d_hp_b = _extract_d_hp(g_bbbb_w, Ob)
-        shift_bbbb -= d_hp_b.reshape(Vb, 1, Ob, 1)
-        shift_bbbb -= d_hp_b.reshape(Vb, 1, 1, Ob)
-        shift_bbbb -= d_hp_b.reshape(1, Vb, Ob, 1)
-        shift_bbbb -= d_hp_b.reshape(1, Vb, 1, Ob)
-    custom_denom['bbbb'] = D_bare_bbbb - shift_bbbb
+    # 1./2. the same-spin aaaa and bbbb sectors
+    for key, e, O_s, V_s, g_w in (('aaaa', ea, Oa, Va, g_aaaa_w), ('bbbb', eb, Ob, Vb, g_bbbb_w)):
+        D_bare = orbital_denominator(e[:O_s], e[O_s:], 2)
+        shift = np.zeros_like(D_bare)
+        if hh:
+            shift += _extract_d_h(g_w, O_s).reshape(1, 1, O_s, O_s)
+        if pp:
+            shift += _extract_d_p(g_w, O_s).reshape(V_s, V_s, 1, 1)
+        if hp:
+            d_hp_s = _extract_d_hp(g_w, O_s)
+            shift -= d_hp_s.reshape(V_s, 1, O_s, 1)
+            shift -= d_hp_s.reshape(V_s, 1, 1, O_s)
+            shift -= d_hp_s.reshape(1, V_s, O_s, 1)
+            shift -= d_hp_s.reshape(1, V_s, 1, O_s)
+        custom_denom[key] = D_bare - shift
 
     # 3. abab sector
-    D_bare_abab = (ea[:Oa].reshape(1, 1, Oa, 1) + eb[:Ob].reshape(1, 1, 1, Ob)
-                   - ea[Oa:].reshape(Va, 1, 1, 1) - eb[Ob:].reshape(1, Vb, 1, 1))
+    D_bare_abab = orbital_denominator_axes([ea[:Oa], eb[:Ob]], [ea[Oa:], eb[Ob:]])
     shift_abab = np.zeros_like(D_bare_abab)
     if hh:
         d_h_ab = np.einsum('ijij->ij', g_abab_w[:Oa, :Ob, :Oa, :Ob], optimize=True)
@@ -480,21 +464,18 @@ def _build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bb
         shift_abab -= d_hp_ab_aj.reshape(Va, 1, 1, Ob)
     custom_denom['abab'] = D_bare_abab - shift_abab
 
-    # 4/5. aa/bb sectors (singles): 'singles' was previously read nowhere in
-    # this function -- the <ia||ia> shift was added UNCONDITIONALLY whenever
-    # u2_denom_dress was not None, regardless of the hh/pp/hp/singles keys
-    # actually passed. Now gated like every other channel (default True,
-    # matching _build_dressed_e_ai's restricted-branch convention) so
-    # singles=False genuinely turns it off instead of silently no-op'ing.
+    # 4/5. aa/bb sectors (singles): the <ia||ia> shift is gated on 'singles'
+    # like every other channel (default True, matching build_dressed_e_ai's
+    # restricted-branch convention), so singles=False turns it off.
     singles = u2_denom_dress.get('singles', True)
-    D_bare_aa = (ea[:Oa].reshape(1, Oa) - ea[Oa:].reshape(Va, 1))
-    D_bare_bb = (eb[:Ob].reshape(1, Ob) - eb[Ob:].reshape(Vb, 1))
+    D_bare_aa = orbital_denominator(ea[:Oa], ea[Oa:], 1)
+    D_bare_bb = orbital_denominator(eb[:Ob], eb[Ob:], 1)
     if singles == 'screened':
         if mol is None or mf_eval is None:
             raise ValueError(
                 "u2_denom_dress={'singles': 'screened', ...} needs mol= and "
                 "mf_eval= (the raw per-spin chemist ERI and RPA screening are "
-                "built from them) -- not passed to _build_dressed_denoms_uhf.")
+                "built from them) -- not passed to build_dressed_denoms_uhf.")
         eri_aa, eri_ab, eri_bb = get_two_electron_integrals_chemist(
             mol, mf_eval, representation='spatial')
         eri_aa_w, eri_bb_w, eri_ab_w = eri_aa[w, w, w, w], eri_bb[w, w, w, w], eri_ab[w, w, w, w]
@@ -514,3 +495,55 @@ def _build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bb
         custom_denom['bb'] = D_bare_bb
 
     return custom_denom
+
+
+def coulomb_exchange_diagonals_uhf_df(B_a, B_b):
+    """Spin-resolved Coulomb/exchange diagonals from the two UHF DF factors:
+
+        J[s][t][p,q] = <p_s q_t | p_s q_t> = (p_s p_s | q_t q_t)
+        K[s][p,q]    = <p_s q_s | q_s p_s> = (p_s q_s | q_s p_s)
+
+    K has one spin index because exchange only exists within a spin -- which
+    is the whole content of the `delta(spin_p, spin_q)` in <pq||pq>
+    (dressed_doubles_block)."""
+    B = {'a': B_a, 'b': B_b}
+    diag = {s: np.einsum('Qpp->Qp', B[s]) for s in ('a', 'b')}
+    J = {s: {t: np.einsum('Qp,Qq->pq', diag[s], diag[t], optimize=True)
+             for t in ('a', 'b')} for s in ('a', 'b')}
+    K = {s: np.einsum('Qpq,Qpq->pq', B[s], B[s], optimize=True)
+         for s in ('a', 'b')}
+    return J, K
+
+
+def dressed_doubles_block(D_bare, J, K, no, spins, dress):
+    """D_bare + Delta for ONE spin block of a doubles amplitude in [i,j,a,b] order,
+    spins = (s_i, s_j, s_a, s_b), with D_bare = eps_a + eps_b - eps_i - eps_j
+    (particles minus holes). Delta is the determinant-wise shift of Jiang & Engel
+    Eq. 20,
+
+        Delta = <ij||ij> + <ab||ab> - <ia||ia> - <jb||jb> - <ja||ja> - <ib||ib>,
+
+    each <pq||pq> = J[s][t][p,q] - delta(s, t) K[s][p,q] for p of spin s and q of
+    spin t: the single rule the whole spin resolution rests on. J, K and no (the
+    occupied count) are keyed by spin 'a'/'b' over each spin's full orbital range
+    (coulomb_exchange_diagonals_uhf_df); a restricted reference passes the same
+    arrays for both spins. dress: the validated channel dict ('hh', 'pp', 'hp')."""
+    si, sj, sa, sb = spins
+
+    def part(s, t, f1, f2):
+        s1 = slice(0, no[s]) if f1 == 'o' else slice(no[s], None)
+        s2 = slice(0, no[t]) if f2 == 'o' else slice(no[t], None)
+        out = J[s][t][s1, s2]
+        return out - K[s][s1, s2] if s == t else out
+
+    D = D_bare.copy()
+    if dress.get('pp'):
+        D = D + part(sa, sb, 'v', 'v')[None, None, :, :]
+    if dress.get('hh'):
+        D = D + part(si, sj, 'o', 'o')[:, :, None, None]
+    if dress.get('hp'):
+        D = D - part(si, sa, 'o', 'v')[:, None, :, None]
+        D = D - part(sj, sb, 'o', 'v')[None, :, None, :]
+        D = D - part(sj, sa, 'o', 'v')[None, :, :, None]
+        D = D - part(si, sb, 'o', 'v')[:, None, None, :]
+    return D

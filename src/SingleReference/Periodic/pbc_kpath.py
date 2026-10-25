@@ -1,5 +1,7 @@
 """Band paths and Fourier interpolation of k-dependent quantities.
 
+No driver calls this module yet; its tests are its only users.
+
 A GW band structure is not computed on a path directly: the self-energy needs
 a regular mesh (the q-sum runs over it), while a plot needs a dense line
 through high-symmetry points. The standard resolution is to compute the
@@ -170,20 +172,3 @@ def fourier_interpolate(cell, kmesh, kpts_mesh, values, kpts_target,
         out = out.real
     return out[:, 0] if squeeze else out
 
-
-def qp_bands_on_path(cell, mf, kmesh, kpts_mesh, corrections, bands,
-                     lattice='fcc', path=None, npoints=200, damping=0.0):
-    """Mean-field bands on a path, plus interpolated QP corrections.
-
-    `corrections` is (nk, len(bands)) of QP(k,n) - eps(k,n) on the mesh.
-    Returns a dict with the path, the mean-field bands, the interpolated
-    corrections and their sum -- all in Hartree.
-    """
-    kpts, x, tick_x, labels = band_path(cell, lattice, path, npoints)
-    mo_energy = mf.get_bands(kpts)[0]
-    eps = np.array([np.asarray(e)[list(bands)].real for e in mo_energy])
-    dq = fourier_interpolate(cell, kmesh, kpts_mesh, corrections, kpts,
-                             damping=damping)
-    dq = dq.reshape(len(kpts), -1)
-    return dict(kpts=kpts, x=x, tick_x=tick_x, tick_labels=labels,
-                bands=list(bands), eps=eps, correction=dq, qp=eps + dq)

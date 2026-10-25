@@ -26,24 +26,29 @@ from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (ISDF_HESSIAN_MIN_GRID,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.properties.optimize import derived_walk
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.gradients.derivative_coupling import (analytic_coupling,
-                                               analytic_ground_coupling,
-                                               configuration_coupling,
-                                               state_to_state_density)
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.state_manifold import StateManifold
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
+                                                     analytic_ground_coupling,
+                                                     configuration_coupling,
+                                                     state_to_state_density)
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
+from tests.blas_bar import assert_same, bar_with_drift
+from tests.pins import RECORDING_BLAS, matches
 from src.properties.hessian import require_hessian_counts
 from src.properties.optimize import relax
 from src.properties.spin_orbit import chain_manifolds
-from src.properties.surface import surface_mean_field
+from src.gradients.surface import surface_mean_field
 from src.properties.vibronic import relax_state
+from tests.isdf_test_grid import g1_numerics
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -55,8 +60,8 @@ PRODUCTION = SurfaceSpec(GroundState('dft', 'lrc-wpbeh'), environment=None,
                          chi0='space-time', residues='sop', solver='davidson',
                          factorization='isdf',
                          qp_states=QPStates(kind='frontier'),
-                         numerics={'grid_accuracy': GRID_ACCURACY,
-                                   'bse_adjoint': 'grid', 'nroots': 4})
+                         numerics=numerics_of({'grid_accuracy': GRID_ACCURACY,
+                                   'bse_adjoint': 'grid', 'nroots': 4}))
 
 
 def molecule(atom=H2O):
@@ -81,7 +86,7 @@ def isdf_lrc(mol):
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid(GRID_ACCURACY, BASIS, elements,
                                         auxbasis=AUX)
-    return converged(isdf_jk(base, auxbasis=AUX, counts=counts,
+    return converged(isdf_jk_with_force(base, auxbasis=AUX, counts=counts,
                              n_start=n_start))
 
 
@@ -104,8 +109,8 @@ def prototype(case, mol):
         return surface_of(PRODUCTION, Excitation('singlet', root=1), mol,
                           factory, mf=factory(mol))
     factory = one_mean_field_per_geometry(rhf)
-    return ExcitedStateChain(mol, factory, mf=factory(mol), solver='davidson',
-                             bse_adjoint='grid', nroots=4)
+    return ExcitedStateChain(
+        mol, factory, mf=factory(mol), numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid', 'nroots': 4})))
 
 
 def fresh(proto, target):
@@ -116,8 +121,10 @@ def fresh(proto, target):
 
 
 def same_bits(a, b):
-    return all(np.array_equal(np.asarray(x), np.asarray(y))
-               for x, y in zip(a, b))
+    """Bitwise under the BLAS the pins record, within the cross-BLAS gradient bar
+    elsewhere."""
+    return all(matches(np.asarray(x), np.asarray(y), RECORDING_BLAS,
+                       quantity='gradient') for x, y in zip(a, b))
 
 
 @pytest.mark.parametrize('case', ['hf-davidson-grid', 'production'])
@@ -136,8 +143,8 @@ def coupling_before(chain, m, n):
     forward, then a second for the vectors."""
     mol, mf = chain.mean_field()
     num, diags = chain.interstate_gradient(m, n, mol=mol, mf=mf)
-    _, pieces = chain._forward(mol, mf)
-    xn, yn = pieces[10], pieces[11]
+    solution = chain.forward(mol, mf)[1]
+    xn, yn = solution.x, solution.y
     goo, gvv = state_to_state_density(chain.nocc, xn[:, m], yn[:, m],
                                       xn[:, n], yn[:, n])
     return (num / diags['gap']
@@ -151,14 +158,24 @@ def test_analytic_coupling_one_forward_and_off_the_evaluation(case):
               for spin in ('singlet', 'triplet')}
     for spin in ('singlet', 'triplet'):
         now, _ = analytic_coupling(fresh(proto, (spin, 0)), 0, 1)
-        assert np.array_equal(now, before[spin]), spin
+        # one forward pass against two is a different call shape: bitwise on the
+        # recording BLAS, gradient class bar on another
+        assert_same(now, before[spin], quantity='gradient', label=spin)
     man = StateManifold(fresh(proto, S0), states=(S0, S1, T0, T1))
     ev = man.evaluate(couplings=((S0, S1), (T0, T1)))
     for spin, pair in (('singlet', (S0, S1)), ('triplet', (T0, T1))):
         shared, _ = analytic_coupling(None, *pair, evaluation=ev)
-        assert np.array_equal(shared, before[spin]), spin
-    with pytest.raises(ValueError, match='interstate'):
-        analytic_coupling(None, S1, S0, evaluation=ev)
+        assert_same(shared, before[spin], quantity='gradient', label=spin)
+    # the numerator is symmetric: the reversed pair is the same element,
+    # antisymmetric (`derivative_coupling.evaluated_coupling`)
+    rev, _ = analytic_coupling(None, S1, S0, evaluation=ev)
+    fwd, _ = analytic_coupling(None, S0, S1, evaluation=ev)
+    # 1e-12 on the recording BLAS; on another the two reads of the same
+    # evaluation differ by the gradient class bar (signs agree, and the
+    # entries printed agree to 1e-12: the miss is in the large entries' last
+    # digits)
+    assert np.allclose(rev, -fwd, rtol=0,
+                       atol=bar_with_drift(1e-12, quantity='gradient'))
 
 
 @pytest.mark.parametrize('case', ['hf-davidson-grid', 'production'])
@@ -168,8 +185,13 @@ def test_analytic_ground_coupling_off_the_evaluation(case):
     man = StateManifold(fresh(proto, S0), states=(S0, T0))
     ev = man.evaluate()
     shared, info_ev = analytic_ground_coupling(None, S0, evaluation=ev)
-    assert np.array_equal(shared, alone)
-    assert info_ev == info
+    assert_same(shared, alone, quantity='gradient', label='ground coupling')
+    # two forwards: the diagnostics under the same bar as the coupling beside
+    # them (a few ulp on the recording BLAS, the class bar elsewhere)
+    assert info_ev.keys() == info.keys()
+    for key, value in info.items():
+        assert_same(info_ev[key], value, label=key, quantity=(
+            'gradient' if key == 'branch_configuration' else 'energy'))
     with pytest.raises(ValueError, match='singlet'):
         analytic_ground_coupling(None, T0, evaluation=ev)
 
@@ -177,13 +199,13 @@ def test_analytic_ground_coupling_off_the_evaluation(case):
 def counted_forwards(chain):
     """`chain` counting its shared forward passes."""
     seen = {'n': 0}
-    shared = chain._shared_forward
+    shared = chain.shared_forward
 
     def counted(mol, mf):
         seen['n'] += 1
         return shared(mol, mf)
 
-    chain._shared_forward = counted
+    chain.shared_forward = counted
     return seen
 
 
@@ -200,22 +222,24 @@ def relaxed_before(surface, mol, **kw):
 @pytest.mark.parametrize('spin', ['singlet', 'triplet'])
 def test_relax_state_takes_one_forward_at_the_minimum(spin):
     proto = prototype('hf-davidson-grid', molecule())
-    walk = dict(engine='cartesian', max_cycle=2, verbose=False)
+    walk = dict(engine='cartesian', verbose=False,
+                numerics=derived_walk(proto, 'a two-step walk', max_cycle=2))
     before = relaxed_before(fresh(proto, (spin, 0)), None, **walk)
     chain = fresh(proto, (spin, 0))
     record = relax_state(chain, None, **walk)
-    assert np.array_equal(record['mol'].atom_coords(),
-                          before['mol'].atom_coords())
+    # two walks: the same minimum to a few ulp
+    assert_same(record['mol'].atom_coords(), before['mol'].atom_coords(),
+                unit='1', quantity='root', label='minimum')
     for name in ('e_total', 'e_scf', 'omega'):
-        assert record[name] == before[name], name
-    # the walk's own evaluations, then one at the minimum
+        assert_same(record[name], before[name], label=name)
+    # the walk's own evaluations and none more: the minimum's is held
     chain = fresh(proto, (spin, 0))
     walked = counted_forwards(chain)
     relax(chain, None, **walk)
     chain = fresh(proto, (spin, 0))
     recorded = counted_forwards(chain)
     relax_state(chain, None, **walk)
-    assert recorded['n'] == walked['n'] + 1
+    assert recorded['n'] == walked['n']
 
 
 def test_track_reaches_the_production_surface():
@@ -228,7 +252,8 @@ def test_track_reaches_the_production_surface():
         PRODUCTION.ground_state, chi0='space-time', residues='sop',
         solver='davidson', factorization='isdf',
         qp_states=QPStates(kind='frontier'),
-        numerics=dict(PRODUCTION.numerics, track='overlap'))
+        numerics=PRODUCTION.numerics.derive('follow the state by overlap',
+                                            bse={'track': 'overlap'}))
     surfaces = [surface_of(spec, Excitation('singlet', root=1), mol, factory,
                            mf=factory(mol))
                 for spec in (PRODUCTION, tracked_spec)]
@@ -240,19 +265,18 @@ def test_track_reaches_the_production_surface():
     for m in (mol, moved):
         g_a, e_a, _ = by_index.total_gradient(m, factory(m))
         g_b, e_b, _ = by_overlap.total_gradient(m, factory(m))
-        assert np.array_equal(g_a, g_b) and e_a == e_b
+        # two surfaces, two SCF solves: bitwise on the recording BLAS, the
+        # gradient and energy class bars on another
+        assert_same(g_a, g_b, quantity='gradient', label='forces')
+        assert_same(e_a, e_b, label='energy')
     assert [step['index'] for step in by_overlap.follow_log] == [0, 0]
     assert by_overlap.follow_log[1]['weight'] > 0.9
 
 
 def test_track_is_refused_where_no_state_is_followed():
-    mol = molecule()
-    spec = SurfaceSpec(PRODUCTION.ground_state, chi0='space-time',
-                       residues='sop', solver='davidson', factorization='isdf',
-                       qp_states=QPStates(kind='frontier'),
-                       numerics=dict(PRODUCTION.numerics, track='index'))
     with pytest.raises(ValueError, match='track'):
-        surface_of(spec, Excitation('singlet', root=1), mol, isdf_lrc)
+        PRODUCTION.numerics.derive('follow by a name that is no mode',
+                                   bse={'track': 'index'})
 
 
 def test_hessian_grid_floor_is_checked_on_counts_before_any_scf():

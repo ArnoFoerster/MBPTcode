@@ -1,6 +1,6 @@
 """The finite-temperature grids, wired into the routes that consume them.
 
-src/Base/utils/matsubara.py built `thermal_e_min`, `IRBasis` and
+src/Base/utils/grids/matsubara.py built `thermal_e_min`, `IRBasis` and
 `ir_continuation_order` and nothing called them. This is the wiring: `beta`
 threaded through to grid construction in both the molecular
 (GW/imaginary_axis) and periodic (Periodic/pbc_rpa) routes, plus the
@@ -9,7 +9,7 @@ IR-derived cap on the Pade continuation order.
 The obvious reading of the remaining risk is that the grids.py guards raise, so
 any metallic run stops until a beta is threaded through. Check 2 shows that is
 only half of it, and which half you get is an accident of the
-basis: `_transition_window` applies one integer occupied count at every
+basis: `split_transition_window` applies one integer occupied count at every
 k-point, and on a Li monolayer that gives a NEGATIVE e_min in gth-dzvp (the
 guard fires, the run stops) and a POSITIVE, plausible, fictitious one in
 gth-szv (nothing fires, the grid is quietly mis-scaled). Both are tested.
@@ -23,7 +23,7 @@ Checks:
      repairs the silent one, mo_occ + beta the loud one.
   3. The T = 0 path is untouched: on a gapped system thermal_e_min returns the
      gap itself for any beta whose pi/beta is below it, so grids, and every
-     number downstream, are bit-identical.
+     number downstream, are the same to a few ulp.
   4. The Pade order cap: truncation happens after the greedy ordering, is a
      no-op when the cap exceeds the sample count, and refuses a cap too small
      to fit.
@@ -42,9 +42,10 @@ from pyscf import gto as mgto, scf as mscf
 from pyscf.pbc import gto as pgto, scf as pscf
 from pyscf.pbc.scf import addons as pbc_addons
 
-from src.Base.utils.matsubara import (beta_from_mf, ir_continuation_order,
-                                      self_energy_range,
-                                      thermal_e_min)
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
+                                            self_energy_range,
+                                            thermal_e_min)
 from src.SingleReference.GW.qp_solve import solve_qp_from_imaginary_axis
 from src.SingleReference.Periodic.pbc_rpa import (build_freq_grid,
                                                   ri_rpa_ecorr_from_dfints)
@@ -52,6 +53,7 @@ from src.SingleReference.Periodic.pbc_rpa_damping import (nyquist_params,
                                                           make_coulG_damped)
 from src.SingleReference.Periodic.pbc_damped_integrals import build_dfintegrals_coulG
 from src.SingleReference.Periodic.pbc_occupations import transition_window
+from tests.pins import RECORDING_BLAS, matches
 
 
 def check(ok, label, detail=''):
@@ -152,7 +154,7 @@ def check_beta_from_mf(mf_metal):
 
 def check_both_failure_modes():
     """The integer window fails loudly on one basis and silently on another."""
-    from src.SingleReference.Periodic.pbc_rpa import _transition_window
+    from src.SingleReference.Periodic.pbc_occupations import split_transition_window
     ok = True
     results = {}
     print(f"       {'basis':10s} {'per-k nocc':>14} {'integer e_min':>14} "
@@ -163,7 +165,7 @@ def check_both_failure_modes():
         f = np.asarray(mf.mo_occ, dtype=float)
         per_k = (f > 1e-8).sum(axis=1)
         n0 = int(per_k[0])
-        e_int, _ = _transition_window(list(e), n0)
+        e_int, _ = split_transition_window(list(e), n0)
         honest, _ = transition_window(e, f)
         try:
             build_freq_grid(list(e), n0, 16)
@@ -226,11 +228,12 @@ def check_gapped_is_untouched():
         if np.pi / beta >= gap:
             continue
         got = build_freq_grid(list(e), nocc, 16, beta=beta)
-        ok &= check(np.array_equal(got[0], ref[0]) and np.array_equal(got[1], ref[1]),
-                    f'beta={beta:g}: the grid is bit-identical to the T=0 one')
+        ok &= check(matches(got[0], ref[0], RECORDING_BLAS, quantity='root')
+                    and matches(got[1], ref[1], RECORDING_BLAS, quantity='root'),
+                    f'beta={beta:g}: the grid is the T=0 one to a few ulp')
     # And mo_occ is a no-op when the occupations are integers.
     got = build_freq_grid(list(e), nocc, 16, mo_occ=f)
-    ok &= check(np.array_equal(got[0], ref[0]),
+    ok &= check(matches(got[0], ref[0], RECORDING_BLAS, quantity='root'),
                 'passing integer mo_occ is a no-op')
 
     # A small beta (high temperature) SHOULD move it -- otherwise the knob is
@@ -320,7 +323,7 @@ def check_pade_cap_is_sized_from_sigma_not_from_w():
                 f'{n_sigma - n_w} lost')
 
     # The wiring itself: capture the wmax solve_qp_energy_imaginary_axis passes.
-    # Without the fix this is e_max and the test fails on the value.
+    # A route that ignores the gap passes e_max here and fails on the value.
     from pyscf import gto, scf
     import src.SingleReference.GW.imaginary_axis as ia
 
@@ -333,9 +336,9 @@ def check_pade_cap_is_sized_from_sigma_not_from_w():
     ia.ir_continuation_order = lambda b, w, **kw: (seen.append((b, w)),
                                                    real_order(b, w, **kw))[1]
     try:
-        ia.solve_qp_energy_imaginary_axis(mf, mol, mol.nelectron // 2,
-                                          mol.nelectron // 2 - 1, nfreq=12,
-                                          beta=100.0)
+        ia.solve_qp_energy_imaginary_axis(
+            mf, mol, mol.nelectron // 2, mol.nelectron // 2 - 1,
+            numerics=Numerics(imagfreq={'nfreq': 12}), beta=100.0)
     finally:
         ia.ir_continuation_order = real_order
 

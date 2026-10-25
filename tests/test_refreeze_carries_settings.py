@@ -1,29 +1,23 @@
-"""`ExcitedStateChain.refreeze` carries EVERY constructor setting.
+"""`ExcitedStateChain.refreeze` carries EVERY setting.
 
 A refrozen chain is the same surface at a new geometry: only the frozen
-conventions are re-derived, every CHOICE travels verbatim. Before this test,
-`refreeze` dropped `scissor`, `n_poles`, `sop_stride` and `comm`, so a surface
-built with `scissor='calibrate'` silently fell back to no scissor tier at the
-first refreeze of a relaxation -- a different surface from the one the record
-named. Negative control: with the four keywords removed from the constructor
-call in `refreeze` (the pre-fix code), `test_every_constructor_choice_travels`
-fails on `scissor` ('calibrate' vs None).
+conventions are re-derived, every CHOICE travels verbatim. The choices are
+the physics arguments and the one `Numerics`; the refrozen chain holds the
+same object -- the resolved tau count and the grown quadrature travel beside
+it (`CarriedGrids`), so its identity is the same before and after -- and a
+setting added to it travels without a line in `refreeze`. A `refreeze` that
+mirrors the constructor's forty keywords would drop `scissor`, `n_poles`,
+`sop_stride` and `comm`, so a surface built with `scissor='calibrate'`
+would silently fall back to no scissor tier at the first refreeze of a
+relaxation.
 """
-import inspect
 
 import numpy as np
-import pytest
 from pyscf import gto, scf
 
-from src.gradients.excited_state import ExcitedStateChain
-
-#: Constructor parameters that are not carried by design: the geometry, the
-#: factory, the reference mean field (it belongs to the old geometry), the
-#: factorization (rebuilt at the new geometry) and the state (refreeze hands
-#: over the FOLLOWED root, tested elsewhere).
-NOT_CARRIED = {'self', 'mol', 'scf_factory', 'mf', 'factorization', 'state'}
-#: Parameters stored under another attribute name.
-STORED_AS = {'frames': 'frames_mode'}
+from src.Base.numerics.numerics import FLAT_FIELDS, Numerics
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1_numerics
 
 
 def _water(shift=0.0):
@@ -38,20 +32,23 @@ def _factory(mol):
     return mf
 
 
-def test_every_constructor_choice_travels():
-    chain = ExcitedStateChain(_water(), _factory, spin='triplet', qp_window=1,
-                              scissor='calibrate', outside='scissor',
-                              n_poles=7, sop_stride=3, residue_route='sop',
-                              nfreq_cd=32, ntau_gw=18, solver='dense')
+def test_every_choice_travels():
+    numerics = g1_numerics(_water(), Numerics(
+        qp={'n_poles': 7, 'sop_stride': 3, 'window': 1, 'scissor': 'calibrate',
+            'residue_route': 'sop'},
+        quadrature={'nfreq_cd': 32, 'ntau_gw': 18}, bse={'solver': 'dense'}))
+    chain = ExcitedStateChain(_water(), _factory, spin='triplet',
+                              bse_tda=True, numerics=numerics)
     fresh = chain.refreeze(_water(0.02))
-    params = [n for n in inspect.signature(ExcitedStateChain.__init__).parameters
-              if n not in NOT_CARRIED]
-    for name in params:
-        attr = STORED_AS.get(name, name)
-        if not hasattr(chain, attr):
-            pytest.fail(f'{name} is stored under no attribute; the test cannot see it')
-        # dicts of arrays (radii, counts) and plain values alike
-        np.testing.assert_equal(getattr(chain, attr), getattr(fresh, attr),
-                                err_msg=name)
+    assert (fresh.spin, fresh.bse_tda) == ('triplet', True)
+    assert fresh.environment is chain.environment
+    assert fresh.settings is numerics
+    assert fresh.settings.identity() == chain.settings.identity()
+    assert fresh.ntau_w == chain.ntau_w
+    assert fresh.conventions.nfreq_cd >= chain.conventions.nfreq_cd
+    for name in FLAT_FIELDS:
+        if name != 'nfreq_cd' and hasattr(chain, name):
+            np.testing.assert_equal(getattr(fresh, name),
+                                    getattr(chain, name), err_msg=name)
     assert fresh.scissor == 'calibrate' and fresh.n_poles == 7 \
-        and fresh.sop_stride == 3 and fresh.outside == 'scissor'
+        and fresh.sop_stride == 3

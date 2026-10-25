@@ -24,9 +24,9 @@ self_energy.py's SelfEnergySolver.
 """
 import numpy as np
 
-from src.Base.constants import DEFAULT_BROADENING_ETA
-from src.Base.pyscf_interface import get_two_electron_integrals_chemist
-from src.Solvers.qp_equation import solve_qp_equation
+from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.pyscf.pyscf_interface import get_two_electron_integrals_chemist
+from src.Solvers.qp_equation import solve_qp_equation_pole_strength
 from src.SingleReference.CC.eom import EOMCC
 
 
@@ -43,18 +43,19 @@ class GWCCSelfEnergy:
         beyond the number of "real" low-lying states you care about --
         non-Hermitian Davidson needs elbow room past the exact size of a
         degenerate cluster (e.g. a p-shell excitation manifold) to reliably
-        resolve every member of it; requesting too few silently returns an
-        incomplete/inconsistent cluster (caught downstream in
-        transition_densities' biorthogonalization, which raises rather than
-        returning wrong numbers -- confirmed on He/def2-SVP's exactly
-        3-fold-degenerate lowest excitation)."""
+        resolve every member of it. With too few, a member of a cluster may
+        find no left eigenvector to pair with: transition_densities warns
+        (`UnpairedEOMStates`), gives that state zero transition densities and
+        lists it in `unpaired_states`, so its pole drops out of Sigma_c.
+        He/def2-SVP's lowest excitation, exactly 3-fold degenerate, is such
+        a cluster."""
         self.eom = eom if eom is not None else EOMCC(mf, level=level, verbose=verbose)
         self.res = self.eom.kernel('ee', nroots=nroots)
         rho, rho_star = self.res.transition_densities()
 
         # Through get_two_electron_integrals_chemist rather than ao2mo directly so
         # that an attached solvent screening (v -> v + vtilde) reaches this
-        # self-energy too -- see src/Base/solvent_screening.py.
+        # self-energy too -- see src/environments/solvent_screening.py.
         eri_so = get_two_electron_integrals_chemist(mf.mol, mf, representation='spin')
         # Kept complex: degenerate EOM roots give complex-conjugate eigenvector
         # pairs whose Im*Im cross term is dropped if truncated to real early.
@@ -77,9 +78,9 @@ class GWCCSelfEnergy:
         den_v = w - self.eps[v][None, :] - self.omega_n[:, None] + 1j * eta
         return np.sum(num_o / den_o) + np.sum(num_v / den_v)
 
-    def solve_qp(self, p, eta=DEFAULT_BROADENING_ETA, method='pole_strength', static_shift=0.0):
+    def solve_qp(self, p, eta=DEFAULT_BROADENING_ETA, static_shift=0.0):
         """Solve w = eps_p + static_shift + Re Sigma_c,pp(w) (HF reference).
         Returns Hartree. static_shift carries any state-independent-of-w term
         the caller adds, e.g. a solvent reaction field."""
         func = lambda w: w - self.eps[p] - static_shift - self.sigma_c(w, p, eta=eta).real
-        return solve_qp_equation(func, self.eps[p], method=method)
+        return solve_qp_equation_pole_strength(func, self.eps[p])

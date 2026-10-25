@@ -60,8 +60,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_fold, ee_gw_pieces, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 
@@ -494,7 +494,7 @@ def check_laplace_kernel(eps, B, no):
     kernel 1e-7 Ha below min D and above it, to 1e-12; a flip
     parity refused; gw_modes_df's traced peak at most 6 (nm, nm) arrays;
     static_term_df in slabs of three modes equals its one-slab form."""
-    from src.Base.utils.time_frequency import minimax_points_for_accuracy
+    from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
     ok = True
     nv = len(eps) - no
     om = 0.3

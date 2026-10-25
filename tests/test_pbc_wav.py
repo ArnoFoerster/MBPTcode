@@ -38,7 +38,8 @@ Checks:
        * the mini-BZ cells TILE the zone, sum_q I0 = int_BZ f -- which needs
          each cell clipped to the zone and its images added back, because on
          an EVEN mesh a transfer sits on the zone boundary and f(|q|) is not
-         periodic (before the fix the sum was 10% low at 2x2, 2.5% at 4x4, and
+         periodic (without the images the sum is 10% low at 2x2, 2.5% at 4x4,
+         and
          exact at 3x3 -- the parity signature of exactly that);
        * EXACT when F is proportional to f, to machine precision at every mesh
          and for a singular law, where the uniform sum is 19-62% out;
@@ -184,9 +185,9 @@ def check_correction_profile():
               f"{vc:11.4f} {vc / v0:9.6f}")
 
     wav_ratios, ca_ratios = np.array(wav_ratios), np.array(ca_ratios)
-    ok &= check(wav_ratios.ptp() < 1e-6,
+    ok &= check(np.ptp(wav_ratios) < 1e-6,
                 'the W-av head ratio is mesh-invariant, like the CA one '
-                '(q * r0 is)', f'{wav_ratios[0]:.6f}, spread {wav_ratios.ptp():.1e}')
+                '(q * r0 is)', f'{wav_ratios[0]:.6f}, spread {np.ptp(wav_ratios):.1e}')
     ok &= check(wav_ratios[0] < 1.0, 'W-av trims the damped Gamma head',
                 f'{100 * (1 - wav_ratios[0]):.1f}%')
     over = (1 - ca_ratios[0]) / (1 - wav_ratios[0])

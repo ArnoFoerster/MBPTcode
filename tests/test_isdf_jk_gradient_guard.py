@@ -6,10 +6,10 @@ so what it returns on such a mean field is the force of one functional
 evaluated on another: 4.0e-4 Ha/Bohr away from a difference of this route's own
 energy, and CONSTANT in the step while the difference itself converges.
 
-That force is now available -- `isdf_mean_field_gradient` replaces the fitted
-exchange derivative by the ISDF one and lands on the same energy -- so this
-file gates the contrast rather than the defect: the guard still fires, because
-it protects callers that take pyscf's gradient, and those are the correlated
+The correct force is `isdf_mean_field_gradient`, which replaces the fitted
+exchange derivative by the ISDF one and lands on the same energy, so this
+file gates the contrast: the guard still fires, because it protects callers
+that take pyscf's gradient, and those are the correlated
 chains whose remaining skeletons are fitted too. The gate on the route that
 works is tests/test_isdf_mean_field_gradient.py.
 """
@@ -22,9 +22,12 @@ import numpy as np
 import pytest
 from pyscf import dft, gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.Base.isdf_jk import ISDFJK, isdf_jk, refuse_isdf_jk_gradient
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.gradients.isdf_mean_field import refuse_isdf_jk_gradient
+from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
+from tests.isdf_test_grid import g1
 
 ATOM = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
 #: Angstrom. The disagreement is CONSTANT in h, so any step shows it; this one
@@ -35,7 +38,7 @@ STEP_ANGSTROM = 2.5e-4
 
 def mean_field(route, atom=ATOM):
     mf = dft.RKS(gto.M(atom=atom, basis='cc-pvdz', verbose=0), xc='b3lyp')
-    mf = isdf_jk(mf) if route == 'isdf' else mf.density_fit(auxbasis='cc-pvdz-ri')
+    mf = isdf_jk_with_force(mf, counts=g1(mf)) if route == 'isdf' else mf.density_fit(auxbasis='cc-pvdz-ri')
     mf.grids.prune = None
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11
     mf.kernel()
@@ -64,12 +67,10 @@ def test_the_guard_fires_only_on_the_isdf_route():
 
 
 def test_the_surfaces_that_move_nuclei_now_dispatch_instead():
-    """THE REFUSAL HERE IS RETIRED, and the assertion is inverted rather than
-    deleted so that reinstating one is a decision and not a drift. Both entries
-    took pyscf's gradient and had to refuse while their Lagrangians built the
-    folded Fock partial and the exact-exchange double counting from the FITTED
-    skeletons; both now come from the interpolation, so the correct force
-    exists and the choice is a dispatch.
+    """The surfaces that move nuclei do not refuse. The folded Fock partial
+    and the exact-exchange double counting of their Lagrangians come from the
+    interpolation, not from the FITTED skeletons of pyscf's gradient, so the
+    correct force exists and the choice is a dispatch.
 
     `factor_chain.FactorChain.mean_field_gradient` is where the dispatch
     itself lives, on `with_df`'s type: `mean_field_skeleton_force` for an
@@ -84,7 +85,8 @@ def test_the_surfaces_that_move_nuclei_now_dispatch_instead():
     """
     import inspect
 
-    from src.gradients import excited_state, factor_chain
+    from src.gradients.gwbse import excited_state
+    from src.gradients.rpa import factor_chain
     for module in (excited_state, factor_chain):
         assert 'refuse_isdf_jk_gradient(' not in inspect.getsource(module), \
             module.__name__
@@ -106,10 +108,10 @@ def test_pyscfs_gradient_misses_what_the_isdf_one_hits():
     field's OWN energy, where the ISDF force sits at the finite difference's
     truncation error -- the same place the fitted route's force sits.
 
-    REACHED THROUGH THE PARENT CLASS ON PURPOSE. `isdf_jk` now attaches
+    REACHED THROUGH THE PARENT CLASS ON PURPOSE. `isdf_jk` attaches
     `attach_isdf_gradient`, so `mf.Gradients()` answers correctly and the
-    hazard is no longer reachable the way a caller would hit it -- which is
-    the point of attaching it. The hazard is still REAL for anyone who builds
+    hazard is not reachable the way a caller would hit it -- which is the
+    point of attaching it. The hazard is still REAL for anyone who builds
     pyscf's gradient directly, so it is measured here by doing exactly that.
     """
     fd = {route: finite_difference(route) for route in ('isdf', 'df')}

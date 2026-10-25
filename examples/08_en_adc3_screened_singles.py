@@ -16,9 +16,9 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 
-HARTREE_TO_EV = 27.211386245988
 
 BASE = {'hh': True, 'pp': True, 'spin_adapted': True, 'shift': 'sum'}
 

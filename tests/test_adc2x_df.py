@@ -11,7 +11,7 @@ import numpy as np
 from pyscf import gto, scf, df
 
 from src.SingleReference.ADC import ADCSolverRestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, DFIntegrals
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, DFIntegrals
 
 
 if __name__ == '__main__':

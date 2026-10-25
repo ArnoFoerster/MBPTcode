@@ -31,11 +31,11 @@ import pytest
 from pyscf import gto, scf
 from pyscf.solvent.pcm import modified_Bondi
 
-from src.Base.environment import attach_environment
-from src.Base.pyscf_interface import unrestricted_reference_diagnostics
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        detach_solvent_screening)
+from src.Base.environment_seam import attach_environment
+from src.Base.pyscf.pyscf_interface import unrestricted_reference_diagnostics
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening,
+                                                detach_solvent_screening)
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift

@@ -1,44 +1,41 @@
-"""The sum-over-poles route in production is the code it replaced, BITWISE.
+"""The sum-over-poles route in production is its reference code, to a few ulp.
 
 `SingleReference/GW/sum_over_poles.py` holds the forward physics -- the
 auxiliary-pole fit, the closed-form Sigma^c and its slope, the compression
-guards and the quasiparticle Newton -- and `gradients/sum_over_poles_adjoint.py`
-the reverse pass. A move is only a move if the numbers do not change, so every
-gate here is `array_equal`, not a tolerance, and the reference each one
-compares against is a verbatim copy of the code that was replaced:
-recomputing it through the new module would gate nothing.
+guards and the quasiparticle root -- and `gradients/sum_over_poles_adjoint.py`
+the reverse pass. Production must reproduce the reference numbers, so every
+gate here is a few ulp (`same`), not a method tolerance, and the reference each one
+compares against is a verbatim copy of the original code: recomputing it
+through the production module would gate nothing.
 
-The Newton of `qp_energy_sop` is the one piece NOT rerouted through
-`Solvers.qp_equation.solve_qp_equation_newton_guarded`. The two are the same
-iteration -- the guard switches off at pole_offset = 0, and the model has no
-pole on the real axis to guard against -- but the residual is spelled in the
-model's own order, (eps + xc + s - w), against the solver's -(w - eps - xc - s),
-and that is a last-bit difference: measured on water/cc-pVDZ, the two iterate
-lists separate by one ULP at the first step for the HOMO-1 (1.1e-16 Ha) and the
-LUMO (2.8e-17 Ha), and with a 0.013 Ha exchange-correlation correction the
-LUMO's converged root lands 2.8e-17 Ha apart. Z agrees bitwise in all six
-cases and the roots in five of six. `test_the_loop_is_not_the_guarded_newton`
-holds that equivalence at the level it really has.
+The quasiparticle root of `qp_energy_sop` is the one piece NOT kept as the
+original code: the original's seeded Newton is replaced by the one root
+finder of `Solvers.qp_equation`,
+which brackets every root between the poles and keeps the largest Z. Both
+end on a Newton step below 1e-11 from different starts, so the roots agree to
+one ULP and Z to its last bits (`test_the_quasiparticle_loop_is_the_old_loop`),
+and the pointwise scan of the same finder lands on the same root
+(`test_the_pole_sum_and_the_scan_agree`).
 
-Every gate below fails when the source it watches is broken:
+What breaks each gate:
 
   * the occupied sign dropped in production `denominators`, so every
-    denominator reads omega - eps_q - Om_m: 6 fail. On water/cc-pVDZ it
+    denominator reads omega - eps_q - Om_m. On water/cc-pVDZ it
     moves Sigma^c(eps_HOMO) from 0.048752188370 to -0.163108404978 Ha and the
     HOMO's quasiparticle root from -0.446839342814 to -0.665725250931 Ha,
     5.96 eV.
-  * the sign of production `pole_amplitudes` flipped: 3 fail. It is the
+  * the sign of production `pole_amplitudes` flipped. It is the
     fit itself, so Sigma^c and every adjoint change sign, while the pole
     POSITIONS and `compressible` do not move at all -- neither ever sees an
     amplitude, which is what those two gates are separately for.
   * `sigma_sop_backward`'s wc_bar built on 1/D^2 instead of 1/D, the one
-    plausible confusion with the eps_bar branch beside it: 1 fail, and only
+    plausible confusion with the eps_bar branch beside it: only
     the adjoint gate. |wc_bar|max goes from 1.02e-01 to 3.48e-01.
-  * xc_correction dropped from the production Newton step: 2 fail. On
+  * xc_correction dropped from the production equation. On
     water's HOMO-1 with a 0.013 Ha correction the loop then lands at
     -0.530410948641 Ha against the -0.518042446697 Ha of the equation it was
     supposed to solve, 1.2e-02 Ha apart -- which is also what makes the
-    comparison against the guarded solver a real check and not an identity.
+    comparison against the pointwise scan a real check and not an identity.
   * the import gate cannot be broken from inside production -- importing
     anything of `src.gradients` there is circular and dies at import time --
     so its sensitivity is a positive control inside the same test: the
@@ -53,17 +50,25 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.Base.constants import (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
-                                SOP_FIT_STRIDE, SOP_N_POLES)
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
+from src.Base.numerics.constants import (SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                         SOP_FIT_STRIDE, SOP_N_POLES)
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW import sum_over_poles as prod
 from src.SingleReference.GW.contour_deformation import residue_set, wc_explicit
-from src.SingleReference.GW.real_screening import ov_energies, screening_aux
-from src.SingleReference.base import get_occ_virt_indices
-from src.Solvers.qp_equation import solve_qp_equation_newton_guarded
-from src.gradients import sum_over_poles_adjoint as adjoint
-from src.gradients.contour_deformation_adjoint import (integral_term_backward,
-                                                       screening_chain)
+from src.SingleReference.GW.real_screening import screening_aux
+from src.Base.orbital_spaces import ov_energies
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Solvers.qp_equation import solve_qp_equation_scan
+from src.gradients.gwbse import sum_over_poles_adjoint as adjoint
+from src.gradients.gwbse.contour_deformation_adjoint import (integral_term_backward,
+                                                             screening_chain)
+from tests.pins import assert_same_tree
+
+
+def same(new, old, label=None):
+    """Production against the verbatim reference, two computations: every
+    number to a few ulp (`assert_same_tree`)."""
+    assert_same_tree(new, old, quantity='root', label=label)
 
 #: The model spectrum and screening of tests/test_sum_over_poles.py, where the
 #: fit is exact and every quantity is a closed form of known numbers.
@@ -74,9 +79,9 @@ WEIGHTS = np.array([0.050, 0.080, 0.120])
 COUPLING = np.array([0.31, -0.24, 0.45, 0.18, -0.37, 0.22, 0.14, -0.29])
 
 
-# --------------------------------------------------------------- the old code
-# Verbatim copies of what was replaced. They are the reference: a gate that
-# recomputed the reference through the new code would gate nothing.
+# ------------------------------------------------------- the reference code
+# Verbatim copies of the original code. They are the reference: a gate that
+# recomputed the reference through production would gate nothing.
 
 def _old_pole_basis(nu_points, poles):
     nu = np.asarray(nu_points, float)[:, None]
@@ -216,7 +221,7 @@ def water():
     """(eps, nocc, B, C_ov, nu, wt) for RHF/cc-pVDZ water, density fitted."""
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -259,16 +264,14 @@ def test_the_fit_is_the_old_fit_on_the_model():
     nu, _ = model_grid()
     wc = model_wc(nu)
     start = prod.initial_poles(3, 0.3, 6.0)
-    assert np.array_equal(start, _old_initial_poles(3, 0.3, 6.0))
-    assert np.array_equal(prod.pole_basis(nu, POLES),
-                          _old_pole_basis(nu, POLES))
-    assert np.array_equal(prod.pole_pseudoinverse(nu, POLES),
-                          _old_pole_pseudoinverse(nu, POLES))
-    assert np.array_equal(prod.pole_amplitudes(wc, POLES, nu),
-                          _old_pole_amplitudes(wc, POLES, nu))
-    assert np.array_equal(
-        prod.fit_poles(wc, nu, start, bounds=(0.05, 20.0)),
-        _old_fit_poles(wc, nu, start, bounds=(0.05, 20.0)))
+    same(start, _old_initial_poles(3, 0.3, 6.0), 'initial poles')
+    same(prod.pole_basis(nu, POLES), _old_pole_basis(nu, POLES), 'basis')
+    same(prod.pole_pseudoinverse(nu, POLES),
+         _old_pole_pseudoinverse(nu, POLES), 'pseudoinverse')
+    same(prod.pole_amplitudes(wc, POLES, nu),
+         _old_pole_amplitudes(wc, POLES, nu), 'amplitudes')
+    same(prod.fit_poles(wc, nu, start, bounds=(0.05, 20.0)),
+         _old_fit_poles(wc, nu, start, bounds=(0.05, 20.0)), 'fit')
 
 
 def test_the_fit_is_the_old_fit_on_water(water):
@@ -277,21 +280,20 @@ def test_the_fit_is_the_old_fit_on_water(water):
     d = ov_energies(eps, nocc)
     gap, top = float(d.min()), float(d.max())
     start = prod.initial_poles(SOP_N_POLES, gap, top)
-    assert np.array_equal(start, _old_initial_poles(SOP_N_POLES, gap, top))
+    same(start, _old_initial_poles(SOP_N_POLES, gap, top), 'initial poles')
     for p in states(nocc):
         wc = wc_explicit(b[:, p, :], c_ov, d, nu)
         # the reference relocation is production's with coalesced poles kept
         # (merge_tol=None); the entry point merges them (SOP_POLE_MERGE_TOL)
-        assert np.array_equal(
-            prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                           bounds=(gap, top), merge_tol=None),
-            _old_fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                           bounds=(gap, top))), p
+        same(prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
+                            bounds=(gap, top), merge_tol=None),
+             _old_fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
+                            bounds=(gap, top)), ('fit', p))
         poles, amp = prod.sop_from_wc(wc, nu, eps, nocc)
         merged = prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
                                 bounds=(gap, top))
-        assert np.array_equal(poles, merged), p
-        assert np.array_equal(amp, _old_pole_amplitudes(wc, merged, nu)), p
+        same(poles, merged, ('merged poles', p))
+        same(amp, _old_pole_amplitudes(wc, merged, nu), ('amplitudes', p))
 
 
 def test_the_closed_form_is_the_old_one(water):
@@ -305,19 +307,19 @@ def test_the_closed_form_is_the_old_one(water):
         _, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, p)
         for shift in (-0.05, 0.02, 0.11):
             omega = float(eps[p] + shift)
-            assert np.array_equal(prod.denominators(omega, poles, eps, nocc),
-                                  _old_denominators(omega, poles, eps, nocc))
+            same(prod.denominators(omega, poles, eps, nocc),
+                 _old_denominators(omega, poles, eps, nocc), 'denominators')
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 s_new = prod.sigma_sop(omega, amp, poles, eps, nocc)
             s_old = _old_sigma_sop(omega, amp, poles, eps, nocc)
-            assert s_new == s_old, (p, shift)
-            assert (prod.sigma_sop_slope(omega, amp, poles, eps, nocc)
-                    == _old_sigma_sop_slope(omega, amp, poles, eps, nocc))
-            assert (prod.pole_clearance(omega, poles, eps, nocc)
-                    == _old_pole_clearance(omega, poles, eps, nocc))
-            assert (prod.compressible(omega, eps, nocc)
-                    == _old_compressible(omega, eps, nocc))
+            same(s_new, s_old, ('Sigma^c', p, shift))
+            same(prod.sigma_sop_slope(omega, amp, poles, eps, nocc),
+                 _old_sigma_sop_slope(omega, amp, poles, eps, nocc), 'slope')
+            same(prod.pole_clearance(omega, poles, eps, nocc),
+                 _old_pole_clearance(omega, poles, eps, nocc), 'clearance')
+            same(prod.compressible(omega, eps, nocc),
+                 _old_compressible(omega, eps, nocc), 'compressible')
     # the core state is refused, with the words the callers match on
     _, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, 0)
     with pytest.warns(RuntimeWarning, match='Eq. \\(27\\)'):
@@ -325,7 +327,11 @@ def test_the_closed_form_is_the_old_one(water):
 
 
 def test_the_quasiparticle_loop_is_the_old_loop(water):
-    """Same iterates, same root, same Z -- the loop was kept, not rerouted."""
+    """Same root, same Z: the bracketed pole-sum solve lands on the loop's
+    root and Z by the pin rule (8 ulp on the recording BLAS, the energy class
+    bar under another; the cluster's MKL: 2 ulp, 1.1e-16 Ha). Not bitwise: both end on a Newton step below 1e-11 from
+    different starts (the loop from eps_p, the bracketed solve from inside
+    its interval)."""
     eps, nocc, b, c_ov, nu, _ = water
     for p in (nocc - 2, nocc - 1, nocc):
         _, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, p)
@@ -335,45 +341,42 @@ def test_the_quasiparticle_loop_is_the_old_loop(water):
                                               xc_correction=xc, w0=w0,
                                               trace=trace)
             w_new, z_new = prod.qp_energy_sop(p, amp, poles, eps, nocc,
-                                              xc_correction=xc, w0=w0)
-            assert (w_new, z_new) == (w_old, z_old), (p, xc)
+                                              xc_correction=xc)
+            # a quasiparticle energy and a pole strength not read off a
+            # continuation: the energy class, Z dimensionless
+            assert_same_tree(w_new, w_old, quantity='energy',
+                             label=('root', p, xc))
+            assert_same_tree(z_new, z_old, unit='1', quantity='energy',
+                             label=('Z', p, xc))
             # the root really is one: the residual of the equation solved
             s = prod.sigma_sop(w_new, amp, poles, eps, nocc, check=False)
             assert abs(w_new - eps[p] - xc - s) < 1e-10, (p, xc)
             assert len(trace) > 1, 'the loop must take more than one step'
 
 
-def test_the_loop_is_not_the_guarded_newton(water):
-    """The repo's guarded Newton solves the SAME equation, to the last bits.
-
-    With pole_offset = 0 the guard never fires -- the pole model has no pole on
-    the real axis to hold the iterate away from -- so the only difference is
-    the order the residual is spelled in: (eps + xc + s - w) here against
-    -(w - eps - xc - s) there. That is a rounding, not a method, and this gate
-    says so quantitatively: the roots agree to 1e-15, which is why the loop
-    stays where the model's own algebra is written and no guard is imported
-    into a route that has nothing to guard.
-    """
+def test_the_pole_sum_and_the_scan_agree(water):
+    """Two bracket sources of the one finder, one equation: the pole sum's
+    intervals and the pointwise scan of Sigma with its closed-form slope
+    return the same root and Z to 1e-14."""
     eps, nocc, b, c_ov, nu, _ = water
     for p in (nocc - 2, nocc - 1, nocc):
         _, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, p)
 
-        def sigma(w, amp=amp, poles=poles):
-            return prod.sigma_sop(w, amp, poles, eps, nocc, check=False)
+        def residual(w, amp=amp, poles=poles, xc=0.0):
+            return w - eps[p] - xc - prod.sigma_sop(w, amp, poles, eps, nocc,
+                                                    check=False)
 
-        def slope(w, amp=amp, poles=poles):
-            return prod.sigma_sop_slope(w, amp, poles, eps, nocc)
+        def fprime(w, amp=amp, poles=poles):
+            return 1.0 - prod.sigma_sop_slope(w, amp, poles, eps, nocc)
 
         for xc in (0.0, 0.013):
-            w_loop, z_loop = prod.qp_energy_sop(p, amp, poles, eps, nocc,
-                                                xc_correction=xc)
-            w_g, z_g = solve_qp_equation_newton_guarded(
-                sigma, slope, eps, p, nocc, xc_correction=xc,
-                w0=float(eps[p]), pole_offset=0.0, relax_offset=False,
-                linearize_on_capture=False, offset_min=0.0, z_min=0.0,
-                linear_offset=0.0)
-            assert abs(w_loop - w_g) < 1e-15, (p, xc, w_loop, w_g)
-            assert abs(z_loop - z_g) < 1e-15, (p, xc, z_loop, z_g)
+            w_poles, z_poles = prod.qp_energy_sop(p, amp, poles, eps, nocc,
+                                                  xc_correction=xc)
+            w_scan, z_scan = solve_qp_equation_scan(
+                lambda w, xc=xc: residual(w, xc=xc), fprime,
+                float(eps[p] + xc))
+            assert abs(w_poles - w_scan) < 1e-14, (p, xc, w_poles, w_scan)
+            assert abs(z_poles - z_scan) < 1e-14, (p, xc, z_poles, z_scan)
 
 
 def test_the_adjoints_are_the_old_ones(water):
@@ -387,13 +390,13 @@ def test_the_adjoints_are_the_old_ones(water):
                                                            eps, nocc, nu),
                                 _old_sigma_sop_backward(omega, amp, poles, eps,
                                                         nocc, nu)):
-                assert np.array_equal(new, old), (p, shift)
+                same(new, old, ('sigma_sop_backward', p, shift))
         omega = float(eps[p] + 0.02)
         for new, old in zip(adjoint.sop_partials(omega, amp, poles, eps, nocc,
                                                  nu, bp, c_ov),
                             _old_sop_partials(omega, amp, poles, eps, nocc, nu,
                                               bp, c_ov)):
-            assert np.array_equal(new, old), p
+            same(new, old, ('sop_partials', p))
 
 
 def test_the_model_screening_still_reproduces_the_contour_deformation():
@@ -420,8 +423,8 @@ def test_the_model_screening_still_reproduces_the_contour_deformation():
                       real_screening=ModelScreening())
         sop = prod.sigma_sop(omega, amp, POLES, EPS, NOCC, check=False)
         assert abs(sop - cd) < 1e-8, f'{sop:.12f} vs {cd:.12f}'
-    assert np.array_equal(prod.pole_amplitudes(wc, POLES, nu),
-                          _old_pole_amplitudes(wc, POLES, nu))
+    same(prod.pole_amplitudes(wc, POLES, nu),
+         _old_pole_amplitudes(wc, POLES, nu), 'amplitudes')
 
 
 def test_production_does_not_import_the_gradient_package():
@@ -441,6 +444,6 @@ def test_production_does_not_import_the_gradient_package():
     assert clean.returncode == 0, clean.stderr
     leaks = subprocess.run(
         [sys.executable, '-c',
-         probe % (root, 'src.gradients.sum_over_poles_adjoint')],
+         probe % (root, 'src.gradients.gwbse.sum_over_poles_adjoint')],
         capture_output=True, text=True)
     assert leaks.returncode == 1, 'the probe cannot see a leak it should see'

@@ -23,16 +23,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_orbital_energies)
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_orbital_energies)
+from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (solve_bse_df,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.isdf_test_grid import g1
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS, XC = 'cc-pvdz', 'cc-pvdz-ri', 'pbe0'
@@ -61,7 +62,7 @@ def factory(mol):
 def check_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc):
     """Same factor, same static W: Davidson and the dense [[A,B],[B,A]] agree
     to round-off, which fixes the kernel's gauge and normalization at once."""
-    omega, _, _, info = solve_bse_df(mf, mol, nocc, nroots=NROOTS, qp=False,
+    omega, _, _, info = solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), qp=False,
                                      probe=False)
     coeff = get_density_fitting_coefficients(mol, mf)
     lr = LinearResponseSolver(get_orbital_energies(mf, representation='spatial'),
@@ -78,7 +79,7 @@ def check_bse_at_the_mean_field_is_the_dense_casida_solve(mol, mf, nocc):
 def check_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc):
     """Every orbital's quasiparticle energy on the diagonal is the one
     `calc_qp_energy(mode='casida')` returns, and GW opens the Kohn-Sham gap."""
-    _, _, _, info = solve_bse_df(mol=mol, mf=mf, nocc=nocc, nroots=NROOTS,
+    _, _, _, info = solve_bse_df(mol=mol, mf=mf, nocc=nocc, numerics=Numerics(bse={'nroots': NROOTS}),
                                  probe=False)
     n = len(info['eps'])
     out = calc_qp_energy(mf, mode='casida', state=list(range(n)))
@@ -96,9 +97,9 @@ def check_the_g0w0_diagonal_is_the_casida_gw_route(mol, mf, nocc):
 def check_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc):
     """DF and ISDF are two fits of one interaction on one mean field; the
     BSE@G0W0 roots agree to the interpolative fit's error and no more."""
-    om_df = np.sort(solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False)[0])
-    om_isdf = np.sort(solve_bse_isdf(mf, mol, nocc, nroots=NROOTS,
-                                     auxbasis=AUXBASIS, probe=False)[0])
+    om_df = np.sort(solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), probe=False)[0])
+    om_isdf = np.sort(solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+                                     auxbasis=AUXBASIS, probe=False, counts=g1(mol))[0])
     d = np.abs(om_df - om_isdf).max() * HARTREE_TO_EV
     return check(d < FIT_TOL, 'the DF and ISDF routes agree to the fit error',
                  f'{d * 1e3:.1f} meV against a {FIT_TOL * 1e3:.0f} meV bar')
@@ -107,8 +108,8 @@ def check_the_two_factorizations_agree_on_the_spectrum(mol, mf, nocc):
 def check_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
     """The loop runs on the Casida route; its fixed point opens the gap past
     G0W0 from a PBE0 start, sits on the diagonal, and rebuilds W."""
-    _, _, _, g0w0 = solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False)
-    om, _, _, info = solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False,
+    _, _, _, g0w0 = solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), probe=False)
+    om, _, _, info = solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), probe=False,
                                   self_consistency='evGW')
 
     def gap(e):
@@ -121,14 +122,14 @@ def check_evgw_converges_and_screens_at_its_fixed_point(mol, mf, nocc):
     ok &= check(np.abs(info['W_aux'] - g0w0['W_aux']).max() > 1e-4,
                 'and W is rebuilt at the fixed point, not left at the mean field',
                 f"max |dW| {np.abs(info['W_aux'] - g0w0['W_aux']).max():.1e}")
-    om_isdf = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, auxbasis=AUXBASIS,
-                             probe=False, self_consistency='evGW')[0]
+    om_isdf = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), auxbasis=AUXBASIS,
+                             probe=False, self_consistency='evGW', counts=g1(mol))[0]
     d = np.abs(np.sort(om) - np.sort(om_isdf)).max() * HARTREE_TO_EV
     ok &= check(d < FIT_TOL, 'both routes reach the same evGW-BSE roots',
                 f'{d * 1e3:.1f} meV')
     # the kernel screens at the fixed point, evGW's W; evGW0 would keep another
     try:
-        solve_bse_df(mf, mol, nocc, nroots=NROOTS, probe=False,
+        solve_bse_df(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), probe=False,
                      self_consistency='evGW', gw_kwargs={'screening': 'fixed'})
         ok &= check(False, "a 'screening' in gw_kwargs is refused")
     except ValueError as e:
@@ -144,10 +145,10 @@ def check_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):
     frozen = env.mean_field(mol, factory)
     solvated = env.mean_field(mol, factory)
     attach_environment(solvated, env)
-    om_gas = np.sort(solve_bse_df(mf_gas, mol, nocc, nroots=NROOTS, probe=False)[0])
-    om_0, _, _, info_0 = solve_bse_df(frozen, mol, nocc, nroots=NROOTS,
+    om_gas = np.sort(solve_bse_df(mf_gas, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), probe=False)[0])
+    om_0, _, _, info_0 = solve_bse_df(frozen, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
                                       probe=False)
-    om, _, _, info = solve_bse_df(solvated, mol, nocc, nroots=NROOTS,
+    om, _, _, info = solve_bse_df(solvated, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
                                   probe=False)
     om_0, om = np.sort(om_0), np.sort(om)
 
@@ -166,10 +167,10 @@ def check_a_continuum_reaches_the_diagonal_and_the_kernel(mol, mf_gas, nocc):
                 'and Eq. (18) then moves the diagonal on an unchanged mean field',
                 f'quasiparticle gap by {d_gap * HARTREE_TO_EV:.3f} eV')
 
-    om_0_isdf = np.sort(solve_bse_isdf(frozen, mol, nocc, nroots=NROOTS,
-                                       auxbasis=AUXBASIS, probe=False)[0])
-    om_isdf = np.sort(solve_bse_isdf(solvated, mol, nocc, nroots=NROOTS,
-                                     auxbasis=AUXBASIS, probe=False)[0])
+    om_0_isdf = np.sort(solve_bse_isdf(frozen, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+                                       auxbasis=AUXBASIS, probe=False, counts=g1(mol))[0])
+    om_isdf = np.sort(solve_bse_isdf(solvated, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+                                     auxbasis=AUXBASIS, probe=False, counts=g1(mol))[0])
     response_df = (om - om_0) * HARTREE_TO_EV
     response_isdf = (om_isdf - om_0_isdf) * HARTREE_TO_EV
     d = np.abs(response_df - response_isdf).max()

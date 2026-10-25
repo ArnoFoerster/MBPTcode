@@ -15,7 +15,8 @@ integrals drop from 3 N^4 to 3 N^2 naux and the N^4 tensor is replaced by an
 this is the assembly both routes feed.
 
 The FORWARD side of the same factorization -- `df_integrals` and the fitted
-four-index `df_eri_mo` the gradient here differentiates -- is `Base.eri_blocks`.
+four-index `df_eri_mo` the gradient here differentiates -- is
+`SingleReference.common.eri_blocks`.
 
 pyscf sign convention, measured against finite differences in Bohr, grad on
 the electron coordinate: int3c2e_ip1 = (grad mu nu|P), int3c2e_ip2 =
@@ -25,7 +26,14 @@ as d/dR_A = -grad, so every nuclear derivative built from them carries a minus.
 import numpy as np
 from pyscf import df as pyscf_df
 
-from src.Base.eri_blocks import df_eri_mo, df_integrals  # noqa: F401
+from src.SingleReference.common.eri_blocks import df_integrals
+
+
+def fit_coefficients(J, V):
+    """K = J V^-1 over the last (auxiliary) index of J: the fit coefficients
+    of every pair, (..., naux)."""
+    naux = V.shape[0]
+    return np.linalg.solve(V, J.reshape(-1, naux).T).T.reshape(J.shape)
 
 
 def df_densities(Gamma4, C, mol, auxmol):
@@ -40,9 +48,8 @@ def df_densities(Gamma4, C, mol, auxmol):
     G = 0.5 * (G + G.transpose(0, 1, 3, 2))
     G = 0.5 * (G + G.transpose(2, 3, 0, 1))
     J, V = df_integrals(mol, auxmol)
-    naux = V.shape[0]
     J_mo = np.einsum('mp,nq,mnP->pqP', C, C, J, optimize=True)
-    K_mo = np.linalg.solve(V, J_mo.reshape(-1, naux).T).T.reshape(J_mo.shape)
+    K_mo = fit_coefficients(J_mo, V)
     Gamma3 = np.einsum('pqrs,rsP->pqP', G, K_mo, optimize=True)
     Gamma2 = np.einsum('pqP,pqQ->PQ', K_mo, Gamma3, optimize=True)
     Gamma3_ao = np.einsum('mp,nq,pqP->mnP', C, C, Gamma3, optimize=True)

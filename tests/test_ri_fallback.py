@@ -8,9 +8,9 @@ from pyscf.gto import basis as pyscf_basis
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import separable_ri                                    # noqa: E402
+from src.Base.factorization import separable_ri                                    # noqa: E402
 from src.Base.basis import ri_fallback                                # noqa: E402
-from src.Base.constants import ISDF_AUX_FALLBACK, ISDF_MAX_AUX_L      # noqa: E402
+from src.Base.numerics.constants import ISDF_AUX_FALLBACK, ISDF_MAX_AUX_L      # noqa: E402
 
 BASES = ('aug-cc-pvdz', 'aug-cc-pvtz')
 COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}

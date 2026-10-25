@@ -45,31 +45,39 @@ both spins' particle-hole pairs, one W, and for each spin its own Sigma~,
 Fock matrix and orbitals, h + J[D_a + D_b] - K[D_s] + Sigma~_s, mixed
 together by one DIIS on both.
 """
-import warnings
+import types
 
 import numpy as np
 import scipy.linalg
 from pyscf import scf
 from pyscf.scf import diis as scf_diis
 
-from src.Base.constants import (DEFAULT_BROADENING_ETA, EVGW_MAX_CYCLE, EVGW_TOL,
-                                HARTREE_TO_EV, QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE,
-                                QSGW_DM_TOL, QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
-                                get_method_info)
-from src.Base.environment import environment_of
-from src.Base.pyscf_interface import get_density_fitting_coefficients
+from src.Base.numerical_flags import flag
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import numerics_or_default
+from src.SingleReference.GW.self_energy import get_method_info
+from src.Base.environment_seam import environment_of
+from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
+from src.Base.utils.parallel import threads
+from src.SingleReference.GW import evGW  # module import: evGW -> qp_energy -> this file
 from src.SingleReference.GW.reaction_field import (continuum_operator,
                                                    dressed_factors)
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
-#: What the iterate screens: the Casida problem rebuilt from it (qsGW), or the
-#: mean field's kept and only the amplitudes and poles moved (qsGW0).
-SCREENINGS = ('updated', 'fixed')
+# SCREENINGS (evGW's): what the iterate screens, the Casida problem rebuilt
+# from it (qsGW, 'updated'), or the mean field's kept and only the
+# amplitudes and poles moved (qsGW0, 'fixed').
 #: How the AO Hamiltonian is mixed between cycles: PySCF's CDIIS, or linear
 #: mixing, Kaplan et al.'s H <- lambda H_new + (1 - lambda) S C diag(eps) C^T S.
 MIXINGS = ('diis', 'linear')
+
+
+class QsGWNotConverged(RuntimeWarning):
+    """The qsGW loop ended without a fixed point: the spectrum returned is the
+    last iterate, its record says info['converged'] False, and the named
+    flag 'qsgw_not_converged' is raised."""
 
 
 def _rpa_spectrum(eps, coeff, nocc, eta, tda, unrestricted=False):
@@ -80,7 +88,7 @@ def _rpa_spectrum(eps, coeff, nocc, eta, tda, unrestricted=False):
                               coeff_df=tuple(coeff) if unrestricted else coeff,
                               spin_mode='unrestricted' if unrestricted
                               else 'restricted', eta=eta)
-    spectrum = qp_energy._casida_spectrum(lr, nocc, 'RPA', None, tda,
+    spectrum = qp_energy.casida_spectrum(lr, nocc, 'RPA', None, tda,
                                           {'GW': get_method_info('GW')}, ['GW'],
                                           unrestricted, True)
     return spectrum, lr
@@ -124,13 +132,32 @@ def _rotated_factors(coeff0, c0, ovlp, mo_coeff):
     return np.einsum('Pmn,mp,nq->Ppq', coeff0, rot, rot, optimize=True)
 
 
+def _record_step(d_eps, d_dm_matrix, tested, nmo, history, dm_history):
+    """(max |delta eps| over `tested`, ||delta D||_F / nmo) of one cycle,
+    appended to the loop's two histories."""
+    delta = float(np.abs(d_eps[tested]).max())
+    d_dm = float(np.linalg.norm(d_dm_matrix) / nmo)
+    history.append(delta)
+    dm_history.append(d_dm)
+    return delta, d_dm
+
+
+def _warn_not_converged(label, loop, history, dm_history, stacklevel):
+    """The loop's warning when it ran out of `loop.max_cycle` cycles (`loop`
+    the qsgw settings): its last iterate is returned, not a fixed point."""
+    flag(
+        'qsgw_not_converged',
+        f'{label} did not converge in {loop.max_cycle} cycles: max |delta eps| '
+        f'is {history[-1] * HARTREE_TO_EV:.4f} eV against '
+        f'{loop.tol * HARTREE_TO_EV:.4f} eV, |dD| {dm_history[-1]:.1e} against '
+        f'{loop.dm_tol:.1e}. The spectrum '
+        f'returned is the last iterate, not a fixed point; raise max_cycle or '
+        f'switch the mixing.', QsGWNotConverged, stacklevel=stacklevel)
+
+
 def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
-                     converge_on=None, max_cycle=EVGW_MAX_CYCLE, tol=EVGW_TOL,
-                     dm_tol=QSGW_DM_TOL, diis_size=QSGW_DIIS_SIZE,
-                     mixing_lambda=QSGW_MIXING_LAMBDA, flow=QSGW_SRG_FLOW,
-                     block_elems=QSGW_BLOCK_ELEMS, keep_spectrum=False,
-                     verbose=False, df=True,
-                     eta=DEFAULT_BROADENING_ETA, tda=False, n_workers=None):
+                     converge_on=None, numerics=None, keep_spectrum=False,
+                     verbose=False, df=True, tda=False, n_workers=None):
     """(eps, mo_coeff, info): the quasiparticle-self-consistent GW spectrum and
     orbitals, in Hartree and the AO basis.
 
@@ -146,14 +173,15 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         1 is no mixing.
     converge_on: orbitals whose eigenvalue movement decides convergence, HOMO
         and LUMO by default.
-    tol:    max |delta eps| over `converge_on`, in Hartree.
-    dm_tol: ||D' - D||_F / nmo, PySCF's criterion. Both must hold.
-    flow: the SRG flow parameter s of the static self-energy, in Hartree^-2;
-        None gives plain mode A broadened by `eta`
-        (SelfEnergySolver.static_self_energy_matrix).
+    numerics: the run's `Numerics`; its qsgw section holds the loop's
+        settings: tol (max |delta eps| over `converge_on`, Hartree) and dm_tol
+        (||D' - D||_F / nmo, PySCF's criterion; both must hold), max_cycle,
+        diis_size, mixing_lambda, flow (the SRG flow parameter s of the static
+        self-energy, Hartree^-2; None gives plain mode A broadened by eta,
+        SelfEnergySolver.static_self_energy_matrix), block_elems and eta.
     keep_spectrum: also return the last cycle's Casida solution and transition
         density in `info`, for a fixed-point check; large, off by default.
-    df, eta, tda: the Casida route's, as `calc_qp_energy` takes them.
+    df, tda: the Casida route's, as `calc_qp_energy` takes them.
     n_workers: threads for the SRG static self-energy; None takes
         OMP_NUM_THREADS, else the CPUs in the affinity mask, as the Casida
         route's QP scan does.
@@ -180,8 +208,12 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     (alpha, beta) pair. ROHF/ROKS is refused.
     """
     mol = mf.mol if mol is None else mol
-    if screening not in SCREENINGS:
-        raise ValueError(f'screening={screening!r}: choose one of {SCREENINGS}')
+    loop = numerics_or_default(numerics).qsgw
+    (max_cycle, tol, dm_tol, diis_size, mixing_lambda, flow, block_elems,
+     eta) = (loop.max_cycle, loop.tol, loop.dm_tol, loop.diis_size,
+             loop.mixing_lambda, loop.flow, loop.block_elems, loop.eta)
+    if screening not in evGW.SCREENINGS:
+        raise ValueError(f'screening={screening!r}: choose one of {evGW.SCREENINGS}')
     if mixing not in MIXINGS:
         raise ValueError(f'mixing={mixing!r}: choose one of {MIXINGS}')
     if not 0.0 < mixing_lambda <= 1.0:
@@ -232,7 +264,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         raise ValueError(f'converge_on={tested.tolist()}: name one orbital or more, '
                          f'each an index 0 to {nmo - 1} of the spectrum')
 
-    workers = qp_energy._resolve_workers(n_workers, nocc * (nmo - nocc))
+    workers = threads.resolve_workers(n_workers, nocc * (nmo - nocc))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
     mf_hf = scf.RHF(mol)
@@ -254,7 +286,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
         spectrum, lr0 = _rpa_spectrum(eps0, coeff0, nocc, eta, tda)
         omega, X, Y = spectrum['singlet']
         rho = SelfEnergySolver(eps0, df_coeff=coeff0, spin_mode='restricted',
-                               eta=eta)._rho_a_df(nocc, X, Y)
+                               eta=eta).rho_a_df(nocc, X, Y)
         w_aux = lr0.static_screening_aux(nocc)
         # the loop needs omega and rho only; X and Y are nexciton x nocc nvirt
         del lr0, X, Y
@@ -277,7 +309,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             spectrum = None
             spectrum, _ = _rpa_spectrum(eps, coeff, nocc, eta, tda)
             omega, X, Y = spectrum['singlet']
-            rho = se._rho_a_df(nocc, X, Y)
+            rho = se.rho_a_df(nocc, X, Y)
             del X, Y
             spectrum = spectrum if keep_spectrum else None
         # Sigma~ in the current MO basis, then to the AO basis: C^-1 = C^T S
@@ -306,10 +338,8 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             ham = mixing_lambda * ham + (1.0 - mixing_lambda) * (cs * eps) @ cs.T
         eps_new, mo_coeff = scipy.linalg.eigh(ham, ovlp)
         dm_new = mf_hf.make_rdm1(mo_coeff, mo_occ)
-        delta = float(np.abs((eps_new - eps)[tested]).max())
-        d_dm = float(np.linalg.norm(dm_new - dm) / nmo)
-        history.append(delta)
-        dm_history.append(d_dm)
+        delta, d_dm = _record_step(eps_new - eps, dm_new - dm, tested, nmo,
+                                   history, dm_history)
         eps, dm = eps_new, dm_new
         if verbose:
             gap = (eps[nocc] - eps[nocc - 1]) * HARTREE_TO_EV
@@ -321,12 +351,7 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
             break
 
     if not converged:
-        warnings.warn(
-            f'{label} did not converge in {max_cycle} cycles: max |delta eps| is '
-            f'{history[-1] * HARTREE_TO_EV:.4f} eV against {tol * HARTREE_TO_EV:.4f} '
-            f'eV, |dD| {dm_history[-1]:.1e} against {dm_tol:.1e}. The spectrum '
-            f'returned is the last iterate, not a fixed point; raise max_cycle or '
-            f'switch the mixing.', RuntimeWarning, stacklevel=2)
+        _warn_not_converged(label, loop, history, dm_history, stacklevel=3)
 
     # the factors of the returned orbitals, and for qsGW the W they screen
     # with; in a continuum both in the dressed gauge, a BSE kernel's
@@ -384,7 +409,7 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
         raise ValueError(f'converge_on={converge_on!r}: name one flattened '
                          f'(channel, orbital) index 0 to {2 * nmo - 1} or more')
 
-    workers = qp_energy._resolve_workers(
+    workers = threads.resolve_workers(
         n_workers, sum(n * (nmo - n) for n in noccs))
     hcore = mf.get_hcore()
     ovlp = mf.get_ovlp()
@@ -407,7 +432,7 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
         omega, X, Y = spectrum['singlet']
         rho = SelfEnergySolver(tuple(eps), df_coeff=tuple(coeffs),
                                spin_mode='unrestricted',
-                               eta=eta)._rho_a_df(noccs, X, Y)
+                               eta=eta).rho_a_df(noccs, X, Y)
         return spectrum, lr, omega, rho
 
     def static_screening(eps, coeffs):
@@ -470,10 +495,8 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
         eps_new = np.array([e for e, _ in solved])
         mo_coeff = np.array([c for _, c in solved])
         dm_new = mf_hf.make_rdm1(mo_coeff, mo_occ)
-        delta = float(np.abs((eps_new - eps).ravel()[tested]).max())
-        d_dm = float(np.linalg.norm(dm_new - dm) / nmo)
-        history.append(delta)
-        dm_history.append(d_dm)
+        delta, d_dm = _record_step((eps_new - eps).ravel(), dm_new - dm, tested,
+                                   nmo, history, dm_history)
         eps, dm = eps_new, dm_new
         if verbose:
             gap = (eps[0, noccs[0]] - eps[0, noccs[0] - 1]) * HARTREE_TO_EV
@@ -485,12 +508,9 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
             break
 
     if not converged:
-        warnings.warn(
-            f'{label} did not converge in {max_cycle} cycles: max |delta eps| is '
-            f'{history[-1] * HARTREE_TO_EV:.4f} eV against {tol * HARTREE_TO_EV:.4f} '
-            f'eV, |dD| {dm_history[-1]:.1e} against {dm_tol:.1e}. The spectrum '
-            f'returned is the last iterate, not a fixed point; raise max_cycle or '
-            f'switch the mixing.', RuntimeWarning, stacklevel=3)
+        _warn_not_converged(label, types.SimpleNamespace(
+            max_cycle=max_cycle, tol=tol, dm_tol=dm_tol), history, dm_history,
+            stacklevel=4)
 
     coeffs = rotated(coeffs0 if continuum is None else coeffs0_d, mo_coeff)
     if continuum is not None and screening == 'fixed':

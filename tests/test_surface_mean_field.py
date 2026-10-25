@@ -3,8 +3,8 @@
 `scf_factory` is the raw user factory. A surface standing in an environment
 builds its mean field THROUGH that environment -- PCM at the static dielectric
 for a continuum, the classical charges in h_core for a point-charge field -- so
-the factory's mean field belongs to a different surface. Every routine here
-that reached for the factory was therefore reporting a geometry relaxed in the
+the factory's mean field belongs to a different surface. A routine that
+reached for the factory would therefore report a geometry relaxed in the
 environment at its gas-phase energy: 0.25 eV on water/cc-pVDZ in
 PCM(1.78/78.39) and 25 mHa in a pair of half-charges 3 Angstrom away, which is
 larger than any reorganization energy such a record is used to compute.
@@ -23,13 +23,17 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.environment import PointCharges
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_bse_surface import RPABSESurface, RPAQPSurface
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    surface_mean_field)
+from src.properties.optimize import derived_walk
+from src.environments.environment import PointCharges
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface, RPAQPSurface
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.surface import MissingIngredient
+from src.gradients.surface import (FiniteDifferenceGradient,
+                                   surface_mean_field)
 from src.properties.vibronic import energy_at, relax_state
+from tests.isdf_test_grid import g1, g1_numerics
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -88,7 +92,7 @@ def water():
 def solvated(water):
     """The dRPA ground state in the continuum, and its gas-phase control."""
     env = SolventScreening(water, eps=EPS, eps_static=EPS_STATIC)
-    return RPAGroundStateChain(water, hf_factory, environment=env)
+    return RPAGroundStateChain(water, hf_factory, environment=env, numerics=Numerics(isdf={'counts': g1(water)}))
 
 
 # ------------------------------------------------------------------ the helper
@@ -100,16 +104,19 @@ def test_the_helper_returns_the_surfaces_own_mean_field(water, solvated):
     assert not hasattr(solvated.scf_factory(water), 'with_solvent')
 
 
-def test_the_helper_falls_back_to_the_factory(water):
-    """A surface with no environment to build one through -- the toy surfaces
-    and the dense route -- must still answer."""
+def test_a_surface_without_the_accessor_is_refused_by_name(water):
+    """`mean_field` is a declared ingredient of the surface protocol: a
+    surface that lacks it is refused by name at the call, and its raw
+    `scf_factory` is never read in its place."""
     class NoMeanField:
         mol0 = None
 
         def scf_factory(self, mol):
             return 'factory'
 
-    assert surface_mean_field(NoMeanField(), water) == 'factory'
+    with pytest.raises(MissingIngredient, match='NoMeanField provides no '
+                                                'mean_field'):
+        surface_mean_field(NoMeanField(), water)
 
 
 def test_the_composed_surfaces_expose_their_mean_field():
@@ -158,7 +165,8 @@ def test_a_relaxed_record_is_on_the_surface_it_was_relaxed_on(water, solvated):
     its `e_scf` from, so a bare one there puts the Huang-Rhys factors on a
     different surface from the geometry.
     """
-    record = relax_state(solvated, water, engine='cartesian', max_cycle=0,
+    record = relax_state(solvated, water, engine='cartesian',
+                         numerics=derived_walk(solvated, 'a capped test walk', max_cycle=0),
                          verbose=False)
     assert hasattr(record['mf'], 'with_solvent'), 'the record came back bare'
     assert record['e_scf'] == pytest.approx(float(record['mf'].e_tot), rel=1e-14)
@@ -171,7 +179,7 @@ def test_energy_at_is_on_the_solvated_bse_surface(water):
     """The composed surface answers `mean_field` itself; before it did not, and
     `energy_at` silently dropped the continuum from E_0 AND from Omega."""
     env = SolventScreening(water, eps=EPS, eps_static=EPS_STATIC)
-    s = RPABSESurface(water, hf_factory, environment=env)
+    s = RPABSESurface(water, hf_factory, environment=env, numerics=g1_numerics(water))
     assert s.mean_field(water)[1] is s.ground.mf0
     assert energy_at(s, water) == pytest.approx(s.total_energy(water), abs=1e-10)
 
@@ -182,7 +190,7 @@ def test_point_charges_reach_the_property_layer(water):
     everything the charges do is in h_core, so the factory's mean field is the
     only place their effect could go missing."""
     charges = PointCharges([[0.0, 0.0, 3.0], [0.0, 0.0, -3.0]], [0.5, -0.5])
-    chain = RPAGroundStateChain(water, hf_factory, environment=charges)
+    chain = RPAGroundStateChain(water, hf_factory, environment=charges, numerics=Numerics(isdf={'counts': g1(water)}))
     assert hasattr(surface_mean_field(chain, water), 'mm_mol')
     own = chain.total_energy(water)
     assert energy_at(chain, water) == pytest.approx(own, abs=1e-10)

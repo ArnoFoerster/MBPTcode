@@ -25,7 +25,7 @@ import numpy as np
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 
 
-def _check_denominator(d, tol=1e-8):
+def check_denominator(d, tol=1e-8):
     """Fail loudly on a vanishing amplitude denominator.
 
     eps_a + eps_b - eps_i - eps_j = 0 means an occupied and a virtual orbital
@@ -50,19 +50,58 @@ def _check_denominator(d, tol=1e-8):
             'with symmetry=False so the reference can break symmetry.')
 
 
-class _Backend:
+def cached_ingredients(cache, make_gb, make_vk):
+    """(gb, vk, cache): the integral blocks and vvvv kernels of a route,
+    built once per cache (ee_r_sigma.new_cache) and read back after."""
+    cache = {} if cache is None else cache
+    if 'gb' not in cache:
+        cache['gb'] = make_gb()
+        cache['vk'] = make_vk()
+    return cache['gb'], cache['vk'], cache
+
+
+def cached_amplitudes(cache, be, gb, d_amp, d_ia_amp, order, vk,
+                      en_shift=None):
+    """Amplitudes/Z/density at the REQUESTED order, cached and upgraded.
+
+    Order 3 is a superset of order 2, so a cell running ADC(2), ADC(2)-x and
+    ADC(3) still pays for the third-order ingredients once. But it must not
+    pay for them when nothing asks: ADC(2) uses t^(1) alone, and computing at
+    order 3 regardless pulls in t^(2) -- whose numerator contains the
+    particle ladder -- plus the whole Z set, three of which (Z1, Z6, Z7) are
+    ovvv-sized. That is the dominant cost of the run, incurred for terms
+    ADC(2) never contracts. An ADC(2)-only sweep of the database is a factor
+    of several cheaper for this one line.
+
+    The cache records the order it holds and recomputes only to go UP."""
+    if order < 2:
+        return None, None, None
+    if cache.get('order', 0) < order:
+        cache['amps'] = amplitudes(be, gb, d_amp, d_ia_amp, order, vk=vk,
+                                   en_shift=en_shift)
+        cache['rho'] = density2(be, cache['amps'])
+        # Z is third-order content only, and the expensive part of it
+        cache['zint'] = (z_intermediates(be, gb, cache['amps'], vk=vk)
+                         if order >= 3 else None)
+        cache['order'] = order
+    return cache['amps'], cache['zint'], cache['rho']
+
+
+class Backend:
+    """The array operations the equations are written in: einsum, scaling and
+    division by a weight, and the identity."""
     def __init__(self, ein, scale, divide, eye):
         self.ein, self.scale, self.divide, self.eye = ein, scale, divide, eye
 
 
-NUMPY = _Backend(
+NUMPY = Backend(
     ein=lambda subs, *ops: np.einsum(subs, *ops, optimize=True),
     scale=lambda T, arr: T * arr,
     divide=lambda T, arr: T / arr,
     eye=np.eye,
 )
 
-SPIN_BLOCKED = _Backend(
+SPIN_BLOCKED = Backend(
     ein=_sb.sb_einsum,
     scale=lambda T, arr: T.scale(arr),
     divide=lambda T, arr: T.divide(arr),
@@ -134,7 +173,7 @@ def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None):
     the denominator has already resummed -- the standard requirement that
     whatever moves into H0 comes out of the perturbation."""
     vk = vk if vk is not None else VvvvKernels(be, gb.get('vvvv'))
-    _check_denominator(d_ijab)
+    check_denominator(d_ijab)
     t2_1 = be.divide(gb['oovv'], d_ijab)
     out = {'t2_1': t2_1}
     num = (_ovvv_ia(be, gb, t2_1)
@@ -310,11 +349,11 @@ def sigma_d_from_s_slab(be, gb, y1, j0, j1):
     swap = (0, 1, 3, 2)
     W = {}
     for k in ('aaaa', 'bbbb'):
-        W[k] = _sb._ew(np.subtract, E[k], E[k].transpose(swap))
+        W[k] = _sb.ew(np.subtract, E[k], E[k].transpose(swap))
         del E[k]
     for k, kx in (('abab', 'abba'), ('baba', 'baab')):
-        W[k] = _sb._ew(np.subtract, E[k], E[kx].transpose(swap))
-        W[kx] = _sb._ew(np.subtract, E[kx], E.pop(k).transpose(swap), out=E[kx])
+        W[k] = _sb.ew(np.subtract, E[k], E[kx].transpose(swap))
+        W[kx] = _sb.ew(np.subtract, E[kx], E.pop(k).transpose(swap), out=E[kx])
         del E[kx]
     # -1/2 (1 - P_ij) sum_c <ic||ab> y_jc on the slab, added into W
     return _sb.ovvv_ijab_pij_slab(gb['ovvv_ajbc'], ym, j0, j1, out=_sb.SB(W))

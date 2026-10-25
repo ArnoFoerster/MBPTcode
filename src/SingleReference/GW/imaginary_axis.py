@@ -1,48 +1,50 @@
+"""GW quasiparticle energies on the imaginary-frequency axis.
+
+The RPA screened interaction W(i omega) on a minimax or Gauss-Legendre grid,
+the correlation self-energy by numerical convolution over that grid
+(`self_energy_imaginary_axis`), and its continuation to the real axis by Pade
+(`solve_qp_energy_imaginary_axis`), restricted and unrestricted, at T = 0 or
+at a finite temperature.
+"""
 import time as _time
 
 import numpy as np
 
 from pyscf import scf
 
-from src.Base.constants import DEFAULT_BROADENING_ETA
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid, minimax_supported_sizes
-from src.Base.utils.analyticalContinuation import greedy_pade_order, thiele_coefficients, pade_eval
-from src.Base.utils.matsubara import (beta_from_mf, ir_continuation_order,
-                                      self_energy_range, thermal_e_min)
-from src.Base.pyscf_interface import (get_orbital_energies,
+from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.numerics.numerics import numerics_or_default
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
+from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
+                                            self_energy_range, thermal_e_min)
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      get_density_fitting_coefficients,
                                      get_df_coefficients_ov,
                                      require_closed_shell_or_unrestricted,
                                      spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.SingleReference.base import get_occ_virt_indices, transition_range
-from src.Solvers.qp_equation import solve_qp_equation
+from src.Base.orbital_spaces import (get_occ_virt_indices,
+                                     particle_hole_window, transition_range)
 from src.SingleReference.GW.reaction_field import (
-    bare_self_energy, environment_quasiparticle_shift)
-from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
-                                             solve_qp_from_imaginary_axis,
+    bare_self_energy, environment_quasiparticle_shift, shift_after_solve)
+from src.SingleReference.GW.qp_solve import (finish_qp,
                                              imaginary_axis_sample_points)
-
-
-def solve_screening_imaginary_axis(lr_solver, nocc, freq_points):
-    """W(i*omega_k) = [I - P(i*omega_k)]^-1 on the imaginary-frequency grid"""
-    return lr_solver.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
 
 
 def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_weights,
                                 W_grid, query_freqs):
-    """
-    Correlation self-energy Sigma_c,pp(i*query_freqs) 
-    by numerical convolution over the imaginary-frequency grid.
+    """Correlation self-energy Sigma_c,pp(i*query_freqs) by numerical
+    convolution over the imaginary-frequency grid:
 
     Sigma_pp(i*w) = -(1/2pi) sum_m sum_k weight_k * [G_m(i*(w+wk)) + G_m(i*(w-wk))] * w_pp^m(i*wk)
-    Wc = W - I is the correlation-only screened interaction
-    exchange handled separately via the static Sigma_x - v_xc term). 
-    Returns complex array of shape (len(query_freqs)).
+
+    with w_pp^m built from Wc = W - I, the correlation-only screened
+    interaction (the exchange is the separate static Sigma_x - v_xc term).
+    Returns a complex array of shape (len(query_freqs)).
 
     eps and query_freqs share an origin: passing eps - mu returns
-    Sigma_pp(mu + i*w), i.e. samples on the vertical line Re z = mu. 
-    Pick mu inside the gap!!!
+    Sigma_pp(mu + i*w), i.e. samples on the vertical line Re z = mu, so mu
+    must lie inside the gap.
     """
     
     # w_pm^m(i*w_k) for all m, all grid points k: shape (nfreq, norb)
@@ -95,13 +97,17 @@ def _unrestricted_screening(mol, mf, nocc, states, spin):
     return spectra, lr, rows
 
 
-def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, grid='minimax',
-                                    solver_mode='pole_strength', greedy=True,
+def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, numerics=None, w0=None, grid='minimax',
+                                    greedy=True,
                                     dm_correction=None, timings=None, beta=None,
-                                    eps_anchor=None, spin_channel='alpha'):
+                                    eps_anchor=None, spin_channel='alpha',
+                                    with_z=False, pade_freq=None):
     """
     GW@RPA quasiparticle energy via the imaginary-frequency-axis route:
     RPA W(i*omega) -> convolution -> Pade continuation.
+
+    numerics: the run's `Numerics`; its imagfreq section holds the W(i omega)
+    quadrature's point count, nfreq.
 
     No broadening to set: chi0(i*omega) has the real denominator
     -2d/(d^2 + w^2) and Sigma_c reaches the real axis by Pade rather than at
@@ -109,15 +115,14 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     reaches mode='casida' instead, the only route it acts on.
 
     beta: inverse temperature in inverse Hartree, for a system whose gap is too
-    small for a T = 0 grid. 
-    gap exceeds pi/beta:
+    small for a T = 0 grid. Setting it does two things:
       * the grid's e_min (or w0) is floored at the first Matsubara frequency
         pi/beta. This makes the tabulated minimax and Gauss-Legendre
         quadratures defined at all when the gap closes;
       * the Pade continuation is capped at `ir_continuation_order(beta, wmax)`
-        nodes. This is the the number of structures the imaginary-axis data can 
-        actually resolve at that temperature and bandwidth, rather than however 
-        many sample points happen to exist.
+        nodes: the number of structures the imaginary-axis data can actually
+        resolve at that temperature and bandwidth, rather than however many
+        sample points happen to exist.
     `beta=None` reads it off the mean field when that carries Fermi-Dirac
     smearing (`beta_from_mf`), and otherwise leaves everything at T = 0.
 
@@ -127,10 +132,18 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     channel's own mid-gap. The frequency grid spans the transitions of both
     spins, since both build the W it integrates. An `eps_anchor` of shape
     (2, nmo) is read at the channel's row.
+
+    with_z: also return Z = 1/(1 - dRe Sigma_c/dw) of the continued fraction
+    at each root, as the space-time route's Pade does: (roots, z).
+
+    pade_freq: the imaginary frequencies Sigma_c is sampled at for the Pade
+    continuation. None takes this route's own W nodes;
+    `analytic_continuation.pade_nodes` is the space-time route's node rule.
     """
 
     require_closed_shell_or_unrestricted(mf, 'solve_qp_energy_imaginary_axis',
                                          mol=mol)
+    nfreq = numerics_or_default(numerics).imagfreq.nfreq
     unrestricted = isinstance(mf, scf.uhf.UHF)
     spin = spin_index(spin_channel) if unrestricted else None
     eps = get_orbital_energies(mf, representation='spatial')
@@ -177,9 +190,7 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         e_min, e_max = transition_range(spectra, nocc)
         eps, nocc = spectra[spin], nocc[spin]
     else:
-        occ, virt = get_occ_virt_indices(eps, nocc)
-        e_min = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
     if beta is not None:
         e_min = thermal_e_min(beta, e_min)
 
@@ -188,20 +199,21 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
         freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
     elif grid == 'gauss_legendre':
         if w0 is None:
-            w0 = (0.5 * e_min if beta is not None or unrestricted
-                  else gap_scaled_w0(eps, nocc))
+            w0 = gap_scaled_w0(eps, nocc, gap=e_min if beta is not None
+                               or unrestricted else None)
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     else:
         raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
 
     # calculate W on imaginary axis - This is the integration gird  
     _t = _time.time()
-    W_grid = solve_screening_imaginary_axis(lr, screening_nocc, freq_points)
+    W_grid = lr.solve_rpa_screening(freq_points, screening_nocc,
+                                    is_imaginary=True)
     if timings is not None:
         timings['t_W'] = _time.time() - _t
 
     # chemical potential, mid gap
-    mu = 0.5 * (eps[nocc - 1] + eps[nocc])
+    mu = particle_hole_window(eps, nocc)[2]
 
     # imaginary axis sampling point
     w_sigma = self_energy_range(eps, mu, e_max)
@@ -215,22 +227,17 @@ def solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=20, w0=None, gr
     if unrestricted and anchor.ndim == 2:
         anchor = anchor[spin]
 
-    _t = _time.time()
-    xc_diag = static_exchange_diagonal(mf, mol, states,
-                                       dm_correction=dm_correction,
-                                       reaction_field=reaction_field,
-                                       spin=spin)
-    out = []
-    for i, p in enumerate(states):
-        z_fit, iw_query = imaginary_axis_sample_points(freq_points, nocc,
-                                                       int(p), mu)
-        sigma_iw = self_energy_imaginary_axis(C_row[:, [i], :], eps - mu, nocc,
-                                              0, freq_points, freq_weights,
-                                              W_grid, iw_query)
-        out.append(solve_qp_from_imaginary_axis(
-            anchor, int(p), float(xc_diag[i]), z_fit, sigma_iw, greedy=greedy,
-            solver_mode=solver_mode, max_order=pade_order))
-    if timings is not None:
-        timings['t_qp'] = _time.time() - _t
-    return out[0] if scalar else np.asarray(out)
+    # Eq. (18) after the solve in G0W0, in the static term on an evGW cycle;
+    # each state's Sigma_c sampled on its own branch of the axis
+    z_points = freq_points if pade_freq is None else pade_freq
+    sigma = [self_energy_imaginary_axis(
+        C_row[:, [i], :], eps - mu, nocc, 0, freq_points, freq_weights, W_grid,
+        imaginary_axis_sample_points(z_points, nocc, int(p), mu)[1])
+        for i, p in enumerate(states)]
+    return finish_qp(sigma[0] if scalar else sigma, anchor, nocc,
+                     states[0] if scalar else states, mu, z_points, mf, mol,
+                     dm_correction, greedy, timings,
+                     reaction_field=reaction_field, spin=spin, with_z=with_z,
+                     after_solve=shift_after_solve(eps_anchor),
+                     max_order=pade_order, branch_sampled=True)
 

@@ -7,11 +7,11 @@ Gated:
   * order and completeness: the result equals the builtin map for 2, 3 and 7
     ranks, including more ranks than items and an empty item list;
   * every rank evaluates only its stripe, and every item exactly once overall;
-  * a `FiniteDifferenceGradient` on a cheap analytic surface returns the SAME
-    BITS with `map_fn=partial(mpi_map, comm=...)` as serially: the displaced
-    energies are the same numbers and the difference is taken in the same
-    arithmetic, whichever rank produced them;
-  * `numerical_hessian` accepts the same map and agrees bitwise too.
+  * a `FiniteDifferenceGradient` on a cheap analytic surface returns the same
+    numbers to a few ulp with `map_fn=partial(mpi_map, comm=...)` as serially:
+    the displaced energies are the same numbers and the difference is taken
+    in the same arithmetic, whichever rank produced them;
+  * `numerical_hessian` accepts the same map and agrees to a few ulp too.
 """
 import functools
 import os
@@ -24,8 +24,10 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.utils.mpi_grid import mpi_map, run_simulated
-from src.properties.surface import FiniteDifferenceGradient
+from src.Base.utils.parallel.mpi_grid import mpi_map
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.surface import FiniteDifferenceGradient
+from tests.pins import assert_same, assert_same_tree
 
 SIZES = [2, 3, 7]
 
@@ -94,8 +96,9 @@ def test_finite_difference_gradient_is_bitwise_under_the_map(size):
         return fd.total_gradient(mol)
 
     for grad, e0, info in run_simulated(one_rank, size):
-        assert np.array_equal(grad, serial[0])
-        assert e0 == serial[1] and info == serial[2]
+        assert_same(grad, serial[0], quantity='gradient', label='gradient')
+        assert_same(e0, serial[1], label='energy')
+        assert_same_tree(info, serial[2], label='info')
     assert np.abs(serial[0]).max() > 0
 
 
@@ -133,7 +136,7 @@ def test_numerical_hessian_accepts_the_map(size):
                                      map_fn=functools.partial(mpi_map, comm=comm))
 
         for hess in run_simulated(one_rank, size):
-            assert np.array_equal(hess, serial)
+            assert_same(hess, serial, quantity='gradient', label='Hessian')
     finally:
         H.gradient_at = original
 

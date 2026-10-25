@@ -28,10 +28,13 @@ construction, and a serial reference on rank r is of the same numbers as rank
 0's. The chain gates compare against rank 0's serial force, since each rank
 converges the chain's SCF on its own.
 
-Five standards:
+Six standards:
   bitwise   a lockstepped output, or an output partition (rows computed once
-            and gathered verbatim): identical on every rank, and identical to
-            serial where the only reductions add exact zeros
+            and gathered verbatim): identical on every rank
+  few ulp   two computations of one number (against serial where the only
+            reductions add exact zeros, a second call of one kernel, a second
+            fit): `pins.matches` under the recording BLAS, PIN_SAME_ULPS ulp,
+            the quantity's class bar elsewhere (two computations are not bitwise)
   reduced   a sum re-associated over the partition: a bar at the summation
             order (1e-12 or 1e-11 relative, 1e-10 Ha, 1e-9 eV), `SIGMA_REL`
             for the cancelling Wt(tau) sum
@@ -42,7 +45,7 @@ Five standards:
             (tests/reduction_bounds.py)
   stated    a composed force or energy, whose inputs pass through the
             re-associated reductions, the Davidson and the fit's Gram solve:
-            a tolerance named in src/Base/constants.py and justified there by
+            a tolerance named in src/Base/numerics/constants.py and justified there by
             its mechanism (RANK_SPLIT_FORCE_TOL / RANK_SPLIT_ENERGY_TOL for
             the same calculation over ranks, FIT_REALIZATION_FORCE_TOL across
             two realizations of the fit), each check printing the fraction of
@@ -77,12 +80,12 @@ Checks (path; standard):
     communicator it is handed: per trial vector one reduce-scatter of the
     (n_occ, M) partial X_o^T (Zt * P), each rank receiving its
     `contiguous_block` rows alone and the ranks' rows tiling the grid once,
-    no all-reduce as long as that intermediate, and A and B the bits of the
-    same action on the unrecorded communicator (exact, bitwise)
+    no all-reduce as long as that intermediate, and A and B those of the
+    same action on the unrecorded communicator (exact, few ulp)
   * the factors held as grid-point slices, `separable_factors(sliced=True)`
-    (context): each rank's rows of the fixture and nothing more (bitwise,
+    (context): each rank's rows of the fixture and nothing more (few ulp,
     exact); the GW window (explicit) and the BSE (context) on them against
-    the fixture's factors (bitwise), rank 0's Davidson on every rank, and
+    the fixture's factors (few ulp; the window's bits one on every rank), rank 0's Davidson on every rank, and
     each whole-array gather once per solve or sweep (exact)
   * the in-core GW window split over grid rows (`_qp_grid_rows`), on sliced
     factors at tiles and blocks small enough that the ranks share a tau
@@ -94,8 +97,9 @@ Checks (path; standard):
     the same trace with a whole Pi(tau) slice planted in the sweep finds it
     on every rank (exact, shown failing); the window against serial
     (anchored: `COMPOSED_GRAD_K` times what relabelling the grid points moves
-    it serially, floored at the root finder's `QP_BISECTION_TOL`), the window
-    and W(0) rank 0's on every rank (bitwise)
+    it serially, floored at the scan's bisection tolerance
+    `QP_GRAPHICAL_TOL`), the window and W(0) rank 0's on every rank
+    (bitwise)
   * the route's two reduced sums on this run's ranks (explicit, recorded on
     the communicator): proj(tau) over the grid-row tiles and the branch sums
     of Sigma over the block pairs, each against the serial kernel's own
@@ -106,8 +110,8 @@ Checks (path; standard):
     the sum's largest element (bounded: the most any reduction tree can
     move it, tests/reduction_bounds.py); chi0's rows the update of the
     received proj rows, W(0) the inversion of their chi0(0) and the route's
-    W(0) that one (bitwise)
-  * `qp_set_gradient` (explicit): roots against serial (bitwise), adjoints
+    W(0) that one (few ulp)
+  * `qp_set_gradient` (explicit): roots against serial (few ulp), adjoints
     (reduced)
   * `rpa_energy_and_adjoint` (context): energy and adjoints (reduced)
   * `qp_gradient_space_time`: contour deformation (context) root, Z and
@@ -164,13 +168,14 @@ Checks (path; standard):
     `bse_adjoint='grid'`, and with the default one (context), both handed one
     reference and one displaced mean field with pyscf's OpenMP on one thread,
     each route gated over the ranks against its own serial kernel and never
-    against the other: the two surfaces' energy and root (bitwise: one
+    against the other: the two surfaces' energy and root (few ulp: one
     forward pass, the adjoint is all that differs); at the reverse call the
-    grid adjoint's four Casida-level seeds, computed over the ranks, the bits
-    of the same kernel run serially on the gathered factors, and the composed
-    force the bits of the same fold of those serial seeds on the same pieces,
-    every rank's rank 0's (bitwise); the default adjoint's seeds the bits of
-    `bse_cache` and `bse_backward` run serially on the gathered factors, its
+    grid adjoint's four Casida-level seeds, computed over the ranks, those
+    of the same kernel run serially on the gathered factors (few ulp), and
+    the composed force that of the same fold of those serial seeds on the
+    same pieces (few ulp), every rank's rank 0's (bitwise); the default
+    adjoint's seeds those of `bse_cache` and `bse_backward` run serially on
+    the gathered factors (few ulp), its
     force every rank's rank 0's (bitwise); no three-index block reachable
     from the chain or its forward pass at the reverse call, where the default
     route's cache is found (exact); the grid kernel traced line by line in
@@ -206,64 +211,71 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto, lib, scf
 
-from src.Base.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
-                                HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
-                                QP_BISECTION_TOL,
-                                RANK_SPLIT_ENERGY_TOL, RANK_SPLIT_FORCE_TOL)
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.Base.numerics.constants import (COMPOSED_GRAD_K, FIT_REALIZATION_FORCE_TOL,
+                                         HARTREE_TO_EV, ISDF_HESSIAN_MIN_GRID,
+                                         QP_GRAPHICAL_TOL, RANK_SPLIT_ENERGY_TOL,
+                                         RANK_SPLIT_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import QPStates
-from src.Base.distributed_df import distributed_df_storage, distributed_mean_field
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
-from src.Base.utils.mpi_grid import (SimulatedComm, broadcast,
-                                     contiguous_block, distributed,
-                                     grid_comm, lockstep_stats, mpi_map,
-                                     partition)
-from src.Base import separable_ri
-from src.Base.sliced_factors import (GridTileRows, SlicedFactors,
-                                     whole_factor)
-from src.Base.utils.time_frequency import (COSINE_WT, TimeFrequencyGrid,
-                                           minimax_transform_weights)
+from src.Base.factorization.distributed_df import distributed_df_storage, distributed_mean_field
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.grids.grids import gauss_legendre_grid, minimax_time_grid
+from src.Base.utils.parallel.mpi_grid import (
+    broadcast, contiguous_block, distributed, grid_comm, lockstep_stats,
+    mpi_map, partition)
+from src.Base.utils.parallel.simulated_comm import SimulatedComm
+from src.Base.factorization import separable_ri
+from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
+                                                   whole_factor)
+from src.Base.utils.grids.time_frequency import (COSINE_WT, TimeFrequencyGrid,
+                                                 minimax_transform_weights,
+                                                 sigma_fit_ranges)
 from src.SingleReference.GW.imaginary_time import (SigmaPairs,
                                                    screened_interaction_rows,
                                                    screening_frequency_grid,
                                                    self_energy_branch_sums,
-                                                   self_energy_fit_ranges)
+                                                   screened_interaction_tau,
+                                                   selfenergy_block)
 from src.SingleReference.GW.qp_states import resolve_qp_states
-from src.SingleReference.GW.space_time import (DEFAULT_NPADE, _dyson_owned,
+from src.Base.numerics.constants import DEFAULT_NPADE, QP_DEGENERACY_TOL
+from src.SingleReference.GW.space_time import (_dyson_owned,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_block_action,
-                                                         solve_bse_isdf)
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_frequency_rows, polarizability_projected_tau,
-    polarizability_tiles, split_branches, wave_items)
-from src.gradients import factor_chain
-from src.gradients.bse_isdf import bse_backward, bse_cache, interstate_backward
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.factor_chain import FactorChain
+    polarizability_tiles, split_branches, static_screening_grid,
+    static_screening_matrix, wave_items)
+from src.gradients.rpa import factor_chain
+from src.gradients.gwbse.bse_isdf import bse_backward, bse_cache, interstate_backward
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.rpa.factor_chain import FactorChain
 from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             dfactor_adjoint_gauges,
                                             product_pairs)
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.gradients.qp_space_time import (qp_gradient_space_time,
-                                         qp_set_gradient)
-from src.gradients.reaction_field_adjoint import static_grid, static_screening
-from src.gradients.space_time_adjoint import (polarizability_tau,
-                                              rpa_energy_and_adjoint,
-                                              screened_interaction_tau,
-                                              selfenergy_block,
-                                              selfenergy_block_backward,
-                                              selfenergy_diag,
-                                              selfenergy_diag_backward,
-                                              sigma_transforms)
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.gwbse.qp_space_time import (qp_gradient_space_time,
+                                               qp_set_gradient)
+from src.gradients.gwbse.reaction_field_adjoint import static_screening
+from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
+                                                  rpa_energy_and_adjoint,
+                                                  selfenergy_block_backward,
+                                                  selfenergy_diag_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
+from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
+from tests.isdf_test_grid import g1, g1_numerics
+from tests.chain_stages import casida_args
+from tests.pins import RECORDING_BLAS, matches
 
 warnings.simplefilter('ignore')
 
@@ -585,7 +597,9 @@ def scf_mean_field(mol, xc):
     the gates test the distribution rather than where the iteration stopped."""
     out = scf.RHF(mol) if xc is None else dft.RKS(mol, xc=xc)
     out = out.density_fit(auxbasis='cc-pvdz-ri')
-    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.conv_tol = SCF_TIGHT_CONV_TOL
+    out.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    out.max_cycle = 200
     return out
 
 
@@ -593,7 +607,9 @@ def chain_scf(m):
     """A mean field converged for gradient work (conv_tol_grad 1e-11), which
     is what the excited-state Lagrangian assumes."""
     out = scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri')
-    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.conv_tol = SCF_TIGHT_CONV_TOL
+    out.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    out.max_cycle = 200
     out.kernel()
     return out
 
@@ -603,14 +619,16 @@ def chain_scf_unrun(m):
 
     `chain_scf` runs its own SCF, which every rank then repeats, the one
     stage of a chain that does not divide. Leaving the `kernel()` out hands it
-    to `factor_chain.converged_factory`, which converges it through
+    to `reference_mean_field.converged_factory`, which converges it through
     `distributed_mean_field` on the region's ranks: every rank runs pyscf's
     loop against the reduced J/K on its block of the auxiliary index. The
     tolerances are the object's, not the caller's, so they are the same either
     way.
     """
     out = scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri')
-    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.conv_tol = SCF_TIGHT_CONV_TOL
+    out.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    out.max_cycle = 200
     return out
 
 
@@ -657,7 +675,7 @@ def region_factors(gate, mf, mol):
     again. It also leaves rank 0's orbitals in every rank's `mf`.
     """
     gate.section('the ISDF factors inside the region')
-    F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')              # context
+    F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))              # context
     if gate.size == 1:
         gate.info(f'serial fit: M {F[1].shape[0]}, naux {F[1].shape[1]}')
         return F
@@ -665,7 +683,7 @@ def region_factors(gate, mf, mol):
     gate.check(n == 1, f'separable_factors [context] over {gate.size} ranks: '
                'X_mo, D, X_ao and coords bitwise identical on every rank',
                f'{n} distinct of {gate.size}')
-    F_serial = serial(separable_factors, mf, mol, auxbasis='cc-pvdz-ri')
+    F_serial = serial(separable_factors, mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
     gate.info(f'the fit over {gate.size} ranks against the serial fit: X rel '
               f'{worst_rel(F_serial[:1], F[:1]):.2e}, D rel '
               f'{worst_rel(F_serial[1:2], F[1:2]):.2e} (the reduced three-centre '
@@ -802,13 +820,14 @@ def bse_routes(gate, mf, mol, F):
     """The whole ISDF BSE: GW diagonal, static W, probe and Davidson."""
     gate.section('ISDF BSE')
     nocc = mol.nelectron // 2
-    om_s, _, _, info_s = serial(solve_bse_isdf, mf, mol, nocc, nroots=3,
+    om_s, _, _, info_s = serial(solve_bse_isdf, mf, mol, nocc,
+                                numerics=Numerics(bse={'nroots': 3}),
                                 probe=True, progress=False, factors=F)
     if gate.size == 1:
         gate.info('serial reference '
                   + ' '.join(f'{w * HARTREE_TO_EV:.6f}' for w in om_s) + ' eV')
         return
-    om_d, _, _, info_d = solve_bse_isdf(mf, mol, nocc, nroots=3, probe=True,
+    om_d, _, _, info_d = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), probe=True,
                                         progress=False, factors=F)
     d = np.abs(om_d - om_s).max() * HARTREE_TO_EV
     gate.check(d < 1e-9, f'BSE roots [context] over {gate.size} ranks == serial',
@@ -822,16 +841,18 @@ def bse_routes(gate, mf, mol, F):
     # The probe runs after the Davidson, on its action: 'sign' is proven by
     # Rayleigh-Ritz on the roots' span, one block action per root, whose
     # decision is rank 0's on every rank, and no probe mode touches a root.
-    om_g, _, _, info_g = solve_bse_isdf(mf, mol, nocc, nroots=3, probe='sign',
+    om_g, _, _, info_g = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), probe='sign',
                                         progress=False, factors=F)
-    _, _, _, info_gs = serial(solve_bse_isdf, mf, mol, nocc, nroots=3,
+    _, _, _, info_gs = serial(solve_bse_isdf, mf, mol, nocc,
+                              numerics=Numerics(bse={'nroots': 3}),
                               probe='sign', progress=False, factors=F)
     st = info_g['stats']
     seen = gate.everyone((info_g['min_eig_amb'], st.get('probe_source'),
                           st.get('probe_matvecs')))
     d_sign = abs(info_g['min_eig_amb'] - info_gs['min_eig_amb'])
     gate.check(len(set(seen)) == 1 and seen[0][1:] == ('roots', len(om_g))
-               and d_sign < 1e-9 and np.array_equal(om_g, om_d),
+               and d_sign < 1e-9
+               and matches(om_g, om_d, RECORDING_BLAS, quantity='root'),
                "min eig(A-B) 'sign' [context] from the roots' span, one block "
                "action per root, rank 0's on every rank, the roots "
                "probe=True's",
@@ -852,7 +873,7 @@ def bse_routes(gate, mf, mol, F):
     if gate.rank != 0:
         mf_r.mo_energy[nocc:] += 1e-3
         F_r[0][...] *= 1.0 + 1e-6
-    om_p, _, _, info_p = solve_bse_isdf(mf_r, mol, nocc, nroots=3, probe=True,
+    om_p, _, _, info_p = solve_bse_isdf(mf_r, mol, nocc, numerics=Numerics(bse={'nroots': 3}), probe=True,
                                         progress=False, factors=F_r,
                                         comm=gate.comm)
     d = np.abs(om_p - om_s).max() * HARTREE_TO_EV
@@ -901,7 +922,8 @@ def grid_reduction_rows(gate, mf, mol, F):
            and all(e[1:] == (npts * nocc, (r1 - r0) * nocc) for e in scattered))
     tiled = sum(gate.everyone(sum(e[2] for e in scattered)))
     gate.check(own and tiled == RECORDED_BATCH * npts * nocc
-               and np.array_equal(A, A0) and np.array_equal(B, B0),
+               and matches(A, A0, RECORDING_BLAS, quantity='root')
+               and matches(B, B0, RECORDING_BLAS, quantity='root'),
                "BSE block action [explicit]: each rank receives its rows of "
                "the grid reduction alone, and the same A and B",
                f'{len(scattered)} reduce-scatters of {npts * nocc} into '
@@ -924,14 +946,15 @@ def sliced_factors_routes(gate, mf, mol, F):
     if gate.size == 1:
         gate.info('one rank: sliced=True returns the whole tuple')
         return
-    Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True)
+    Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True, counts=g1(mol))
     r0, r1 = Fs.rows
-    rows_ok = (np.array_equal(Fs.X_mo, F[0][r0:r1])
-               and np.array_equal(Fs.D, F[1][r0:r1])
-               and np.array_equal(Fs.X_ao, F[2][r0:r1])
-               and np.array_equal(Fs.coords, F[3]))
+    # a second fit: its rows are the fixture's to a few ulp, not a copy of
+    # them
+    rows_ok = all(matches(a, b, RECORDING_BLAS, unit='1', quantity='root')
+                  for a, b in ((Fs.X_mo, F[0][r0:r1]), (Fs.D, F[1][r0:r1]),
+                               (Fs.X_ao, F[2][r0:r1]), (Fs.coords, F[3])))
     gate.check(rows_ok, "sliced factors [context]: this rank's rows of the "
-               'fixture, bitwise', f'rows {Fs.rows} of {Fs.npts}')
+               'fixture, to a few ulp', f'rows {Fs.rows} of {Fs.npts}')
     held = Fs.held_bytes()
     want = {'X_mo': (r1 - r0) * F[0].shape[1] * 8,
             'D': (r1 - r0) * F[1].shape[1] * 8,
@@ -943,16 +966,19 @@ def sliced_factors_routes(gate, mf, mol, F):
     qp_s = solve_qp_energy_space_time(mf, mol, nocc, window, factors=Fs,
                                       comm=gate.comm)
     n = gate.distinct(qp_s)
-    gate.check(np.array_equal(qp_s, qp_w) and n == 1,
+    gate.check(matches(qp_s, qp_w, RECORDING_BLAS, quantity='continued')
+               and n == 1,
                f'GW window [explicit] on sliced factors over {gate.size} '
-               'ranks == whole factors, bitwise, on every rank',
+               'ranks == whole factors to a few ulp, the same bits on every '
+               'rank',
                f'max|d| {np.abs(qp_s - qp_w).max():.2e} Ha, {n} distinct')
-    om_w, _, _, _ = solve_bse_isdf(mf, mol, nocc, nroots=3, probe=True,
+    om_w, _, _, _ = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), probe=True,
                                    progress=False, factors=F)
-    om_s, _, _, info_s = solve_bse_isdf(mf, mol, nocc, nroots=3, probe=True,
+    om_s, _, _, info_s = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), probe=True,
                                         progress=False, factors=Fs)
-    gate.check(np.array_equal(om_s, om_w),
-               f'BSE roots [context] on sliced factors == whole factors, bitwise',
+    gate.check(matches(om_s, om_w, RECORDING_BLAS, quantity='root'),
+               f'BSE roots [context] on sliced factors == whole factors, to a '
+               'few ulp',
                f'max|d| {np.abs(om_s - om_w).max() * HARTREE_TO_EV:.2e} eV')
     same_davidson(gate, 'BSE [context] on sliced factors', om_s, info_s)
     gathers = gate.everyone(dict(Fs.gathers))
@@ -965,16 +991,14 @@ def sliced_factors_routes(gate, mf, mol, F):
 
 
 def grid_row_axes(eps, nocc):
-    """The in-core driver's axes at ROW_NTAU: the chi0 grid with its
-    omega = 0 passenger, the self-energy's tau points, the Pade points, the
-    omega -> tau weights of W - I, the chi0 frequencies and mu."""
+    """The in-core driver's axes at ROW_NTAU: the chi0 grid, the
+    self-energy's tau points, the Pade points, the omega -> tau weights of
+    W - I, the chi0 frequencies and mu."""
     e_min, e_max = eps[nocc] - eps[nocc - 1], eps[-1] - eps[0]
     mu = 0.5 * (eps[nocc - 1] + eps[nocc])
     fp, fw = screening_frequency_grid(ROW_NTAU, eps, nocc, mu=mu)
-    grid = TimeFrequencyGrid.minimax_split(ROW_NTAU, e_min, e_max,
-                                           np.append(fp, 0.0),
-                                           np.append(fw, 0.0))
-    rW, rS = self_energy_fit_ranges(eps, nocc, mu=mu)
+    grid = TimeFrequencyGrid.minimax_split(ROW_NTAU, e_min, e_max, fp, fw)
+    rW, rS = sigma_fit_ranges(eps, nocc, mu=mu)
     tau = 0.5 * minimax_time_grid(ROW_NTAU, *rS)[0]
     Ctw = minimax_transform_weights(COSINE_WT, tau, fp, *rW)[0]
     pade = gauss_legendre_grid(DEFAULT_NPADE, w0=1.0)[0]
@@ -1060,8 +1084,8 @@ def grid_row_sums(gate, mf, mol, F, w0_route):
     receives lies within `join_bound` of the exact sum of the ranks'
     partials at every element, floored at one ulp of the serial sum's
     largest element (tests/reduction_bounds.py). The branch sums are those
-    of the Wt(tau) this chi0 screens. W(0) is the inversion of chi0(0)
-    folded from the received proj rows, and the route's W(0), bitwise.
+    of the Wt(tau) this chi0 screens. The route's W(0) is the one static
+    build over these ranks and serially, bitwise.
     """
     gate.section('the grid-row GW sums on their rounding bound')
     if gate.size == 1:
@@ -1090,14 +1114,18 @@ def grid_row_sums(gate, mf, mol, F, w0_route):
     bounded_sum_checks(gate, 'proj(tau) [explicit]', 'tile', verdicts,
                        [s[0] for s in rec.sums]
                        == ['reduce_scatter'] * grid.ntau)
-    gate.check(np.array_equal(chi0.rows, fold), "chi0's rows the serial "
-               'update of the received proj rows, bitwise')
-    owned, w0 = _dyson_owned(chi0, grid.nfreq - 1)
-    c0 = np.concatenate(gate.everyone(chi0.rows[-1]))
-    gate.check(np.array_equal(w0, np.linalg.inv(np.eye(naux) - c0)),
-               'W(0) the inversion of chi0(0) folded from them, bitwise')
-    gate.check(np.array_equal(w0_route, w0), "the route's W(0) this one, "
-               'bitwise', f'{np.abs(w0_route - w0).max():.2e} apart')
+    gate.check(matches(chi0.rows, fold, RECORDING_BLAS, quantity='root'),
+               "chi0's rows the serial update of the received proj rows, to a "
+               'few ulp')
+    owned = _dyson_owned(chi0)
+    static = static_screening_grid(eps, nocc)
+    w0 = static_screening_matrix(X_mo, D, eps, nocc, static, comm=gate.comm)
+    gate.check(matches(w0, serial(static_screening_matrix, X_mo, D, eps, nocc,
+                                  static), RECORDING_BLAS, quantity='root'),
+               'W(0) the serial static build, to a few ulp')
+    gate.check(matches(w0_route, w0, RECORDING_BLAS, quantity='root'),
+               "the route's W(0) this one, to a few ulp",
+               f'{np.abs(w0_route - w0).max():.2e} apart')
 
     ntau = len(ax['tau'])
     Wt = screened_interaction_rows(owned, ax['Ctw'], naux, gate.comm)
@@ -1139,7 +1167,8 @@ def gw_grid_rows(gate, mf, mol, F):
     gate.section('the GW window split over grid rows (_qp_grid_rows)')
     nocc = mol.nelectron // 2
     window = np.array([nocc - 1, nocc])
-    kw = dict(ntau=ROW_NTAU, tile_gb=ROW_TILE_GB)
+    kw = dict(numerics=Numerics(quadrature={'ntau_st': ROW_NTAU},
+                                layout={'tile_gb': ROW_TILE_GB}))
 
     def window_and_w0(factors, comm=None):
         extras = {}
@@ -1157,7 +1186,7 @@ def gw_grid_rows(gate, mf, mol, F):
         got = serial(window_and_w0, tuple(a[perm] for a in F))
         moved = np.maximum(moved, [np.abs(a - b).max()
                                    for a, b in zip(got, ref)])
-    Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True)
+    Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True, counts=g1(mol))
     M, naux, nao = F[1].shape[0], F[1].shape[1], F[2].shape[1]
     census = HeldCensus(solve_qp_energy_space_time.__code__, M, naux, nao)
     qp, w0 = census.trace(window_and_w0, Fs, gate.comm)
@@ -1174,7 +1203,7 @@ def gw_grid_rows(gate, mf, mol, F):
     gate.info(f'rank 0 held at most {census.bytes / 1e6:.3f} MB of named '
               f'arrays; the serial W(0) alone is {naux * naux * 8 / 1e6:.3f} '
               'MB a slice')
-    bar_qp = COMPOSED_GRAD_K * max(moved[0], QP_BISECTION_TOL)
+    bar_qp = COMPOSED_GRAD_K * max(moved[0], QP_GRAPHICAL_TOL)
     d_qp, d_w0 = np.abs(qp - ref[0]).max(), np.abs(w0 - ref[1]).max()
     gate.check(d_qp <= bar_qp, 'the window within the anchored bar of serial',
                f'{d_qp:.2e} of {bar_qp:.2e} Ha (relabelling {moved[0]:.2e})')
@@ -1221,7 +1250,7 @@ def qp_set_and_rpa(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
                               mu=mu, residue_route=route, comm=gate.comm)
         worst = worst_rel(ref[1:], got[1:])
         d_roots = np.abs(np.asarray(ref[0]) - np.asarray(got[0])).max()
-        gate.check(np.array_equal(ref[0], got[0]) and worst < 1e-11,
+        gate.check(matches(got[0], ref[0], RECORDING_BLAS) and worst < 1e-11,
                    f'qp_set_gradient[{route}] [explicit] over {gate.size} ranks '
                    '== serial',
                    f'roots bitwise {np.array_equal(ref[0], got[0])} '
@@ -1281,7 +1310,7 @@ def single_state_qp(gate, X_mo, D, eps, nocc, grid, nu, wt, mu):
 def screening_and_sigma(gate, X_mo, D, eps, nocc, grid, mu):
     """Static W and the self-energy matrix and diagonal with their adjoints."""
     gate.section('static W and the self-energy from the gradient package')
-    w_grid = static_grid(eps, nocc)
+    w_grid = static_screening_grid(eps, nocc)
     ref_ss = serial(static_screening, X_mo, D, eps, nocc, w_grid)
     transforms = sigma_transforms(eps, nocc, grid.tau_points, grid.omega_points,
                                   grid.omega_points, mu=mu)
@@ -1341,9 +1370,9 @@ def chain_end_to_end(gate, mol):
     gate.section('the BSE@GW surface end to end')
     with distributed(None):
         mf_grad = chain_scf(mol)
-        g_ex = ExcitedStateChain(mol, chain_scf, mf=mf_grad).excitation_gradient()[0]
+        g_ex = ExcitedStateChain(mol, chain_scf, mf=mf_grad, numerics=g1_numerics(mol)).excitation_gradient()[0]
         g_qp = ExcitedStateChain(mol, chain_scf,
-                                 mf=mf_grad).quasiparticle_gradient(0)[0]
+                                 mf=mf_grad, numerics=g1_numerics(mol)).quasiparticle_gradient(0)[0]
     if gate.size == 1:
         gate.info(f'serial reference |dOmega/dR| max {np.abs(g_ex).max():.9f}, '
                   f'|deps^QP/dR| max {np.abs(g_qp).max():.9f} Ha/Bohr')
@@ -1354,7 +1383,7 @@ def chain_end_to_end(gate, mol):
     # one thing the route gates above cannot see. The mean field is printed
     # beside it because it is the other per-rank input, and the two say which
     # of them a failing force below belongs to.
-    tag = grid_tag(ExcitedStateChain(mol, chain_scf, mf=mf_grad), mol)
+    tag = grid_tag(ExcitedStateChain(mol, chain_scf, mf=mf_grad, numerics=g1_numerics(mol)), mol)
     tags = gate.everyone(tag + (digest(mf_grad.mo_energy, mf_grad.mo_coeff),))
     for r, (crd_t, radii_t, layout_t, mft) in enumerate(tags):
         gate.info(f'rank {r} chain grid: points {crd_t}, radii {radii_t}, '
@@ -1369,7 +1398,7 @@ def chain_end_to_end(gate, mol):
     # node-to-node input noise on top of the reduction noise.
     g_ex = broadcast(g_ex, gate.comm)
     g_qp = broadcast(g_qp, gate.comm)
-    g_ex_d = ExcitedStateChain(mol, chain_scf, mf=mf_grad).excitation_gradient()[0]
+    g_ex_d = ExcitedStateChain(mol, chain_scf, mf=mf_grad, numerics=g1_numerics(mol)).excitation_gradient()[0]
     # the same mean field and factors, so only the re-associated reductions
     # differ: RANK_SPLIT_FORCE_TOL
     d_ex = np.abs(g_ex_d - g_ex).max()
@@ -1380,7 +1409,7 @@ def chain_end_to_end(gate, mol):
     n_ex = gate.distinct(g_ex_d)
     gate.info(f'excitation_gradient holds {n_ex} distinct value(s) over '
               f'{gate.size} ranks')
-    d_qp = np.abs(ExcitedStateChain(mol, chain_scf, mf=mf_grad)
+    d_qp = np.abs(ExcitedStateChain(mol, chain_scf, mf=mf_grad, numerics=g1_numerics(mol))
                   .quasiparticle_gradient(0)[0] - g_qp).max()
     gate.check(d_qp <= RANK_SPLIT_FORCE_TOL,
                f'quasiparticle_gradient [context] over {gate.size} ranks == serial',
@@ -1400,7 +1429,8 @@ def build_only_factory(gate, mol, mf_grad, g_ex):
     # force off it, `g_ex`, the same two numbers the block above compares
     # against.
     runs = []
-    chain_unrun = ExcitedStateChain(mol, recorded(chain_scf_unrun, runs))
+    chain_unrun = ExcitedStateChain(mol, recorded(chain_scf_unrun, runs),
+                                    numerics=g1_numerics(mol))
     mf0 = chain_unrun.mf0
     d_scf = abs(mf0.e_tot - mf_grad.e_tot)
     n_mo = gate.distinct(mf0.mo_coeff)
@@ -1419,7 +1449,8 @@ def build_only_factory(gate, mol, mf_grad, g_ex):
         g_orb = float(np.linalg.norm(plain.get_grad(plain.mo_coeff,
                                                     plain.mo_occ)))
         g_ref = ExcitedStateChain(mol, chain_scf,
-                                  mf=plain).excitation_gradient()[0]
+                                  mf=plain,
+                                  numerics=g1_numerics(mol)).excitation_gradient()[0]
     if gate.size > 1:
         g_ref = broadcast(g_ref, gate.comm)
     d_ex_unrun = np.abs(g_unrun - g_ref).max()
@@ -1508,12 +1539,14 @@ def sliced_chain_routes(gate, mol):
     threads = pyscf_one_thread(gate)
     out = {}
     for tag, sliced in (('whole', None), ('sliced', True)):
-        surface = RPABSESurface(mol, chain_scf, spin='singlet', mf=mf_ref,
-                                solver='davidson', sliced=sliced)
+        surface = RPABSESurface(
+            mol, chain_scf, spin='singlet', mf=mf_ref,
+            numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson'},
+                                               layout={'sliced': sliced})))
         g, e, diags = surface.total_gradient(here, mf_here)           # context
         # the reference's rows, which live as long as its mean field
         ex = surface.excited
-        ex._forward(ex.mol0, ex.mf0)
+        ex.forward(ex.mol0, ex.mf0)
         out[tag] = (np.asarray(g), e, diags, ex)
     pyscf_threads_back(gate, threads)
     g_w, e_w, d_w, _ = out['whole']
@@ -1562,11 +1595,11 @@ def whole_row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar, **extra):
     g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                  self.pts_local, self.owner,
                                  frames=self.frames,
-                                 with_frames=self.with_frames,
+                                 with_frames=False,
                                  body=self.body)
     g_fit = dfactor_adjoint_gauges(
         mol, auxmol, crd, [(d_bar, None)], self.layout, self.pts_local,
-        self.owner, frames=self.frames, with_frames=self.with_frames,
+        self.owner, frames=self.frames, with_frames=False,
         gram_layout=product_pairs(mol), body=self.body)
     return g_coll, g_fit, None
 
@@ -1605,7 +1638,7 @@ def scan_assembly(chain, found, ledgers):
     npts = chain.M
     ngram = len(product_pairs(mol)[0])
     widths = {chain.mf0.mo_coeff.shape[1], mol.nao, chain.naux, npts,
-              int((separable_ri._ao_l_labels(mol) <= 2).sum()),
+              int((separable_ri.ao_l_labels(mol) <= 2).sum()),
               len(chain.layout[0]), ngram, ngram + chain.naux}
     assemble, branches = chain.nuclear_gradient, chain.row_fit_branches
 
@@ -1722,10 +1755,10 @@ def row_fit_chain_routes(gate, mol):
     here = gto.M(atom=WATER_DISPLACED, basis='cc-pvdz', verbose=0)
     mf_here = chain_scf(here)
 
-    def force(scan=None, **kw):
-        surface = RPABSESurface(mol, chain_scf, spin='singlet', mf=mf_ref,
-                                solver='davidson',
-                                bse_conv_tol=ROW_FIT_BSE_CONV_TOL, **kw)
+    def force(scan=None, **layout):
+        surface = RPABSESurface(
+            mol, chain_scf, spin='singlet', mf=mf_ref,
+            numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
         if scan is not None:
             scan(surface)
         g, e, _ = surface.total_gradient(here, mf_here)               # context
@@ -1825,21 +1858,22 @@ def grid_adjoint_routes(gate, mol):
     threads = pyscf_one_thread(gate)
     out = {}
     for adjoint in ('explicit', 'grid'):
-        surface = RPABSESurface(mol, chain_scf, spin='singlet', mf=mf_ref,
-                                solver='davidson', sliced=True,
-                                bse_adjoint=adjoint)
+        surface = RPABSESurface(
+            mol, chain_scf, spin='singlet', mf=mf_ref,
+            numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': adjoint},
+                                               layout={'sliced': True})))
         ex = surface.excited
         nocc, nmo = ex.nocc, ex.mf0.mo_coeff.shape[1]
         three = {tuple(sorted((ex.naux, nocc, nmo - nocc))),
                  tuple(sorted((ex.naux, nocc, nocc)))}
         found = set()
         seeds = []
-        fold = ex._fold_to_nuclei
+        fold = ex.reverse.fold_to_nuclei
 
-        def probed(pieces, *seeds_in, fold=fold, ex=ex, three=three,
+        def probed(shared, *seeds_in, fold=fold, ex=ex, three=three,
                    found=found, seeds=seeds, **fold_kw):
             # what the reverse pass holds beside the seeds: chain and forward
-            found.update(a.shape for a in reachable((ex, pieces))[0]
+            found.update(a.shape for a in reachable((ex, shared))[0]
                          if tuple(sorted(a.shape)) in three
                          or (a.ndim == 2 and tuple(sorted(a.shape)) ==
                              tuple(sorted((ex.naux, nocc * (nmo - nocc))))))
@@ -1847,16 +1881,16 @@ def grid_adjoint_routes(gate, mol):
             if seeds and 'ref' in seeds[-1]:
                 # the same fold of the serial kernel's seeds, handed in whole;
                 # first, so that it reads the tape the probed fold may release
-                again = fold(pieces, *[np.array(a, copy=True)
+                again = fold(shared, *[np.array(a, copy=True)
                                        for a in seeds[-1]['ref']],
                              release_tape=False)
-            result = fold(pieces, *seeds_in, **fold_kw)
+            result = fold(shared, *seeds_in, **fold_kw)
             if again is not None:
                 seeds[-1]['refold'] = (np.asarray(result[0]),
                                        np.asarray(again[0]))
             return result
 
-        ex._fold_to_nuclei = probed
+        ex.reverse.fold_to_nuclei = probed
         if adjoint == 'grid':
             probe_grid_seeds(ex, seeds)
         else:
@@ -1867,25 +1901,27 @@ def grid_adjoint_routes(gate, mol):
     pyscf_threads_back(gate, threads)
     g_d, e_d, om_d, found_d, seeds_d = out['explicit']
     g_g, e_g, om_g, found_g, seeds_g = out['grid']
-    gate.check(e_g == e_d and om_g == om_d,
+    gate.check(matches(e_g, e_d, RECORDING_BLAS)
+               and matches(om_g, om_d, RECORDING_BLAS),
                'grid and default BSE adjoints [context] share the forward '
-               'pass on one mean field: energy and root bitwise',
+               'pass on one mean field: energy and root to a few ulp',
                f'dE {abs(e_g - e_d):.2e} ({ulps(e_g, e_d):.0f} ulp), dOmega '
                f'{abs(om_g - om_d):.2e} Ha ({ulps(om_g, om_d):.0f} ulp)')
     n = gate.distinct(*[a for call in seeds_g for a in call['seeds']])
     gate.check(seeds_g and all(call['same'] for call in seeds_g) and n == 1,
                f'grid BSE adjoint seeds [context] over {gate.size} ranks == '
-               'the serial kernel on the gathered factors (bitwise), every '
-               "rank rank 0's",
+               'the serial kernel on the gathered factors (to a few ulp), '
+               "every rank rank 0's",
                f'{len(seeds_g)} reverse call(s), worst '
                f"{max((c['ulp'] for c in seeds_g), default=0):.3g} ulp of "
                f'the largest element, {n} distinct')
     folds = [c['refold'] for c in seeds_g if 'refold' in c]
     n = gate.distinct(g_g, np.atleast_1d(e_g))
-    gate.check(folds and all(np.array_equal(*f) for f in folds) and n == 1,
+    gate.check(folds and all(matches(a, b, RECORDING_BLAS, quantity='gradient')
+                             for a, b in folds) and n == 1,
                f'state-pair force [context] with the grid BSE adjoint over '
                f'{gate.size} ranks == the same fold of the serial kernel\'s '
-               "seeds (bitwise), every rank rank 0's",
+               "seeds (to a few ulp), every rank rank 0's",
                f'{len(folds)} fold(s), |d| '
                f'{max((np.abs(a - b).max() for a, b in folds), default=0):.2e}'
                f' Ha/Bohr, {n} distinct')
@@ -1895,7 +1931,7 @@ def grid_adjoint_routes(gate, mol):
                and n == 1 and n_g == 1,
                f'default BSE adjoint seeds [context] over {gate.size} ranks '
                '== bse_cache and bse_backward run serially on the gathered '
-               "factors (bitwise), its force every rank rank 0's",
+               "factors (to a few ulp), its force every rank rank 0's",
                f'{len(seeds_d)} reverse call(s), worst '
                f"{max((c['ulp'] for c in seeds_d), default=0):.3g} ulp of "
                f'the largest element, {n} distinct seeds, {n_g} distinct '
@@ -1959,28 +1995,28 @@ def probe_explicit_seeds(ex, log):
     """Wrap the default chain's Casida-level adjoint: compare its seeds with
     `bse_cache` and `bse_backward` run serially on the gathered factors; one
     record per call into `log`."""
-    seeds_of = ex._casida_seeds
+    seeds_of = ex.follower.casida_seeds
 
-    def probed(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        x, d, eq, w, no, _, xn, yn = ex._casida_args(pieces)
+    def probed(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        x, d, eq, w, no, _, xn, yn = casida_args(ex, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
         with distributed(None):
-            cache = bse_cache(X, D, eq, w, no, **kw)
+            cache = bse_cache(X, D, eq, no, **kw)
             ref = (bse_backward(n, X, D, eq, w, no, cache, xn, yn,
-                                **ex._tile_kw()) if m is None else
+                                **ex.quasiparticles.tile_kw()) if m is None else
                    interstate_backward(m, n, X, D, eq, w, no, cache, xn, yn,
-                                       **ex._tile_kw()))
+                                       **ex.quasiparticles.tile_kw()))
         # copies: the fold adds into X_bar and D_bar in place
         seeds = tuple(np.array(a, copy=True) for a in out)
         log.append(dict(seeds=seeds,
-                        same=all(np.array_equal(a, b)
+                        same=all(matches(a, b, RECORDING_BLAS, quantity='root')
                                  for a, b in zip(seeds, ref)),
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex._casida_seeds = probed
+    ex.follower.casida_seeds = probed
 
 
 def probe_grid_seeds(ex, log):
@@ -1990,13 +2026,12 @@ def probe_grid_seeds(ex, log):
     makes, and compare its seeds with the same kernel run serially on the
     gathered factors, which the record keeps for the fold; one record per
     call into `log`."""
-    seeds_of = ex._casida_seeds
-    kernel = os.path.join(SRC, 'SingleReference', 'LinearResponse',
-                          'isdf_bse_adjoint.py')
+    seeds_of = ex.follower.casida_seeds
+    kernel = os.path.join(SRC, 'gradients', 'gwbse', 'isdf_bse_adjoint.py')
     boundary = 'adjoints_at_the_boundary'
 
-    def probed(pieces, n, m=None):
-        rows = ex._casida_args(pieces)[0]
+    def probed(shared, solution, n, m=None):
+        rows = shared.x_mo
         before = dict(rows.gathers)
         whole, entered = set(), []
 
@@ -2025,12 +2060,12 @@ def probe_grid_seeds(ex, log):
 
         sys.settrace(tracer)
         try:
-            out = seeds_of(pieces, n, m)
+            out = seeds_of(shared, solution, n, m)
         finally:
             sys.settrace(None)
         grew = {k: c - before.get(k, 0) for k, c in rows.gathers.items()
                 if c != before.get(k, 0)}
-        x, d, eq, w, no, _, xn, yn = ex._casida_args(pieces)
+        x, d, eq, w, no, _, xn, yn = casida_args(ex, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=ex.spin, bse_tda=ex.bse_tda)
         with distributed(None):
@@ -2043,12 +2078,12 @@ def probe_grid_seeds(ex, log):
                       for a in out)
         log.append(dict(whole=sorted(whole), boundary=len(entered),
                         gathers=grew, seeds=seeds, ref=ref,
-                        same=all(np.array_equal(a, b)
+                        same=all(matches(a, b, RECORDING_BLAS, quantity='root')
                                  for a, b in zip(seeds, ref)),
                         ulp=max(ulps(a, b) for a, b in zip(seeds, ref))))
         return out
 
-    ex._casida_seeds = probed
+    ex.follower.casida_seeds = probed
 
 
 def lockstep_counters(gate, stats):
@@ -2088,7 +2123,7 @@ def audited_forward(gate, mol):
     mf_own = serial(chain_scf, mol)
     lockstep_stats(reset=True)
     with distributed(gate.comm, audit=True):
-        om = ExcitedStateChain(mol, chain_scf, mf=mf_own).spectrum()
+        om = ExcitedStateChain(mol, chain_scf, mf=mf_own, numerics=g1_numerics(mol)).spectrum()
     stats = lockstep_stats(reset=True)
     keys = ('audited_calls', 'mismatched_calls', 'max_abs_diff',
             'agreement_calls', 'disagreements', 'first_disagreement')
@@ -2127,7 +2162,7 @@ def hessian_layout_routes(gate):
     layouts = []
 
     def factory(m):
-        mf = isdf_jk(scf.RHF(m), auxbasis='cc-pvdz-ri', counts=counts,
+        mf = isdf_jk_with_force(scf.RHF(m), auxbasis='cc-pvdz-ri', counts=counts,
                      n_start=n_start)
         mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
         mf.kernel()
@@ -2162,21 +2197,23 @@ def adaptive_chain_routes(gate, mol):
 
     def selected(mf, window):
         chain = ExcitedStateChain(
-            mol, chain_scf, mf=mf, qp_window=window, residue_route='sop',
-            scissor='calibrate', outside='scissor',
-            qp_select=QPStates('adaptive', targets=(('singlet', 0),
-                                                    ('triplet', 0))))
+            mol, chain_scf, mf=mf,
+            numerics=g1_numerics(mol, Numerics(qp={
+                'window': window, 'residue_route': 'sop',
+                'scissor': 'calibrate',
+                'select': QPStates('adaptive', targets=(('singlet', 0),
+                                                        ('triplet', 0)))})))
         om_s = chain.excitation(mol, mf)
         om_t = chain.spin_view('triplet').excitation(mol, mf)
-        part = chain.qp_partition
+        part = chain.resolved.qp_partition
         return (part.explicit, part.tier_of), np.array([om_s, om_t])
 
     with distributed(None):
         mf = chain_scf(mol)
         eps = np.asarray(mf.mo_energy, float)
-        window = list(resolve_qp_states(QPStates('adaptive'), eps,
-                                        mol.nelectron // 2,
-                                        degeneracy_tol=1e-4).explicit)
+        window = list(resolve_qp_states(
+            QPStates('adaptive'), eps, mol.nelectron // 2,
+            degeneracy_tol=QP_DEGENERACY_TOL).explicit)
         if gate.comm is not None:
             window = broadcast(window, gate.comm)
         ref_part, ref_om = selected(mf, window)

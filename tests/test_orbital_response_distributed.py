@@ -8,7 +8,7 @@ not by the mean field's serial `ISDFJK`, which would build the (M, M) Gram
 matrix, its M^3 Cholesky and X, M and L whole on every rank.
 
 Gated here:
-  * `lgmres_root_driven` serially is scipy's `lgmres` call, bitwise; under
+  * `lgmres_root_driven` serially is scipy's `lgmres` call, to a few ulp; under
     2 and 3 simulated ranks, with a matvec that is a collective and a rank
     whose own arithmetic differs, every rank applies the operator the same
     number of times and ends on rank 0's solution, which is the serial one;
@@ -36,12 +36,14 @@ from pyscf.dft import numint
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.distributed_df import distributed_fock
-from src.Base.distributed_isdf_jk import DistributedISDFJK
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.utils.krylov import lgmres_root_driven
-from src.Base.utils.mpi_grid import distributed, reduce_sum, run_simulated
+from src.Base.factorization.distributed_df import distributed_fock
+from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
+from src.Base.utils.parallel.mpi_grid import distributed, reduce_sum
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from tests.pins import assert_same
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
 BASIS = 'cc-pvdz'
@@ -72,7 +74,7 @@ def test_root_driven_lgmres_is_scipys_serially():
         x, info = lgmres_root_driven(lambda v: a @ v, rhs, precond, ATOL,
                                      MAX_ITER)
     assert info == info_ref == 0
-    assert np.array_equal(x, x_ref)
+    assert_same(x, x_ref, unit='1', quantity='root', label='lgmres solution')
 
 
 @pytest.mark.parametrize('size', (2, 3))
@@ -141,7 +143,7 @@ def isdf_mean_field(mol, xc='pbe0'):
     mf = dft.RKS(mol, xc=xc)
     counts, n_start = resolve_isdf_grid('G1', BASIS, ['H', 'O'],
                                         auxbasis=BASIS + '-ri')
-    return isdf_jk(mf, auxbasis=BASIS + '-ri', counts=counts, n_start=n_start)
+    return isdf_jk_with_force(mf, auxbasis=BASIS + '-ri', counts=counts, n_start=n_start)
 
 
 def test_a_divided_isdfjk_refuses_to_build_whole_under_ranks():

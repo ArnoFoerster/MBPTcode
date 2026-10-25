@@ -9,7 +9,7 @@ and the self-energy's q-sum (pbc_isdf_gw) is a CONVOLUTION,
     Sigma^k = sum_q G^{k-q} * Wt^q      -> plain product of forward FFTs.
 
 Each is already pinned against its own direct sum, in its own file. That is
-NOT sufficient, and this file exists because it was found not to be:
+NOT sufficient, and this file exists for that reason:
 
 **every other ISDF test runs on a mesh that cannot tell the two apart.** The
 meshes in use are [1,1,1], [2,1,1], [2,2,1] and [2,2,2] -- all subsets of

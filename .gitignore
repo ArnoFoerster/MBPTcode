@@ -13,5 +13,14 @@ __pycache__/
 # Locally optimized ISDF atomic grids. Cached to pin a non-reproducible
 # optimization (see separable_ri.optimize_atomic_radii), machine-specific, and
 # regenerated on demand -- the shipped tables in data/ are the portable ones.
-src/Base/data/radii_cache/
-.claude/
+src/Base/factorization/data/radii_cache/
+
+# Output of the ADC code generators (src/CodeGeneration), produced on the
+# user's machine and never committed.
+src/SingleReference/ADC/generatedADC/
+# per-order MPn amplitude numerators generateADC adds next to the committed
+# mpn_density_pieces.py
+src/SingleReference/DensityMatrix/generated_mpn/mpn_amp_numerators_o*.py
+# the restricted order-4 ground state of non-Dyson ADC(5), written with the ADC(5)
+# runtime (GenerateRuntime)
+src/SingleReference/DensityMatrix/generated_mpn_restricted/mpn_order4_ground_state_restricted.py

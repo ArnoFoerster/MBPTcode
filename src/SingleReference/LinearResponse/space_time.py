@@ -21,14 +21,14 @@ The transform is used one way only, on the model space it is fitted for
 (Pi(i.tau) is a sum of e^{-Delta_ia tau} with Delta_ia in [e_min, e_max]), so
 the minimax transform's lack of matrix duality costs nothing.
 
-Sign convention follows `imaginary_frequency._f_rpa`: f(i.w) = -2 d/(d^2 + w^2)
+Sign convention follows `imaginary_frequency.f_rpa`: f(i.w) = -2 d/(d^2 + w^2)
 and chi0 = 2 (C_ov f) C_ov^T; the cosine transform maps e^{-d tau} to
 2d/(d^2 + w^2), hence the leading -2 below.
 
 One kernel serves both sides: `polarizability_projected_tau` is the N^3
 sweep and its only implementation. The energy routes stream
 it into chi0 here, and the gradient chain
-(`gradients.space_time_adjoint.polarizability_tau`) runs it over every tau
+(`gradients.rpa.space_time_adjoint.polarizability_tau`) runs it over every tau
 point through `polarizability_projected_sweep` and keeps the result whole,
 because every contour-deformation frequency is a fixed linear combination of
 proj(tau) and the adjoint lands back on an array of that shape. The reverse
@@ -54,7 +54,7 @@ chi0 is the serial update of its proj rows, bitwise.
 reason: one bra state's pair density, an arbitrary index block and the
 particle-hole block are the forward halves of the three-index chain, read by
 the contour-deformation energy route and the gradient chain alike, while their
-adjoints stay in `gradients.space_time_adjoint` and `gradients.bse_isdf`
+adjoints stay in `gradients.rpa.space_time_adjoint` and `gradients.gwbse.bse_isdf`
 beside the rest of the reverse pass.
 
 `rpa_correlation_energy_space_time` is the dRPA energy's own forward sweep, and
@@ -79,13 +79,18 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.constants import ISDF_TILE_GB
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (agreement, allgather_rows,
-                                     contiguous_block, current_comm,
-                                     exchange_rows, ordered_sum, partition,
-                                     reduce_scatter_rows, reduce_sum)
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB
+from src.Base.numerical_flags import flag
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
+                                              contiguous_block, current_comm,
+                                              exchange_rows, ordered_chain_sum,
+                                              ordered_sum, partition,
+                                              reduce_scatter_rows, reduce_sum)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
+                                                 minimax_points_for_accuracy)
+from src.Base.orbital_spaces import (get_occ_virt_indices,
+                                     particle_hole_window, transition_range)
 
 
 @dataclass(frozen=True)
@@ -220,7 +225,7 @@ class ProjRows:
         """An adjoint accumulator in the same rows, zeroed."""
         return ProjRows(np.zeros_like(self.rows), self.naux, self.comm)
 
-    def _size_rank(self):
+    def size_rank(self):
         return ((1, 0) if self.comm is None
                 else (self.comm.Get_size(), self.comm.Get_rank()))
 
@@ -247,7 +252,7 @@ class ProjRows:
         auxiliary row at a time, so a frequency's rows are the same bits
         whoever owns it.
         """
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         nfreq = cosft_wt.shape[0]
         spans = frequency_blocks(nfreq, self.naux, tile_gb, live=live)
         if freq_indices is not None and size > 1:
@@ -282,7 +287,7 @@ class ProjRows:
         factorizations run concurrently between two collectives instead of
         one owner at a time. A round holds one (naux, naux) of rows a rank
         on top of the serial block."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
         todo, ready = iter(spans), {}
         serial = SerialFolds(spans)
@@ -314,7 +319,7 @@ class ProjRows:
         time -- the serial association, at every rank count. A round's
         adjoints come back in one exchange and wait in `fb.serial` until
         their serial block is whole, which is then folded as one."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         if fb.serial is not None:
             nrows, empty = self.r1 - self.r0, np.empty((0, self.naux))
             rows = np.empty((len(fb.block) * nrows, self.naux))
@@ -347,7 +352,7 @@ class ProjRows:
         in every round. tau_indices: the round-robin `partition`, or None for
         every point on every rank. The slice buffer is reused: read it before
         asking for the next."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         ntau = self.rows.shape[0]
         if size == 1:
             which = range(ntau) if tau_indices is None else tau_indices
@@ -383,7 +388,7 @@ class ProjRows:
         the t-th slice of its list from every rank's rows, verbatim. The
         lists travel first (one small allgather), so the rounds pair. The
         slice buffer is reused: read it before asking for the next."""
-        size, rank = self._size_rank()
+        size, rank = self.size_rank()
         wants = [int(k) for k in wants]
         if size == 1:
             for k in wants:
@@ -405,41 +410,10 @@ class ProjRows:
                 yield ks[rank], slab
 
 
-def polarizability_imaginary_time(X_o, X_v, eps_o, eps_v, tau_points,
-                                  out=None, beta=None):
-    """Pi_PQ(i.tau) on the interpolation grid, shape (ntau, M, M).
-
-    X_o, X_v :     (M, n_occ) and (M, n_vir) collocation, occupied and virtual.
-    eps_o, eps_v : orbital energies shifted so every eps_v - eps_o > 0; any
-                   chemical potential inside the gap does this.
-    beta :         inverse temperature, giving the bosonic periodic object
-                   Pi(tau) + Pi(beta - tau) that a Matsubara/IR grid needs.
-                   Omit for the T = 0 half-line function of the minimax grids.
-
-    The mirror term is not a small correction: e^{i nu_n beta} = 1 for bosonic
-    frequencies, so tau -> beta - tau maps the integral onto itself and the
-    mirror contributes as much as the direct term. Dropping it is a
-    factor of two at every beta.
-    """
-    M = X_o.shape[0]
-    ntau = len(tau_points)
-    if out is None:
-        out = np.empty((ntau, M, M))
-    for k, tau in enumerate(tau_points):
-        Go = (X_o * np.exp(eps_o * tau)) @ X_o.T
-        Gv = (X_v * np.exp(-eps_v * tau)) @ X_v.T
-        np.multiply(Go, Gv, out=out[k])
-        if beta is not None:
-            tb = beta - tau
-            out[k] += (((X_o * np.exp(eps_o * tb)) @ X_o.T)
-                       * ((X_v * np.exp(-eps_v * tb)) @ X_v.T))
-    return out
-
-
 def tile_rows(M, tile_memory_gb, per_row_bytes):
     """Grid rows per tile so that `per_row_bytes` x rows fits in
     tile_memory_gb: at least one row, at most all M of them."""
-    return max(1, min(M, int(tile_memory_gb * 1e9 / max(per_row_bytes, 1))))
+    return max(1, min(M, int(tile_memory_gb * BYTES_PER_GB / max(per_row_bytes, 1))))
 
 
 def polarizability_work(M, tile_memory_gb=ISDF_TILE_GB):
@@ -471,7 +445,7 @@ def wave_items(k0, k1, nitems, rank, size):
     return [(k0 + i // nitems, i % nitems) for i in range(i0, i1)]
 
 
-def split_branches(X, eps, nocc, mu=None):
+def split_branches(X, eps, nocc, mu=None, branches=None):
     """(X_o, X_v, e_o, e_v, mu, occ, virt): the collocation split at the gap.
 
     The energies come back shifted by mu, which defaults to the middle of the
@@ -484,12 +458,17 @@ def split_branches(X, eps, nocc, mu=None):
     ranks' grid rows of X_mo, one collective each, and the whole X_mo never
     exists -- every kernel that reads the collocation only through this split
     takes sliced factors in its place.
+
+    branches: (X_o, X_v) a caller already split from X, returned in their
+    place, so two sweeps on one route gather a sliced X once.
     """
     eps = np.asarray(eps, float)
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:
-        mu = 0.5 * (eps[occ].max() + eps[virt].min())
-    if isinstance(X, SlicedFactors):
+        mu = particle_hole_window(eps, nocc)[2]
+    if branches is not None:
+        X_o, X_v = branches
+    elif isinstance(X, SlicedFactors):
         X_o, X_v = X.branches(occ, virt)
     else:
         X_o, X_v = np.ascontiguousarray(X[:, occ]), np.ascontiguousarray(X[:, virt])
@@ -509,7 +488,7 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
 
     The one kernel of the N^3 sweep, for the energy routes and the gradient
     chain alike (see the module docstring). The reverse pass in
-    `gradients.space_time_adjoint.polarizability_backward` mirrors this tiling,
+    `gradients.rpa.space_time_adjoint.polarizability_backward` mirrors this tiling,
     so the row budget here, 3 * M * 8 bytes per row, is a convention and not a
     private detail.
 
@@ -565,7 +544,7 @@ def polarizability_projected_sweep(X, D, eps, nocc, tau_points, mu=None,
 
     tau_indices: the points to compute; the other slots stay zero, so the sum
     over disjoint subsets is the full sweep. That is the partition
-    `Base.utils.mpi_grid` hands out, and an all-reduce of the result is exact.
+    `Base.utils.parallel.mpi_grid` hands out, and an all-reduce of the result is exact.
     """
     X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
     tau_points = np.asarray(tau_points, float)
@@ -625,7 +604,7 @@ def polarizability_projected_rows(X, D, eps, nocc, tau_points, mu=None,
     return ProjRows(rows, naux, comm)
 
 
-def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
+def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None,
                              tau_indices=None, tile_memory_gb=ISDF_TILE_GB):
     """chi0(i.omega) in the DF auxiliary basis, shape (nfreq, naux, naux).
 
@@ -637,22 +616,13 @@ def chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=None, stream=True,
 
     Same chi0 as `solve_rpa_screening_df`, so W follows as [I - chi0]^-1.
 
-    stream=True projects and accumulates each Pi(i.tau) immediately. Identical
-    algebraically, since
-
-        chi0(i.w) = -2 sum_tau cosft_wt[w,tau] (D^T Pi(tau) D),
-
-    but the peak drops from (ntau, M, M) to chi0 itself, one (nfreq, naux,
-    naux) update of it and the two (rows, M) tiles of the kernel: every rank
-    of a tau split holds all of that, which `chi0_frequency_rows` does not.
+    chi0(i.w) = -2 sum_tau cosft_wt[w,tau] (D^T Pi(tau) D), each Pi(i.tau)
+    projected and accumulated as it is built: the peak is chi0 itself, one
+    (nfreq, naux, naux) update of it and the two (rows, M) tiles of the
+    kernel; every rank of a tau split holds all of that, which
+    `chi0_frequency_rows` does not.
     """
     X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
-    if not stream:
-        Pi_tau = polarizability_imaginary_time(X_o, X_v, e_o, e_v,
-                                               grid.tau_points)
-        Pi_w = np.tensordot(grid.cosft_wt, Pi_tau, axes=(1, 0))
-        return -2.0 * np.einsum('Pa,wPQ,Qb->wab', D, Pi_w, D, optimize=True)
-
     naux = D.shape[1]
     chi0 = np.zeros((grid.nfreq, naux, naux))
     for _, term in chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid, tau_indices,
@@ -724,7 +694,7 @@ def polarizability_rows_sweep(X_o, X_v, e_o, e_v, D, tau_points, comm=None,
 
 
 def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
-                        tile_memory_gb=ISDF_TILE_GB):
+                        tile_memory_gb=ISDF_TILE_GB, branches=None):
     """chi0(i.omega) held by auxiliary rows, `ProjRows` over the frequency
     axis: this rank's rows of every frequency, (nfreq, r1 - r0, naux).
 
@@ -736,13 +706,13 @@ def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
     `chi0_imaginary_frequency`, bitwise.
 
     X: the MO collocation or `SlicedFactors`, whose two branches
-    `split_branches` gathers whole once; D whole. comm: None is
-    `current_comm()`.
+    `split_branches` gathers whole once (or `branches`, as split there); D
+    whole. comm: None is `current_comm()`.
     """
     comm = current_comm() if comm is None else comm
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
-    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
     naux = D.shape[1]
     r0, r1 = contiguous_block(naux, rank, size)
     chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
@@ -757,7 +727,7 @@ def frequency_blocks(nfreq, naux, tile_gb, live):
     """(k0, k1) ranges over the frequency axis such that `live` (naux, naux)
     arrays per frequency fit in tile_gb. The one knob for both the M-row tiles
     and the frequency blocks: a working-set budget, not a count."""
-    nb = max(1, min(nfreq, int(tile_gb * 1e9 / max(live * naux * naux * 8, 1))))
+    nb = max(1, min(nfreq, int(tile_gb * BYTES_PER_GB / max(live * naux * naux * 8, 1))))
     return [(k0, min(k0 + nb, nfreq)) for k0 in range(0, nfreq, nb)]
 
 
@@ -817,7 +787,7 @@ def spin_summed(kernel, X_mos, D, spectra, noccs, *args, **kwargs):
     out = None
     for X, eps, nocc in zip(X_mos, spectra, noccs):
         part = kernel(X, D, eps, nocc, *args,
-                      mu=0.5 * (eps[nocc - 1] + eps[nocc]), **kwargs)
+                      mu=particle_hole_window(eps, nocc)[2], **kwargs)
         if out is None:
             out = part
         else:
@@ -961,17 +931,176 @@ def laplace_representation_error(grid, eps, nocc, freq, pair_energies=None):
     return float(np.abs(q * y - 1.0).max())
 
 
-def screening_space_time(X, D, eps, nocc, grid, mu=None):
-    """W(i.omega) = [I - chi0(i.omega)]^-1, via the imaginary-time route."""
-    chi0 = chi0_imaginary_frequency(X, D, eps, nocc, grid, mu=mu)
-    eye = np.eye(chi0.shape[-1])
-    return np.array([np.linalg.inv(eye - c) for c in chi0])
+def chi0_aux(blocks, spin_factor=1.0, scratch=None):
+    """chi0 = spin_factor sum_s (C_s f_s) C_s^T in the auxiliary basis: the
+    independent-particle response of the particle-hole blocks
+    `blocks` = [(C_ov, f)], C_ov (naux, n_ov) and f its pairs' frequency
+    factor (`frequency_factor`). spin_factor 2 is the restricted singlet's
+    spin sum; an unrestricted chi0 sums its two spins' blocks at 1. scratch:
+    a buffer of one block's shape, filled in place of a fresh C_ov f."""
+    out = None
+    for C, f in blocks:
+        # C f stays a temporary (no name), so no second (naux, n_ov) array
+        # is held next to C_ov
+        if scratch is None:
+            term = (spin_factor * (C * f) if spin_factor != 1.0
+                    else C * f) @ C.T
+        else:
+            np.multiply(C, f, out=scratch)
+            term = (spin_factor * scratch if spin_factor != 1.0
+                    else scratch) @ C.T
+        out = term if out is None else out + term
+    return out
+
+
+def dyson_screening(chi0, transform=None, correlation=False):
+    """W = [I - T^T chi0 T]^-1 at one frequency: the Dyson step of every
+    imaginary-axis screening route.
+
+    transform: the bare-gauge T of a reaction field (`bare_gauge_transform`),
+    None for the gauge chi0 is in. correlation: return W - I.
+    """
+    if transform is not None:
+        chi0 = transform.T @ chi0 @ transform
+    W = np.linalg.inv(np.eye(chi0.shape[-1]) - chi0)
+    if correlation:
+        W[np.diag_indices_from(W)] -= 1.0
+    return W
+
+
+def minimax_points_for_bse(eps, nocc, tau_target=DEFAULT_TAU_TARGET):
+    """(ntau, residual): smallest minimax time grid for the static-W build.
+
+    The BSE counterpart of `minimax_points_for_gw`: only chi0(i.tau) is
+    transformed here, so the chi0 transition range alone binds -- none of the
+    self-energy ranges that widen the GW choice apply. Public so a harness that
+    records the grid used can call the resolver `isdf_bse_factors` uses,
+    instead of re-deriving a number that could silently drift from it.
+    """
+    gap, span, _ = particle_hole_window(eps, nocc)
+    return minimax_points_for_accuracy(gap, span, target=tau_target)
+
+
+def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
+    """The one-point (omega = 0) minimax grid a static screening is built on.
+
+    One frequency, omega = 0: the BSE kernel and the reaction field's
+    self-polarization both want the static screened interaction, so only the
+    tau -> omega direction is evaluated. with_inverse=False skips the
+    omega -> tau matrices, which a single input frequency cannot constrain --
+    they would report an error of order one and warn on every call.
+
+    ntau: None or 'auto' sizes the grid from the chi0 transition range through
+    `minimax_points_for_bse`.
+    """
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
+        ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
+    return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                           with_sine=False, with_inverse=False)
+
+
+def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,
+                            tile_memory_gb=ISDF_TILE_GB, branches=None):
+    """W = [1 - chi0(i.omega = 0)]^-1 in the auxiliary basis, from the
+    separable factors in imaginary time.
+
+    The one build of the static screened interaction: the BSE kernel's W_aux
+    (`isdf_bse_factors`), the reaction field of Duchemin, Guido, Jacquemin and
+    Blase, Chem. Sci. 9, 4430 (2018) Eq. (18)
+    (`gradients.gwbse.reaction_field_adjoint.static_screening`), the space-time GW
+    route's W(0) (its BSE extras and its Eq. (18) shift) and the dense ISDF
+    BSE are this matrix on `static_screening_grid`, in the auxiliary gauge of
+    the factors handed in.
+
+    comm: an MPI communicator (or `simulated_world` rank), by default the
+    current `distributed` region's, whose ranks all call this in lockstep, on
+    X, D, eps and a grid that already agree bit for bit across them --
+    `mpi_grid.replicate` at the entry point, which `isdf_bse_factors` does
+    before it sizes the grid. Tau is the compute axis (every point is an M^2
+    sweep) and there is one frequency, so the whole result is a single
+    (naux, naux) accumulator, the best compute-per-byte sweep in the chain.
+    The inversion afterwards is replicated. Each rank computes its
+    consecutive tau points' addends and the running sum visits the ranks in
+    tau order (`ordered_chain_sum`), so chi0 is the one-rank bits at every
+    rank count. A rank holds its own tau addends of (naux, naux) each beside
+    the running sum and one copy in flight, and the sum crosses once per rank
+    that owns a point.
+
+    X may be `SlicedFactors` over `comm` (`split_branches` gathers its
+    branches, or takes `branches` already gathered); D is then the whole,
+    gathered array. tile_memory_gb: the grid-row tile budget of each tau
+    point's sweep (`polarizability_projected_tau`).
+    """
+    comm = current_comm() if comm is None else comm
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
+    rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
+                    else (0, 1))
+    # consecutive tau points per rank, so the running sum crosses once per rank
+    owners = [r for r in range(nranks)
+              for _ in range(*contiguous_block(grid.ntau, r, nranks))]
+    t0, t1 = contiguous_block(grid.ntau, rank, nranks)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
+    terms = dict(chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid,
+                                range(t0, t1), tile_memory_gb))
+    naux = D.shape[1]
+    # chi0's tau addends in tau order (`ordered_chain_sum`): the one-rank bits
+    chi0 = ordered_chain_sum(terms, owners, comm,
+                             np.zeros((grid.nfreq, naux, naux)))[0]
+    return dyson_screening(chi0)
+
+
+def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,
+                                         tau_target=DEFAULT_TAU_TARGET):
+    """`static_screening_matrix` of an unrestricted reference: one W from
+    chi0_alpha + chi0_beta (`spin_summed`), each spin in its own collocation
+    X_mos[s] = X_ao C_s, on a grid spanning the transitions of both spins and
+    as many time points as the harder of the two needs."""
+    e_min, e_max = transition_range(spectra, noccs)
+    ntau = max(minimax_points_for_bse(e, n, tau_target=tau_target)[0]
+               for e, n in zip(spectra, noccs))
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                           with_sine=False, with_inverse=False)
+    chi0 = spin_summed(chi0_imaginary_frequency, X_mos, D, spectra, noccs,
+                       grid)[0]
+    return dyson_screening(chi0)
+
+
+class NonPositiveDielectric(RuntimeWarning):
+    """det(1 - chi0) is not positive at an imaginary frequency."""
+
+
+def dielectric_log_determinant(one_minus_c, where, flags=None):
+    """log|det(1 - c)| of the dRPA energy, from the matrix `one_minus_c`
+    (real, or complex on a k-point mesh) at `where`: the frequency index, or
+    (transfer q, frequency index) on a mesh.
+
+    On the imaginary axis chi0(i.w) is negative semidefinite in any real gauge,
+    so 1 - chi0 >= 1 and the logarithm exists. A determinant that is not
+    positive is a numerical outcome (a broken chi0, or a convention error),
+    not an input to refuse: log|det| is returned with a
+    `NonPositiveDielectric` warning and the named flag 'nonpositive_det'
+    (`numerical_flags.flag`), and `where` is appended to
+    flags['nonpositive_det'] when a dict is passed. Either way the energy
+    built on it is not the dRPA correlation energy.
+    """
+    sign, logdet = np.linalg.slogdet(one_minus_c)
+    if not sign.real > 0:
+        flag('nonpositive_det',
+             f'det(1 - chi0) is not positive at {where} (sign {sign}): '
+             f'the RPA dielectric has been driven singular, which on a '
+             f'gapped system means a convention error rather than '
+             f'physics; log|det| is used.',
+             NonPositiveDielectric, stacklevel=3)
+        if flags is not None:
+            flags.setdefault('nonpositive_det', []).append(where)
+    return logdet
 
 
 def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
                                       tile_gb=ISDF_TILE_GB, screening=None,
                                       counter_term=None, comm=None,
-                                      want_tape=False):
+                                      want_tape=False, flags=None):
     """dRPA correlation energy E_c = (1/2pi) int dw Tr{log(1 - chi0) + chi0}.
 
     The quadrature of `rpa_energy.rpa_correlation_energy_imaginary_axis`, with
@@ -1005,6 +1134,9 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     (`mpi_grid.agreement`).
 
     want_tape: also return the `RPAEnergyTape` a reverse pass reads.
+    flags: a dict, or None: receives under 'nonpositive_det' the frequencies,
+    on every rank, whose det(1 - chi0) was not positive
+    (`dielectric_log_determinant`).
     """
     n_mat, g = (None, None) if screening is None else screening
     comm = current_comm() if comm is None else comm
@@ -1020,8 +1152,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
                                               tile_memory_gb=tile_gb)
     if nranks > 1:
         reduce_sum(proj_tau, comm)            # the others' slots are zero
-    eye = np.eye(proj_tau.shape[-1])
-    terms = []
+    terms, mine = [], {}
     for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb,
                                           nu_mine):
         for m, k in enumerate(ks):
@@ -1032,9 +1163,15 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
             # dressed interaction, so S = I and c is untouched there.
             one_minus_g = 0.0 if n_mat is None else 1.0 - g[k]
             c = c0 if n_mat is None else c0 - one_minus_g * (n_mat @ c0)
-            _, logdet = np.linalg.slogdet(eye - c)
+            logdet = dielectric_log_determinant(np.eye(c.shape[-1]) - c, k, mine)
             terms.append((k, np.array(grid.omega_weights[k]
                                       * (logdet + linear))))
+    if flags is not None:
+        bad = mine.get('nonpositive_det', [])
+        bad = sorted(int(k) for part in (comm.allgather(bad) if nranks > 1 else [bad])
+                     for k in part)
+        if bad:
+            flags.setdefault('nonpositive_det', []).extend(bad)
     # every frequency's term added in frequency order: the one-rank bits
     e_c = float(ordered_sum(terms, comm, onto=np.zeros(())))
     e_c /= 2.0 * np.pi

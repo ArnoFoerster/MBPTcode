@@ -1,12 +1,15 @@
 """End-to-end gates: every EE-ADC route the driver exposes must give the same
 excitation energies -- spin-free dense, spin-free Davidson, density-fitted,
-and the spin-orbital arbiter -- and the singlet channel must match pyscf."""
+and the spin-orbital arbiter -- and the singlet channel must match pyscf.
+Every route hands the Davidson's convergence flags to the caller
+(.converged), and a dense solve reports every root converged."""
 import numpy as np
 import pytest
 
 from pyscf import gto, scf, adc
 
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC import ee_driver
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 ATOMS = ['H 0 0 0; F 0 0 0.917',
          'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
@@ -73,3 +76,35 @@ def test_bad_options_raise():
         solve_ee_adc(mf, level='adc3', spin='doublet')
     with pytest.raises(ValueError):
         solve_ee_adc(mf, level='adc5')
+
+
+def test_every_route_returns_the_convergence_flags(monkeypatch):
+    """.converged on every non-fold route: True per root from a dense solve,
+    and the Davidson's own flags, here forced False, from an iterative one,
+    with (e, Z) still unpacking as before."""
+    mol = gto.M(atom=ATOMS[1], basis='sto-3g', verbose=0)
+    mf = scf.RHF(mol).run()
+    uhf = scf.UHF(mol).density_fit().run()
+    routes = {'spin-free': dict(spin='singlet'),
+              'spin-free, both channels': dict(return_parity=True),
+              'spin-orbital': dict(route='spinorbital'),
+              'spin-orbital, Ms sector': dict(route='spinorbital', ms_sector=0),
+              'unrestricted': dict(route='unrestricted', df=True, mf=uhf)}
+    for name, kw in routes.items():
+        kw = dict(kw)
+        m = kw.pop('mf', mf)
+        r = solve_ee_adc(m, level='adc2', nroots=3, matrix_free=False, **kw)
+        assert r.converged.shape == (3,) and r.converged.all(), name
+    real = ee_driver.solve_symmetric
+
+    def unconverged(*a, **k):
+        e, X, conv = real(*a, **k)
+        return e, X, np.zeros_like(conv)
+    monkeypatch.setattr(ee_driver, 'solve_symmetric', unconverged)
+    for name, kw in routes.items():
+        kw = dict(kw)
+        m = kw.pop('mf', mf)
+        e, Z, *_ = r = solve_ee_adc(m, level='adc2', nroots=3, dense_limit=0,
+                                    **kw)
+        assert len(e) == 3 and Z.shape[1] == 3, name
+        assert r.converged.shape == (3,) and not r.converged.any(), name

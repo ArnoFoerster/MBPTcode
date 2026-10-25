@@ -6,7 +6,7 @@ SINGLET (S=0) or TRIPLET (S=1, Ms=0) subspace.
 Same design decision as spin_adapt.py on the IP/EA side, and for the same
 reason: **no CSF matrix element is derived by hand here.** T is built from
 exact bitstring second quantization (reusing spin_adapt's apply_ops /
-_apply_S2 / det_sz), so every spin-adapted block inherits the spin-orbital
+apply_S2 / det_sz), so every spin-adapted block inherits the spin-orbital
 implementation's own validation:
 
     H_csf = T^T H_spin T      (same poles, each once, no Ms redundancy)
@@ -33,7 +33,8 @@ import numpy as np
 from scipy import sparse
 
 from src.SingleReference.ADC.eeADC import ee_utils
-from src.SingleReference.ADC.spin_adapt import apply_ops, det_sz, _apply_S2
+from src.SingleReference.ADC.eeADC.ee_r_sigma import spin_flip_vector
+from src.SingleReference.ADC.spin_adapt import apply_ops, det_sz, apply_S2
 
 _S2_SINGLET = 0.0
 _S2_TRIPLET = 2.0
@@ -99,7 +100,7 @@ def csf_isometry(nocc, norb, spin='singlet', level='adc3'):
         S2 = np.zeros((k, k))
         for n in members:
             det, sign, _ = states[n]
-            for d2, c in _apply_S2(det, norb_spatial).items():
+            for d2, c in apply_S2(det, norb_spatial).items():
                 hit = det_to_cfg.get(d2)
                 if hit is None or hit[0] not in pos:
                     continue
@@ -116,3 +117,37 @@ def csf_isometry(nocc, norb, spin='singlet', level='adc3'):
             ncol += 1
     return sparse.csr_matrix((vals, (rows, cols)),
                              shape=(n_cfg, max(ncol, 1))).toarray()
+
+
+def channel_basis(n, no, nv, level, sgn):
+    """(embed, restrict, reps): an orthonormal basis of one spin channel of the
+    spin-free route's vector (ee_r_sigma layout).
+
+    The alpha<->beta flip F permutes the vector's entries, so its sgn
+    eigenspace is spanned by (e_k + sgn e_F(k)) / sqrt(2) over the pairs
+    k < F(k), plus e_k at every fixed point k = F(k) when sgn = +1. The +1
+    space holds the singlets and the Ms = 0 part of the quintets the doubles
+    can form; the -1 space holds the Ms = 0 triplets. embed maps coefficients
+    in that basis to the full vector, restrict(embed(u)) == u, and reps picks
+    one full-vector entry per basis vector (the operator diagonal is the same
+    on both entries of a pair)."""
+    mate = spin_flip_vector(np.arange(n), no, nv, level)
+    k = np.arange(n)
+    fixed = mate == k
+    reps = k[(k < mate) | (fixed & (sgn > 0))]
+    pair = ~fixed[reps]
+    mate = mate[reps[pair]]
+    w = np.where(pair, np.sqrt(0.5), 1.0)
+
+    def embed(u):
+        v = np.zeros(n)
+        v[reps] = w * u
+        v[mate] = sgn * w[pair] * u[pair]
+        return v
+
+    def restrict(v):
+        u = w * v[reps]
+        u[pair] += sgn * w[pair] * v[mate]
+        return u
+
+    return embed, restrict, reps

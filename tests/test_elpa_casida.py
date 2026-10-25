@@ -3,8 +3,9 @@
     python tests/test_elpa_casida.py               # serial path only
     mpirun -n 4 python tests/test_elpa_casida.py   # the real check
 
-Needs pyelpa and mpi4py for the distributed cells. Launched on more than one
-rank, a cell that fell back to the serial path fails; on one rank either path
+Needs pyelpa and mpi4py for the distributed cells; without pyelpa a launch on
+more than one rank prints SKIPPED and exits 0. Launched on more than one
+rank with pyelpa, a cell that fell back to the serial path fails; on one rank either path
 passes, so the serial run checks the comparisons only. Two phases. Unserved,
 every rank solves, as a driver that never parks its workers does: rank 0 must
 get the serial result, every other rank the eigenvalues and None for the rest.
@@ -20,20 +21,48 @@ Served only: a second solve on a solver that keeps its intermediates, and a
 complex Hermitian matrix, which must stay on the local solve. Eigenvectors are
 compared after aligning the sign of every column.
 """
+import importlib.util
 import os
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-from src.Base.utils.linearAlgebra.diagonalization import (diagonalize_matrix,
-                                                          serve_distributed_solves,
-                                                          release_workers)
+from src.Base.utils.linear_algebra.diagonalization import (diagonalize_matrix,
+                                                           serve_distributed_solves,
+                                                           release_workers)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.ADC import solve as adc_solve
-from src.Base.utils.linearAlgebra import diagonalization as _diag_backend
+from src.Base.utils.linear_algebra import diagonalization as _diag_backend
 from src.SingleReference.LinearResponse import casida as casida_mod
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+
+
+def ranks_without_elpa():
+    """(rank, size) of the launch when pyelpa cannot be imported, else None:
+    mpi4py may be imported first only when there is no binding to precede."""
+    if importlib.util.find_spec('pyelpa') is not None:
+        return None
+    try:
+        from mpi4py import MPI    # no pyelpa: nothing must import before it
+    except ImportError:
+        return 0, 1
+    if not MPI.Is_initialized():
+        return 0, 1
+    return MPI.COMM_WORLD.Get_rank(), MPI.COMM_WORLD.Get_size()
+
+
+# Without pyelpa no solve can be distributed, and on more than one rank every
+# cell would fail on distributed=False: the file skips there, saying why. On
+# one rank the serial comparisons still run.
+_LAUNCH = ranks_without_elpa()
+if _LAUNCH is not None and _LAUNCH[1] > 1:
+    if _LAUNCH[0] == 0:
+        print(f'SKIPPED on {_LAUNCH[1]} rank(s): pyelpa is not installed, so '
+              'no eigensolve can be distributed and there is nothing for this '
+              'file to check (install pyelpa: docs/parallel.md, "Distributed '
+              'eigensolve").', flush=True)
+    sys.exit(0)
 
 N = 300
 NORB = 20

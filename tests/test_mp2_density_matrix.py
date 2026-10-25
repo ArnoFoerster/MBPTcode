@@ -34,11 +34,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, mp
 
-from src.SingleReference.DensityMatrix.density_matrix import (
-    compute_mp2_density_matrix, MP2DensityMatrixSolver, compute_mp2_density_matrix_ao,
-    MP2DensityMatrixSolverUnrestricted,
-)
-from src.Base.pyscf_interface import (
+from src.SingleReference.DensityMatrix.density_matrix import (compute_mp2_density_matrix_ao)
+from tests.mpn_density_oracle import (compute_mp2_density_matrix, MP2DensityMatrixSolver, MP2DensityMatrixSolverUnrestricted)
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri,

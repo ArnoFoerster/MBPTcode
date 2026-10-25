@@ -21,14 +21,15 @@ Checks, water/cc-pVDZ Hartree-Fock, tiles of `TILE` points (7 tiles):
   * rows only [context]: the factors a rank holds are its `contiguous_block`
     rows, and every grid-indexed array the fit held (`fit_held`) is its own
     tiles' or rows' size, below the whole
-  * bitwise across the ranks' views [context]: every rank's rows of X_mo, D
+  * across the ranks' views [context], to a few ulp (two rank splits:
+    `matches` of tests/pins.py): every rank's rows of X_mo, D
     and X_ao are the same rows of a one-rank run of the row fit on the same
     points, at `TILE` and at `FIT_CHOLESKY_BLOCK`
   * the realization gate [context]: D over all ranks' rows against the
     serial replicated fit within FIT_REALIZATION_REL_TOL, and W(0) within
     FIT_REALIZATION_OBSERVABLE_REL_TOL, two realizations of one fit
   * the quasiparticle window [explicit] and the whole ISDF BSE [context] on
-    the row `SlicedFactors`: bitwise the same distributed solves on the
+    the row `SlicedFactors`: to a few ulp the same distributed solves on the
     one-rank fit's whole arrays, rank 0's on every rank, and within
     FIT_REALIZATION_OBSERVABLE_REL_TOL of the same solves on the replicated
     fit's `SlicedFactors`, the roots' bar floored at what the Davidson
@@ -37,7 +38,7 @@ Checks, water/cc-pVDZ Hartree-Fock, tiles of `TILE` points (7 tiles):
     held its kept pairs' integrals and one call over them, the others none
   * the metric root on rank 0 [context]: D = M^T V^1/2 with the root formed
     on rank 0 alone (`RowFit.metric_root_rows`) is every rank's rows of the
-    one-rank run bitwise, the root held by rank 0 only and a slab of it
+    one-rank run to a few ulp, the root held by rank 0 only and a slab of it
     elsewhere, and the whole-metric D to 1e-12
 """
 import os
@@ -50,21 +51,22 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import numpy as np
 from pyscf import df, gto, scf
 
-from src.Base import separable_ri
-from src.Base.constants import (FIT_CHOLESKY_BLOCK,
-                                FIT_REALIZATION_OBSERVABLE_REL_TOL,
-                                FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
-from src.Base.separable_ri import (DEFAULT_PAIR_TOL, aux_metric_sqrt,
-                                   fit_M_streaming)
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import distributed, grid_comm, partition
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+                                         FIT_REALIZATION_OBSERVABLE_REL_TOL,
+                                         FIT_REALIZATION_REL_TOL, HARTREE_TO_EV)
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_streaming
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, partition
 from src.SingleReference.GW.space_time import (_row_factors,
                                                separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (_residual_floor,
-                                                         bse_pair_diagonal,
-                                                         isdf_bse_factors,
-                                                         solve_bse_isdf)
+from src.SingleReference.LinearResponse.davidson import _residual_floor
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
+from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
@@ -143,6 +145,14 @@ def bitwise(a, b):
         for x, y in zip(a, b))
 
 
+def same_arrays(a, b, quantity='root'):
+    """Every array of two computations (two rank splits, two layouts) to a
+    few ulp (`matches` of tests/pins.py); `bitwise` stays for copies."""
+    return len(a) == len(b) and all(
+        matches(x, y, RECORDING_BLAS, quantity=quantity)
+        for x, y in zip(a, b))
+
+
 def relative(a, b):
     """||a - b|| / ||b||."""
     return float(np.linalg.norm(np.asarray(a) - np.asarray(b))
@@ -153,8 +163,8 @@ def one_rank_rows(mf, mol, coords, block):
     """The row fit on one rank, on the region's own points: the whole tuple
     every rank's rows are held to."""
     auxmol = df.addons.make_auxmol(mol, auxbasis=AUXBASIS)
-    return serial(_row_factors, mf, mol, auxmol, coords, 4.0,
-                  DEFAULT_PAIR_TOL, None, None, block, time.time())
+    return serial(_row_factors, mf, mol, auxmol, coords, None, None, None,
+                  block, time.time())
 
 
 def roots_resolution(eps, nocc, roots):
@@ -180,7 +190,7 @@ def solves(mf, mol, nocc, factors, comm=None):
     these factors in this region."""
     qp = solve_qp_energy_space_time(mf, mol, nocc, np.array([nocc - 1, nocc]),
                                     factors=factors, comm=comm)
-    om, _, _, info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS,
+    om, _, _, info = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
                                     factors=factors, progress=False)
     return qp, om, roots_resolution(info['eps'], nocc, om)
 
@@ -216,7 +226,7 @@ def rows_only(gate, part, mol, nao, naux):
                f"{fit['FD_rows']} of {npts * naux * 8} B")
     # water is one shell block, every pair kept, evaluated by rank 0 in one
     # call over every nu shell
-    n2 = int((separable_ri._ao_l_labels(mol) <= 2).sum())
+    n2 = int((separable_ri.ao_l_labels(mol) <= 2).sum())
     want = 2 * nao * n2 * naux * 8 if gate.rank == 0 else 0
     gate.check(fit['shell_block'] == want, 'the shell block [context]: its '
                'kept pairs\' integrals and one call no larger, on the rank '
@@ -237,8 +247,9 @@ def metric_root(gate, mol, part, naux):
         mol, auxmol, coords, fit='rows', block=TILE).metric_rows(
             aux_metric_sqrt(auxmol)))
     r0, r1 = fit.rows
-    gate.check(D.tobytes() == whole[r0:r1].tobytes(), 'D on the rank-0 root '
-               '[context]: this rank\'s rows == the one-rank run\'s, bitwise',
+    gate.check(same_arrays((D,), (whole[r0:r1],)), 'D on the rank-0 root '
+               '[context]: this rank\'s rows == the one-rank run\'s, to a few '
+               'ulp',
                f'rows ({r0}, {r1})')
     held = fit.held
     root = 2 * naux * naux * 8 if gate.rank == 0 else 0
@@ -252,14 +263,15 @@ def metric_root(gate, mol, part, naux):
 
 
 def views_are_bitwise(gate, mf, mol, part, block):
-    """Every rank's rows are the one-rank run's rows, bit for bit."""
+    """Every rank's rows are the one-rank run's rows, to a few ulp (two rank
+    splits)."""
     coords = part.coords if isinstance(part, SlicedFactors) else part[3]
     whole = one_rank_rows(mf, mol, coords, block)
     (r0, r1), X_mo, D, X_ao = rows_of(part)
-    ok = bitwise((X_mo, D, X_ao),
-                 (whole[0][r0:r1], whole[1][r0:r1], whole[2][r0:r1]))
+    ok = same_arrays((X_mo, D, X_ao),
+                     (whole[0][r0:r1], whole[1][r0:r1], whole[2][r0:r1]))
     gate.check(ok, f'row fit [context] at tiles of {block}: this rank\'s rows '
-               'of X_mo, D and X_ao == the one-rank run\'s, bitwise',
+               'of X_mo, D and X_ao == the one-rank run\'s, to a few ulp',
                f'rows ({r0}, {r1})')
     return whole
 
@@ -269,7 +281,7 @@ def realization_gate(gate, mf, mol, nocc, part, whole):
     realizations of one fit: D within FIT_REALIZATION_REL_TOL, W(0), the
     window and the roots within FIT_REALIZATION_OBSERVABLE_REL_TOL."""
     gate.section('the realization gate against the replicated fit')
-    old = serial(separable_factors, mf, mol, auxbasis=AUXBASIS)
+    old = serial(separable_factors, mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     (r0, r1), _, D, _ = rows_of(part)
     sums = np.sum(gate.everyone(np.array([
         np.sum((D - old[1][r0:r1]) ** 2), np.sum(old[1][r0:r1] ** 2)])),
@@ -295,11 +307,12 @@ def realization_gate(gate, mf, mol, nocc, part, whole):
     on_whole = solves(mf, mol, nocc, whole, comm=gate.comm)
     distinct = len(set(gate.everyone(b''.join(np.ascontiguousarray(a).tobytes()
                                               for a in on_rows))))
-    gate.check(bitwise(on_rows, on_whole) and distinct == 1,
+    gate.check(same_arrays(on_rows, on_whole, 'energy') and distinct == 1,
                f'window [explicit] and BSE [context] on the row factors over '
                f'{gate.size} rank(s) == on the one-rank fit\'s whole arrays, '
-               'bitwise, on every rank', f'{distinct} distinct')
-    sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True)
+               'to a few ulp, every rank rank 0\'s bitwise',
+               f'{distinct} distinct')
+    sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True, counts=g1(mol))
                   if gate.size > 1 else old)
     on_old = solves(mf, mol, nocc, sliced_old, comm=gate.comm)
     for name, got, ref, tol in zip(('window', 'BSE roots'), on_rows, on_old,
@@ -324,11 +337,11 @@ def main(comm):
         nao = mol.nao_nr()
         naux = df.addons.make_auxmol(mol, auxbasis=AUXBASIS).nao_nr()
         part = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows',
-                                 fit_block=TILE)                 # context
+                                 fit_block=TILE, counts=g1(mol))                 # context
         rows_only(gate, part, mol, nao, naux)
-        gate.section('bitwise across the ranks\' views')
+        gate.section('across the ranks\' views, to a few ulp')
         whole = views_are_bitwise(gate, mf, mol, part, TILE)
-        production = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows')
+        production = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows', counts=g1(mol))
         views_are_bitwise(gate, mf, mol, production, FIT_CHOLESKY_BLOCK)
         realization_gate(gate, mf, mol, nocc, part, whole)
         metric_root(gate, mol, part, naux)

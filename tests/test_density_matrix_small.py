@@ -7,7 +7,7 @@ import numpy as np
 from pyscf import gto, scf, df
 
 from src.SingleReference.DensityMatrix.density_matrix import compute_gw_density_matrix, GWDensityMatrixSolver
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 
 if __name__ == '__main__':
     all_ok = True
