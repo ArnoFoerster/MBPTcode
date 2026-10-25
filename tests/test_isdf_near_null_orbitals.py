@@ -42,6 +42,11 @@ ROOT_TOL_EV = 5e-3
 #: converges (with no cut |g| stalls at 3e-6 while |ddm| jumps between 45 and
 #: 240, exact density fitting and no ISDF anywhere).
 REFERENCE_CUT = 1e-8
+#: X^T S X = 1 holds to round-off of order eps ||S|| / w_min for the smallest
+#: kept overlap eigenvalue w_min (here about 2e-8, so about 2e-7); the bar is
+#: ten times that, so it holds on any LAPACK while a wrong column or scale,
+#: an error of order one, still fails.
+CANONICAL_ROUNDOFF_FACTOR = 10.0
 
 
 def _basis(element):
@@ -123,8 +128,12 @@ def test_canonical_basis_spans_the_kept_overlap_eigenvectors(water):
     mol = water[0]
     S = mol.intor('int1e_ovlp')
     X = canonical_basis(S, REFERENCE_CUT)
-    assert X.shape[1] == int((np.linalg.eigvalsh(S) > REFERENCE_CUT).sum())
-    assert np.allclose(X.T @ S @ X, np.eye(X.shape[1]), atol=1e-8)
+    w = np.linalg.eigvalsh(S)
+    assert X.shape[1] == int((w > REFERENCE_CUT).sum())
+    bar = (CANONICAL_ROUNDOFF_FACTOR * np.finfo(float).eps
+           * np.linalg.norm(S, 2) / w[w > REFERENCE_CUT].min())
+    err = np.abs(X.T @ S @ X - np.eye(X.shape[1])).max()
+    assert err <= bar, (err, bar)
     assert water[3].mo_coeff.shape[1] == X.shape[1]
 
 

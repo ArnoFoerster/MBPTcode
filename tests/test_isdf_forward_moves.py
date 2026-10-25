@@ -77,9 +77,10 @@ GEOMETRY = (('O', (0.0, 0.0, 0.1173)), ('H', (0.0, 0.7572, -0.4692)),
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 #: Bound on |M_stable - M_streaming| / |M_stable|max on water/cc-pVDZ, G1:
-#: round-off of two realizations of one fit, which depends on the BLAS
-#: (2.80e-8 on a workstation's MKL, 1.99e-8 on a cluster's).
-FIT_FACTOR_DISCREPANCY = 5e-8
+#: round-off of two realizations of one fit, which depends on the BLAS and the
+#: CPU it runs on (1.99e-8 on a cluster's MKL, 2.80e-8 on a workstation's,
+#: 6.84e-8 on a hosted CI runner's OpenBLAS); the bar leaves a factor of about 3.
+FIT_FACTOR_DISCREPANCY = 2e-7
 #: The Ha/Bohr the substitution moved the Hartree-Fock skeleton force by on
 #: G1 (4.3e-9 on the workstation), below the 1e-8 reproducibility floor because
 #: the fit adjoint solves the Gram matrix once per side (applying G^-1 twice

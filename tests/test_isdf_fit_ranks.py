@@ -45,9 +45,13 @@ these, and the gate is not a converged number to re-baseline but a ceiling: a
 real defect in the partition or the reduction misses by whole digits, as the
 perturbations below show.
 
-The numbers are reproducible run to run, not a spread -- the stripe and the
-rank order of the reduction are both fixed -- so a change in them is a change
-in the arithmetic.
+The numbers are reproducible run to run on one machine, not a spread -- the
+stripe and the rank order of the reduction are both fixed -- so a change in
+them is a change in the arithmetic. Across machines they follow the BLAS and
+the CPU: ethylene's D through `separable_factors` on 3 ranks moves 3.4e-08 on
+a workstation and 1.2e-07 on a hosted CI runner, so `FIT_TOL` sits a factor
+of about 4 above the latter and still about 4 below the 1.8e-06 between the
+two fit realizations on ethylene.
 
 What breaks each gate, in `separable_ri.py`:
 
@@ -105,10 +109,11 @@ CASES = {'water': (WATER, 'cc-pvdz', 2e-4),
 #: so 3 leaves the stripe uneven over both block counts.
 RANKS = (2, 3)
 
-#: Ceiling on the fit's disagreement with serial: one order above the worst
-#: measured, and below the discrepancy between the repo's two fit
-#: realizations on ethylene. Not a measurement to re-baseline.
-FIT_TOL = 1e-7
+#: Ceiling on the fit's disagreement with serial: above the worst measured on
+#: any BLAS so far (1.2e-07, a hosted CI runner) and below the discrepancy
+#: between the repo's two fit realizations on ethylene (1.8e-06). Not a
+#: measurement to re-baseline.
+FIT_TOL = 5e-7
 
 REPO = Path(__file__).resolve().parents[1]
 #: The fit before its element-wise work ran in `row_map`'s threads -- the
