@@ -34,7 +34,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.environment_seam import attach_environment
 from src.Base.numerics.numerics import Numerics
 from src.environments.solvent_screening import SolventScreening
-from src.SingleReference import calc_qp_energy
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.BSE.solve import solve_bse_df
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'

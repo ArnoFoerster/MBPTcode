@@ -4,7 +4,7 @@
 `LinearResponse.space_time.static_screening_grid` is the single build of
 W = [1 - chi0(i.omega = 0)]^-1 from the separable factors.
 `isdf_bse_factors(screening='imaginary-time')` returns it as the BSE kernel's
-W_aux and `gradients.reaction_field_adjoint.static_screening` returns it beside
+W_aux and `gradients.gwbse.reaction_field_adjoint.static_screening` returns it beside
 the orbital densities A[Q,p] = sum_k D[k,Q] X[k,p]^2 that Duchemin, Guido,
 Jacquemin and Blase, Chem. Sci. 9, 4430 (2018) Eq. (18) contracts it against.
 The two entry points must therefore hand back the SAME BITS, serially and off

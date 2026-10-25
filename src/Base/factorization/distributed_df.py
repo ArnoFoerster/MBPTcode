@@ -174,8 +174,8 @@ from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
-                                              lockstep_stats, partition, reduce_sum,
-                                              replicate)
+                                              lockstep_mean_field, lockstep_stats,
+                                              partition, reduce_sum, replicate)
 from src.Base.utils.parallel.threads import blas_full_pool, blas_single_threaded
 
 #: What a distributed run leaves on `mf._distributed_timings`, on every rank.
@@ -1459,9 +1459,7 @@ def _lockstep_result(mf, comm, timings):
     The quadrature grid, which only rank 0 built, follows (`_lockstep_grids`).
     """
     t0 = time.time()
-    (mf.mo_energy, mf.mo_coeff, mf.mo_occ, mf.e_tot,
-     mf.converged) = lockstep((mf.mo_energy, mf.mo_coeff, mf.mo_occ,
-                               mf.e_tot, mf.converged), comm, check=True)
+    lockstep_mean_field(mf, comm, check=True)
     add_seconds(timings, 'scf_lockstep', t0)
     t0 = time.time()
     moved = _lockstep_grids(mf, comm)

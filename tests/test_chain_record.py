@@ -59,7 +59,7 @@ def test_a_chain_read_back_is_the_same_surface(setting, tmp_path):
     # starts from the committed roots carried through each chain's own SCF
     # orbitals, which differ in their last bits, and stops elsewhere inside
     # BSE_DAVIDSON_CONV_TOL: in toluene-split 4.3e-11 and 8.6e-11 Ha apart
-    # (two cluster runs), above the energy bar; two cold solves
+    # (on the cluster), above the energy bar; two cold solves
     # start from the same unit vectors.
     chain.davidson_warm_start = rebuilt.davidson_warm_start = None
     for seed in (2, 3):

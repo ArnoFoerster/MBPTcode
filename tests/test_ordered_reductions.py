@@ -8,7 +8,7 @@ in tile order gives the one-rank bits at any rank count, where `reduce_sum`
 joins rank partials in an order the rank count decides. Gated on water
 /cc-pVDZ RHF at 1, 2, 3, 5 and 8 simulated ranks, every sum the serial one
 to a few ulp (`assert_same`: each rank's addends are its own computation of
-the serial tiles, no method tolerance). The planted
+the serial tiles; no method tolerance). The planted
 defects are shown to move the bits of the sums; under the recording BLAS
 their 1e-12 moves also lie far outside the few-ulp bar:
 

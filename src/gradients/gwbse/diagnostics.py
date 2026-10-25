@@ -44,7 +44,8 @@ def log_entries(chain):
     (`ExcitedStateChain.qp_hamiltonian_log`); Casida solves whose read roots
     were left above read_tol or unconfirmed by kind, roots, spin, state and
     geometry (`casida_log`); quasiparticles kept on their followed branch by
-    orbital and geometry (`qp_branch_log`)."""
+    orbital and geometry (`qp_branch_log`); named flags a forward raised by
+    flag and message (`numerical_flag_log`)."""
     return {
         'qp_hamiltonian_warnings': [
             ((e['kind'], tuple(e['orbitals']), e['geometry']), e)
@@ -55,7 +56,10 @@ def log_entries(chain):
             for e in (getattr(chain, 'casida_log', None) or [])],
         'qp_branch_warnings': [
             ((e['orbital'], e['geometry']), e)
-            for e in (getattr(chain, 'qp_branch_log', None) or [])]}
+            for e in (getattr(chain, 'qp_branch_log', None) or [])],
+        'numerical_flag_warnings': [
+            ((e['flag'], e['message']), e)
+            for e in (getattr(chain, 'numerical_flag_log', None) or [])]}
 
 
 def chain_diagnostics(chain, mol, mf=None, posteriori=False):

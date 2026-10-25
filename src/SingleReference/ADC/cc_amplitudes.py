@@ -15,13 +15,13 @@ amplitude and a static self-energy from the BCCD density
 """
 import copy
 import functools
-import warnings
 
 import numpy as np
 from pyscf import cc as _pyscf_cc
 from pyscf import scf as _pyscf_scf
 from pyscf.cc import bccd as _pyscf_bccd
 
+from src.Base.numerical_flags import flag
 from src.SingleReference.ADC.solve import ADCNotConverged
 
 
@@ -71,7 +71,7 @@ def run_cc(mf, method, frozen, out=None, **cc_opts):
     if out is not None:
         out['converged'] = bool(mycc.converged)
     if not mycc.converged:
-        warnings.warn(f"{method.upper()} did not converge; its last amplitudes are "
+        flag('cc_amplitudes_not_converged', f"{method.upper()} did not converge; its last amplitudes are "
                       f"used (converged=False)", ADCNotConverged, stacklevel=2)
     return mycc
 
@@ -119,7 +119,7 @@ def brueckner_reference(mf, conv_tol_normu=1e-6, max_cycle=50, **cc_opts):
     # so the Brueckner condition itself is the test
     converged = t1_norm < conv_tol_normu
     if not converged:
-        warnings.warn(f"BCCD did not converge (|T1| = {t1_norm:.2e}); the last "
+        flag('brueckner_not_converged', f"BCCD did not converge (|T1| = {t1_norm:.2e}); the last "
                       f"orbitals are used (converged=False)", ADCNotConverged,
                       stacklevel=2)
     C = mfb.mo_coeff

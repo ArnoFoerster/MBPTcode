@@ -26,6 +26,7 @@ from src.Base.numerics.constants import (
     QB_QP_END_BLOCK_BYTES, QB_QP_ROOT_TOL, QP_POLE_INTERVAL_SAMPLES,
     QP_SCAN_SECANT_MIN, QP_SCAN_SPLIT_DEPTH, QP_WEIGHT_SUM_SLACK,
 )
+from src.Base.numerical_flags import flag
 from src.Base.step_failed import StepFailed
 
 
@@ -46,22 +47,41 @@ class QPRootNotConverged(StepFailed):
 
 class QPNoRoot(RuntimeWarning):
     """A quasiparticle equation without a root in its widest scan window:
-    the root is NaN, and a caller's `out` dict carries 'no_root' (refuse
-    inputs, warn numerics: a number that does not exist is a flagged NaN)."""
+    the root is NaN, the named flag 'no_root' is raised, and a caller's `out`
+    dict carries 'no_root' (refuse inputs, warn numerics: a number that does
+    not exist is a flagged NaN)."""
 
 
 class QPWeightOutside(RuntimeWarning):
-    """The root of largest weight of a positive-weight pole sum with Z
-    outside (0, 1], which no root of such a self-energy has: a numerical
-    event, kept with a warning and 'z_outside' in a caller's `out` dict."""
+    """A quasiparticle root kept with Z outside (0, 1], which no root of a
+    positive-weight self-energy has: a numerical event, kept with this
+    warning, the named flag 'z_outside', and 'z_outside' in a caller's `out`
+    dict."""
 
 
 def _report(message, reason, last, refuse):
     """Raise QPRootNotConverged when the caller refuses this case, warn
-    (`QPNoRoot`) otherwise."""
+    (`QPNoRoot`) and raise the named flag 'no_root' otherwise."""
     if refuse:
         raise QPRootNotConverged(message, reason, last)
-    warnings.warn(message, QPNoRoot, stacklevel=3)
+    flag('no_root', message, QPNoRoot, stacklevel=3)
+
+
+def z_outside(got):
+    """Whether a root was found and its pole strength lies outside (0, 1]."""
+    return bool(np.isfinite(got.w) and not 0.0 < got.z <= 1.0)
+
+
+def _flag_outside(got, label):
+    """Warn (`QPWeightOutside`) and raise the named flag 'z_outside' for a
+    root kept with Z outside (0, 1]; the root stays as solved."""
+    if z_outside(got):
+        flag('z_outside',
+             f'the quasiparticle root of {label or "the quasiparticle equation"} '
+             f'{got.w!r} Ha has Z = {got.z!r}, outside (0, 1], which no root '
+             f'of a positive-weight self-energy has: kept', QPWeightOutside,
+             stacklevel=3)
+    return got
 
 
 def qp_start(eps, p, nocc, offset=QP_POLE_OFFSET):
@@ -151,7 +171,10 @@ def find_qp_root(source, a, follow=None, z_min=QP_WINDOW_Z_MIN, label='',
     is exact too; one that could not evaluate f somewhere
     (`SampledEquation`'s refusals) raises that refusal instead, since the
     root may lie there. No root at all is 'no_root': refused under
-    refuse_unconverged, NaN with a warning otherwise.
+    refuse_unconverged, NaN with a `QPNoRoot` warning and the named flag
+    'no_root' otherwise. A root kept with Z outside (0, 1] stays as solved,
+    with a `QPWeightOutside` warning and the named flag 'z_outside', on
+    every route.
 
     With `follow` = (w, labels), the root the previous geometry of a walk
     kept and the labels of the poles that bracketed it (None where the
@@ -176,34 +199,43 @@ def find_qp_root(source, a, follow=None, z_min=QP_WINDOW_Z_MIN, label='',
     `QPRoot.flipped` tells the caller that the largest weight has moved.
     """
     if follow is None:
-        return _largest_root(source, a, z_min, label, refuse_unconverged)
+        return _flag_outside(_largest_root(source, a, z_min, label,
+                                           refuse_unconverged), label)
     w_prev, labels = (follow if isinstance(follow, (tuple, list))
                       else (follow, None))
     got = source.follow_root(float(w_prev), labels, a)
     if got is not None and got[3] is not None:
         # () is a largest weight the source was told not to search for
         w, z, labels, largest = got
-        return QPRoot(w, z, quasiparticle_weight(z, z_min), (), labels,
-                      largest or None, True)
-    refusals = (QPRootNotConverged,) + tuple(getattr(source, 'refusals', ()))
+        return _flag_outside(QPRoot(w, z, quasiparticle_weight(z, z_min), (),
+                                    labels, largest or None, True), label)
     try:
+        # no root of largest weight beside a followed one is no event
         best, failed = _largest_root(source, a, z_min, label,
-                                     refuse_unconverged), None
-    except refusals as refusal:
+                                     refuse_unconverged, report=False), None
+    except tuple(getattr(source, 'refusals', ())) as refusal:
         best, failed = None, refusal
     largest = None if best is None else (best.w, best.z)
     if got is None:
         if failed is not None:
             raise failed
-        return best._replace(largest=largest, followed=False)
+        if not np.isfinite(best.w):
+            _report(f'{label or "the quasiparticle equation"}: the branch '
+                    f'followed from {float(w_prev):.6f} Ha has gone and no '
+                    f'root lies in the widest scan window about {a:.6f} Ha.',
+                    'no_root', np.nan, refuse_unconverged)
+        return _flag_outside(best._replace(largest=largest, followed=False),
+                             label)
     w, z, labels, _ = got
     found = () if best is None else best.found
-    return QPRoot(w, z, quasiparticle_weight(z, z_min), found, labels,
-                  largest, True)
+    return _flag_outside(QPRoot(w, z, quasiparticle_weight(z, z_min), found,
+                                labels, largest, True), label)
 
 
-def _largest_root(source, a, z_min, label, refuse_unconverged):
-    """`find_qp_root` without `follow`: the root of largest valid weight."""
+def _largest_root(source, a, z_min, label, refuse_unconverged, report=True):
+    """`find_qp_root` without `follow`: the root of largest valid weight;
+    with `report` False, no root at all is the NaN root alone, for the
+    caller to report."""
     found, k, window = [], None, None
     windows = list(source.windows(a))
     for i, window in enumerate(windows):
@@ -221,11 +253,14 @@ def _largest_root(source, a, z_min, label, refuse_unconverged):
     exact = getattr(source, 'exhaustive', None)
     if exact is not None and exact() is not None:
         # no quasiparticle: every bound that is not exact is dropped
-        return _largest_root(exact(), a, z_min, label, refuse_unconverged)
+        return _largest_root(exact(), a, z_min, label, refuse_unconverged,
+                             report)
     if not found:
-        _report(f'{label or "the quasiparticle equation"} has no root in the '
-                f'widest scan window [{window[0]:.6f}, {window[1]:.6f}] Ha '
-                f'about {a:.6f} Ha.', 'no_root', np.nan, refuse_unconverged)
+        if report:
+            _report(f'{label or "the quasiparticle equation"} has no root in the '
+                    f'widest scan window [{window[0]:.6f}, {window[1]:.6f}] '
+                    f'Ha about {a:.6f} Ha.', 'no_root', np.nan,
+                    refuse_unconverged)
         return QPRoot(np.nan, np.nan, False, ())
     if k is None:
         k = min(range(len(found)), key=lambda i: abs(found[i][0] - a))
@@ -306,14 +341,15 @@ def _weighed_outward(source, lo, hi, a, enough=-np.inf):
 
 def _note_branch(got, label, tol, out):
     """Hand a followed root's branch to `out` (a dict: 'labels', 'largest',
-    'followed', 'flipped', and 'no_root' for a NaN root), or, with no
+    'followed', 'flipped', 'no_root' for a NaN root and 'z_outside' for a
+    root kept with Z outside (0, 1]), or, with no
     `out`, warn where the largest weight has moved to another root
     (`QPRoot.flipped`)."""
     flipped = got.flipped(tol)
     if out is not None:
         out.update(labels=got.labels, largest=got.largest,
                    followed=got.followed, flipped=flipped,
-                   no_root=not np.isfinite(got.w))
+                   no_root=not np.isfinite(got.w), z_outside=z_outside(got))
         return
     if flipped:
         warnings.warn(branch_warning(label, got), RuntimeWarning,
@@ -1421,22 +1457,15 @@ def largest_weight_root(num, pol, a, label='', tol=QB_QP_ROOT_TOL, out=None):
     Exact: no bound under-estimates.
 
     Every root of a positive-weight self-energy has 0 < Z <= 1; one outside
-    is a numerical event, kept with a `QPWeightOutside` warning and
-    'z_outside' True in `out` (a dict, when given), as is no root at all
-    (NaN, `QPNoRoot`, 'no_root').
+    is a numerical event, kept with a `QPWeightOutside` warning and the named
+    flag 'z_outside' (`find_qp_root`), and 'z_outside' True in `out` (a dict,
+    when given), as is no root at all (NaN, `QPNoRoot`, 'no_root').
     """
-    got = find_qp_root(PoleSum(num, pol, a, tol, prune=True), a, label=label)
-    best_w, best_z = float(got.w), float(got.z)
-    outside = bool(np.isfinite(best_w) and not 0.0 < best_z <= 1.0)
-    if outside:
-        warnings.warn(
-            f'the quasiparticle root of {label or "the secular equation"} '
-            f'{best_w!r} Ha has Z = {best_z!r}, outside (0, 1], which no root '
-            f'of a positive-weight self-energy has: kept', QPWeightOutside,
-            stacklevel=2)
+    got = find_qp_root(PoleSum(num, pol, a, tol, prune=True), a,
+                       label=label or 'the secular equation')
     if out is not None:
-        out.update(z_outside=outside, no_root=not np.isfinite(best_w))
-    return best_w, best_z
+        out.update(z_outside=z_outside(got), no_root=not np.isfinite(got.w))
+    return float(got.w), float(got.z)
 
 
 def bracketed_root(num, pol, a, w0, labels=None, tol=QB_QP_ROOT_TOL, out=None):

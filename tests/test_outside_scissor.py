@@ -30,7 +30,6 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import glob
 import json
 import pathlib
 
@@ -61,17 +60,10 @@ FD_STEP = 1e-4
 FD_TOL = 1e-6
 
 
-def newest_baseline():
-    """The newest `baseline_<sha7>.json`, repeats excluded."""
-    paths = [p for p in glob.glob(str(GATES / 'baseline_*.json'))
-             if not p.endswith('_repeat.json')]
-    if not paths:
-        pytest.skip(f'no baseline_*.json in {GATES}; run record_baseline.py')
-    return pathlib.Path(max(paths, key=os.path.getmtime))
-
-
-RECORD = json.loads(newest_baseline().read_text())
-RECORD_BLAS = recorded_blas(newest_baseline())
+#: The recorded baseline.
+BASELINE = GATES / 'baseline_forward_routes.json'
+RECORD = json.loads(BASELINE.read_text())
+RECORD_BLAS = recorded_blas(BASELINE)
 #: The record's energies and gradients as this tree computes them.
 PINS = json.loads(
     (GATES / 'one_fit_pins.json').read_text())['outside_scissor']

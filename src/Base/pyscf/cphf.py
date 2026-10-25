@@ -18,7 +18,7 @@ until the true residual max |rhs - diag x - coupling(x)| is below tol. A
 solve that ends above tol is a numerical event (refuse inputs, warn numerics):
 it returns its last x, warns
 (CphfNotConverged) and, inside `numerical_flags.collecting(flags)`, appends the flag
-'cphf_not_converged' to that list, which a state model copies into its
+'orbital_response_not_converged' to that list, which a state model copies into its
 record (src.gradients.state_models).
 
 numerics: a `src.Base.numerics.numerics.Numerics`; its scf section holds the true
@@ -102,5 +102,5 @@ def solve(coupling, diag, rhs, numerics=None, precond=None):
     if res >= tol:
         text = (f'CPHF not converged: true residual {res:.1e} after {refinements} '
                 f'refinements (tol {tol:.0e}); its last iterate is returned')
-        flag('cphf_not_converged', text, CphfNotConverged)
+        flag('orbital_response_not_converged', text, CphfNotConverged)
     return x

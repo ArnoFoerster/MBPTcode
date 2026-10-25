@@ -1,29 +1,29 @@
 """Refusals and numerical flags of the state-specific solvation loop, its
-state models, its medium and its driver (refuse inputs, warn numerics).
-Water 6-31G
-(bent, non-symmetric), toluene IEF-PCM, frozen 1, cc-pvdz-ri / cc-pvdz-jkfit.
-Each refusal test raises where the code used to return a number;
-each flag test shows the warning and the named flag where the code refused before.
+state models, its medium and its driver (a bad input is refused; a numerical
+shortfall warns and carries a named flag). Water 6-31G (bent, non-symmetric),
+toluene IEF-PCM, frozen 1, cc-pvdz-ri / cc-pvdz-jkfit.
+Each refusal test raises on an input that would give a wrong number;
+each flag test shows the warning and the named flag.
 
   - a loop at max_cycle warns and returns its last cycle, flagged
-      'solvation_loop_not_converged', its G the functional there; the driver
-      keeps a walk that did not converge, warned about and flagged
-      'walk_not_converged', and a rerun walks it again
+    'solvation_loop_not_converged', its G the functional there; the driver
+    keeps a walk that did not converge, warned about and flagged
+    'walk_not_converged', and a rerun walks it again
   - an unconverged ADC(2) root is warned about and flagged
-      'adc_roots_not_converged', in the call and in the force
+    'adc_roots_not_converged', in the call and in the force
   - the driver refuses a record made with other settings and builds
-      ADC(2) on Hartree-Fock (and refuses --refreeze
-      with ADC(2), which freezes nothing); a GW-BSE minimum whose refreeze
-      drift stays above REFREEZE_TOL_MEV is kept, warned about and flagged
-      (refreeze_not_converged), its G taken on the last rebuilt surface; the
-      walk-versus-vertical bar of a refrozen walk is REFREEZE_TOL_MEV
+    ADC(2) on Hartree-Fock (and refuses --refreeze
+    with ADC(2), which freezes nothing); a GW-BSE minimum whose refreeze
+    drift stays above REFREEZE_TOL_MEV is kept, warned about and flagged
+    (refreeze_not_converged), its G taken on the last rebuilt surface; the
+    walk-versus-vertical bar of a refrozen walk is REFREEZE_TOL_MEV
   - overlap following flags a lost root and two mixed roots
-      ('root_following_lost', 'root_following_mixed'), and its metric does not
-      depend on the orbitals' phases
+    ('root_following_lost', 'root_following_mixed'), and its metric does not
+    depend on the orbitals' phases
   - the loop's G is the functional E(q) - (1/2) q^T Q^-1 q at the charges
-      it returns, also away from convergence
+    it returns, also away from convergence
   - a Kohn-Sham reference gets its own gradient class (the loop's force is
-      pyscf's PCM-RKS gradient); MP2 on it is refused
+    pyscf's PCM-RKS gradient); MP2 on it is refused
   - the PCM force refuses a non-symmetric density
   - the PCM force refuses a continuum around an enclosing shell
   - the loop refuses a state whose LR continuum is not its field's
@@ -70,7 +70,7 @@ def driver():
     return solvated
 
 
-# ------------------------------------------------------------------------------
+# loop and walk convergence ----------------------------------------------------
 
 def test_loop_at_max_cycle_warns_and_flags():
     mol = molecule(ATOMS)
@@ -108,7 +108,7 @@ def test_driver_keeps_an_unconverged_walk_flagged(tmp_path, monkeypatch):
     assert R == {}
 
 
-# ------------------------------------------------------------------------------
+# unconverged ADC(2) roots -----------------------------------------------------
 
 def _unconverged(fn):
     def wrapped(*a, **k):
@@ -144,7 +144,7 @@ def test_unconverged_root_flagged_in_the_force(monkeypatch):
     assert np.isfinite(F).all()
 
 
-# ------------------------------------------------------------------------------
+# driver records, ADC(2) and refreeze ------------------------------------------
 
 def _args(tmp_path, **kw):
     xyz = tmp_path / 'w.xyz'
@@ -312,7 +312,7 @@ def test_a_surface_that_freezes_nothing_is_its_own_refreeze(kind):
     assert surf.refreeze(molecule(ATOMS)) is surf
 
 
-# ------------------------------------------------------------------------------
+# overlap following ------------------------------------------------------------
 
 def test_a_lost_root_is_flagged():
     """The vector of root 5 (of 6) carried into a solve of 3 roots: it is not
@@ -367,7 +367,7 @@ def test_following_metric_is_gauge_free_and_follows_a_step():
     assert ref.weights(step, moved.y_follow.T[None])[0] > 0.9
 
 
-# ------------------------------------------------------------------------------
+# the loop's G -----------------------------------------------------------------
 
 def test_loop_reports_the_functional_away_from_convergence():
     """Stopped early (tol_q 1e-2), the reported G is G(q) = E(q) - (1/2)
@@ -383,7 +383,7 @@ def test_loop_reports_the_functional_away_from_convergence():
     assert abs(r.energy - G) < 1e-10, f'{r.energy - G:+.1e}'
 
 
-# ------------------------------------------------------------------------------
+# Kohn-Sham reference ----------------------------------------------------------
 
 def make_rks(mol):
     mf = dft.RKS(mol, xc='pbe0')
@@ -414,7 +414,7 @@ def test_mp2_on_a_kohn_sham_reference_is_refused():
         MP2State(HFState(mol, make_rks), NF, AUX)
 
 
-# ------------------------------------------------------------------------------
+# PCM force refusals -----------------------------------------------------------
 
 def test_pcm_force_refuses_a_non_symmetric_density():
     mol = molecule(ATOMS)
@@ -440,7 +440,7 @@ def test_pcm_force_refuses_an_enclosing_shell():
         field.transition_force(dm)
 
 
-# ------------------------------------------------------------------------------
+# LR continuum of the state ----------------------------------------------------
 
 class _WithLR(HFState):
     """Hartree-Fock declaring an LR continuum (the attribute the loop reads)."""
@@ -464,7 +464,7 @@ def test_loop_refuses_a_foreign_lr_continuum():
     assert r.converged
 
 
-# ------------------------------------------------------------------------------
+# unconverged SCF --------------------------------------------------------------
 
 def test_state_model_refuses_an_unconverged_orbital_gradient():
     mol = molecule(ATOMS)

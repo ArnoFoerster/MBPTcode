@@ -14,8 +14,8 @@ walk's own resolution; such passes oscillate (formaldehyde T1: -3.5, -1.8,
 +1.4, -0.8 meV). A drift within REFREEZE_TOL_MEV ends the loop; one above it
 refreezes at the new minimum and walks again, and a drift still above it after
 REFREEZE_MAX_PASSES is warned about and flagged (RefreezeNotConverged,
-walk_flags 'refreeze_not_converged'; refuse inputs,
-warn numerics), the last pass's geometry kept; nothing stands in between.
+walk_flags 'refreeze_not_converged'; a numerical shortfall warns, it is not
+refused), the last pass's geometry kept; nothing stands in between.
 
 `opt_grad_max` in these records is the RESIDUAL |dE/dR| at the converged
 geometry R*, not the driving force at the input geometry R0.

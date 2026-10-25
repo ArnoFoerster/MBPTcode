@@ -22,7 +22,7 @@ one rank to the next. Each energy and force a surface returns is therefore one
 `lockstep` of what the call computed: rank 0's on every rank, and serially the
 value itself.
 """
-import warnings
+import functools
 
 import numpy as np
 from pyscf import gto, scf
@@ -38,6 +38,7 @@ from src.SingleReference.common.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
 from src.Base.environment_seam import environment_of
 from src.Base.factorization.isdf_jk import ISDFJK
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.Base.utils.parallel.threads import blas_single_threaded
 from src.SingleReference.GW.qp_selection import true_degenerate_blocks
@@ -71,11 +72,6 @@ VARIANTS = {
     'BSEtda@GWtda':    dict(screening='tda', bse_tda=True),
 }
 
-# The ground state each variant's excitation sits on: E_0 = E_HF + E_c^dRPA for
-# RPA screening (letter Eq. 15/17), E_0 = E_HF for TDA screening (Eq. 19),
-# where the correlation part of the plasmon formula vanishes.
-GROUND_OF = {'rpa': 'rpa', 'tda': 'hf'}
-
 
 def tight_rhf(mol):
     """The default reference: unfitted, and converged tightly enough to
@@ -85,8 +81,9 @@ def tight_rhf(mol):
     so a loose SCF biases the force rather than degrading it gracefully; and a
     density-fitted mean field gives different orbitals, which the quasiparticle
     energy inherits directly. An SCF that stops short is warned about and
-    kept where it stopped, carrying the flag 'scf_not_converged' in
-    `mf.flags`.
+    kept where it stopped, with the named flag 'scf_not_converged'
+    (`numerical_flags.flag`), which it also carries in `mf.flags`: a
+    gradient read off it later names it (`flags_in_diagnostics`).
     """
     mf = scf.RHF(mol)
     mf.conv_tol = SCF_TIGHT_CONV_TOL
@@ -97,9 +94,31 @@ def tight_rhf(mol):
     if not mf.converged:
         text = (f'the SCF did not converge in {mf.max_cycle} cycles; it is kept '
                 f'where it stopped, and what follows carries its residual')
-        warnings.warn(text, RuntimeWarning, stacklevel=2)
+        flag('scf_not_converged', text, RuntimeWarning)
         mf.flags = [{'flag': 'scf_not_converged', 'message': text}]
     return mf
+
+
+def flags_in_diagnostics(gradient):
+    """A surface's `gradient(mol, mf)` -> (dE/dR, E, diagnostics), whose
+    diagnostics also carry 'numerical_flags': every named flag the call
+    raised on any thread or rank and those of the mean field it was handed
+    (`mf.flags`, `tight_rhf`), each once. The surface keeps them in
+    `numerical_flag_log` with the nuclei they were raised at, which its
+    records read (`diagnostics.log_entries`)."""
+    @functools.wraps(gradient)
+    def recorded(self, mol=None, mf=None):
+        raised = list(getattr(mf, 'flags', None) or [])
+        with collecting(raised):
+            grad, energy, diagnostics = gradient(self, mol, mf)
+        raised = gathered(raised)
+        log = self.__dict__.setdefault('numerical_flag_log', [])
+        held = {(e['flag'], e['message']) for e in log}
+        where = np.asarray((mol or self.mol0).atom_coords(), float).tolist()
+        log.extend(dict(e, geometry=where) for e in raised
+                   if (e['flag'], e['message']) not in held)
+        return grad, energy, dict(diagnostics, numerical_flags=raised)
+    return recorded
 
 
 #: The letter's quasiparticle window: all valence occupied, nocc+10 virtual.
@@ -349,6 +368,7 @@ class DenseRPASurface(PotentialEnergySurface):
                                             mf, mol,
                                             e_corr=qp.qb.e_corr()).total)
 
+    @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
         """(dE_0/dR, E_0, diagnostics), fully analytic."""
         mol = self.mol0 if mol is None else mol
@@ -538,6 +558,7 @@ class QuasiparticleSurface(PotentialEnergySurface):
         return lockstep(float(self._state(self.mol0 if mol is None else mol,
                                           mf)[1]))
 
+    @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
         """(dE/dR, E, diagnostics) for the N-/+1 state, fully analytic."""
         mol = self.mol0 if mol is None else mol
@@ -816,6 +837,7 @@ class DenseBSESurface(PotentialEnergySurface):
         b, _, _, _, _ = self._solve(mol, mf)
         return lockstep(float(b.Omega[self.state]))
 
+    @flags_in_diagnostics
     def excitation_gradient(self, mol=None, mf=None):
         """(dOmega/dR, Omega, diagnostics) -- the excitation energy alone.
 
@@ -862,6 +884,7 @@ class DenseBSESurface(PotentialEnergySurface):
                            in enumerate(mol.atom_coords())],
                      unit='Bohr', basis=self.auxbasis, verbose=0)
 
+    @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)

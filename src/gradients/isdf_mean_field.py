@@ -66,13 +66,14 @@ from pyscf.scf.dispersion import parse_disp
 from pyscf.solvent import pcm as pyscf_pcm
 
 from src.Base.pyscf.dispersion import dispersion_gradient
+from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.environments.pcm_derivatives import solvation_gradient
 from src.Base.factorization.isdf_jk import ISDFJK, isdf_jk
 from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
                                           one_electron_energy_skeleton,
                                           xc_energy_grid_skeleton)
 from src.gradients.isdf_derivatives import (
-    auxmol_of, exchange_fit, isdf_exchange_skeleton, isdf_scf_handle,
+    exchange_fit, isdf_exchange_skeleton, isdf_scf_handle,
     mean_field_exchange_wanted, require_fitted_coulomb)
 from src.gradients.one_electron import one_electron_gradient
 

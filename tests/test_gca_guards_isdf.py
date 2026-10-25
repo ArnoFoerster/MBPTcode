@@ -110,7 +110,7 @@ def fitted_rhf(mol, max_cycle=200):
 def test_couplings_flag_a_loosely_converged_mean_field():
     """A coupling, like a force, warns about an SCF whose |F_ia| is left
     large, flags it in its diagnostics and the chain's `scf_flags`, and
-    carries on (refuse inputs, warn numerics)."""
+    carries on (a numerical shortfall warns and carries a named flag)."""
     mol = water()
     chain = ExcitedStateChain(mol, fitted_rhf, state=0,
                               numerics=g1_numerics(mol, Numerics(isdf={'auxbasis': AUXBASIS},

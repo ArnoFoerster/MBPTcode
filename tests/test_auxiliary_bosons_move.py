@@ -1,8 +1,9 @@
 """The auxiliary-boson route must be the same numbers as the quasi-boson closed form.
 
-`src.SingleReference.GW.auxiliary_bosons` is the production Casida solve of
-the dRPA bosons; the quasi-boson closed form (`gradients.quasi_boson_adjoint.
-RPAAdjoint`, a subclass of `SingleReference.GW.quasi_boson.RPA`) -- e^t and the
+`src.SingleReference.GW.auxiliary_bosons` solves the dRPA bosons with the
+Casida solver (`CasidaSolver`); the quasi-boson closed form
+(`src.gradients.gwbse.quasi_boson_adjoint.RPAAdjoint`, a subclass of
+`src.SingleReference.LinearResponse.quasi_boson_rpa.RPA`) -- e^t and the
 eigenvectors of Abar = [e^t (A+B) e^t + e^-t (A-B) e^-t]/2 -- is the
 reference. The two are the same object: with Abar = (P^1/2 e^t)^T (P^1/2 e^t),
 P = A+B,

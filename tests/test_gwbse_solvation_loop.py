@@ -532,8 +532,8 @@ def test_one_ranks_unconverged_scf_takes_rank_zeros_answer():
 
 
 def test_rank_zeros_unconverged_scf_is_flagged_on_every_rank():
-    """Rank 0's SCF stops short: a numerical event
-    (refuse inputs, warn numerics), flagged alike on every rank, the loop
+    """Rank 0's SCF stops short: a numerical event (it warns,
+    it does not refuse), flagged alike on every rank, the loop
     carrying on in step."""
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)

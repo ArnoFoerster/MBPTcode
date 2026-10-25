@@ -21,8 +21,8 @@ What each check is for
    precision: `raw3 -= N^(3) K` is exactly undone by `S^(3) -= N^(3) I` acting
    through the Loewdin y3. The orthonormalized block is normalization-
    invariant, so N^(3) is NOT a free parameter here. This matters because
-   N^(3) is directly validated elsewhere (exact norm series, 6.6e-11)
-   -- this check shows the CLASS-CLASS block does not even
+   N^(3) is directly validated elsewhere (exact norm series, 6.6e-11) --
+   this check shows the CLASS-CLASS block does not even
    depend on that value, only on N^(3) cancelling consistently between raw and
    S.
 4. **lambda^5 pole-order gate** (exact side tests/lambda_oracle.py:

@@ -31,12 +31,13 @@ of the spectrum.
 is kept as a private, tests-only oracle to validate this generated/iterative
 solver on small systems -- it is not part of the public API.
 """
-import warnings
 from itertools import permutations
 
 import numpy as np
+import scipy.linalg
 from pyscf import lib, scf
 
+from src.Base.numerical_flags import flag
 from . import amplitudes
 from . import solver as _lambda_solver
 from .integrals import build_spinorbital_integrals_from_mf, energy_denominators
@@ -94,50 +95,55 @@ def _antisymmetrize(sector, key, x):
     return x
 
 
-def _biorthogonalize_degenerate(omega, r_vectors, l_vectors, tol=1e-6):
-    """Rotate (independently Davidson-solved) right/left eigenvectors within
-    each near-degenerate omega cluster so that <L_m|R_n> = delta_mn.
+def _canonical_mask(sector, key, shape):
+    """True on the entries of an r/l block whose antisymmetric index groups
+    are strictly increasing: one representative per independent amplitude."""
+    idx = np.indices(shape)
+    mask = np.ones(shape, dtype=bool)
+    for _, axes in _ANTISYM_SPEC.get((sector, key), ()):
+        for a, b in zip(axes[:-1], axes[1:]):
+            mask &= idx[a] < idx[b]
+    return mask
 
-    Solving the right and left eigenproblems separately gives, within any
-    degenerate subspace, an ARBITRARY (and generally uncorrelated) choice of
-    basis on each side -- pairing states by sorted-omega order then silently
-    breaks (near-zero or wildly cross-mixed overlaps): confirmed the hard way
-    on He/def2-SVP (whose p-orbital excitations are exactly 3-fold
-    degenerate), which produced an exact NaN (division by a zero overlap) in
-    the naive per-state normalization.
 
-    Fix: within each cluster of size k, form the k x k overlap matrix
-    S[m,n] = <L_m|R_n> and SVD it, S = U @ diag(sigma) @ Vt. Rotating
-    L' = L @ U, R' = R @ Vt.T gives L'^T R' = U^T S V = diag(sigma) exactly
-    (U, V orthogonal) -- a mutually consistent biorthogonal pair per cluster,
-    which a plain per-state scalar renormalization can never produce since it
-    only ever rescales, never rotates, each vector individually."""
-    omega = np.asarray(omega)
-    order = np.argsort(omega)
+def _pair_left_right(omega_r, r_vectors, omega_l, l_vectors, dual,
+                     cluster_tol=1e-6, match_tol=1e-5, rank_tol=1e-8):
+    """Left vectors paired with the right ones, <L'_m|R_n> = delta_mn, or
+    None for a right vector that cannot be paired.
+
+    The right and left eigenproblems are solved separately, so within a
+    degenerate eigenvalue each side returns its own basis, and the right
+    solve may hold only part of a degenerate cluster. For each cluster of
+    right eigenvalues (within cluster_tol), every left vector whose eigenvalue
+    lies within match_tol is taken; with S = <L|R> (m x k), the combinations
+    L' = L pinv(S)^T satisfy <L'|R> = 1 whenever the left vectors span the
+    cluster's left eigenspace (S of rank k). `dual` maps a left vector to the
+    right-vector layout with the metric of <L|R>."""
+    omega_r = np.asarray(omega_r)
+    omega_l = np.asarray(omega_l)
+    order = np.argsort(omega_r)
     clusters, start = [], 0
     for i in range(1, len(order) + 1):
-        if i == len(order) or omega[order[i]] - omega[order[start]] > tol:
+        if i == len(order) or omega_r[order[i]] - omega_r[order[start]] > cluster_tol:
             clusters.append(order[start:i])
             start = i
 
-    r_new = [None] * len(omega)
-    l_new = [None] * len(omega)
+    l_new = [None] * len(omega_r)
     for idx in clusters:
-        R = np.stack([r_vectors[i] for i in idx], axis=1)   # (dim, k)
-        L = np.stack([l_vectors[i] for i in idx], axis=1)
-        S = L.T @ R
-        U, sigma, Vt = np.linalg.svd(S)
-        if np.min(np.abs(sigma)) < 1e-10:
-            raise RuntimeError(f"degenerate EE cluster at omega={omega[idx[0]]:.6f} "
-                               f"has a near-singular L/R overlap (sigma={sigma}) -- "
-                               f"left/right Davidson solves did not resolve a "
-                               f"consistent basis for this subspace")
-        Rp = R @ Vt.T / sigma[np.newaxis, :]
-        Lp = L @ U
+        centre = omega_r[idx].mean()
+        cand = np.flatnonzero(np.abs(omega_l - centre) < match_tol)
+        if len(cand) < len(idx):
+            continue
+        R = np.stack([r_vectors[i] for i in idx], axis=1)            # (dim, k)
+        L = np.stack([l_vectors[j] for j in cand], axis=1)           # (dim, m)
+        S = np.stack([dual(l_vectors[j]) for j in cand], axis=1).T @ R
+        sigma = np.linalg.svd(S, compute_uv=False)
+        if sigma[-1] < rank_tol * max(sigma[0], 1.0):
+            continue
+        Lp = L @ np.linalg.pinv(S).T
         for k, i in enumerate(idx):
-            r_new[i] = Rp[:, k]
             l_new[i] = Lp[:, k]
-    return r_new, l_new
+    return l_new
 
 
 def _shapes(sector, no, nv):
@@ -306,10 +312,69 @@ class EOMCC:
         diag = np.concatenate([dblocks[r].ravel() for r in self.ranks])
         return matvec, diag
 
+    def manifold_basis(self, sector, left=False):
+        """(size, dim) orthonormal basis of the sector's antisymmetric
+        amplitude space in the packed layout of gen_matvec: one column per
+        independent amplitude. dim is the number of EOM states."""
+        self._sector = sector
+        no, nv = self.nocc, self.nvir
+        side = 'l' if left else 'r'
+        shapes = _shapes(sector, no, nv)
+        positions, offset = [], 0
+        for r in self.ranks:
+            key = f'{side}{r}'
+            mask = _canonical_mask(sector, key, shapes[key])
+            positions.append(offset + np.flatnonzero(mask.ravel()))
+            offset += mask.size
+        positions = np.concatenate(positions)
+        basis = np.zeros((offset, len(positions)))
+        for col, pos in enumerate(positions):
+            v = np.zeros(offset)
+            v[pos] = 1.0
+            v = self._pack(self._unpack(v, side, no, nv), side, no, nv)
+            basis[:, col] = v / np.linalg.norm(v)
+        return basis
+
+    def manifold_dim(self, sector):
+        """The number of independent amplitudes of the sector: its EOM states."""
+        shapes = _shapes(sector, self.nocc, self.nvir)
+        return sum(int(_canonical_mask(sector, f'r{r}', shapes[f'r{r}']).sum())
+                   for r in self.ranks)
+
+    def left_dual(self, vec):
+        """An EE left vector in the right-vector layout, weighted so that
+        dual(l) @ r = <L|R> = l1.r1 + l2.r2/4 + l3.r3/36 (antisymmetric
+        amplitudes stored redundantly)."""
+        self._sector = 'ee'
+        no, nv = self.nocc, self.nvir
+        amps = self._unpack(vec, 'l', no, nv)
+        out = {'r1': amps['l1'].transpose(1, 0),
+               'r2': amps['l2'].transpose(2, 3, 0, 1) / 4.0,
+               'r3': amps['l3'].transpose(3, 4, 5, 0, 1, 2) / 36.0}
+        return self._pack(out, 'r', no, nv)
+
+    def _dense_eig(self, sector, left):
+        """Every eigenpair of the sector's Hbar, projected on its
+        antisymmetric amplitude space and diagonalized densely: (es, vectors,
+        conv) as the Davidson returns them."""
+        matvec, _ = self.gen_matvec(sector, left=left)
+        basis = self.manifold_basis(sector, left=left)
+        hbar = basis.T @ np.stack([matvec(b) for b in basis.T], axis=1)
+        es, x = scipy.linalg.eig(hbar)
+        # a degenerate eigenvalue may come out as a complex-conjugate pair
+        # (x, x*): its real subspace is spanned by Re x and Im x, while the
+        # real parts of the two would be one vector twice
+        vs = [basis @ (x[:, n].real if es[n].imag >= 0 else x[:, n].imag)
+              for n in range(len(es))]
+        return np.ones(len(es), dtype=bool), es, vs
+
     def kernel(self, sector='ee', nroots=4, left=False, guess=None,
               tol=1e-9, max_cycle=100, max_space=30, verbose=0):
         """Diagonalize sector's manifold-projected Hbar for the lowest
-        `nroots` real eigenvalues via non-Hermitian Davidson.
+        `nroots` real eigenvalues via non-Hermitian Davidson. When nroots
+        covers every state of the sector (manifold_dim), the projected Hbar is
+        built and diagonalized densely instead: all states, every degenerate
+        cluster complete.
 
         Hbar = e^{-T} H e^{T} still carries the Hamiltonian's absolute
         energy scale (e.g. sigma1's leading `f(j,j)*r1(i)` term) regardless
@@ -321,8 +386,9 @@ class EOMCC:
         matvec, diag = self.gen_matvec(sector, left=left)
         size = diag.size
         nroots = min(nroots, size)
+        dense = nroots >= self.manifold_dim(sector)
 
-        if guess is None:
+        if guess is None and not dense:
             # raw unit vectors at arbitrary flat positions are generally NOT
             # antisymmetric (e.g. a unit vector at r2(a,i,j) with i>j isn't
             # the antisymmetric combination r2(a,i,j)=-r2(a,j,i)) -- project
@@ -351,9 +417,12 @@ class EOMCC:
         def aop(xs):
             return [matvec(x) for x in xs]
 
-        conv, es, vs = lib.davidson_nosym1(aop, guess, precond, nroots=nroots,
-                                           tol=tol, max_cycle=max_cycle,
-                                           max_space=max_space, verbose=verbose)
+        if dense:
+            conv, es, vs = self._dense_eig(sector, left)
+        else:
+            conv, es, vs = lib.davidson_nosym1(aop, guess, precond, nroots=nroots,
+                                               tol=tol, max_cycle=max_cycle,
+                                               max_space=max_space, verbose=verbose)
         es = np.atleast_1d(np.asarray(es))
         if nroots == 1 and not isinstance(vs, list):
             vs = [vs]
@@ -363,9 +432,9 @@ class EOMCC:
         if max_imag > EOM_IMAG_TOL:
             # a numerical event: warned about, not refused; the
             # result says so (`EOMResult.complex_eigenvalues`)
-            warnings.warn(f'EOM-{sector} eigenvalues have |Im| up to '
-                          f'{max_imag:.2e}; their real parts are returned',
-                          ComplexEOMEigenvalues, stacklevel=2)
+            flag('eom_complex_eigenvalues',
+                 f'EOM-{sector} eigenvalues have |Im| up to {max_imag:.2e}; '
+                 f'their real parts are returned', ComplexEOMEigenvalues)
 
         order = np.argsort(es.real)
         omega = es.real[order] - self.e_cc
@@ -373,10 +442,10 @@ class EOMCC:
         conv = np.asarray(conv)[order]
         if not np.all(conv):
             # davidson_nosym1's tol is an eigenvalue change, not a residual norm
-            warnings.warn(f'EOM-{sector} Davidson left {int(np.sum(~conv.astype(bool)))} of '
-                          f'{len(conv)} roots unconverged (tol {tol:.1e}, max_cycle '
-                          f'{max_cycle}); EOMResult.conv says which',
-                          UnconvergedEOMRoots, stacklevel=2)
+            flag('eom_roots_not_converged',
+                 f'EOM-{sector} Davidson left {int(np.sum(~conv.astype(bool)))} of '
+                 f'{len(conv)} roots unconverged (tol {tol:.1e}, max_cycle '
+                 f'{max_cycle}); EOMResult.conv says which', UnconvergedEOMRoots)
         return EOMResult(self, sector, left, omega, vectors, conv,
                          max_imag=max_imag)
 
@@ -392,6 +461,12 @@ class UnconvergedEOMRoots(RuntimeWarning):
     returned and flagged (`EOMResult.conv` per root, `EOMResult.converged`)."""
 
 
+class UnpairedEOMStates(RuntimeWarning):
+    """EOM-EE states whose left eigenvector was not found, so they cannot be
+    paired with their right one: their transition densities are zero and
+    they are listed in `EOMResult.unpaired_states`."""
+
+
 #: |Im omega| above which an EOM eigenvalue is reported as complex.
 EOM_IMAG_TOL = 1e-6
 
@@ -401,7 +476,8 @@ class EOMResult:
     eigenvalues the solver returned and `complex_eigenvalues` whether it
     exceeds EOM_IMAG_TOL: the omega kept are the real parts. `conv` is the
     Davidson's per-root convergence flag and `converged` whether all roots
-    converged."""
+    converged. `unpaired_states` (set by transition_densities) lists the
+    states no left vector could be paired with."""
 
     def __init__(self, eomcc, sector, left, omega, vectors, conv,
                  max_imag=0.0):
@@ -414,6 +490,7 @@ class EOMResult:
         self.converged = bool(np.all(conv))
         self.max_imag = float(max_imag)
         self.complex_eigenvalues = self.max_imag > EOM_IMAG_TOL
+        self.unpaired_states = None
 
     def amplitudes(self, n):
         """Unpack the n-th eigenvector into its r{1,2,3} (or l{1,2,3})
@@ -430,13 +507,15 @@ class EOMResult:
         precision against the determinant_space oracle (full CCSDT, see
         tests/test_eom_ccsdt.py).
 
-        Requires the matching LEFT eigenvectors for the SAME states; if
-        `left_result` isn't supplied, solves for it (same nroots). Right/left
-        vectors are biorthogonalized per near-degenerate omega cluster (see
-        `_biorthogonalize_degenerate`) before use -- required whenever the
-        excitation spectrum has genuine degeneracies (e.g. spin multiplets),
-        since the independent left/right Davidson solves otherwise return
-        uncorrelated bases within each degenerate subspace.
+        Needs the LEFT eigenvectors of the same states; without
+        `left_result` it solves for them, with a few more roots than this
+        result holds (a degenerate cluster needs room past its size), and
+        once more with twice as many if a state is left unpaired. Left
+        vectors are paired with the right ones per eigenvalue cluster, so that
+        <L_m|R_n> = delta_mn (`_pair_left_right`): within a degenerate
+        cluster the two solves return unrelated bases. A state that cannot be
+        paired (its left eigenspace not found) warns (`UnpairedEOMStates`),
+        is listed in `unpaired_states` and gets zero transition densities.
 
         Returns (rho, rho_star), each shape (nstates, norb, norb).
         """
@@ -455,26 +534,33 @@ class EOMResult:
         kd = np.eye(norb)
 
         nstates = len(self.omega)
-        if left_result is None:
-            # Request a few extra roots beyond nstates: non-Hermitian Davidson
-            # needs "elbow room" past the exact size of a degenerate cluster
-            # to reliably resolve every member of it -- confirmed directly on
-            # He/def2-SVP's 3-fold-degenerate p-shell excitation, where
-            # nroots=3 silently returned only 2 of the 3 degenerate left
-            # eigenvectors (plus an unrelated extra root at a different
-            # eigenvalue) while nroots=6 resolved the full triplet cleanly.
-            left_result = eomcc.kernel('ee', nroots=nstates + 4, left=True)
-        if len(left_result.omega) < nstates or np.max(np.abs(
-                left_result.omega[:nstates] - self.omega[:nstates])) > 1e-5:
-            raise RuntimeError("left/right EE eigenvalues do not match -- "
-                               "cannot pair L_n/R_n states for transition densities")
-
-        r_vecs, l_vecs = _biorthogonalize_degenerate(
-            self.omega, self.vectors[:nstates], left_result.vectors[:nstates])
+        if left_result is not None:
+            l_vecs = _pair_left_right(self.omega, self.vectors, left_result.omega,
+                                      left_result.vectors, eomcc.left_dual)
+        else:
+            for nleft in (nstates + 4, 2 * nstates + 8):
+                left_result = eomcc.kernel('ee', nroots=nleft, left=True)
+                l_vecs = _pair_left_right(self.omega, self.vectors, left_result.omega,
+                                          left_result.vectors, eomcc.left_dual)
+                if all(lv is not None for lv in l_vecs):
+                    break
+        self.unpaired_states = [n for n in range(nstates) if l_vecs[n] is None]
+        if self.unpaired_states:
+            flag('eom_states_unpaired',
+                 f'EOM-EE: no left eigenvector pairs with the right one of '
+                 f'{len(self.unpaired_states)} of {nstates} states (omega '
+                 f'{np.round(self.omega[self.unpaired_states], 6).tolist()}); '
+                 f'their transition densities are zero, '
+                 f'EOMResult.unpaired_states lists them', UnpairedEOMStates)
+        r_vecs = self.vectors
+        # the ground-state CCSDT density <(1+Lambda)|e^-T p^dag q e^T|0>
+        gamma = _lambda_solver.ccsdt_one_rdm(t1, t2, t3, lam1, lam2, lam3, o, v)
 
         rho = np.zeros((nstates, norb, norb))
         rho_star = np.zeros((nstates, norb, norb))
         for n in range(nstates):
+            if l_vecs[n] is None:
+                continue
             self.eomcc._sector = 'ee'
             r_amps = eomcc._unpack(r_vecs[n], 'r', no, nv)
             l_amps = eomcc._unpack(l_vecs[n], 'l', no, nv)
@@ -485,6 +571,13 @@ class EOMResult:
             rho[n, v, v] = ee_density.rho_vv(lam1, lam2, lam3, r1n, r2n, r3n, t1, t2, t3, kd, o, v)
             rho[n, o, v] = ee_density.rho_ov(lam1, lam2, lam3, r1n, r2n, r3n, t1, t2, t3, kd, o, v)
             rho[n, v, o] = ee_density.rho_vo(lam1, lam2, lam3, r1n, r2n, r3n, t1, t2, t3, kd, o, v)
+            # R_n's reference component, r0 = -<Lambda|R_n> (R_n is orthogonal
+            # to the ground-state bra <(1+Lambda)|), nonzero for totally
+            # symmetric states only: rho_n gains r0 times the ground-state density
+            r0 = -(np.einsum('ia,ai->', lam1, r1n)
+                   + np.einsum('ijab,abij->', lam2, r2n) / 4.0
+                   + np.einsum('ijkabc,abcijk->', lam3, r3n) / 36.0)
+            rho[n] += r0 * gamma
 
             rho_star[n, o, o] = ee_density.rho_star_oo(l1n, l2n, l3n, t1, t2, t3, kd, o, v)
             rho_star[n, v, v] = ee_density.rho_star_vv(l1n, l2n, l3n, t1, t2, t3, kd, o, v)

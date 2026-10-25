@@ -6,7 +6,7 @@ screens with the BARE interaction, so a vertex-corrected Sigma_c in a
 continuum is its gas-phase self. The shift is added to the root after the
 G0W0 solve, whole (`qp_solve.add_reaction_field`), so on one mean field the
 continuum moves every method's level by exactly Eq. (18). Inside the
-equation it would move it by Z times Eq. (18) only, the spurious blue shift
+equation it would move it by Z times Eq. (18) only, a spurious blue shift,
 which this test fails on.
 
   1. Restricted water: GW, GW Gamma_inf and PSD1, HOMO and LUMO, levels
@@ -38,9 +38,9 @@ METHODS = ['GW', 'GWGammaInf', 'PSD1']
 #: moved - Eq. (18), eV: round-off; Z x Eq. (18) misses by 50-100 meV here
 WHOLE_SHIFT_TOL_EV = 1e-8
 #: (gas, water) levels in eV, HOMO then LUMO, water/6-31G RHF; the solvent
-#: shift is Eq. (18) itself, the same for the three methods (the water
-#: levels were 50-70 meV lower on the HOMO with the shift inside the
-#: equation, Z x Eq. (18); re-recorded 2026-10-20)
+#: shift is Eq. (18) itself, the same for the three methods (with the shift
+#: inside the equation, Z x Eq. (18), the water levels would be 50-70 meV
+#: lower on the HOMO)
 PINNED = {'GW': ([-12.053613, 5.355737], [-10.378436, 3.747798]),
           'GWGammaInf': ([-12.306862, 5.362849], [-10.631685, 3.754910]),
           'PSD1': ([-12.369361, 5.314714], [-10.694184, 3.706775])}

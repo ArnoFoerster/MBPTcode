@@ -280,7 +280,7 @@ def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
                                                                     monkeypatch):
     """The workstation case: nothing is limited, so nothing re-associates.
 
-    A route audit compares `xc_correction_eV` with `==` against a frozen
+    A reference record compares `xc_correction_eV` with `==` against a frozen
     record, and a two-thread build dropped to one moves it at 1e-16. Below the
     threshold the wrapped call is the unwrapped one.
 

@@ -1,5 +1,4 @@
-"""Increment 4 (arbiter C^(2)) gate of the spin-free ADC(2)-(5) plan
-the restricted
+"""Gate of the spin-free generated C^(2) block: the restricted
 (spin-blocked, RHF) BuildSuperMatrixADCnRestricted.c2_block_generated
 assembles the disputed order-2 class-class C^(2) block (the ADC(4) arbiter
 that beat the printed SCW83 B7 by 4 orders in the lambda-oracle) purely from

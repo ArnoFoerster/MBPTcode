@@ -62,7 +62,6 @@ import warnings
 import numpy as np
 from pyscf import gto
 from pyscf.lib import logger, param
-from scipy.sparse.linalg import ArpackNoConvergence
 
 from src.Base.numerics.constants import (
     BYTES_PER_GB, BSE_DENSE_MAX_NOV, DAVIDSON_FLOOR_EPS_MULTIPLE,
@@ -357,7 +356,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
 def probe_after_solve(apply_AB, diag_d, omega, X, Y, probe, stats=None,
                       comm=None):
     """min eig(A - B) on the block action a Davidson just ran on, after it:
-    the converged Lanczos from 1/d for probe=True, or for 'sign' the sign
+    the converged Davidson from 1/d for probe=True, or for 'sign' the sign
     alone, proven from the span of the roots' X - Y first
     (`_lowest_amb_local`). Nothing here reaches the roots. A value <= 0
     refuses them (`UnstableReference`): the reference is unstable and the
@@ -1245,14 +1244,14 @@ def _casida_breakdown(apply_AB, diag_d, conv_tol, comm=None):
     definite, telling a stable reference's numerical breakdown from an
     unstable reference (`UnstableReference`, min eig(A-B) <= 0 measured) by
     the (A-B) probe, run cold over `comm`. Only the probe's own failures --
-    ARPACK or the distributed Lanczos out of iterations, or ranks whose
+    its Davidson out of iterations (`AmbProbeNotConverged`), or ranks whose
     iterations fell apart meeting at the lockstep (ValueError) -- become the
     "did not converge" breakdown; any other exception is a defect and raises
     as itself rather than being reported as an instability."""
     try:
         amb = float(lowest_amb_from_action(apply_AB, diag_d, comm=comm)[0])
         detail = f'measured min eig(A-B) = {amb:.6f} Ha'
-    except (ArpackNoConvergence, AmbProbeNotConverged, ValueError):
+    except (AmbProbeNotConverged, ValueError):
         amb = None
         detail = ('min eig(A-B) probe did not converge; smallest '
                   f'orbital-energy difference {diag_d.min():.4f} Ha')

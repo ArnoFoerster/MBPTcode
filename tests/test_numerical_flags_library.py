@@ -1,5 +1,5 @@
-"""Warn-and-continue sites name their event where the result is kept
-(refuse inputs, warn numerics).
+"""Warn-and-continue sites name their event where the result is kept (a bad
+input is refused; a numerical shortfall warns and carries a named flag).
 
 Each site keeps warning and carries on; the event is also handed to the
 object the caller records:
@@ -7,8 +7,7 @@ object the caller records:
 - the BSE Davidson's unit-vector guess cut inside a degenerate cluster:
   `counters['guess_truncated']` -> timings 'davidson_guess_truncated';
 - `sigma_sop` outside the compression condition: `out['compression_excluded']`;
-- complex EOM-CC eigenvalues: a `ComplexEOMEigenvalues` warning (no longer a
-  print) and `EOMResult.complex_eigenvalues` / `max_imag`;
+- complex EOM-CC eigenvalues: a `ComplexEOMEigenvalues` warning and `EOMResult.complex_eigenvalues` / `max_imag`;
 - unconverged EOM-CC Davidson roots: `UnconvergedEOMRoots` and
   `EOMResult.conv` / `converged`;
 - a CC amplitude or Lambda solve out of iterations: `CCNotConverged` and
@@ -18,8 +17,11 @@ object the caller records:
   diagnostics, kept on the mean field as `reference_diagnostics`;
 - an ill-conditioned Matsubara IR fit: `IRBasis.last_fit`;
 - the fragment pole guard deciding on an unconverged Davidson:
-  `guard_flags['q_lowest_unconverged']`;
-- a followed quasiparticle root's branch: `bracketed_root(out=...)`.
+  `guard_flags['q_lowest_unconverged']`, which a diabat gradient's
+  diagnostics carry in 'flags' and which a `collecting` block receives;
+- a followed quasiparticle root's branch: `bracketed_root(out=...)`;
+- the CC and EOM-CC events of G0W@CC (complex eigenvalues, unpaired states):
+  named flags in `calc_qp_energy(polarizability='CCSDT', out=...)`.
 
 Stand-ins and tiny molecules (H2, H atom); each runs in well under a second.
 """
@@ -32,8 +34,10 @@ from src.Base.utils.grids import matsubara
 from src.Base.utils.grids.matsubara import IRBasis
 from src.Base.numerics.constants import ROOT_FOLLOW_MARGIN_MIN
 from src.gradients import state_identity
-from src.gradients.gwbse import fragment_bse
+from src.Base.numerical_flags import collecting
+from src.gradients.gwbse import fragment_bse, fragment_diabatic
 from src.SingleReference.CC import eom
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.sum_over_poles import sigma_sop
 from src.SingleReference.LinearResponse.davidson import _davidson_counters
 from src.SingleReference.LinearResponse.davidson_shared import guess_indices
@@ -177,9 +181,39 @@ def test_the_pole_guard_flags_an_unconverged_decision(monkeypatch):
     assert flags['q_lowest_unconverged']['residual'] == 1e-4
 
 
+def test_the_partition_flags_reach_a_diabat_gradient(monkeypatch):
+    """A partition solve that stopped short (here the pole guard) names its
+    flag in the diagnostics of every element gradient taken through it, and
+    in the `collecting` block it was raised in; they reached neither."""
+    monkeypatch.setattr(fragment_bse, '_guard_lowest',
+                        lambda *a, **k: (0.5, None, 1e-4, False))
+    raised, guard = [], {}
+    with collecting(raised), pytest.warns(RuntimeWarning, match='pole guard'):
+        fragment_bse.FragmentPartition._q_lowest(
+            None, lambda x, om: x, None, np.ones(3), np.zeros((3, 1)),
+            np.ones(3), 3, True, 0.1, 0.01, 1e-8, dense_max=0, flags=guard)
+    assert [e['flag'] for e in raised] == ['q_lowest_unconverged']
+
+    g = object.__new__(fragment_diabatic.DiabaticGradient)
+    g.partition = fragment_bse.FragmentPartition(
+        operator=None, orbitals=None, omega0=0.1, labels=['site 0.0'],
+        p_local=None, y_local=None, a_pp=np.eye(1), sigma=np.zeros((1, 1)),
+        dsigma=np.zeros((1, 1)), q_lowest=0.5, guard_flags=guard)
+    g.flags = {'diabat_response_not_converged': {'tol': 1e-8}}
+    g.timings, g.progress, g.dressed = {}, None, True
+    zero = np.zeros((2, 3))
+    g._pairs = lambda w: None
+    g._chain_term = lambda pairs: zero
+    g._rotation_terms = lambda pairs: (zero, zero)
+    grad, diags = g.element(0, 0)
+    assert set(diags['flags']) == {'q_lowest_unconverged',
+                                   'diabat_response_not_converged'}
+    assert diags['flags']['q_lowest_unconverged']['residual'] == 1e-4
+
+
 def test_a_short_resolvent_solve_keeps_its_iterate_and_is_flagged():
     """A batched conjugate-gradient solve stopped by its iteration cap
-    returns its last iterate, warns and flags; it raised."""
+    returns its last iterate, warns and flags."""
     a = np.diag([1.0, 2.0, 3.0]) + 0.1
     flags = {}
     with pytest.warns(RuntimeWarning, match='resolvent solve did not'):
@@ -207,6 +241,29 @@ def test_a_followed_root_hands_its_branch_to_the_caller():
     out = {}
     w, z = bracketed_root(np.array([0.1, 0.1]), np.array([-1.0, 1.0]), 0.0,
                           0.0, out=out)
-    assert set(out) == {'labels', 'largest', 'followed', 'flipped', 'no_root'}
-    assert out['no_root'] is False
+    assert set(out) == {'labels', 'largest', 'followed', 'flipped', 'no_root',
+                        'z_outside'}
+    assert out['no_root'] is False and out['z_outside'] is False
     assert out['flipped'] is False and 0.0 < z <= 1.0
+
+
+def test_cc_and_eom_events_reach_the_g0w_at_cc_record(monkeypatch):
+    """Planted on H2/STO-3G: every EOM eigenvalue counts as complex and one
+    EE state loses its left partner. Both warn as before and are named in
+    the quasiparticle record; neither reached it."""
+    pair = eom._pair_left_right
+
+    def drop_last(*args, **kw):
+        out = list(pair(*args, **kw))
+        out[-1] = None
+        return out
+    monkeypatch.setattr(eom, 'EOM_IMAG_TOL', -1.0)
+    monkeypatch.setattr(eom, '_pair_left_right', drop_last)
+    mf = scf.RHF(h2()).run()
+    out = {}
+    with pytest.warns(eom.UnpairedEOMStates), \
+            pytest.warns(eom.ComplexEOMEigenvalues):
+        calc_qp_energy(mf, selfenergy='GW', polarizability='CCSDT',
+                       state='homo', nroots=4, out=out)
+    raised = {e['flag'] for e in out['numerical_flags']}
+    assert {'eom_complex_eigenvalues', 'eom_states_unpaired'} <= raised

@@ -109,19 +109,6 @@ class ActiveSpace:
                    np.arange(nocc, nocc + n_virt_active))
 
     @classmethod
-    def from_window(cls, eps, nocc, window):
-        """Every orbital inside [E_F - window/2, E_F + window/2], E_F the midpoint of the gap."""
-        norb = len(eps)
-        occ_full, virt_full = np.arange(nocc), np.arange(nocc, norb)
-        e_fermi = 0.5 * (eps[nocc - 1] + eps[nocc])
-        lo, hi = e_fermi - 0.5 * window, e_fermi + 0.5 * window
-        occ_active = occ_full[eps[occ_full] >= lo]
-        virt_active = virt_full[eps[virt_full] <= hi]
-        if len(occ_active) == 0 or len(virt_active) == 0:
-            raise ValueError(f"window={window} selects an empty occ or virt active set.")
-        return cls(norb, nocc, occ_active, virt_active)
-
-    @classmethod
     def from_indices(cls, norb, nocc, occ_active, virt_active):
         """The window spelt out: index arrays into the canonical orbital list."""
         return cls(norb, nocc, occ_active, virt_active)

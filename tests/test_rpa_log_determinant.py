@@ -6,8 +6,9 @@ which a negative semidefinite chi0 guarantees at every imaginary frequency.
 to drop the sign, so a chi0 with one eigenvalue above 1 at one frequency gave
 a finite number for the energy of another functional, silently. Now one helper
 (`space_time.dielectric_log_determinant`, which the periodic route uses too) warns
-with `NonPositiveDielectric`, naming the frequency, and records it under the
-'nonpositive_det' flag.
+with `NonPositiveDielectric`, naming the frequency, and raises the named flag
+'nonpositive_det'; both molecular routes hand the frequencies to the caller's
+`flags` dict, as the periodic one does.
 
 Both checks plant chi0 in place of the screening build: negative definite on
 every frequency but one, which carries a single eigenvalue at 1.5, so the
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from src.Base.numerical_flags import collecting
 from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse import rpa_energy, space_time
 
@@ -42,9 +44,14 @@ def test_imaginary_axis_route_warns_at_the_planted_frequency(monkeypatch):
     monkeypatch.setattr(rpa_energy, 'solve_polarizability_imaginary_axis',
                         lambda lr, nocc, freq: planted_chi0(len(freq)))
     lr = SimpleNamespace(eps=np.array([-1.0, -0.5, 0.3, 1.0]))
-    with pytest.warns(space_time.NonPositiveDielectric, match=f'not positive at {BAD} '):
+    flags, raised = {}, []
+    with collecting(raised), pytest.warns(space_time.NonPositiveDielectric,
+                                          match=f'not positive at {BAD} '):
         rpa_energy.rpa_correlation_energy_imaginary_axis(
-            lr, 2, numerics=Numerics(quadrature={'nfreq_rpa': NFREQ}))
+            lr, 2, numerics=Numerics(quadrature={'nfreq_rpa': NFREQ}),
+            flags=flags)
+    assert flags == {'nonpositive_det': [BAD]}
+    assert [e['flag'] for e in raised] == ['nonpositive_det']
 
 
 def test_space_time_route_warns_at_the_planted_frequency(monkeypatch):
@@ -56,9 +63,14 @@ def test_space_time_route_warns_at_the_planted_frequency(monkeypatch):
     grid = SimpleNamespace(ntau=2, nfreq=NFREQ, tau_points=np.ones(2),
                            cosft_wt=np.zeros((NFREQ, 2)),
                            omega_weights=np.ones(NFREQ))
-    with pytest.warns(space_time.NonPositiveDielectric, match=f'not positive at {BAD} '):
+    flags, raised = {}, []
+    with collecting(raised), pytest.warns(space_time.NonPositiveDielectric,
+                                          match=f'not positive at {BAD} '):
         space_time.rpa_correlation_energy_space_time(
-            None, np.zeros((1, NAUX)), np.array([-1.0, 1.0]), 1, grid)
+            None, np.zeros((1, NAUX)), np.array([-1.0, 1.0]), 1, grid,
+            flags=flags)
+    assert flags == {'nonpositive_det': [BAD]}
+    assert [e['flag'] for e in raised] == ['nonpositive_det']
 
 
 def test_a_positive_determinant_is_the_plain_log_determinant():

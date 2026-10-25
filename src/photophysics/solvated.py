@@ -117,7 +117,7 @@ from src.gradients.gwbse.state_model import GWBSEState
 from src.properties.excitations import (relaxation_fields,
                                         relaxation_flags, saddle_check,
                                         saddle_verdict)
-from src.properties.optimize import relax
+from src.properties.optimize import derived_walk, relax
 from src.gradients.solvated_surface import SolvatedSurface
 
 #: The ADC(2) options' values when not given (GW-BSE takes none of them).
@@ -355,8 +355,9 @@ def _minimum(args, surf, start, nudge, kind):
     asked = None if (args.method == 'adc2' or kind == 'S0') else refreeze
 
     def walk(s, at, nudge=0):
-        return relax(s, at, maxiter=args.maxiter, nudge=nudge,
-                     refreeze=refreeze)
+        return relax(s, at, nudge=nudge, refreeze=refreeze,
+                     numerics=derived_walk(s, 'the command line caps the walk',
+                                           max_cycle=args.maxiter))
     m, info = walk(surf, start, nudge)
     final = info.get('final_surface', surf)
     out = _walk_record(info, asked)

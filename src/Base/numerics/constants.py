@@ -269,8 +269,6 @@ CPHF_KRYLOV_LINDEP = 1e-20
 CORRELATION_CPHF_TOL = 1e-10
 
 # QP root-finding (src/Solvers/qp_equation.py).
-QP_NEWTON_TOL = 1e-6
-QP_NEWTON_MAX_ITER = 50
 QP_GRAPHICAL_TOL = 1e-8
 QP_GRAPHICAL_N_OMEGA = 150
 QP_GRAPHICAL_MAX_BISECTION = 100
@@ -462,13 +460,17 @@ PCM_CROSS_TERM_STEP = 1e-2
 # orbital energy and the root search needs no distance from them.
 RESIDUE_ON_CONTOUR_TOL = 1e-10
 QP_POLE_OFFSET = 1e-3
-# Margin (Hartree) past the residue frequencies of the Newton start that the
+# Margin (Hartree) past the residue frequencies of the root search's start that the
 # tau grid must carry for the Laplace residue backend to be chosen: the root
 # moves by the quasiparticle correction, a few tenths of an eV to 2 eV.
 RESIDUE_FREQ_MARGIN = 0.1
 # Gauss-Legendre points on the imaginary-frequency integral of the dRPA
 # correlation energy in the space-time route; converged to 1e-8 Ha at 40.
 RPA_ENERGY_NFREQ = 40
+# Minimax points on the same integral where the grid is minimax
+# (`rpa_energy.rpa_correlation_energy_imaginary_axis`): the GreenX tables
+# stop at 34, and 20 minimax points already match the Casida trace to 1e-6 Ha.
+RPA_ENERGY_NFREQ_MINIMAX = 20
 # Gauss-Legendre points on the imaginary-frequency half of a contour
 # deformation, for a quasiparticle set with a state on the quadrature routes.
 # The grid is never resized: the Lorentzian a pole of G puts at nu = 0 is
@@ -551,17 +553,17 @@ SOP_FIT_STRIDE = 8
 QP_WINDOW_Z_MIN = 0.5
 
 # Root tolerance (Ha) of `GW.quasi_boson.QPqb.quasiparticle_root`, the dense
-# route's largest-weight root of w = eps_p + Sigma_pp(w): the Newton step it
-# stops at, and the budget of couplings it may drop before bracketing. By
+# route's largest-weight root of w = eps_p + Sigma_pp(w): the bracket width it
+# is refined to, and the budget of couplings it may drop before bracketing. By
 # Weyl's inequality, removing couplings of total norm sqrt(sum W^2) from the
 # arrowhead supermatrix moves every root by at most that norm, so dropping the
 # weakest poles while the norm stays below this moves the answer by no more
 # than the solve itself resolves. What goes is the symmetry-forbidden poles,
 # |W| ~ 1e-17, whose roots sit closer to their pole than w can resolve. The
-# same 1e-12 as `QPqb.solve_diag`'s Newton, so both rules converge alike.
+# same 1e-12 as `QPqb.solve_diag`'s followed root, so both rules converge alike.
 QB_QP_ROOT_TOL = 1e-12
 
-# Bytes of one (intervals x poles) block of `quasi_boson.end_value_bounds`,
+# Bytes of one (intervals x poles) block of `Solvers.qp_equation.end_value_bounds`,
 # the pruning pass of the largest-weight root search: an orbital can hold
 # hundreds of thousands of poles, so a block is a few rows of them.
 QB_QP_END_BLOCK_BYTES = 64 << 20
@@ -602,7 +604,7 @@ DERIV_BLOCK_BYTES = 2 << 30
 XC_SHIFT_GRADIENT_TOL = 1e-10
 
 # Ha/Bohr. Two evaluations of one ISDF gradient agree to this and no better:
-# a Newton root re-solved from a frozen seed lands one ulp (1e-16 Ha) from the
+# a quasiparticle root re-solved from a frozen seed lands one ulp (1e-16 Ha) from the
 # unseeded root, and the interpolative fit's conditioning turns that into
 # 4e-9 Ha/Bohr on water. A gate that asks for bitwise equality of two such
 # gradients is asking for a property the arithmetic does not have.
@@ -1221,19 +1223,11 @@ AGREEMENT_DIGEST_SEED = 1
 # blocks, which runs far faster than blake2b over the same bytes).
 AGREEMENT_DIGEST_BLOCK = 4096
 
-# The (A - B) probe replicated over ranks (`LinearResponse.davidson`) runs its
-# own Lanczos where serially it runs ARPACK: eigsh holds one process-wide lock
-# across its whole iteration, matvecs included, so rank threads cannot all be
-# inside it at once. Sized by eigsh's own defaults: a basis of
-# max(2k + 1, AMB_LANCZOS_NCV) vectors between thick restarts, and at most
-# AMB_LANCZOS_MAXITER_PER_DIM operator applications per pair.
-AMB_LANCZOS_NCV = 20
-AMB_LANCZOS_MAXITER_PER_DIM = 10
 # Weight of the normalized cold start 1/d added to the lowest converged Casida
-# root's normalized X - Y when the (A - B) Lanczos starts after the Davidson
-# (`LinearResponse.davidson`). (A - B) is block diagonal over the pair irreps
-# and the root lies in one of them, so the root alone would confine the
-# Krylov space there; 1/d has weight in every irrep. At 0.1 a tenth of the
+# root's normalized X - Y when the (A - B) probe's Davidson starts after the
+# Casida Davidson (`LinearResponse.probe`). (A - B) is block diagonal over the
+# pair irreps and the root lies in one of them, so the root alone would confine
+# the subspace there; 1/d has weight in every irrep. At 0.1 a tenth of the
 # start reaches the other irreps while the root still carries most of it, so
 # the warm start reaches the sign certificate in fewer block actions than 1/d
 # alone.
@@ -1531,7 +1525,8 @@ WALK_TRUST_MIN_BOHR = 2e-3
 
 # The walk's step cap and its trust radius (Bohr, the norm of the 3N-vector
 # step). The first step is taken on a guessed Hessian, and a longer one can
-# carry a quasiparticle root past where the frozen Newton seed finds it.
+# carry a quasiparticle root far enough that the root followed from the last
+# geometry is no longer the one of largest weight.
 WALK_MAX_CYCLE = 50
 WALK_TRUST_BOHR = 0.1
 WALK_TRUST_MAX_BOHR = 0.5
@@ -1706,9 +1701,9 @@ PIN_CROSS_BLAS_ROOT_BAR = 2e-10
 # Two computations of one number on the recording machine (two solves, two
 # routes, a run and an archived tree's run) are not bitwise: a BLAS reduction
 # taken in another order reproduces only to an ulp (1.1e-16 Ha, one ulp of a
-# 0.689 Ha operand, measured in one cluster run in five). They are held
-# to this many ulp of the larger of their magnitude and one unit (tests/pins
-# .same_bar): the unit floor because a
+# 0.689 Ha operand, measured in one run in five on a cluster node). They are held
+# to this many ulp of the larger of their magnitude and one unit (`same_bar`
+# of tests/pins.py): the unit floor because a
 # difference of O(1) operands keeps their ulps, not its own. 8 ulp: a few
 # roundings of a reduction, far below every class bar (2e-12 Ha at its least).
 PIN_SAME_ULPS = 8
@@ -1907,7 +1902,7 @@ RATE_LAMBDA_REMAINDER_MIN_MEV = 2.0 * REFREEZE_TOL_MEV
 RATE_MLJ_N_MAX = 400
 
 # Default eigenvalue tolerance (Hartree) of an excitation-energy ADC solve
-# (`eeADC.ee_driver.solve_ee_adc` and the ADC(2) state model)
+# (`eeADC.solve.solve_ee_adc` and the ADC(2) state model)
 EE_ADC_CONV_TOL = 1e-8
 
 # GB of MP1 amplitudes (one spin channel, this rank's occupied tiles) that the
@@ -2121,7 +2116,7 @@ DF_FORCE_BLOCK_ARRAYS = 5
 
 # pdaggerq prints term coefficients rounded to seven decimals (1/576 -> 0.0017361);
 # the exact rational is recovered within half a unit of the last printed digit
-# (src/Base/pdaggerq_interface.exact_coefficient).
+# (src/CodeGeneration/pdaggerq_interface.exact_coefficient).
 PDAGGERQ_COEFFICIENT_PRINT_TOLERANCE = 5.5e-8
 
 # Seed of the random directions solve_symmetric's lowest-k completion adds to

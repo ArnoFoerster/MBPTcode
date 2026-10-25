@@ -11,10 +11,9 @@ become exactly degenerate) keeps the undamped update for that step. Running out
 of iterations is a numerical shortfall, not a bad input: the loop warns
 (`CCNotConverged`) and returns the last iterate with `converged=False`.
 """
-import warnings
-
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from .diis import DIIS
 
 
@@ -67,8 +66,9 @@ def iterate(step, blocks, is_converged, max_iter, diis_size=0, diis_start_cycle=
         if is_converged(it, blocks, info):
             return blocks, True, it + 1
 
-    warnings.warn(f'{what} did not converge in {max_iter} iterations; the last '
-                  f'iterate is returned (converged=False)', CCNotConverged, stacklevel=3)
+    flag('cc_not_converged', f'{what} did not converge in {max_iter} iterations; '
+         f'the last iterate is returned (converged=False)', CCNotConverged,
+         stacklevel=3)
     return blocks, False, max_iter
 
 

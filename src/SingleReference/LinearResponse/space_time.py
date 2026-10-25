@@ -77,11 +77,10 @@ supplying X_o and X_v.
 from dataclasses import dataclass
 from typing import NamedTuple
 
-import warnings
-
 import numpy as np
 
 from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB
+from src.Base.numerical_flags import flag
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
                                               contiguous_block, current_comm,
@@ -1080,17 +1079,19 @@ def dielectric_log_determinant(one_minus_c, where, flags=None):
     so 1 - chi0 >= 1 and the logarithm exists. A determinant that is not
     positive is a numerical outcome (a broken chi0, or a convention error),
     not an input to refuse: log|det| is returned with a
-    `NonPositiveDielectric` warning, and `where` is appended to
+    `NonPositiveDielectric` warning and the named flag 'nonpositive_det'
+    (`numerical_flags.flag`), and `where` is appended to
     flags['nonpositive_det'] when a dict is passed. Either way the energy
     built on it is not the dRPA correlation energy.
     """
     sign, logdet = np.linalg.slogdet(one_minus_c)
     if not sign.real > 0:
-        warnings.warn(f'det(1 - chi0) is not positive at {where} (sign {sign}): '
-                      f'the RPA dielectric has been driven singular, which on a '
-                      f'gapped system means a convention error rather than '
-                      f'physics; log|det| is used.',
-                      NonPositiveDielectric, stacklevel=3)
+        flag('nonpositive_det',
+             f'det(1 - chi0) is not positive at {where} (sign {sign}): '
+             f'the RPA dielectric has been driven singular, which on a '
+             f'gapped system means a convention error rather than '
+             f'physics; log|det| is used.',
+             NonPositiveDielectric, stacklevel=3)
         if flags is not None:
             flags.setdefault('nonpositive_det', []).append(where)
     return logdet
@@ -1099,7 +1100,7 @@ def dielectric_log_determinant(one_minus_c, where, flags=None):
 def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
                                       tile_gb=ISDF_TILE_GB, screening=None,
                                       counter_term=None, comm=None,
-                                      want_tape=False):
+                                      want_tape=False, flags=None):
     """dRPA correlation energy E_c = (1/2pi) int dw Tr{log(1 - chi0) + chi0}.
 
     The quadrature of `rpa_energy.rpa_correlation_energy_imaginary_axis`, with
@@ -1133,6 +1134,9 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     (`mpi_grid.agreement`).
 
     want_tape: also return the `RPAEnergyTape` a reverse pass reads.
+    flags: a dict, or None: receives under 'nonpositive_det' the frequencies,
+    on every rank, whose det(1 - chi0) was not positive
+    (`dielectric_log_determinant`).
     """
     n_mat, g = (None, None) if screening is None else screening
     comm = current_comm() if comm is None else comm
@@ -1148,7 +1152,7 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
                                               tile_memory_gb=tile_gb)
     if nranks > 1:
         reduce_sum(proj_tau, comm)            # the others' slots are zero
-    terms = []
+    terms, mine = [], {}
     for ks, blk in owned_frequency_blocks(proj_tau, grid.cosft_wt, tile_gb,
                                           nu_mine):
         for m, k in enumerate(ks):
@@ -1159,9 +1163,15 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
             # dressed interaction, so S = I and c is untouched there.
             one_minus_g = 0.0 if n_mat is None else 1.0 - g[k]
             c = c0 if n_mat is None else c0 - one_minus_g * (n_mat @ c0)
-            logdet = dielectric_log_determinant(np.eye(c.shape[-1]) - c, k)
+            logdet = dielectric_log_determinant(np.eye(c.shape[-1]) - c, k, mine)
             terms.append((k, np.array(grid.omega_weights[k]
                                       * (logdet + linear))))
+    if flags is not None:
+        bad = mine.get('nonpositive_det', [])
+        bad = sorted(int(k) for part in (comm.allgather(bad) if nranks > 1 else [bad])
+                     for k in part)
+        if bad:
+            flags.setdefault('nonpositive_det', []).extend(bad)
     # every frequency's term added in frequency order: the one-rank bits
     e_c = float(ordered_sum(terms, comm, onto=np.zeros(())))
     e_c /= 2.0 * np.pi

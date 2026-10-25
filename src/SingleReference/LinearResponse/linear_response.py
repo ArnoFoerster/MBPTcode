@@ -1,5 +1,5 @@
 import numpy as np
-from src.Base.orbital_spaces import ov_energies
+from src.Base.orbital_spaces import ov_energies, ov_factor
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (CASIDA_NORM_TOL,
                                          DEFAULT_BROADENING_ETA)
@@ -71,6 +71,23 @@ class LinearResponseSolver:
 
     def _get_occ_virt_indices(self, eps, nocc):
         return get_occ_virt_indices(eps, nocc)
+
+    def ov_coulomb_unrestricted(self, occ_a, virt_a, occ_b, virt_b):
+        """(ia|jb) from the full ERIs on the stacked alpha + beta pair index:
+        [[V_aa, V_ab], [V_ab^T, V_bb]], the Coulomb matrix every unrestricted
+        full-ERI screening builds."""
+        n_pair_a = len(occ_a) * len(virt_a)
+        n_pair_b = len(occ_b) * len(virt_b)
+        V_aa = self.eri_a[np.ix_(occ_a, virt_a, occ_a, virt_a)].reshape(n_pair_a, n_pair_a)
+        V_bb = self.eri_b[np.ix_(occ_b, virt_b, occ_b, virt_b)].reshape(n_pair_b, n_pair_b)
+        V_ab = self.eri_ab[np.ix_(occ_a, virt_a, occ_b, virt_b)].reshape(n_pair_a, n_pair_b)
+        return np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
+
+    def ov_factors_unrestricted(self, occ_a, virt_a, occ_b, virt_b):
+        """(C_ov_a, C_ov_b): its DF twin, the occupied-virtual blocks of the
+        two spin factors (Base.orbital_spaces.ov_factor)."""
+        return (ov_factor(self.coeff_a, occ_a, virt_a),
+                ov_factor(self.coeff_b, occ_b, virt_b))
 
     def construct_4d_w_rpa(self, nocc, spin_channel='alpha'):
         """
@@ -173,8 +190,8 @@ class LinearResponseSolver:
                     self.eps_b, occ_b, virt_b, lBSE, W_aux, factor=1.0, 
                     coeff_all=self.coeff_b, spin_channel='b'
                 )
-                C_ov_a = self.coeff_a[:, occ_a[:, None], virt_a].reshape(self.naux, -1)
-                C_ov_b = self.coeff_b[:, occ_b[:, None], virt_b].reshape(self.naux, -1)
+                C_ov_a, C_ov_b = self.ov_factors_unrestricted(occ_a, virt_a,
+                                                              occ_b, virt_b)
                 V_ab = C_ov_a.T @ C_ov_b
             else:
                 A_aa, B_aa = self._build_block_full(
@@ -428,14 +445,10 @@ class LinearResponseSolver:
                     nvirt_a = len(virt_a)
                     nvirt_b = len(virt_b)
                     
-                    d_a = (self.eps_a[virt_a][None, :] - self.eps_a[occ_a][:, None]).ravel()
-                    d_b = (self.eps_b[virt_b][None, :] - self.eps_b[occ_b][:, None]).ravel()
+                    d_a = ov_energies(self.eps_a, nocc_a)
+                    d_b = ov_energies(self.eps_b, nocc_b)
                     
-                    V_aa = self.eri_a[np.ix_(occ_a, virt_a, occ_a, virt_a)].reshape(n_pair_a, n_pair_a)
-                    V_bb = self.eri_b[np.ix_(occ_b, virt_b, occ_b, virt_b)].reshape(n_pair_b, n_pair_b)
-                    V_ab = self.eri_ab[np.ix_(occ_a, virt_a, occ_b, virt_b)].reshape(n_pair_a, n_pair_b)
-                    
-                    V_trans = np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
+                    V_trans = self.ov_coulomb_unrestricted(occ_a, virt_a, occ_b, virt_b)
                     
                     chi_trans = -2.0 * np.linalg.inv(
                         np.diag(np.concatenate([d_a, d_b])) + 2.0 * V_trans)
@@ -548,8 +561,7 @@ class LinearResponseSolver:
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             occ_b, virt_b = self._get_occ_virt_indices(self.eps_b, nocc_b)
-            C_ov_a = self.coeff_a[:, occ_a[:, None], virt_a].reshape(self.naux, -1)
-            C_ov_b = self.coeff_b[:, occ_b[:, None], virt_b].reshape(self.naux, -1)
+            C_ov_a, C_ov_b = self.ov_factors_unrestricted(occ_a, virt_a, occ_b, virt_b)
             XplusY_proj = np.block([[C_ov_a, C_ov_b]]) @ X_plus_Y
             prefactor = 1.0
         else:
@@ -567,12 +579,7 @@ class LinearResponseSolver:
             nocc_a, nocc_b = nocc
             occ_a, virt_a = self._get_occ_virt_indices(self.eps_a, nocc_a)
             occ_b, virt_b = self._get_occ_virt_indices(self.eps_b, nocc_b)
-            n_pair_a = len(occ_a) * len(virt_a)
-            n_pair_b = len(occ_b) * len(virt_b)
-            V_aa = self.eri_a[np.ix_(occ_a, virt_a, occ_a, virt_a)].reshape(n_pair_a, n_pair_a)
-            V_bb = self.eri_b[np.ix_(occ_b, virt_b, occ_b, virt_b)].reshape(n_pair_b, n_pair_b)
-            V_ab = self.eri_ab[np.ix_(occ_a, virt_a, occ_b, virt_b)].reshape(n_pair_a, n_pair_b)
-            V_trans = np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
+            V_trans = self.ov_coulomb_unrestricted(occ_a, virt_a, occ_b, virt_b)
             prefactor = 1.0
         else:
             occ, virt = self._get_occ_virt_indices(self.eps, nocc)

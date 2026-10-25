@@ -42,8 +42,7 @@ from tests.pins import assert_same
 
 
 def same(got, want, label):
-    """Two computations of one matrix element (complex): a few ulp.
-    """
+    """Two computations of one matrix element (complex): a few ulp."""
     for part in (np.real, np.imag):
         assert_same(part(got), part(want), quantity='root', label=label)
 

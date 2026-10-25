@@ -1,11 +1,8 @@
-"""Internal coordinates of a molecule, one way to displace along them, and
-the molecule moved to given Cartesian coordinates (`molecule_at`).
+"""Coordinates and bond lengths of a molecule, and the molecule moved to
+given Cartesian coordinates (`molecule_at`, `displaced`).
 
-Structural comparisons are made in these, not in Cartesians: a relaxed geometry
-is reported as bond lengths and angles, two methods are compared by the same,
-and an excited-state minimum is recognised by an out-of-plane angle that the
-ground state does not have. All angles are in degrees and all distances in
-Angstrom, because that is how the literature tabulates them.
+Distances are in Angstrom, because that is how the literature tabulates them;
+pyscf holds the coordinates in Bohr.
 """
 import numpy as np
 
@@ -41,33 +38,3 @@ def bond(mol, i, j):
     """Distance i-j in Angstrom."""
     c = coordinates(mol)
     return float(np.linalg.norm(c[i] - c[j]))
-
-
-def angle(mol, i, j, k):
-    """Angle i-j-k in degrees, j the vertex."""
-    c = coordinates(mol)
-    u, v = c[i] - c[j], c[k] - c[j]
-    cos = u @ v / (np.linalg.norm(u) * np.linalg.norm(v))
-    return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
-
-
-def pyramidalize(mol, c, m, s1, s2, degrees):
-    """Tilt the c-m bond `degrees` out of the (c, s1, s2) plane; a new Mole.
-
-    A PLANAR CENTRE IS A STATIONARY POINT of the out-of-plane coordinate by
-    symmetry, so the gradient along it vanishes there and an optimization
-    started planar can never pyramidalize however much the state wants to. It
-    converges to a saddle and reports it as a minimum. Displacing first is what
-    makes the search able to find the real one.
-    """
-    x = mol.atom_coords().copy()
-    axis = x[s2] - x[s1]
-    axis /= np.linalg.norm(axis)
-    v = x[m] - x[c]
-    th = np.radians(degrees)
-    # Rodrigues. The axis lies in the plane, so the rotation angle IS the angle
-    # the bond ends up making with it.
-    v_rot = (v * np.cos(th) + np.cross(axis, v) * np.sin(th)
-             + axis * (axis @ v) * (1.0 - np.cos(th)))
-    x[m] = x[c] + v_rot
-    return molecule_at(mol, x)

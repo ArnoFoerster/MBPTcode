@@ -55,7 +55,7 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as rd
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from tests.adc_common import (FD_STEP_DENSITY, H2CO, five_point, JKFIT, SCF_GRAD_TIGHT,
                               SCF_MAX_CYCLE, WATER_C2V, check, converge_newton)
 from tests.pins import RECORDING_BLAS, matches

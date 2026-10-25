@@ -43,6 +43,7 @@ import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf import scf
 
+from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator)
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
@@ -160,7 +161,8 @@ def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
     gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
     f1 = one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao])[0]
     Co = C[:, :nocc]
-    auxjk = pyscf_df.addons.make_auxmol(mol, jk_fit(mf))
+    jk_fit(mf)                     # refuses a mean field with no JK fit
+    auxjk = auxmol_of(mf, mol)
     fjk = fitted_fock_skeleton(mol, auxjk, gamma_ao, 2.0 * Co @ Co.T,
                                occ=np.sqrt(2.0) * Co, exchange=1.0)
     Gs = 0.5 * (Gam + Gam.transpose(1, 0, 2))
@@ -189,7 +191,7 @@ def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None
     Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout.
     numerics: the caller's (the Z-vector's tolerances); flags: the list a
     short Z-vector solve appends its flag to."""
-    jk_fit(mf)
+    jk_fit(mf)                     # refuses a mean field with no JK fit
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
     ri = RIFactors(mol, mf, auxbasis)

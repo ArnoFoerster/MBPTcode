@@ -62,6 +62,7 @@ unchanged, since thread counts move only the summation order inside BLAS,
 never the arithmetic pyscf does.
 """
 import contextlib
+import contextvars
 import os
 import threading
 import warnings
@@ -225,14 +226,19 @@ def blas_libraries():
 
 def row_map(fn, n, threads):
     """[fn(r0, r1)] over contiguous ranges tiling [0, n), one per thread of a
-    pool of `threads`, in order; inline where one range is all there is."""
+    pool of `threads`, in order; inline where one range is all there is.
+    Each range runs in a copy of the caller's context, so a numerical flag
+    raised in a worker lands in the caller's `numerical_flags.collecting`
+    block."""
     parts = min(int(threads), n)
     if parts < 1:
         return []
     ranges = [(p * n // parts, (p + 1) * n // parts) for p in range(parts)]
     if parts == 1:
         return [fn(*ranges[0])]
-    return list(_row_pool(int(threads)).map(lambda r: fn(*r), ranges))
+    context = contextvars.copy_context()
+    return list(_row_pool(int(threads)).map(
+        lambda r: context.copy().run(fn, *r), ranges))
 
 
 def _row_pool(threads):

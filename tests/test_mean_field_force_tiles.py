@@ -43,10 +43,9 @@ from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
                                           xc_energy_grid_skeleton)
 from src.Base.utils.parallel.mpi_grid import distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.gradients.isdf_derivatives import auxmol_of
 from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
                                            isdf_mean_field_gradient)
-from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
+from src.Base.pyscf.pyscf_interface import auxmol_of, xc_hybrid_coeff
 from tests.test_skeleton_tiles import GEOMS
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same

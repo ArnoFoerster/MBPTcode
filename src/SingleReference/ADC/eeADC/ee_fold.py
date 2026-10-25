@@ -110,8 +110,8 @@ def _say(label, text):
 def _flag(name, text, stacklevel):
     """Warn `text` and write it, as the named flag `name`, into the flags of the
     solve_folded call in flight (FoldResult.flags): a numerical event of the
-    solve warns, is flagged and the solve carries on
-    (refuse inputs, warn numerics)."""
+    solve warns, is flagged and the solve carries on (the library's rule:
+    refuse bad inputs, warn about numerical events)."""
     warnings.warn(text, RuntimeWarning, stacklevel=stacklevel + 1)
     flags = _FLAGS.get()
     if flags is not None:
@@ -1334,8 +1334,8 @@ class _Roots:
 
     def short(self, text, stacklevel):
         """A root set that is short or unchecked: warned about and flagged
-        'roots_missing', and what was found is returned
-        (a short root set is a numerical event; a caller that
+        'roots_missing', and what was found is returned (a short root set
+        is a numerical event; a caller that
         cannot go on without a missing root refuses itself, as the state
         models do)."""
         _flag('roots_missing', f'{self.label}: {text}', stacklevel=stacklevel + 1)
@@ -1638,8 +1638,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     λ_j(ω) - ω inside the
     bracket between λ_j(ω_c) and ω_c, bisection when a step leaves it, a group of
     branches degenerate at ω_c at one ω (loop 'index'). At most EE_FOLD_COUNT_ROUNDS rounds, then
-    the call warns and returns what it found, flagged 'roots_missing'
-    (refuse inputs, warn numerics), as it does when more roots
+    the call warns and returns what it found, flagged 'roots_missing' (refuse
+    inputs, warn numerics), as it does when more roots
     are found at or below ω_c than the count admits, when an index solve lands on
     a root already found, when the block leaves a branch outside and when fewer
     than nroots roots come back; a root set with an unconverged root is flagged

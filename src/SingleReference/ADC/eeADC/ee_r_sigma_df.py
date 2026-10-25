@@ -27,6 +27,7 @@ shows up at machine precision rather than as a plausible small error.
 import numpy as np
 
 from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
+from src.Base.pyscf.pyscf_interface import get_coulomb_exchange_diagonals_df
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
@@ -253,7 +254,7 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
         d_amp, d_ia_amp = _en.en_denominators_spin_free(
-            eps, *_en.jk_from_B(B), no, nv, en_dress)
+            eps, *get_coulomb_exchange_diagonals_df(B), no, nv, en_dress)
         # what the EN denominator has resummed, so amplitudes() can
         # take it back out of the t2^(2) numerator and not count the
         # diagonal ladder twice (see ee_equations.amplitudes)

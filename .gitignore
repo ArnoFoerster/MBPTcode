@@ -14,7 +14,6 @@ __pycache__/
 # optimization (see separable_ri.optimize_atomic_radii), machine-specific, and
 # regenerated on demand -- the shipped tables in data/ are the portable ones.
 src/Base/factorization/data/radii_cache/
-.claude/
 
 # Output of the ADC code generators (src/CodeGeneration), produced on the
 # user's machine and never committed.

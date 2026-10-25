@@ -141,8 +141,7 @@ builds ΔW must equal the explicit form that does.
 
 ## Reference data
 
-`reference_data.json` and `adc_refactor_pins.json` hold pinned numbers several
-tests compare against. Regenerating a pin is a deliberate act: it changes what
+`adc_refactor_pins.json` holds pinned numbers several tests compare against. Regenerating a pin is a deliberate act: it changes what
 the suite considers correct, so the reason belongs in the commit that does it.
 
 Optimized ISDF grid radii ship in `src/Base/factorization/data/optimized_radii.json`. The

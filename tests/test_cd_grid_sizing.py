@@ -12,9 +12,8 @@ Water/cc-pVDZ (HF, DF) on the chain's own ISDF factors. Gated here:
 - [1 - chi0(i.nu)] is factorized by Cholesky (`screening_solver`), which
   matches LU to rounding and falls back to LU, with a warning, on a matrix
   that is not positive definite.
-- a root of pole strength outside (0, 1] is kept, warned about and flagged
-  (it was demoted and the set re-solved without it), and
-  the set is solved on the same grid. The quadrature Newton is scripted
+- a root of pole strength outside (0, 1] is kept, warned about and flagged,
+  and the set is solved on the same grid. The quadrature Newton is scripted
   there, so which root is where is fixed by the test.
 """
 import os

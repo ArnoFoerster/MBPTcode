@@ -6,6 +6,7 @@ pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
 pytest test_adc3_restricted.py
+pytest test_adc_lanczos_handwritten.py
 pytest test_adc_numerical_flags.py
 pytest test_allocation_memory.py
 script test_amplitudes_consistency.py
@@ -51,6 +52,7 @@ script test_davidson_symmetric.py
 pytest test_davidson_triplet.py
 pytest test_declaration.py
 script test_density_matrix_small.py
+pytest test_docs_parallel_example.py
 pytest test_df_check.py
 pytest test_downfolded_seeds.py
 pytest test_ee_adc_davidson_max_memory.py
@@ -66,6 +68,7 @@ script test_ee_gw_fold.py
 pytest test_environment.py
 pytest test_environment_cache.py
 pytest test_environment_guards.py
+pytest test_eom_left_right_pairing.py
 script test_exciton_descriptors.py
 pytest test_faddeev_adc3.py
 pytest test_fit_adjoint_stability.py
@@ -143,6 +146,7 @@ pytest test_qdpt_perturbative.py
 pytest test_qp_energy_continuation.py
 pytest test_qp_energy_diagnostics.py
 pytest test_qp_numerics_warn_and_flag.py
+pytest test_gw_flags_reach_record.py
 script test_qp_refine_root.py
 pytest test_qp_root_demotion.py
 pytest test_qp_route_eta_consistency.py
@@ -267,7 +271,7 @@ pytest test_layering.py
 pytest test_surface_ingredients.py
 pytest test_drpa_equilibrium_solvation.py
 pytest test_walk_probe_default.py
-# Placed 2026-10-20 by the 60 s rule on the full-suite wall times of one cluster run (merged tree, 2 threads per lane): under 60 s
+# Placed by the 60 s rule on full-suite wall times on a cluster node (2 threads per lane): under 60 s
 pytest test_archive_radii.py
 pytest test_bse_entry_points_read_numerics.py
 pytest test_chain_forwards_through_production.py
@@ -299,6 +303,7 @@ pytest test_hessian_cache.py
 pytest test_isdf_builders_read_numerics.py
 pytest test_marcus_lambda_refusal.py
 pytest test_numerical_flags.py
+pytest test_warnings_doc_complete.py
 pytest test_numerics.py
 pytest test_numerics_not_in_signatures.py
 pytest test_one_degeneracy_tolerance.py
@@ -333,7 +338,7 @@ pytest test_solvated_rpa_energy_move.py
 pytest test_state_manifold_auto_solver.py
 pytest test_walk_failures_propagate.py
 pytest test_solvation_refusals.py
-# Placed 2026-10-20 by the 60 s rule on recorded wall times: under 60 s (cluster wall times; test_cphf_residual 3.4 s on the workstation; test_archive_radii and test_ee_adc_state_specific are placed above)
+# Placed by the 60 s rule on recorded wall times on a cluster node: under 60 s (test_cphf_residual 3.4 s on a workstation; test_archive_radii and test_ee_adc_state_specific are placed above)
 pytest test_cphf_residual.py
 pytest test_ee_adc_gradient.py
 pytest test_ee_adc_gradient_tiled.py

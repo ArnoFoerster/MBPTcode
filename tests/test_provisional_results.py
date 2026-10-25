@@ -1,5 +1,5 @@
 """Provisional results warn and the run carries on; mixed pictures are
-refused (refuse inputs, warn numerics).
+refused (a bad input is refused; a numerical shortfall warns).
 
 - A Franck-Condon integrand that has not decayed at its largest t_max: rho
   may be truncated, a numerical event, warned about. One undamped mode

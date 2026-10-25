@@ -3,11 +3,11 @@
 The rates in `properties.rates` take Delta_E = E_final - E_initial, the
 reaction energy's sign: `fc_weighted_dos` is the Fourier transform of a
 generating function whose zero-temperature lines sit at dE = -n omega -
-lambda, so a step that RELEASES energy has dE < 0. The UISC driver once passed
-E(S1) - E(S0) to the S1 -> S0 internal conversion and E(T1) - E(S0) to the
-T1 -> S0 decay, both positive, which reads the uphill (absorption) side of
-the density of states: on a toy spectrum k_IC came out 14 s^-1 where the decay
-is 7e14 s^-1. The decays are now `rates.rate_table`'s, the table the TADF
+lambda, so a step that RELEASES energy has dE < 0. Passing E(S1) - E(S0) to
+the S1 -> S0 internal conversion and E(T1) - E(S0) to the T1 -> S0 decay,
+both positive, reads the uphill (absorption) side of the density of states:
+on a toy spectrum k_IC comes out 14 s^-1 where the decay is 7e14 s^-1. The
+decays are `rates.rate_table`'s, the table the TADF
 model reads too. These tests drive it, directly and through
 `uisc.uisc_rate_table`, on a toy spectrum and require the downhill rate,
 which a positive gap misses by many orders of magnitude. S0 at each excited

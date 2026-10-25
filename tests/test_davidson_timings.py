@@ -37,8 +37,8 @@ vectors are to a few ulp (`assert_archive_same` of tests/pins.py) those of a
 pinned tree without the `qp_*` timers, extracted with `git archive` and run in
 its own process with its W frequency axis moved onto rW, the range its
 transform is fitted over. Two later changes of the physics are handed to it
-rather than compared: the interpolation points (the radii table was recut on
-2026-10-14, so the pinned tree's default grid is another grid; it gets this
+rather than compared: the interpolation points (the radii table was recut
+since, so the pinned tree's default grid is another grid; it gets this
 tree's G1 radii) and the BSE kernel's static W (built eta-free on its own
 time grid in this tree, which moves water's roots by 1.1e-8 Ha; it gets this
 tree's W). Its Davidson is not this tree's (it has changed since, and the

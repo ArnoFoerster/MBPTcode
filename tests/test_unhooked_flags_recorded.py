@@ -7,7 +7,12 @@ return or keep:
     diagnostics, which `quasiparticle_order` returns;
   * a quasi-boson root followed off its branch (`bracketed_root(out=)`) is
     warned about and kept in `QPqb.branch_log`;
-  * the spin-vibronic coupling returns its couplings' `scf_flags`.
+  * the spin-vibronic coupling returns its couplings' `scf_flags`;
+  * `calc_qp_energy(out=)` receives every named flag the calculation raised,
+    on the per-state scan's threads too;
+  * the excited-state chain logs the named flags a forward pass raised, and
+    the dense surfaces' gradients carry theirs and their mean field's, both
+    read by the records (`numerical_flag_warnings`).
 
 Stand-ins where the event cannot be made cheaply; one OH/STO-3G UHF.
 """
@@ -17,7 +22,11 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.gradients.gwbse import rpa_bse_surface
+from src.Base.numerical_flags import flag
+from src.gradients.gwbse import dense_surfaces, diagnostics, rpa_bse_surface
+from src.gradients.gwbse.state_following import StateFollower
+from src.properties.excitations import merged_logs
+from src.SingleReference.GW import qp_energy
 from src.properties import characters, spin_vibronic
 from src.SingleReference.GW import quasi_boson
 from src.SingleReference.GW.qp_energy import calc_qp_energy
@@ -106,3 +115,55 @@ def test_the_spin_vibronic_coupling_returns_the_couplings_scf_flags(
                                {'scf_flags': [dict(flag)]}))
     out = spin_vibronic.spin_vibronic_coupling(ev, None, s1, t1, (s2,), (t2,))
     assert out['scf_flags'] == [flag]
+
+
+def test_the_qp_energy_hands_out_the_flags_of_its_threads(monkeypatch):
+    solve = qp_energy.solve_qp_equation_pole_strength
+
+    def planted(func, e0, **kw):
+        flag('planted', f'state at {e0:.6f}', RuntimeWarning)
+        return solve(func, e0, **kw)
+
+    monkeypatch.setattr(qp_energy, 'solve_qp_equation_pole_strength', planted)
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run()
+    seen = {}
+    with pytest.warns(RuntimeWarning, match='state at'):
+        calc_qp_energy(mf, df=False, state=[0, 1, 2], n_workers=2, out=seen)
+    assert seen['numerical_flags'] == sorted(
+        ({'flag': 'planted', 'message': f'state at {e:.6f}'}
+         for e in mf.mo_energy[:3]), key=lambda e: e['message'])
+
+
+def test_a_forward_passs_flags_are_logged_once_for_the_record():
+    chain = SimpleNamespace(resolved=SimpleNamespace(geometry='g1'))
+    follower = StateFollower.__new__(StateFollower)
+    follower.chain = chain
+    raised = [{'flag': 'planted', 'message': 'once'}]
+    follower._log_flags(raised)
+    chain.resolved.geometry = 'g2'
+    follower._log_flags(raised)
+    assert chain.numerical_flag_log == [dict(raised[0], geometry='g1')]
+    logs = diagnostics.log_entries(chain)
+    assert merged_logs('numerical_flag_warnings', {'logs': logs}) == \
+        chain.numerical_flag_log
+
+
+def test_a_dense_gradient_carries_its_flags_and_its_mean_fields():
+    held = {'flag': 'scf_not_converged', 'message': 'kept where it stopped'}
+
+    class Stub:
+        mol0 = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
+
+        @dense_surfaces.flags_in_diagnostics
+        def total_gradient(self, mol=None, mf=None):
+            flag('planted', 'inside the gradient', RuntimeWarning)
+            return 0.0, -1.0, {'stationarity': 0.0}
+
+    surface = Stub()
+    with pytest.warns(RuntimeWarning, match='inside the gradient'):
+        _, _, diag = surface.total_gradient(mf=SimpleNamespace(flags=[held]))
+    assert diag['numerical_flags'] == [
+        {'flag': 'planted', 'message': 'inside the gradient'}, held]
+    assert [e['flag'] for e in surface.numerical_flag_log] == [
+        'planted', 'scf_not_converged']

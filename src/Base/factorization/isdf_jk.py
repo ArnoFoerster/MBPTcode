@@ -42,7 +42,7 @@ rho_{mu nu}(r) ~= sum_P X_{P mu} X_{P nu} xi_P(r), and the operator only enters
 through Z_PQ = (xi_P | w | xi_Q), so a second operator needs a second Z and
 nothing else: same grid, X and M, with V replaced by the attenuated
 two-centre metric. Z is linear in V and V_SR + V_LR = V, so
-K_SR(omega) + K_LR(omega) = K_bare to machine precision (tests/test_isdf_jk.py);
+K_SR(omega) + K_LR(omega) = K_bare to machine precision;
 a refitted M_omega would forfeit that identity (it was 3-4x better on water
 and no better on benzene, for a second full factorization, and is gone).
 Reuse is also numerically safer: the attenuated metric is singular where the
@@ -645,41 +645,6 @@ class ISDFJK(df.df.DF):
             worst = max(worst, abs(0.5 * np.einsum('ij,ji->', vj, dm) - e_ref)
                         / max(abs(e_ref), 1e-12))
         return float(worst)
-
-    def check_k(self, dms=None, omega=None):
-        """Exchange-energy error of ISDF-K against stored-cderi DF-K, in Hartree.
-
-        `check` probes J because a broken grid shows there first, but with
-        `j_route='df-direct'` the only term the grid touches is K, and a K
-        error too small to trip the J probe is not small in absolute terms on
-        a large molecule (1e-3 relative can be a tenth of a Hartree). Returns
-        (max |dE_x| in Ha, max relative), with E_x = -1/4 tr(D K) for a
-        closed-shell D.
-
-        The reference builds a three-index tensor, naux x nao^2 / 2, so this is a
-        small-molecule calibration tool for choosing grids, not a check to run
-        inside a production SCF. `omega` probes the attenuated K a range-
-        separated functional also builds.
-        """
-        if not self._built:
-            self.build()
-        if dms is None:
-            dms = self.probe_densities()
-        if not isinstance(dms, dict):
-            dms = {'dm': dms}
-        ref = df.DF(self.mol, auxbasis=self.auxmol.basis)
-        ref.build()
-        nao = self.mol.nao_nr()
-        worst_abs, worst_rel = 0.0, 0.0
-        for dm in dms.values():
-            dm = np.asarray(dm).reshape(-1, nao, nao)[0]
-            vk_ref = ref.get_jk(dm, hermi=1, with_j=False, omega=omega)[1]
-            vk = self.get_jk(dm, hermi=1, with_j=False, omega=omega)[1]
-            ex_ref = -0.25 * np.einsum('ij,ji->', vk_ref, dm)
-            d = abs(-0.25 * np.einsum('ij,ji->', vk, dm) - ex_ref)
-            worst_abs = max(worst_abs, d)
-            worst_rel = max(worst_rel, d / max(abs(ex_ref), 1e-12))
-        return float(worst_abs), float(worst_rel)
 
     # -- the interface _DFHF calls ------------------------------------------
 

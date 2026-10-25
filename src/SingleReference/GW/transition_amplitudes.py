@@ -1,5 +1,6 @@
 import numpy as np
 
+from src.Base.orbital_spaces import ov_factor
 from src.Base.pyscf.pyscf_interface import spin_index
 
 class AmplitudeGenerator:
@@ -91,8 +92,8 @@ class AmplitudeGenerator:
                 n_pair_a = len(occ_a) * len(virt_a)
                 XpY_a = XpY[:n_pair_a, :]
                 XpY_b = XpY[n_pair_a:, :]
-                C_ov_a = self.df_a[:, occ_a[:, None], virt_a].reshape(self.naux, -1)
-                C_ov_b = self.df_b[:, occ_b[:, None], virt_b].reshape(self.naux, -1)
+                C_ov_a = ov_factor(self.df_a, occ_a, virt_a)
+                C_ov_b = ov_factor(self.df_b, occ_b, virt_b)
                 return C_ov_a @ XpY_a + C_ov_b @ XpY_b
             return self._amp_cache(key, build)
         else:

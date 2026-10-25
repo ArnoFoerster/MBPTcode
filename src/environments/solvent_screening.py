@@ -130,12 +130,12 @@ from src.Base.numerics.constants import (BYTES_PER_GB, BOHR_TO_ANGSTROM, HARTREE
                                          SOLVENT_RI_PROBE_ORBITALS,
                                          SOLVENT_RI_RESIDUAL_MAX)
 from src.Base.factorization.distributed_df import distributed_mean_field
-from src.Base.environment_seam import attach_environment, environment_of
+from src.Base.environment_seam import attach_environment
 from src.environments.pcm_derivatives import (bound_pyscf_pcm_blocks, by_atom,
                                               cavity_blocks,
                                               solver_bilinear_gradient)
 from src.environments.pcm_factorization import factorize_once
-from src.Base.pyscf.pyscf_interface import require_closed_shell_or_unrestricted
+from src.Base.pyscf.pyscf_interface import auxmol_of, require_closed_shell_or_unrestricted
 from src.Base.factorization.separable_ri import auxmol_key
 from src.Base.utils.parallel.threads import blas_single_threaded
 
@@ -960,7 +960,7 @@ class SolventScreening:
         The optical response is not attached to the returned mean field: a
         gradient chain or surface carries this object itself. A caller handing
         the mean field to `calc_qp_energy` attaches it
-        (`environment.attach_environment(mf, self)`); without it the
+        (`Base.environment_seam.attach_environment(mf, self)`); without it the
         quasiparticles are gas-phase GW on a solvated SCF.
         """
         mf = scf_factory(mol)
@@ -1333,18 +1333,6 @@ class SolventScreening:
         kind = 'static, equilibrium' if self.equilibrium else 'optical'
         return (f"SolventScreening({label}eps={self.eps:.4f} ({kind}), "
                 f"method={self.method!r}, ngrids={self.ngrids}{shell})")
-
-
-def auxmol_of(mf, mol=None):
-    """The auxiliary Mole behind mf.with_df (built on demand if pyscf has not
-    materialized it yet)."""
-    with_df = getattr(mf, 'with_df', None)
-    if with_df is None:
-        raise ValueError("mf carries no with_df -- there is no auxiliary basis")
-    if getattr(with_df, 'auxmol', None) is not None:
-        return with_df.auxmol
-    return pyscf_df.addons.make_auxmol(mol if mol is not None else mf.mol,
-                                       with_df.auxbasis)
 
 
 def _verify_cderi_is_cholesky(mol, mf, auxmol, low):

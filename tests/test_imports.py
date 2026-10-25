@@ -100,5 +100,26 @@ def test_all_core_modules_import():
     assert 'ALL PASSED' in done.stdout
 
 
+#: modules on a declared import cycle; each must import as the FIRST module of
+#: an interpreter, whichever end of the cycle that is
+CYCLE_ENTRIES = ['src.SingleReference.GW.qp_energy', 'src.SingleReference.GW.evGW',
+                 'src.SingleReference.GW.qsGW', 'src.SingleReference.ADC.base',
+                 'src.SingleReference.ADC.spin_adapt']
+
+
+def test_cycle_members_import_first():
+    """No package __init__ imports one end of a cycle first any more, so an
+    entry from the other end must work on its own: each cycle member is
+    imported alone in a fresh interpreter."""
+    env = dict(os.environ, MPI4PY_RC_INITIALIZE='0')
+    failed = []
+    for name in CYCLE_ENTRIES:
+        done = subprocess.run([sys.executable, '-c', f'import {name}'],
+                              capture_output=True, text=True, env=env, cwd=str(ROOT))
+        if done.returncode:
+            failed.append(f'{name}: {done.stderr.strip().splitlines()[-1]}')
+    assert not failed, '\n'.join(failed)
+
+
 if __name__ == '__main__':
     sys.exit(main())

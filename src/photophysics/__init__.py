@@ -13,6 +13,11 @@
     minimum        `StateMinimum`: what the rate layer reads of a geometry,
                    filled by GW-BSE or ADC(2) alike
     rate_models    the TADF rate table off three minima and the S0 modes
+    rates          the rate formulas: golden-rule transfer (Marcus,
+                   Marcus-Levich-Jortner, spin-vibronic, internal
+                   conversion), radiative, and the photoluminescence kinetics
+    records        what every stage shares: state labels, the log line and
+                   a walk's record
     uisc           the UISC protocol of Samanta et al.: the promoting-mode
                    derivative stage and its rate rows
     vertical_arms  the vertical spectrum of one geometry under three

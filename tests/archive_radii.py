@@ -11,8 +11,8 @@ import shutil
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 RADII = pathlib.Path('src') / 'Base' / 'factorization' / 'data' / 'optimized_radii.json'
-#: Where an extracted tree keeps its table: as above in current trees,
-#: under src/Base/data.
+#: Where an extracted tree keeps its table: as above in current trees, under
+#: src/Base/data in older ones.
 ARCHIVED_RADII = (RADII, pathlib.Path('src') / 'Base' / 'data' / 'optimized_radii.json')
 
 

@@ -20,46 +20,38 @@ denominator. Dressing it as well would shift the ground-state density blocks
 rho^(2) that enter M^(3) without any corresponding change in the secular
 matrix, which is not what the EN partitioning is for.
 
-`dress` is a dict of channel toggles matching
-EpsteinNesbet.denominators.restricted_channel_shifts:
+`dress` is the en_dress dict validated by
+EpsteinNesbet.validate_en_dress, restricted to the channel toggles:
 
     {'hh': True, 'pp': True}       <- the standard choice, and what True means
 
 hh switches on the <ij||ij> hole-hole term and pp the <ab||ab>
 particle-particle term. The hole-particle cross channel 'hp' is available but
 OFF by default: it is the channel that mixes the hole and particle
-denominators and is not part of the usual EN doubles dressing.
+denominators and is not part of the usual EN doubles dressing. The IP/EA keys
+'singles', 'shift' and 'spin_adapted' are refused by name: the singles stay MP
+and the dressing is determinant-wise.
 
-Unlike the CSF route on the IP/EA side, nothing here has to average the two
-spin cases: the spin-free backend carries a separate denominator per spin
-block, so the dressing is the exact determinant-wise one in both routes --
-which is also why the spin-orbital and spin-free EN amplitudes agree to
-machine precision (tests/test_ee_adc_en.py).
+The shifts themselves are the EpsteinNesbet ones (epstein_nesbet_denominator
+on the spin-orbital route, dressed_doubles_block per spin block on the
+spin-free and unrestricted routes). Unlike the CSF route on the IP/EA side,
+nothing here has to average the two spin cases: the spin-free backend carries
+a separate denominator per spin block, so the dressing is the exact
+determinant-wise one in both routes -- which is also why the spin-orbital and
+spin-free EN amplitudes agree to machine precision (tests/test_ee_adc_en.py).
 """
 import numpy as np
 
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.ADC.eeADC.ee_utils import (excitation_denominator,
                                                    orbital_denominators)
+from src.SingleReference.EpsteinNesbet import (dressed_doubles_block,
+                                               epstein_nesbet_denominator,
+                                               validate_en_dress)
 
-CHANNELS = ('hh', 'pp', 'hp')
-
-
-def validate_dress(dress):
-    """Normalize and check the channel dict; None means no dressing."""
-    if dress is None:
-        return None
-    if dress is True:
-        return {'hh': True, 'pp': True, 'hp': False}
-    bad = set(dress) - set(CHANNELS)
-    if bad:
-        raise ValueError(f'unknown EN channel(s) {sorted(bad)}; '
-                         f'expected a subset of {CHANNELS}')
-    out = {c: bool(dress.get(c, False)) for c in CHANNELS}
-    if not any(out.values()):
-        raise ValueError('en_dress was given with every channel off; pass '
-                         'None for plain Moller-Plesset denominators')
-    return out
+#: the en_dress keys EE-ADC implements: the doubles channels only
+DRESS_KEYS = ('hh', 'pp', 'hp')
+KEYS4 = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
 
 
 # ----------------------------------------------------------------------
@@ -69,20 +61,12 @@ def validate_dress(dress):
 def en_denominators_spin_orbital(eps, g, nocc, dress):
     """(d_ijab, d_ia) as full spin-orbital arrays. The spin bookkeeping is
     already inside g, so <pq||pq> is just its diagonal."""
-    dress = validate_dress(dress)
+    dress = validate_en_dress(dress, keys=DRESS_KEYS)
     d, d_ia, _ = orbital_denominators(eps, nocc)
     if dress is None:
         return d, d_ia
-    a = np.einsum('pqpq->pq', g, optimize=True)          # <pq||pq>
-    o, v = slice(0, nocc), slice(nocc, len(eps))
-    if dress['hh']:
-        d = d + a[o, o][:, :, None, None]
-    if dress['pp']:
-        d = d + a[v, v][None, None, :, :]
-    if dress['hp']:
-        ov = a[o, v]
-        d = d - ov[:, None, :, None] - ov[None, :, None, :]
-        d = d - ov[None, :, :, None] - ov[:, None, None, :]
+    d = epstein_nesbet_denominator(d, g, nocc, layout='hhpp', bare_sign=-1.0,
+                                   **{c: bool(dress.get(c)) for c in DRESS_KEYS})
     return d, d_ia          # singles denominator stays MP -- doubles only
 
 
@@ -92,36 +76,18 @@ def en_denominators_spin_orbital(eps, g, nocc, dress):
 
 def en_denominators_spin_free(eps, J, K, no, nv, dress):
     """(d_ijab, d_ia) as SBs, one denominator per spin block, from the
-    Coulomb/exchange arrays J[p,q] = <pq|pq> and K[p,q] = <pq|qp>.
-
-    <pq||pq> = J[p,q] - delta(spin_p, spin_q) K[p,q] -- the single rule the
-    whole spin resolution rests on."""
-    dress = validate_dress(dress)
+    Coulomb/exchange arrays J[p,q] = <pq|pq> and K[p,q] = <pq|qp>
+    (pyscf_interface.get_coulomb_exchange_diagonals[_df]); both spins share
+    them."""
+    dress = validate_en_dress(dress, keys=DRESS_KEYS)
     base, d_ia_mp, _ = orbital_denominators(eps, no)
-    keys4 = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
     if dress is None:
-        return (SB({k: base for k in keys4}),
+        return (SB({k: base for k in KEYS4}),
                 SB({'aa': d_ia_mp, 'bb': d_ia_mp}))
-
-    o, v = slice(0, no), slice(no, no + nv)
-    J_vv, K_vv = J[v, v], K[v, v]
-    J_oo, K_oo = J[o, o], K[o, o]
-    J_ov, K_ov = J[o, v], K[o, v]
-
-    def block(si, sj, sa, sb):
-        D = base.copy()
-        if dress['pp']:
-            D = D + (J_vv - (sa == sb) * K_vv)[None, None, :, :]
-        if dress['hh']:
-            D = D + (J_oo - (si == sj) * K_oo)[:, :, None, None]
-        if dress['hp']:
-            D = D - (J_ov - (si == sa) * K_ov)[:, None, :, None]
-            D = D - (J_ov - (sj == sb) * K_ov)[None, :, None, :]
-            D = D - (J_ov - (sj == sa) * K_ov)[None, :, :, None]
-            D = D - (J_ov - (si == sb) * K_ov)[:, None, None, :]
-        return D
-
-    d4 = SB({k: block(*[c == 'a' for c in k]) for k in keys4})
+    Js = {s: {t: J for t in 'ab'} for s in 'ab'}
+    Ks = {s: K for s in 'ab'}
+    d4 = SB({k: dressed_doubles_block(base, Js, Ks, {'a': no, 'b': no}, k, dress)
+             for k in KEYS4})
     # singles denominator stays MP -- doubles only
     return d4, SB({'aa': d_ia_mp, 'bb': d_ia_mp})
 
@@ -143,48 +109,19 @@ def shift_from_denominators(d_en, d_mp):
     return d_en - d_mp
 
 
-def jk_from_V(V):
-    """J[p,q] = <pq|pq>, K[p,q] = <pq|qp> from the spatial physicist tensor."""
-    return (np.einsum('pqpq->pq', V, optimize=True),
-            np.einsum('pqqp->pq', V, optimize=True))
-
-
-def jk_from_B(B):
-    """The same two arrays from a DF factor, without forming V."""
-    return (np.einsum('Qpp,Qqq->pq', B, B, optimize=True),
-            np.einsum('Qpq,Qpq->pq', B, B, optimize=True))
-
-
-def jk_from_B_uhf(B_a, B_b):
-    """Spin-resolved Coulomb/exchange arrays from the two UHF DF factors:
-
-        J[s][t][p,q] = <p_s q_t | p_s q_t> = (p_s p_s | q_t q_t)
-        K[s][p,q]    = <p_s q_s | q_s p_s> = (p_s q_s | q_s p_s)
-
-    K has one spin index because exchange only exists within a spin -- which
-    is the whole content of the `delta(spin_p, spin_q)` in <pq||pq>."""
-    B = {'a': B_a, 'b': B_b}
-    diag = {s: np.einsum('Qpp->Qp', B[s]) for s in ('a', 'b')}
-    J = {s: {t: np.einsum('Qp,Qq->pq', diag[s], diag[t], optimize=True)
-             for t in ('a', 'b')} for s in ('a', 'b')}
-    K = {s: np.einsum('Qpq,Qpq->pq', B[s], B[s], optimize=True)
-         for s in ('a', 'b')}
-    return J, K
-
-
 def en_denominators_unrestricted(eps_a, eps_b, J, K, no_a, no_b, dress):
     """(d_ijab, d_ia) as SBs for an UNRESTRICTED reference.
 
     Same rule as en_denominators_spin_free -- <pq||pq> = J - delta(spin) K --
     with the spin pair made explicit instead of implied, because alpha and
-    beta no longer share an orbital set (nor even a count). The singles
-    denominator stays MP: the dressing is doubles only."""
-    dress = validate_dress(dress)
+    beta no longer share an orbital set (nor even a count). J, K are
+    EpsteinNesbet.coulomb_exchange_diagonals_uhf_df. The singles denominator
+    stays MP: the dressing is doubles only."""
+    dress = validate_en_dress(dress, keys=DRESS_KEYS)
     eps = {'a': np.asarray(eps_a), 'b': np.asarray(eps_b)}
     no = {'a': no_a, 'b': no_b}
     eo = {s: eps[s][:no[s]] for s in ('a', 'b')}
     ev = {s: eps[s][no[s]:] for s in ('a', 'b')}
-    keys4 = ('aaaa', 'bbbb', 'abab', 'baba', 'abba', 'baab')
 
     def base(si, sj, sa, sb):
         return excitation_denominator((eo[si], eo[sj]), (ev[sa], ev[sb]))
@@ -192,25 +129,6 @@ def en_denominators_unrestricted(eps_a, eps_b, J, K, no_a, no_b, dress):
     d_ia = SB({s + s: -2.0 * excitation_denominator((eo[s],), (ev[s],))
                for s in ('a', 'b')})
     if dress is None:
-        return SB({k: base(*k) for k in keys4}), d_ia
-
-    def part(s, t, f1, f2):
-        s1 = slice(0, no[s]) if f1 == 'o' else slice(no[s], len(eps[s]))
-        s2 = slice(0, no[t]) if f2 == 'o' else slice(no[t], len(eps[t]))
-        out = J[s][t][s1, s2]
-        return out - K[s][s1, s2] if s == t else out
-
-    def block(si, sj, sa, sb):
-        D = base(si, sj, sa, sb).copy()
-        if dress['pp']:
-            D = D + part(sa, sb, 'v', 'v')[None, None, :, :]
-        if dress['hh']:
-            D = D + part(si, sj, 'o', 'o')[:, :, None, None]
-        if dress['hp']:
-            D = D - part(si, sa, 'o', 'v')[:, None, :, None]
-            D = D - part(sj, sb, 'o', 'v')[None, :, None, :]
-            D = D - part(sj, sa, 'o', 'v')[None, :, :, None]
-            D = D - part(si, sb, 'o', 'v')[:, None, None, :]
-        return D
-
-    return SB({k: block(*k) for k in keys4}), d_ia
+        return SB({k: base(*k) for k in KEYS4}), d_ia
+    return SB({k: dressed_doubles_block(base(*k), J, K, no, k, dress)
+               for k in KEYS4}), d_ia

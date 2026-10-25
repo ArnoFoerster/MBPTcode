@@ -2,7 +2,7 @@
 
 `mode` is the chi0 realization and `continuation` is how that chi0 reaches the
 real axis. The reference is the `qp_routes` section of
-`tests/baseline_forward_routes.json`, a record of the route audit on
+`tests/baseline_forward_routes.json`, a reference calculation on
 water, formaldehyde and thioformaldehyde (cc-pVDZ, density-fitted RHF on
 cc-pvdz-ri, conv_tol 1e-12, conv_tol_grad 1e-11) through the gradient chain's
 `qp_gradient_space_time(want_grad=False)`. Geometries, shell counts and the SCF

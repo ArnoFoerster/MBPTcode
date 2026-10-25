@@ -58,8 +58,7 @@ from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
                                         minimax_supported_sizes)
 from src.Base.utils.parallel.mpi_grid import (agreement,
                                               current_comm, grid_comm, lockstep,
-                                              lockstep_mean_field, partition,
-                                              reduce_sum)
+                                              partition, reduce_sum)
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid, COSINE_WT,
                                                  minimax_transform_weights,
                                                  sigma_fit_ranges)
@@ -331,18 +330,6 @@ def _bare_gauge(X_mo, D, transform):
         rows = slice(r0, r0 + FIT_CHOLESKY_BLOCK)
         D[rows] = D[rows] @ transform
     return D
-
-
-def replicate_mean_field(mf, comm):
-    """`mpi_grid.lockstep_mean_field` under the name its callers import.
-
-    The implementation lives in `mpi_grid` so that replicating a mean field
-    imports nothing from GW. Here `comm` stays explicit: None or one rank is
-    serial and never falls back to `current_comm()`.
-    """
-    if comm is None or comm.Get_size() == 1:
-        return mf
-    return lockstep_mean_field(mf, comm)
 
 
 def replicate_factors(factors, comm):

@@ -590,12 +590,3 @@ def _eigensolve(aop, diag, nroots, conv_tol, dense, embed=None, restrict=None,
     if Z is not None and embed is not None:
         Z = np.column_stack([embed(Z[:, k]) for k in range(Z.shape[1])])
     return e, Z, conv
-
-
-def __getattr__(name):
-    # solve_ee_adc lives in solve.py, which imports this module; callers that
-    # import it from here (examples, tests) get it at first use
-    if name == 'solve_ee_adc':
-        from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-        return solve_ee_adc
-    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

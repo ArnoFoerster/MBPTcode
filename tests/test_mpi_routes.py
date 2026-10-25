@@ -34,7 +34,7 @@ Six standards:
   few ulp   two computations of one number (against serial where the only
             reductions add exact zeros, a second call of one kernel, a second
             fit): `pins.matches` under the recording BLAS, PIN_SAME_ULPS ulp,
-            the quantity's class bar elsewhere
+            the quantity's class bar elsewhere (two computations are not bitwise)
   reduced   a sum re-associated over the partition: a bar at the summation
             order (1e-12 or 1e-11 relative, 1e-10 Ha, 1e-9 eV), `SIGMA_REL`
             for the cancelling Wt(tau) sum
@@ -948,8 +948,8 @@ def sliced_factors_routes(gate, mf, mol, F):
         return
     Fs = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', sliced=True, counts=g1(mol))
     r0, r1 = Fs.rows
-    # a second fit: its rows are the fixture's to a few ulp,
-    # not a copy of them
+    # a second fit: its rows are the fixture's to a few ulp, not a copy of
+    # them
     rows_ok = all(matches(a, b, RECORDING_BLAS, unit='1', quantity='root')
                   for a, b in ((Fs.X_mo, F[0][r0:r1]), (Fs.D, F[1][r0:r1]),
                                (Fs.X_ao, F[2][r0:r1]), (Fs.coords, F[3])))

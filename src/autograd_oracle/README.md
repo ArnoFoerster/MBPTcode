@@ -55,7 +55,7 @@ Neither is a property of the chain. The torch side reads only the `.npz`, so
 it runs under any interpreter with numpy and torch, including a native arm64
 one.
 
-## Results (2026-09-11, water bent to C1, cc-pVDZ / cc-pVDZ-RI, M = 444, naux = 84)
+## Results (water bent to C1, cc-pVDZ / cc-pVDZ-RI, M = 444, naux = 84)
 
 Every variant agrees with torch.autograd at round-off on all four adjoint
 arrays: relative 1e-14 or better, worst single entry above 1 % of the scale

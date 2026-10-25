@@ -76,11 +76,32 @@ def test_a_true_minimum_is_kept():
     assert record['status'] == 'minimum'
     assert record['first']['lowest_curvature'] > 0
     assert record['second'] is None and 'saddle_walk' not in record
+    assert record['numerical_flags'] == {}
+
+
+def test_an_asymmetric_hessian_at_a_minimum_is_flagged(monkeypatch):
+    """A minimum whose Hessian came out asymmetric is kept, and its record
+    names 'hessian_asymmetric' in 'numerical_flags', as the stage drivers'
+    records do; the minimum's record carried no flags."""
+    real = excitations.surface_hessian
+
+    def planted(surface, mol, info=None, **kw):
+        h = real(surface, mol, info=info, **kw)
+        info.update(hessian_asymmetric=True, asymmetry_rel=0.05)
+        return h
+    monkeypatch.setattr(excitations, 'surface_hessian', planted)
+    x = PLANAR.copy()
+    x[0, 2] = 0.4
+    surface = Relaxable(molecule(x))
+    relaxed = relax_state(surface, surface.mol0, nudge=0, **WALK)
+    state, record = saddle_checked_state(relaxed, **WALK)
+    assert state is relaxed and record['status'] == 'minimum'
+    assert record['numerical_flags'] == {'hessian_asymmetric': {'first': 0.05}}
 
 
 def test_a_second_saddle_is_warned_and_flagged(at_saddle, monkeypatch):
-    """A numerical event: the escape walk's state
-    is returned, warned about and flagged; it was refused."""
+    """A numerical event: the escape walk's state is returned, warned about
+    and flagged."""
     real = excitations.surface_hessian
     calls = []
 

@@ -403,9 +403,8 @@ def test_vibronic_refuses_two_relaxations_of_different_functionals():
 
 def test_a_quasiparticle_the_largest_weight_left_is_followed_and_logged(
         isdf_record):
-    """A walk keeps the
-    branch it follows when the largest Z moves to another root, even below
-    QP_WINDOW_Z_MIN, writes a warning into the record and keeps optimizing.
+    """A walk keeps the branch it follows when the largest Z moves to another
+    root, even below QP_WINDOW_Z_MIN, writes a warning into the record and keeps optimizing.
     Water/cc-pVDZ orbital 15 is that case on the cubic route: Z 0.540 (its
     partner 0.366) at the reference, 0.427 against 0.448 one step out. Its
     entry carries the orbital, the geometry, the root followed and its Z,

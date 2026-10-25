@@ -1,12 +1,13 @@
 """The (A - B) probe after every matrix-free full-BSE solve of a chain is on
 by default and off only by name.
 
-`BSENumerics.probe` (True: the converged Lanczos from 1/d) reaches every
-chain a `SurfaceSpec` builds, and so every walk of the photophysics stages
-under either rate model; a non-positive min eig(A - B) refuses the step
-(`UnstableReference`, a StepFailed). `probe=False` in a spec's numerics, and
---no-probe on the photophysics command line, switch it off; the default
-leaves every record's stamp as it was (`chain_spec`, `excited_numerics`).
+`BSENumerics.probe` (True: min eig(A - B) converged by the symmetric
+Davidson from 1/d) reaches every chain a `SurfaceSpec` builds, and so every
+walk of the photophysics stages under either rate model; a non-positive
+min eig(A - B) refuses the step (`UnstableReference`, a StepFailed).
+`probe=False` in a spec's numerics, and --no-probe on the photophysics
+command line, switch it off; the default leaves every record's stamp as it
+was (`chain_spec`, `excited_numerics`).
 """
 import numpy as np
 import pytest

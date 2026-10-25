@@ -47,6 +47,7 @@ from src.SingleReference.ADC.eeADC import ee_en as _en
 from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_equations import Backend
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4_uhf
+from src.SingleReference.EpsteinNesbet import coulomb_exchange_diagonals_uhf_df
 
 LEVELS = _r.LEVELS
 SCALE = _r.SCALE
@@ -408,7 +409,7 @@ def build_operator(eps_a, eps_b, Ba, Bb, no_a, no_b, level='adc3',
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
-        J, K = _en.jk_from_B_uhf(Ba, Bb)
+        J, K = coulomb_exchange_diagonals_uhf_df(Ba, Bb)
         d_amp, d_ia_amp = _en.en_denominators_unrestricted(
             eps_a, eps_b, J, K, no_a, no_b, en_dress)
         # what the EN denominator has resummed, so amplitudes() can take it

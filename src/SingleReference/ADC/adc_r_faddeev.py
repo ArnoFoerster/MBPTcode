@@ -37,11 +37,11 @@ triplet on II'); the particle-hole ones recouple the spins and act on Q (R).
 Both follow from the spin-orbital formulas of adc_u_faddeev evaluated on
 these components, and are checked against it through the CSF isometry.
 """
-import warnings
 
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER_JACOBI
 from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.common.eri_blocks import g_slice
@@ -281,7 +281,7 @@ def solve_ladder_amplitudes_restricted(eps, nocc, B_aa=None, eri_chemist=None,
         t = diis.compute_new_vec(t_new.ravel(), (t_new - t).ravel()).reshape(t.shape)
     converged = rmax < conv_tol
     if not converged:
-        warnings.warn(f"ladder CCD not converged in {max_iter} iterations (max|R| = "
+        flag('ladder_amplitudes_not_converged', f"ladder CCD not converged in {max_iter} iterations (max|R| = "
                       f"{rmax:.3e}); the last iterate is used (converged=False)",
                       ADCNotConverged, stacklevel=2)
     return LadderAmplitudes(t, _ladder_TA(lad, ev, t), V, G_oooo,

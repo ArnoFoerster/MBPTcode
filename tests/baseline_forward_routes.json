@@ -1,10 +1,6 @@
 {
  "kind": "gw_bse_refactor_baseline",
- "sha": "0000000000000000000000000000000000000000",
- "sha7": "0000000",
- "tree": "0000000000000000000000000000000000000000",
- "expect_tree": "0000000000000000000000000000000000000000",
- "tree_found_at": "HEAD",
+ "recorded_on": "the GW/BSE surface code before its refactor, on the workstation described under versions and blas; the live tests recompute the numbers they compare",
  "repo": null,
  "code_root": null,
  "basis": "cc-pvdz",
@@ -37,11 +33,7 @@
   "pyscf": "Accelerate",
   "machine": "x86_64"
  },
- "geometry_source": "tools/gradient_tests/systems.py inline",
- "head_at_record_time": {
-  "head_sha": "0000000000000000000000000000000000000000",
-  "head_tree": "0000000000000000000000000000000000000000"
- },
+ "geometry_source": "inline",
  "nondeterministic": [],
  "grid": {
   "level": "G1",
@@ -159,7 +151,7 @@
  },
  "qp_routes": {
   "water": {
-   "driver": "route-audit driver",
+   "driver": "quasiparticle route driver",
    "argv": [
     "--system",
     "water",
@@ -180,7 +172,7 @@
      "system": "water",
      "tier": "T0",
      "natm": 3,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -543,7 +535,7 @@
      "system": "water",
      "tier": "T0",
      "natm": 3,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -906,7 +898,7 @@
      "system": "water",
      "tier": "T0",
      "natm": 3,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -1270,7 +1262,7 @@
    ]
   },
   "formaldehyde": {
-   "driver": "route-audit driver",
+   "driver": "quasiparticle route driver",
    "argv": [
     "--system",
     "formaldehyde",
@@ -1291,7 +1283,7 @@
      "system": "formaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -1715,7 +1707,7 @@
      "system": "formaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -2139,7 +2131,7 @@
      "system": "formaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -2564,7 +2556,7 @@
    ]
   },
   "thioformaldehyde": {
-   "driver": "route-audit driver",
+   "driver": "quasiparticle route driver",
    "argv": [
     "--system",
     "thioformaldehyde",
@@ -2585,7 +2577,7 @@
      "system": "thioformaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -3012,7 +3004,7 @@
      "system": "thioformaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -3439,7 +3431,7 @@
      "system": "thioformaldehyde",
      "tier": "T0",
      "natm": 4,
-     "geometry_source": "systems.py inline",
+     "geometry_source": "inline",
      "atom": "C 0.0 0.0 -0.7936; S 0.0 0.0 0.8177; H 0.0 0.9243 -1.3828; H 0.0 -0.9243 -1.3828",
      "basis": "cc-pvdz",
      "auxbasis": "cc-pvdz-ri",
@@ -3889,12 +3881,12 @@
    "formaldehyde/DenseBSESurface[triplet]": 0.86
   },
   "surfaces": 34.96,
-  "campaign_detail": {
+  "driver_detail": {
    "run_state_pair": 2.73,
    "run_gradient": 2.66,
    "score_grids_gwbse": 2.44
   },
-  "campaign_records": 10.53
+  "driver_records": 10.53
  },
  "bse": {
   "water": {
@@ -10209,72 +10201,16 @@
     "status": "ok"
    },
    "DenseRPASurface": {
-    "status": "ValueError: DenseRPASurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 342, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, None, 'DenseRPASurface',",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: DenseRPASurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: DenseRPASurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this."
    },
    "QuasiparticleSurface": {
-    "status": "ValueError: QuasiparticleSurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 509, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, None, 'QuasiparticleSurface',",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: QuasiparticleSurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: QuasiparticleSurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field: this surface transforms the exact (pq|rs) and takes no auxiliary basis. The energies are not refused by this."
    },
    "DenseBSESurface[singlet]": {
-    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 818, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, self._auxmol(mol),",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
    },
    "DenseBSESurface[triplet]": {
-    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 818, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, self._auxmol(mol),",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
    }
   },
   "formaldehyde": {
@@ -11135,44 +11071,16 @@
     "status": "ok"
    },
    "DenseBSESurface[singlet]": {
-    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 818, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, self._auxmol(mol),",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
    },
    "DenseBSESurface[triplet]": {
-    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this.",
-    "traceback": [
-     "Traceback (most recent call last):",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 686, in section_surfaces",
-     "    'geometries': geometry_block(surface, mol)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 442, in geometry_block",
-     "    **evaluate(surface, mol, mf)}",
-     "  File \"<repo>/tools/refactor_gates/record_baseline.py\", line 426, in evaluate",
-     "    grad, e_g, info = surface.total_gradient(mol, mf)",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 818, in total_gradient",
-     "    refuse_mismatched_integrals(mf, mol, self._auxmol(mol),",
-     "  File \"<repo>/src/gradients/dense_surfaces.py\", line 265, in refuse_mismatched_integrals",
-     "    raise ValueError(",
-     "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
-    ]
+    "status": "ValueError: DenseBSESurface differentiates its post-SCF step with the mean field's orbital response built from the post-SCF integrals, but the mean field is density-fitted in cc-pvdz-ri and the post-SCF integrals are exact (auxbasis=None): the force would not be the derivative of the energy this surface reports (6e-5 Ha/Bohr off on water/cc-pVDZ). Use an unfitted mean field with auxbasis=None, or a density-fitted one with auxbasis= its own auxiliary basis. The energies are not refused by this."
    }
   }
  },
- "campaign_records": {
+ "driver_records": {
   "skipped": {
-   "tools/gradient_tests/run_dense_state_pair.py": "it RELAXES a geometry, so its number is a minimum found by an optimizer walk rather than a value at a fixed geometry; a walk cannot be gated bitwise against a later tree because the step sequence is what changes first"
+   "dense state-pair relaxation": "it RELAXES a geometry, so its number is a minimum found by an optimizer walk rather than a value at a fixed geometry; a walk cannot be gated bitwise against a later tree because the step sequence is what changes first"
   },
   "run_state_pair": {
    "driver": "state-pair driver",

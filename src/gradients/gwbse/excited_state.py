@@ -312,6 +312,10 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # above read_tol or unconfirmed, kept as solved
         # (`StateFollower._flag_casida`)
         self.casida_log = []
+        # each named flag a forward pass raised (`numerical_flags.flag`:
+        # the screening's LU fallback, the vector fit's, ...), by geometry
+        # (`StateFollower._log_flags`)
+        self.numerical_flag_log = []
         # where each entry of `follow_log` was evaluated (`followed_root`)
         self.follow_coords = []
         self.is_ks = xc_hybrid_coeff(self.mf0)[0]
@@ -504,6 +508,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             'qp_branch_log': copy.deepcopy(self.qp_branch_log),
             'qp_hamiltonian_log': copy.deepcopy(self.qp_hamiltonian_log),
             'casida_log': copy.deepcopy(self.__dict__.get('casida_log', [])),
+            'numerical_flag_log': copy.deepcopy(
+                self.__dict__.get('numerical_flag_log', [])),
             # the committed roots the next Davidson starts from, so a chain
             # read back (a resumed walk) solves as this one would
             'davidson_warm_start': (None if warm is None
@@ -565,6 +571,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         chain.qp_branch_log = list(record.get('qp_branch_log', []))
         chain.qp_hamiltonian_log = list(record.get('qp_hamiltonian_log', []))
         chain.casida_log = list(record.get('casida_log', []))
+        chain.numerical_flag_log = list(record.get('numerical_flag_log', []))
         warm = record.get('davidson_warm_start', {})
         if warm is None or warm:
             chain.davidson_warm_start = (
@@ -737,6 +744,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         view.follow_log = []
         view.follow_coords = []
         view.casida_log = []
+        view.numerical_flag_log = []
         view.davidson_solves = []
         return view
 

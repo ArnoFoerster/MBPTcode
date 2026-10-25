@@ -72,7 +72,6 @@ WHAT IS NOT HERE. No nuclear derivatives: those are
 `src.gradients.gwbse.fragment_diabatic`, and their finite-difference reference is
 `tests/fragment_diabatic_fd.py`.
 """
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -93,6 +92,7 @@ from src.Base.numerics.constants import (FESHBACH_ROOT_MAX_ITER,
                                          FRAGMENT_DENSE_MAX,
                                          FRAGMENT_MATRIX_FREE_DENSE_MAX)
 from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.numerical_flags import flag
 from src.Base.utils.linear_algebra.krylov import root_driven_solve
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.gradients.gwbse.bse_isdf import bse_blocks, bse_solve
@@ -305,12 +305,13 @@ class FragmentCanonical:
 
 def flag_numerics(flags, name, text, **detail):
     """Warn `text` and record `detail` under `name` in the dict `flags` (None:
-    warn only): the one way a solve of this module that stopped short reports
-    it, its last iterate kept (the policy: refuse inputs, warn numerics).
-    Called on every rank with rank 0's verdict."""
+    warn only), and raise the named flag into the `collecting` block in flight
+    (`numerical_flags.flag`): the one way a solve of this module that stopped
+    short reports it, its last iterate kept (the policy: refuse inputs, warn
+    numerics). Called on every rank with rank 0's verdict."""
     if flags is not None:
         flags[name] = dict(detail)
-    warnings.warn(text, RuntimeWarning, stacklevel=3)
+    flag(name, text, RuntimeWarning, stacklevel=3)
 
 
 def _lowest(apply, diag, n, dim, tol, x0=None, dense_max=FRAGMENT_DENSE_MAX,

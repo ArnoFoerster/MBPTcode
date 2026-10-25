@@ -1,6 +1,6 @@
 """The photophysics stages warn about a numerical event and name it in the
-record instead of refusing the run (refuse inputs,
-warn numerics).
+record instead of refusing the run (a bad input is refused; a numerical
+shortfall warns and carries a named flag).
 
 1. A ground-state walk that did not converge: s0 carries on where it stopped
    and its record says 'walk_not_converged'.
@@ -8,7 +8,8 @@ warn numerics).
    flag in its info, which the stage record copies (`walk_fields`).
 3. A mean field whose SCF stopped short is warned about by the factory
    (`chain.SCFNotConverged`) and the stage that built it is flagged
-   'scf_not_converged'.
+   'scf_not_converged', and a named flag raised inside a stage is named in
+   its record.
 4. The rate table gathers every stage record's flags by stage, and a failed
    ISDF-vs-DF acceptance check is warned about and flagged.
 5. A Franck-Condon integrand that had not decayed is named in the rate
@@ -23,6 +24,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
+from src.Base.numerical_flags import flag
 from src.photophysics import chain, stages
 from src.photophysics.records import walk_fields
 from src.properties.excitations import WalkNotRelaxed
@@ -88,6 +90,20 @@ def test_an_unconverged_scf_is_warned_and_flags_its_stage(tmp_path):
     record = stages.flag_scfs(run, 's0', stage)
     assert run.unconverged_scfs() == 1
     assert record['numerical_flags'] == {'scf_not_converged': 1}
+
+
+def test_a_flag_raised_inside_a_stage_is_named_in_its_record(tmp_path):
+    run = run_of(tmp_path)
+
+    def stage(run_):
+        flag('planted', 'a shortfall inside the stage', RuntimeWarning)
+        run_.write('s0', {'coords_bohr': run_.mol_in.atom_coords(),
+                          'numerical_flags': {}})
+        return run_.read('s0')
+    with pytest.warns(RuntimeWarning, match='inside the stage'):
+        record = stages.flag_scfs(run, 's0', stage)
+    assert record['numerical_flags'] == {
+        'planted': ['a shortfall inside the stage']}
 
 
 def stub_run(tmp_path, records):

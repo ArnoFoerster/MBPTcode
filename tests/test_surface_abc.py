@@ -1,6 +1,6 @@
-"""Every potential-energy surface inherits the abstract base class `PotentialEnergySurface`
-: a surface that lacks one of its six members is refused when it is
-created."""
+"""Every potential-energy surface inherits the abstract base class
+`PotentialEnergySurface`: a surface that lacks one of its six members is
+refused when it is created."""
 import pytest
 
 from src.gradients.surface import PotentialEnergySurface

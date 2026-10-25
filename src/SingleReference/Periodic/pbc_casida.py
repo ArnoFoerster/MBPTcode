@@ -210,8 +210,8 @@ def screened_block(dfints, W_all, k1, k2, k3, k4, s1, s2, s3, s4):
     L^{k3,k4}_{P',rs} for orbital ranges s1..s4, with Q the momentum transfer
     of the (k1,k2) pair and W^Q = conj(W_all[Q]): W_all is built from
     Pi = M M^H with M the bra-conjugated L_ov, the transpose of the orientation
-    a left factor of transfer Q contracts with. Reduces to eri_block when
-    W^Q = I.
+    a left factor of transfer Q contracts with. Reduces to the bare DF block
+    (PBCDFIntegrals.reconstruct_eri) when W^Q = I.
 
     Requires k1-k2+k3-k4 = 0 so the two L-blocks share aux momentum Q = k2-k1.
     """

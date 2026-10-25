@@ -34,8 +34,7 @@ from tests.pins import assert_same
 
 
 def same(got, want, label, unit='Ha', quantity='root'):
-    """Two computations of one array, real or complex: a few ulp.
-    """
+    """Two computations of one array, real or complex: a few ulp."""
     got, want = np.asarray(got), np.asarray(want)
     assert got.shape == want.shape, label
     for part in (np.real, np.imag):

@@ -62,7 +62,7 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_density, ee_fold, ee_ri_density,
                                            ee_ri_fold, ee_state_specific)
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from tests.adc_common import H2CO, WATER_C2V, check, df_rhf_converged
 from tests.pins import RECORDING_BLAS, matches
 

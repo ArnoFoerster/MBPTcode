@@ -46,13 +46,13 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             require_closed_shell_or_unrestricted)
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
-from src.Base.utils.parallel.mpi_grid import current_comm, grid_comm, replicate
+from src.Base.utils.parallel.mpi_grid import (current_comm, grid_comm,
+                                              lockstep_mean_field, replicate)
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.evGW import evgw_eigenvalues, shifted_mean_field
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from src.SingleReference.GW.space_time import (replicate_factors,
-                                               replicate_mean_field,
                                                separable_factors,
                                                solve_qp_diagonal_space_time)
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
@@ -615,10 +615,10 @@ def solve_bse_isdf(mf, mol, nocc, numerics=None, qp='G0W0', factors=None,
     unstable reference is refused anyway, probe or not, when the Davidson's
     projected (A-B) block stops being positive definite, and the measurement
     that breakdown runs names the reference. True converges the eigenvalue by
-    the Lanczos from 1/d. 'sign' stops once the sign is proven by the
+    the symmetric Davidson from 1/d. 'sign' stops once the sign is proven by the
     residual bound: first by Rayleigh-Ritz on the span of the roots' X - Y
     (which proves an eigenvalue in that span, not the minimum over pair
-    irreps no root lies in), then by a Lanczos from the lowest root with
+    irreps no root lies in), then by a Davidson from the lowest root with
     PROBE_START_MIX of 1/d at 1e-2, then from 1/d at escalating tolerances.
     The quantity is a property of the SCF solution, not the molecule, so
     probe once per reference that is in doubt.
@@ -741,7 +741,7 @@ def solve_bse_isdf(mf, mol, nocc, numerics=None, qp='G0W0', factors=None,
     # Rank 0's mean field, before a grid size or an interpolation point count
     # is read off it anywhere below.
     if nranks > 1:
-        replicate_mean_field(mf, mpi_comm)
+        lockstep_mean_field(mf, mpi_comm)
     if progress is None:
         progress = getattr(mol, 'verbose', 0) > 0
     progress = bool(progress) and rank == 0        # lockstep ranks, one voice
@@ -1103,7 +1103,7 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
     nranks = mpi_comm.Get_size() if mpi_comm is not None else 1
     # Before the grid: `ntau='auto'` is an integer read off the spectrum.
     if nranks > 1:
-        replicate_mean_field(mf, mpi_comm)
+        lockstep_mean_field(mf, mpi_comm)
     factors = (factors if factors is not None
                else separable_factors(mf, mol, auxbasis=auxbasis, radii=radii,
                                       counts=counts, n_start=n_start,

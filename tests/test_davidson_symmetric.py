@@ -26,7 +26,7 @@ from pyscf import gto, scf
 
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 from src.SingleReference.ADC import ADCSolver
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 H2O = 'O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471'
 

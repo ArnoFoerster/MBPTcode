@@ -93,7 +93,7 @@ def test_a_second_saddle_is_flagged_and_walked_on(tmp_path, monkeypatch):
         return real(s, m, **kw) if len(calls) == 1 else -1.0 * real(s, m)
     monkeypatch.setattr(excitations, 'surface_hessian', planted)
     run = run_of(tmp_path, '--engine', 'auto', '--saddle-check', '1')
-    # Refuse inputs, warn numerics
+    # a numerical event: warned about, not refused
     with pytest.warns(WalkNotRelaxed, match='second saddle'):
         mol, again, root, final, record = run.saddle_checked(
             't1', saddle, info, 0, surface, 0.0)

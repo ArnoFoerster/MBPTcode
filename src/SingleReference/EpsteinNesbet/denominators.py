@@ -495,3 +495,55 @@ def build_dressed_denoms_uhf(u2_denom_dress, eps_a, eps_b, g_aaaa, g_abab, g_bbb
         custom_denom['bb'] = D_bare_bb
 
     return custom_denom
+
+
+def coulomb_exchange_diagonals_uhf_df(B_a, B_b):
+    """Spin-resolved Coulomb/exchange diagonals from the two UHF DF factors:
+
+        J[s][t][p,q] = <p_s q_t | p_s q_t> = (p_s p_s | q_t q_t)
+        K[s][p,q]    = <p_s q_s | q_s p_s> = (p_s q_s | q_s p_s)
+
+    K has one spin index because exchange only exists within a spin -- which
+    is the whole content of the `delta(spin_p, spin_q)` in <pq||pq>
+    (dressed_doubles_block)."""
+    B = {'a': B_a, 'b': B_b}
+    diag = {s: np.einsum('Qpp->Qp', B[s]) for s in ('a', 'b')}
+    J = {s: {t: np.einsum('Qp,Qq->pq', diag[s], diag[t], optimize=True)
+             for t in ('a', 'b')} for s in ('a', 'b')}
+    K = {s: np.einsum('Qpq,Qpq->pq', B[s], B[s], optimize=True)
+         for s in ('a', 'b')}
+    return J, K
+
+
+def dressed_doubles_block(D_bare, J, K, no, spins, dress):
+    """D_bare + Delta for ONE spin block of a doubles amplitude in [i,j,a,b] order,
+    spins = (s_i, s_j, s_a, s_b), with D_bare = eps_a + eps_b - eps_i - eps_j
+    (particles minus holes). Delta is the determinant-wise shift of Jiang & Engel
+    Eq. 20,
+
+        Delta = <ij||ij> + <ab||ab> - <ia||ia> - <jb||jb> - <ja||ja> - <ib||ib>,
+
+    each <pq||pq> = J[s][t][p,q] - delta(s, t) K[s][p,q] for p of spin s and q of
+    spin t: the single rule the whole spin resolution rests on. J, K and no (the
+    occupied count) are keyed by spin 'a'/'b' over each spin's full orbital range
+    (coulomb_exchange_diagonals_uhf_df); a restricted reference passes the same
+    arrays for both spins. dress: the validated channel dict ('hh', 'pp', 'hp')."""
+    si, sj, sa, sb = spins
+
+    def part(s, t, f1, f2):
+        s1 = slice(0, no[s]) if f1 == 'o' else slice(no[s], None)
+        s2 = slice(0, no[t]) if f2 == 'o' else slice(no[t], None)
+        out = J[s][t][s1, s2]
+        return out - K[s][s1, s2] if s == t else out
+
+    D = D_bare.copy()
+    if dress.get('pp'):
+        D = D + part(sa, sb, 'v', 'v')[None, None, :, :]
+    if dress.get('hh'):
+        D = D + part(si, sj, 'o', 'o')[:, :, None, None]
+    if dress.get('hp'):
+        D = D - part(si, sa, 'o', 'v')[:, None, :, None]
+        D = D - part(sj, sb, 'o', 'v')[None, :, None, :]
+        D = D - part(sj, sa, 'o', 'v')[None, :, :, None]
+        D = D - part(si, sb, 'o', 'v')[:, None, None, :]
+    return D

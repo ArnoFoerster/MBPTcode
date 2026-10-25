@@ -1,9 +1,10 @@
 """The folded ADC(2) operator's RI factors as the factor provider the tiled
 correlation force reads (`df_correlation_force_tiled`, module docstring).
 
-The MP2 force runs on the fold set up without a root (`ground_factors`, the
-ADC(1) level); an ADC(2) state's force on the fold that solved it
-(`FoldFactors(op)`). Either way the provider hands over the fold's factors,
+An ADC(2) state's force runs on the fold that solved it (`FoldFactors(op)`);
+the fold set up without a root (`ground_factors`, the ADC(1) level) gives
+the MP2 force the same bits as its default provider
+(`gradients.df_factors.mp2_factors`). Either way the provider hands over the fold's factors,
 its occupied-tile integrals, its auxiliary chunks and their owners, its
 communicator, and the frozen core's factors in the same fit.
 
@@ -37,7 +38,8 @@ class FoldFactors:
 def ground_factors(mol, mf, frozen, auxbasis, tile_gb=EE_RI_TILE_GB, comm=None,
                    aux_chunk=None):
     """The fold's factors, tiles and chunks without a root (ADC(1) setup), as
-    a provider: what the tiled MP2 force runs on."""
+    a provider, bitwise equal to `gradients.df_factors.mp2_factors` for the
+    tiled MP2 force."""
     f = ee_ri_fold.bare_factors(mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm,
                                 aux_chunk=aux_chunk)
     return FoldFactors(ee_ri_fold.RIFoldADC2(f, 'singlet', level='adc1',

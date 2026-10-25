@@ -46,13 +46,13 @@ Fock matrix and orbitals, h + J[D_a + D_b] - K[D_s] + Sigma~_s, mixed
 together by one DIIS on both.
 """
 import types
-import warnings
 
 import numpy as np
 import scipy.linalg
 from pyscf import scf
 from pyscf.scf import diis as scf_diis
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.numerics.numerics import numerics_or_default
 from src.SingleReference.GW.self_energy import get_method_info
@@ -60,7 +60,7 @@ from src.Base.environment_seam import environment_of
 from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
 from src.Base.utils.parallel import threads
-from src.SingleReference.GW.evGW import SCREENINGS
+from src.SingleReference.GW import evGW  # module import: evGW -> qp_energy -> this file
 from src.SingleReference.GW.reaction_field import (continuum_operator,
                                                    dressed_factors)
 from src.SingleReference.GW.self_energy import SelfEnergySolver
@@ -76,7 +76,8 @@ MIXINGS = ('diis', 'linear')
 
 class QsGWNotConverged(RuntimeWarning):
     """The qsGW loop ended without a fixed point: the spectrum returned is the
-    last iterate and its record says info['converged'] False."""
+    last iterate, its record says info['converged'] False, and the named
+    flag 'qsgw_not_converged' is raised."""
 
 
 def _rpa_spectrum(eps, coeff, nocc, eta, tda, unrestricted=False):
@@ -144,7 +145,8 @@ def _record_step(d_eps, d_dm_matrix, tested, nmo, history, dm_history):
 def _warn_not_converged(label, loop, history, dm_history, stacklevel):
     """The loop's warning when it ran out of `loop.max_cycle` cycles (`loop`
     the qsgw settings): its last iterate is returned, not a fixed point."""
-    warnings.warn(
+    flag(
+        'qsgw_not_converged',
         f'{label} did not converge in {loop.max_cycle} cycles: max |delta eps| '
         f'is {history[-1] * HARTREE_TO_EV:.4f} eV against '
         f'{loop.tol * HARTREE_TO_EV:.4f} eV, |dD| {dm_history[-1]:.1e} against '
@@ -210,8 +212,8 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
     (max_cycle, tol, dm_tol, diis_size, mixing_lambda, flow, block_elems,
      eta) = (loop.max_cycle, loop.tol, loop.dm_tol, loop.diis_size,
              loop.mixing_lambda, loop.flow, loop.block_elems, loop.eta)
-    if screening not in SCREENINGS:
-        raise ValueError(f'screening={screening!r}: choose one of {SCREENINGS}')
+    if screening not in evGW.SCREENINGS:
+        raise ValueError(f'screening={screening!r}: choose one of {evGW.SCREENINGS}')
     if mixing not in MIXINGS:
         raise ValueError(f'mixing={mixing!r}: choose one of {MIXINGS}')
     if not 0.0 < mixing_lambda <= 1.0:

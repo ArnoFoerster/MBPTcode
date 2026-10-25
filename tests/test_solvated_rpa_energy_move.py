@@ -59,8 +59,7 @@ from tests.pins import RECORDING_BLAS, matches
 
 def same(got, want, quantity='root', unit='1'):
     """Production and the reference spelling, two computations: a few ulp
-    under the recording BLAS, the class bar elsewhere.
-    """
+    under the recording BLAS, the class bar elsewhere."""
     return matches(got, want, RECORDING_BLAS, unit=unit, quantity=quantity)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))

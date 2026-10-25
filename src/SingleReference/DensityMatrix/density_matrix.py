@@ -1,6 +1,7 @@
 import numpy as np
 from pyscf import scf
 
+from src.SingleReference.GW.qp_solve import mean_field_static_operator
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -107,10 +108,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         dgamma_vv = np.einsum('sak,sbk->ab', t_ak, t_ak)
 
         mo = mf.mo_coeff
-        dm = mf.make_rdm1()
-        Sigx = -0.5 * mf.get_k(mol, dm)
-        vxc = mf.get_veff(mol, dm) - mf.get_j(mol, dm)
-        sx_ib = (mo.T @ (Sigx - vxc) @ mo)[np.ix_(occ, virt)]
+        sx_ib = (mo.T @ mean_field_static_operator(mf, mol) @ mo)[np.ix_(occ, virt)]
 
         term1 = np.einsum('sik,sbk->ib', w_ik, t_ak)
         term2 = np.einsum('sic,sbc->ib', t_ic, w_bc)

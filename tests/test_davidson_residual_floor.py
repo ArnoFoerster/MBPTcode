@@ -58,7 +58,7 @@ def model(monkeypatch):
         return diag[None] * z + v, v
 
     # RPA's screened diagonal is d itself, as the production actions return
-    # it; the default preconditioner is now the screened diagonal, which a
+    # it; the default preconditioner is the screened diagonal, which a
     # block action without one refuses.
     apply_AB.screened_diagonal = lambda: diag
 
@@ -165,8 +165,8 @@ def test_a_converged_solve_carries_no_flag(model):
 
 def test_the_gradient_chain_keeps_and_logs_rather_than_refuses(monkeypatch):
     """The chain reads forces off the eigenvectors; a read root left
-    unconverged is a numerical event (refuse inputs,
-    warn numerics), so its Davidson returns the roots and the chain judges
+    unconverged is a numerical event (a numerical shortfall warns and
+    carries a named flag), so its Davidson returns the roots and the chain judges
     them itself, logging any in casida_log: empty on a converged solve."""
     seen = []
 

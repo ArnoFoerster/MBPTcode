@@ -17,8 +17,8 @@ the arithmetic is unchanged (verified: max|diff| ~1e-16 on every residual):
    bit-identical.
 
 2. The P(x,y) antisymmetrizer lines accumulate via `pacc` (parallel_accum.py)
-   rather than `res += c0 * tmp + c1 * tmp.transpose(...) + ...`. Once (1)
-   landed, those lines were 84% of triples_residual -- single-threaded, since
+   rather than `res += c0 * tmp + c1 * tmp.transpose(...) + ...`. With (1)
+   in place, those lines were 84% of triples_residual -- single-threaded, since
    numpy elementwise ufuncs never use BLAS, and allocating a full rank-6
    temporary per permutation. See parallel_accum.py for the measurements.
 

@@ -1,7 +1,6 @@
 """Numerical events in the excited-state chain warn, carry a named flag in the
-record, and let the run carry on
-(refuse inputs, warn numerics); the adjoint reads the forward's
-floor.
+record, and let the run carry on (a bad input is refused instead); the
+square-root adjoint reads the forward's floor.
 
 - a member leaving its frozen quasiparticle-Hamiltonian group at a
   displaced geometry: warned about, the drop in `qp_subspace_drops` (which
@@ -28,7 +27,7 @@ floor.
   is logged in `casida_log`, which the vertical and emission records carry
   as 'casida_warnings'; a root the force does not read is not logged.
 
-Stubs, except G5: water/cc-pVDZ on its shipped G1 radii, whose fit error is
+Stubs, except the failed fit: water/cc-pVDZ on its shipped G1 radii, whose fit error is
 reported as failed.
 """
 import numpy as np

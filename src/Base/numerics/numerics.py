@@ -57,7 +57,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          NUCLEAR_FD_STEP,
                                          OUTSIDE_SCISSOR_MODES,
                                          QP_DEGENERACY_TOL, ROOT_FOLLOWING,
-                                         RPA_ENERGY_NFREQ,
+                                         RPA_ENERGY_NFREQ, RPA_ENERGY_NFREQ_MINIMAX,
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL, SCF_MAX_CYCLE,
                                          SOLVATION_LOOP_MAX_CYCLE,
@@ -243,16 +243,21 @@ class BSENumerics:
     Davidson's cycle cap, guess count per root and preconditioner, the
     (A - B) probe, the root's adjoint and how the state is followed. The
     Davidson's entry points (`solve_casida_davidson`, `solve_bse_isdf`,
-    `solve_bse_df`, `solve_bse`) and the chain read them all from here, so a
-    stand-alone solve and the chain's converge to one residual.
+    `solve_bse_df`, `solve_bse`) and the chain read the solver settings from
+    here, so a stand-alone solve and the chain's converge to one residual.
 
-    probe: after every full-BSE matrix-free solve, True converges
-        min eig(A - B) by the Lanczos from 1/d and refuses the step
-        (`UnstableReference`) when it is not positive; 'sign' only proves its
-        sign, from the roots' span first, which cannot see a minimum in a
-        pair irrep no root reaches; False skips it, only where asked for by
-        name. The dense solver refuses an indefinite (A - B) by its Cholesky
-        whatever this says, and the Tamm-Dancoff kernel is not probed.
+    probe: the gradient chains' (A - B) probe (`excited_state`, the surface
+        factory, the ISDF-vs-DF check). After every full-BSE matrix-free solve
+        of a chain, True converges min eig(A - B) by the symmetric Davidson
+        from 1/d and refuses the step (`UnstableReference`) when it is not
+        positive; 'sign' only proves its sign, from the roots' span first,
+        which cannot see a minimum in a pair irrep no root reaches; False
+        skips it, only where asked for by name. The stand-alone drivers
+        (`solve_bse`, `solve_bse_isdf`, `solve_bse_df`) do not read it: they
+        probe only when called with `probe=True` or `'sign'`, since on a large
+        DF run the probe can cost more than the solve. The dense solver
+        refuses an indefinite (A - B) by its Cholesky whatever this says, and
+        the Tamm-Dancoff kernel is not probed.
     adjoint: how the root's adjoint is formed (BSE_ADJOINTS); track: None
         follows the state's index, a mode of ROOT_FOLLOWING its Casida
         vector.
@@ -503,16 +508,24 @@ def require_one_stamp(products, where):
         require_same_identity(stamps[0], other, where)
 
 
-def rpa_quadrature(numerics):
+def rpa_quadrature(numerics, grid='gauss_legendre'):
     """(ntau, nfreq) of a dRPA correlation energy on `numerics`: its own
     counts where `derive` gave it some, else derived from the excited
     state's -- the static screening's tau count `ntau_w` (None:
     the minimax count of the gap, the same rule) and the energy integral's
-    RPA_ENERGY_NFREQ frequencies, the excited half having no frequency
-    quadrature of that integrand."""
+    frequencies, the excited half having no frequency quadrature of that
+    integrand: RPA_ENERGY_NFREQ on a Gauss-Legendre grid,
+    RPA_ENERGY_NFREQ_MINIMAX on a minimax one (`grid='minimax'`), whose
+    tables stop at 34."""
     q = numerics.quadrature
+    if grid == 'minimax':
+        nfreq = RPA_ENERGY_NFREQ_MINIMAX
+    elif grid == 'gauss_legendre':
+        nfreq = RPA_ENERGY_NFREQ
+    else:
+        raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
     return (q.ntau_w if q.ntau_rpa is None else q.ntau_rpa,
-            RPA_ENERGY_NFREQ if q.nfreq_rpa is None else q.nfreq_rpa)
+            nfreq if q.nfreq_rpa is None else q.nfreq_rpa)
 
 
 def numerics_or_default(numerics):

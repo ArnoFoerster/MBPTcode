@@ -117,7 +117,6 @@ RESTRICTED = SpinModel('restricted', True, 4)
 UNRESTRICTED = SpinModel('unrestricted', False, MAX_RANK_U)
 
 T_BRA = {r: (bra_ops(r), RESTRICTED.blocks(r)) for r in range(1, RESTRICTED.max_rank + 1)}
-ALL_BLOCKS_U = {r: UNRESTRICTED.all_blocks(r) for r in range(1, MAX_RANK_U + 1)}
 
 
 # ---------------------------------------------------------------------------

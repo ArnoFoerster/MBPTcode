@@ -67,7 +67,7 @@ from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds, fit_rows_ad
 from src.gradients.skeleton_tiles import isdf_exchange_seeds, shell_runs
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
-from src.Base.pyscf.pyscf_interface import exchange_channels
+from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels
 
 #: The row-fit adjoint pending on this thread (`one_fit_adjoint`): each
 #: simulated rank is a thread assembling its own force.
@@ -865,14 +865,6 @@ def pair_positions(layout, gram_layout, nao):
             or not np.array_equal(key[np.minimum(pos, len(key) - 1)], want)):
         raise ValueError('the F test set holds pairs the Gram layout does not')
     return pos
-
-
-def auxmol_of(mf):
-    """The auxiliary molecule behind a density-fitted mean field."""
-    aux = getattr(mf.with_df, 'auxmol', None)
-    if aux is None:
-        aux = pyscf_df.addons.make_auxmol(mf.mol, auxbasis=mf.with_df.auxbasis)
-    return aux
 
 
 # ---------------------------------------------------------------------------

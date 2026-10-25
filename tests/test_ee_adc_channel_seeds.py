@@ -28,7 +28,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.ADC.eeADC.ee_driver import _open_seeds, solve_ee_adc
+from src.SingleReference.ADC.eeADC.ee_driver import _open_seeds
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988

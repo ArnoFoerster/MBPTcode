@@ -12,7 +12,7 @@ r + nranks, ... and the roots are all-gathered back into state order. Sigma
 arrives all-reduced and identical on every rank and the static term is
 replicated from rank 0, so each root is the same scalar iteration on the same
 numbers wherever it runs, and the gates here are a few ulp per state (two
-computations of one root, `assert_same` on the
+computations of one root; `assert_same` on the
 Pade-continued class). Ranks
 beyond the state count own an empty block and only serve the gather.
 

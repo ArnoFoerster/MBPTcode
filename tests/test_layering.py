@@ -18,8 +18,7 @@ and no MPI is needed to check them, each over every module of both packages:
     `lockstep_mean_field` and `current_comm` -- lock what the layer decided
     itself, ask for the rank where a side effect needs it, nothing more.
 
-The layer rules hold over every module of src/ and tools/
-(docs/layout.md):
+The layer rules hold over every module of src/ and tools/:
 
   * an import only points down the layers (`LAYERS`): physics -> properties
     -> gradients (method subpackages above the core) -> electronic structure
@@ -29,7 +28,7 @@ The layer rules hold over every module of src/ and tools/
   * the method subpackages of the gradient layer never import each other
     (`SIBLINGS`), and nothing outside Periodic imports it (`ISOLATED`);
   * no private name of another module is read (`PRIVATE_EXCEPTIONS` names the
-    few that are allowed for now).
+    few kept as aliases).
 
 The scanners are checked against planted sources below, so each rule is shown
 to fail on the pattern it forbids and to pass on the one it allows.
@@ -56,8 +55,8 @@ KERNEL_MODULES = frozenset({'src/gradients/gwbse/qp_space_time.py',
                             'src/gradients/rpa/space_time_adjoint.py',
                             'src/gradients/gwbse/reaction_field_adjoint.py'})
 
-#: Distributed kernels and state models that live under src/gradients:
-#: the tiled
+#: Distributed kernels and state models that live under src/gradients
+#: (the MPI rule goes by role, not by folder): the tiled
 #: skeleton and correlation forces, the ISDF fit adjoint, and the state models of the solvation
 #: loop, moved in from Base and SingleReference. They split their work over
 #: the ranks themselves, so they may take `comm` and use any primitive of
@@ -249,7 +248,7 @@ PLANTED = '''
 import src.Base.utils.parallel.mpi_grid as grid
 from src.Base.utils.parallel import mpi_grid
 from src.Base.utils.parallel.mpi_grid import broadcast, lockstep
-from src.SingleReference.GW.space_time import replicate_mean_field
+from src.SingleReference.GW.space_time import replicate_factors
 from src.Base.factorization.distributed_df import serve_requests
 
 
@@ -291,7 +290,7 @@ def test_the_comm_scan_finds_every_planted_parameter():
 def test_the_import_scan_finds_every_planted_name():
     assert forbidden_imports(ast.parse(PLANTED)) == [
         'src.Base.utils.parallel.mpi_grid.broadcast:4',
-        'src.SingleReference.GW.space_time.replicate_mean_field:5',
+        'src.SingleReference.GW.space_time.replicate_factors:5',
         'src.Base.factorization.distributed_df.serve_requests:6']
     assert forbidden_imports(ast.parse(ALLOWED)) == []
 
@@ -308,8 +307,7 @@ if __name__ == '__main__':
 
 
 # --------------------------------------------------------------- the layers
-#: The layering rules, enforced on
-#: every module of src/ and tools/ too: an import may only point to an
+#: Enforced on every module of src/ and tools/: an import may only point to an
 #: equal or lower rank. The longest prefix decides a module's rank, so the
 #: method subpackages of the gradient layer sit above its core.
 LAYERS = {
@@ -334,8 +332,8 @@ SIBLINGS = (('src.gradients.gwbse', 'src.gradients.adc'),
 #: Separate side by side: imported by no
 #: module outside it.
 ISOLATED = ('src.SingleReference.Periodic',)
-#: Private names read across modules that stay for now:
-#: ee_spin_blocks keeps `_ew`, `_ksum`, `_slab_plan`, `_stream` and ee_driver
+#: Private names read across modules that stay as aliases: ee_spin_blocks
+#: keeps `_ew`, `_ksum`, `_slab_plan`, `_stream` and ee_driver
 #: `_channel_basis` as aliases for ee_fold and ee_gw_pieces.
 PRIVATE_EXCEPTIONS = {
     'src/SingleReference/ADC/eeADC/ee_fold.py': {

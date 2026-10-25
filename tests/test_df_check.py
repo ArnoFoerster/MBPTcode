@@ -3,8 +3,8 @@
 After the vertical stage the check of the stage's geometry runs once, its output is kept as
 'isdf_df_check_vert' and its verdict is written into the stage record as
 `isdf_df_check`; a record holding one is not checked again; and the rate stage
-of a run any of whose checked stages failed warns and flags its table
-(refuse inputs, warn numerics). Formaldehyde, cc-pVDZ, gas phase,
+of a run any of whose checked stages failed warns and flags its table (a
+numerical shortfall warns, it does not refuse). Formaldehyde, cc-pVDZ, gas phase,
 the vertical record produced by `stages.vertical` on a small `Run` from an S0
 record at the input geometry (no walk).
 """

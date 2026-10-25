@@ -43,11 +43,12 @@ class GWCCSelfEnergy:
         beyond the number of "real" low-lying states you care about --
         non-Hermitian Davidson needs elbow room past the exact size of a
         degenerate cluster (e.g. a p-shell excitation manifold) to reliably
-        resolve every member of it; requesting too few silently returns an
-        incomplete/inconsistent cluster (caught downstream in
-        transition_densities' biorthogonalization, which raises rather than
-        returning wrong numbers -- confirmed on He/def2-SVP's exactly
-        3-fold-degenerate lowest excitation)."""
+        resolve every member of it. With too few, a member of a cluster may
+        find no left eigenvector to pair with: transition_densities warns
+        (`UnpairedEOMStates`), gives that state zero transition densities and
+        lists it in `unpaired_states`, so its pole drops out of Sigma_c.
+        He/def2-SVP's lowest excitation, exactly 3-fold degenerate, is such
+        a cluster."""
         self.eom = eom if eom is not None else EOMCC(mf, level=level, verbose=verbose)
         self.res = self.eom.kernel('ee', nroots=nroots)
         rho, rho_star = self.res.transition_densities()

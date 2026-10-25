@@ -19,7 +19,7 @@ The reference is `state_models.HFState` (the mean field in the field, its
 refusal of loose orbital gradients, its rank lockstep before any decision);
 each call hands the chain a copy of it, because the chain holds what it
 computed at a geometry by the identity of the mean field
-(`state_following.ExcitedStateChain.forward`), and a mean field
+(`excited_state.ExcitedStateChain.forward`), and a mean field
 re-converged in place would be taken for the last one.
 
 drho_rel = d Omega / d h is the chain's Lagrangian density

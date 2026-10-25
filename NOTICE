@@ -24,7 +24,7 @@ Licensed under the Apache License, Version 2.0.
     explicit contraction ordering) and are described in the file's module
     docstring; the amplitude equations themselves are unchanged.
 
-  * src/CodeGeneration/pdaggerq_interface.py and src/CodeGeneration/
+  * src/CodeGeneration/ (pdaggerq_interface.py and the generators)
     Code generators that derive equations with pdaggerq (an optional
     dependency, not distributed here) and emit NumPy modules. The restricted
     CC generator (generate_restricted_ccsdt.py) sets up its operators as

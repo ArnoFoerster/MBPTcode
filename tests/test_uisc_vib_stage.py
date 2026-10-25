@@ -9,7 +9,7 @@ Bredas, J. Am. Chem. Soc. 139, 4042 (2017), as the staged run carries them:
   which is exact for V linear in q, Condon term included;
 - the promoting modes are picked by Huang-Rhys weight of the S1 <-> T1
   displacement on the S0 modes, not by |dV/dq|, and S0 modes with an
-  imaginary one are refused (the mode was skipped before);
+  imaginary one are refused;
 - a displaced root is identified by the overlap of its Casida vector with the
   centre's, never by its index or the sign of its eigenvector;
 - the stage's record is a function of the declaration: a stored one is taken

@@ -5,7 +5,7 @@ name: tests
 # dependencies, so a red nightly after a green push means a library moved.
 # The generated ADC(2)-(4) runtime is written nightly with pdaggerq (cached
 # until a generator source changes) and the fast and slow files that read it
-# run on it; ADC(5) (hours to generate) and the heavy tests (hour-long, real
+# or run the generators run on it; ADC(5) (hours to generate) and the heavy tests (hour-long, real
 # MPI) run on the cluster, not here: tools/ci/heavy.txt.
 
 on:
@@ -95,11 +95,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src/SingleReference/ADC/generatedADC
-          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py') }}
+          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py', 'src/SingleReference/ADC/adc_order_rule.py', 'src/SingleReference/ADC/precursor_classes.py') }}
       - name: Write the runtime
         if: steps.runtime.outputs.cache-hit != 'true'
         run: |
           pip install -r tools/ci/pinned.txt
+          pip install networkx==3.4.2   # the Goldstone-diagram engine of the generators
           pip install ~/pdaggerq-wheel/*.whl
           python -c "from src.CodeGeneration.generate_adc import GenerateRuntime; GenerateRuntime(orders=(2, 3, 4))"
 
@@ -130,12 +131,13 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: src/SingleReference/ADC/generatedADC
-          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py') }}
+          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py', 'src/SingleReference/ADC/adc_order_rule.py', 'src/SingleReference/ADC/precursor_classes.py') }}
           fail-on-cache-miss: true
       - name: Install
         run: |
           pip install -r tools/ci/pinned.txt
           pip install openfermion geometric psutil
+          pip install networkx==3.4.2   # the Goldstone-diagram engine of the generator tests
           pip install ~/pdaggerq-wheel/*.whl
       - name: Generated-runtime files of the fast and slow tiers, shard ${{ matrix.shard }} of 4
         run: python tools/ci/run_tier.py fast slow --generated --shard ${{ matrix.shard }}/4 --timeout 3000

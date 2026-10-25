@@ -73,7 +73,7 @@ Water/cc-pVDZ, Hartree-Fock, one factorization shared by every test.
 Which gates are a few ulp. A reduction over disjoint zero-padded slots
 (proj(tau) and the branch sums of the self-energy, where a rank writes only the
 tau points it owns) adds exact zeros, and what it feeds is the serial number
-to a few ulp (two computations, `assert_same`; a copy
+to a few ulp (two computations: `assert_same`; a copy
 of one rank's value on another, a lockstep or a broadcast, stays `==`).
 Everything reduced as a
 partial sum is re-associated instead: chi0 accumulates its tau points as they
@@ -422,10 +422,11 @@ def test_rpa_energy_and_adjoint(water, size):
 @pytest.mark.parametrize('size', SIZES)
 def test_static_w_and_bse(water, size):
     # probe=False here: this gate is the reduction, and the probe is a second
-    # eigensolver in front of it. Replicated on every rank it is a Lanczos
-    # (`probe._lanczos_lowest`), not ARPACK (scipy's eigsh holds one
-    # process-wide lock across its whole iteration, so rank threads deadlock
-    # in it); test_bse_is_rank_zeros_with_perturbed_ranks turns it on.
+    # eigensolver in front of it. Replicated on every rank it is the symmetric
+    # Davidson (`probe._lowest_amb_local`), the same iteration on every rank,
+    # not scipy's eigsh (which holds one process-wide lock across its whole
+    # iteration, so rank threads would deadlock in it);
+    # test_bse_is_rank_zeros_with_perturbed_ranks turns it on.
     w = water
     _, _, W0 = isdf_bse_factors(w['mf'], w['mol'], w['nocc'], factors=w['factors'])
     om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),
@@ -1062,9 +1063,10 @@ def test_bse_is_rank_zeros_with_perturbed_ranks(water, size):
     re-associates the sum over grid points inside the block action. 1e-10 is
     the last bits of that sum; the perturbation it must not admit is 1e-3.
 
-    The (A-B) probe runs here, replicated as a Lanczos
-    (`probe._lanczos_lowest`): scipy's eigsh holds one process-wide lock
-    across its whole iteration, so rank threads would deadlock inside it.
+    The (A-B) probe runs here, replicated as the symmetric Davidson
+    (`probe._lowest_amb_local`), the same iteration on every rank, not
+    scipy's eigsh (which holds one process-wide lock across its whole
+    iteration, so rank threads would deadlock inside it).
     """
     w = water
     om0, _, _, info0 = solve_bse_isdf(w['mf'], w['mol'], w['nocc'], numerics=Numerics(bse={'nroots': 3}),

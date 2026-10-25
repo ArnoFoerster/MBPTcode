@@ -10,8 +10,8 @@ ElementwiseKernel's CUDA text compiled as the body of a C loop. This checks
 the kernel text's arithmetic, not the device; with CuPy the same checks run
 on the GPU as well.
 
-Note: doubles_dot on the GPU dropped the spin-component
-weights (kernel/CPU 0.848 singlet, 0.865 triplet at (1.2, 0.33)).
+A doubles_dot on the GPU that drops the spin-component weights gives
+kernel/CPU 0.848 singlet, 0.865 triplet at (1.2, 0.33).
 """
 import ctypes
 import os

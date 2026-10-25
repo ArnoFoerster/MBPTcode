@@ -1,5 +1,4 @@
-"""Increment 4 (arbiter U^(3)) gate of the spin-free ADC(2)-(5) plan
-the restricted
+"""Gate of the spin-free generated U^(3) coupling: the restricted
 (spin-blocked, RHF) BuildSuperMatrixADCnRestricted.u3_generated assembles the
 disputed order-3 orbital<->k=1 U^(3) coupling (the ADC(4) arbiter that hit
 the exact-FCI 0.0126 H2 target where the printed SCW83 B3 gave 0.0671)

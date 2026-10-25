@@ -9,7 +9,8 @@ from pyscf import dft, gto
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.numerics.constants import HARTREE_TO_EV
-from src.SingleReference import calc_qp_energy, evgw_eigenvalues
+from src.SingleReference.GW.evGW import evgw_eigenvalues
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis='cc-pvdz', verbose=0)

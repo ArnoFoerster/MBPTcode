@@ -111,8 +111,9 @@ script -- the SCF loop, the Davidson, the gradient, the geometry optimization --
 and MPI lives only inside the numerical kernels: the time and frequency sweeps
 of the GW self-energy, the ISDF fit, the BSE matrix-vector products, the SCF's
 Coulomb, exchange and exchange-correlation builds, and the pieces of an
-analytic force. A driver never takes a communicator; the kernels read it from
-the region the script opens once:
+analytic force. A driver needs no communicator: the kernels read it from the
+region the script opens once. (`solve_bse_isdf` also takes `comm=` and
+`distribute=`, for a caller that wants a communicator other than the region's.)
 
 ```python
 from pyscf import dft, gto
@@ -126,10 +127,11 @@ comm = grid_comm()[0]                  # COMM_WORLD, or None without mpi4py
 with distributed(comm):
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
                 basis='cc-pvdz')
-    mf = dft.RKS(mol, xc='pbe0').density_fit()
+    mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
     distributed_mean_field(mf)         # J/K and the xc grid split over ranks
+    numerics = Numerics(isdf={'level': 'G1'}, bse={'nroots': 5})
     omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2,
-                                       numerics=Numerics(bse={'nroots': 5}))
+                                       numerics=numerics)
     if comm is None or comm.Get_rank() == 0:
         print(omega)                   # the same bits on every rank
 ```

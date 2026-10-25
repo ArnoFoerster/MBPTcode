@@ -14,7 +14,7 @@ and the relaxed densities built on it reach the finite field.
      its equation to 1e-9, with and without the preconditioner's level shift,
      which leaves the solution unchanged to 1e-12.
   4. a solve that cannot reach tol warns (CphfNotConverged) and flags
-     'cphf_not_converged' inside numerical_flags.collecting (a numerical
+     'orbital_response_not_converged' inside numerical_flags.collecting (a numerical
      event is warned about, not refused).
 
 Run: python tests/test_cphf_residual.py
@@ -176,9 +176,9 @@ def check_unreachable_tol():
         x = cphf.solve(fvind, e_ai, np.ones_like(e_ai), numerics=Numerics(
             scf={'cphf_tol': 1e-30, 'cphf_max_cycle': 2, 'cphf_refinements': 2}))
     warned = any(issubclass(w.category, cphf.CphfNotConverged) for w in caught)
-    return check(warned and [f['flag'] for f in flags] == ['cphf_not_converged']
+    return check(warned and [f['flag'] for f in flags] == ['orbital_response_not_converged']
                  and np.isfinite(x).all(),
-                 'an unreachable tol warns and flags cphf_not_converged',
+                 'an unreachable tol warns and flags orbital_response_not_converged',
                  str([f['flag'] for f in flags]))
 
 

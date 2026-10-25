@@ -5,11 +5,10 @@ equations). CCSD: thin wrapper around pyscf's CCSD/make_rdm1. Both density
 functions return the full AO-basis 1-RDM, usable as
 calc_qp_energy(..., dm_correction=...).
 """
-import warnings
-
 import numpy as np
 from pyscf import cc, scf
 
+from src.Base.numerical_flags import flag
 from . import amplitudes
 from . import solver
 from .integrals import (build_spinorbital_integrals,
@@ -113,9 +112,9 @@ def _flag_ccsd_convergence(mycc, who, out):
     if out is not None:
         out['converged'] = bool(mycc.converged)
     if not mycc.converged:
-        warnings.warn(f'{who}: pyscf {type(mycc).__name__} did not converge; its '
-                      f'last amplitudes are used (converged=False)',
-                      CCNotConverged, stacklevel=3)
+        flag('cc_not_converged', f'{who}: pyscf {type(mycc).__name__} did not '
+             f'converge; its last amplitudes are used (converged=False)',
+             CCNotConverged, stacklevel=3)
 
 
 def compute_ccsd_density_matrix(mf, ncore=0, out=None):

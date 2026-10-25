@@ -1,6 +1,7 @@
 """Distributed tau loops must reproduce the serial answer, and every
 collective cut into windows at an artificial count limit its one call's
 numbers to a few ulp (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
+A named flag raised on one rank reaches every rank's record.
 The reduce-scatter hands each rank its rows of the all-reduce within the
 spread of the summed partials over the orders a reduction adds them in, whole
 and in windows: to a few ulp over simulated ranks, which add both in rank order,
@@ -16,10 +17,14 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import warnings
+from types import SimpleNamespace
+
 import numpy as np
 warnings.simplefilter('ignore')
 from pyscf import gto, scf
 import src.Base.utils.parallel.mpi_grid as mpi_grid
+import src.SingleReference.LinearResponse.space_time as st
+from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.utils.parallel.mpi_grid import (
     contiguous_block, grid_comm, partition, reduce_scatter_rows, reduce_sum)
 from src.Base.utils.parallel.simulated_comm import run_simulated
@@ -130,6 +135,37 @@ else:
         faults = scatter_faults(s, whole, cut, exact=True)
         all_ok &= check(not faults, f'over {s} simulated ranks, to a few ulp',
                         '; '.join(faults))
+
+# Named flags raised on one rank reach every rank's record: `gathered` over
+# the ranks, and the space-time dRPA's `flags` dict, whose frequencies are
+# owned by one rank each (a planted chi0 with one non-positive determinant).
+if rank == 0:
+    print(f'\n-- named flags over {size} rank(s)')
+raised = []
+with collecting(raised):
+    flag('planted', f'rank {rank}', RuntimeWarning)
+got = gathered(raised, comm)
+all_ok &= check(got == [{'flag': 'planted', 'message': f'rank {r}'}
+                        for r in range(size)],
+                'every rank gathers every rank\'s flags', f'{len(got)} entries')
+NAUX, NFREQ, BAD = 4, 6, 4
+q = np.linalg.qr(np.random.default_rng(0).standard_normal((NAUX, NAUX)))[0]
+chi0 = np.array([(q * np.r_[1.5 if k == BAD else -0.1, -np.linspace(0.2, 0.5, NAUX - 1)])
+                 @ q.T for k in range(NFREQ)])
+sweep, blocks = st.polarizability_projected_sweep, st.owned_frequency_blocks
+st.polarizability_projected_sweep = lambda *a, **k: np.zeros((2, NAUX, NAUX))
+st.owned_frequency_blocks = lambda p, c, t, mine: iter(
+    [(list(range(NFREQ) if mine is None else mine),
+      chi0[list(range(NFREQ) if mine is None else mine)])])
+grid = SimpleNamespace(ntau=2, nfreq=NFREQ, tau_points=np.ones(2),
+                       cosft_wt=np.zeros((NFREQ, 2)), omega_weights=np.ones(NFREQ))
+dets = {}
+st.rpa_correlation_energy_space_time(None, np.zeros((1, NAUX)), np.array([-1.0, 1.0]),
+                                     1, grid, comm=comm if size > 1 else None,
+                                     flags=dets)
+st.polarizability_projected_sweep, st.owned_frequency_blocks = sweep, blocks
+all_ok &= check(dets == {'nonpositive_det': [BAD]},
+                'every rank names the frequency one rank owns', str(dets))
 
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
             basis='cc-pvdz', verbose=0)

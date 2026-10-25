@@ -21,9 +21,7 @@ R0 in some places and the residual at R* in others.
 
 A state is declared by spin and root index, never by irreducible
 representation: `Excitation(irrep=...)` has no realization that follows it and
-`potential_energy_surface` refuses it. `root_by_irrep` takes the irrep from
-the spectrum at the reference geometry, the lowest root of that state
-symmetry, and returns the root to declare.
+`potential_energy_surface` refuses it.
 
 Every vertical block also carries what the method reports of its own state
 through the `diagnostics` ingredient: for GW-BSE (`gradients.gwbse.diagnostics`)
@@ -41,7 +39,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from pyscf import gto
 
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
@@ -60,7 +57,6 @@ from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.rpa_energy import (ground_state_energy,
                                                            reference_energy)
 from src.gradients.gwbse.state_manifold import StateManifold
-from src.properties import characters
 from src.properties.hessian import surface_hessian
 from src.properties.optimize import escape_saddle
 from src.gradients.surface import (evaluate, lockstep_geometry,
@@ -347,62 +343,6 @@ def spectrum_of(surface, mol, mf):
         mol, mf)
 
 
-def symmetric_copy(mol):
-    """`mol` rebuilt with its point group detected, from its CURRENT coordinates.
-
-    Read off `atom_coords` and not `mol.atom`: a molecule that went through
-    `set_geom_` keeps the string it was created from, so rebuilding from that
-    would label the reference geometry's orbitals at a displaced one.
-    """
-    return gto.M(atom=[(mol.atom_pure_symbol(i), tuple(c)) for i, c
-                       in enumerate(mol.atom_coords())],
-                 unit='Bohr', basis=mol.basis, symmetry=True,
-                 max_memory=mol.max_memory, verbose=0)
-
-
-def labelled_spectrum(spec, excitation, mol, scf_factory, listed=8):
-    """The roots the route solves at `mol`, each labelled by its state irrep.
-
-    A state's symmetry is the direct product Gamma_i (x) Gamma_a over its
-    transition amplitude (`characters.root_irreps`), so the spectrum is the
-    realization's own, solved on a copy of `mol` built with its point group.
-    Returns (omega in Hartree, the per-root labels, the point group, the
-    `listed` lowest roots as records with energy, irrep and purity).
-    """
-    symmetric = symmetric_copy(mol)
-    surface = surface_of(spec, excitation, symmetric, scf_factory)
-    symmetric, mf = surface.mean_field(symmetric)
-    omega, x, y, nocc = spectrum_of(surface, symmetric, mf)
-    labels = characters.root_irreps(symmetric, mf.mo_coeff, nocc, x, y)
-    order = np.argsort(np.asarray(omega))[:listed]
-    roots = [{'root': int(n), 'omega_eV': float(omega[n]) * HARTREE_TO_EV,
-              'irrep': labels[int(n)]['irrep'],
-              'purity': labels[int(n)]['purity']} for n in order]
-    return np.asarray(omega), labels, symmetric.groupname, roots
-
-
-def root_by_irrep(spec, excitation, mol, scf_factory, irrep, listed=8):
-    """The lowest root of state irrep `irrep` at the reference geometry, as a record.
-
-    THE INDEX IS THIS ROUTE'S OWN: two realizations that order near roots
-    differently are each asked for the state, not for the other one's index.
-    An irrep absent from the roots solved is an error naming the roots, never
-    a fallback to root 1. `index` is zero-based; the record lists the `listed`
-    lowest roots with their labels and purity.
-    """
-    omega, labels, group, roots = labelled_spectrum(spec, excitation, mol,
-                                                    scf_factory, listed)
-    index = next((int(n) for n in np.argsort(omega)
-                  if labels[int(n)]['irrep'] == irrep), None)
-    if index is None:
-        raise ValueError(
-            f'no {irrep!r} root among the {len(omega)} solved at {group}: '
-            + ', '.join(f"{r['irrep']} {r['omega_eV']:.3f} eV" for r in roots)
-            + '. Raise nroots, or name an irrep the point group has.')
-    return {'target': irrep, 'index': index, 'point_group': group,
-            'roots': roots, 'impure': characters.impure(labels)}
-
-
 def ground_state_at(surface, mol, total=None):
     """E_0(mol) and its additive terms on the ground surface's frozen conventions.
 
@@ -428,10 +368,9 @@ def ground_state_at(surface, mol, total=None):
 def relaxation_fields(info, prefix=''):
     """What an optimizer's record contributes, renamed away from `grad_max`.
 
-    `info['grad_max']` and `info['opt_grad_max']` are ONE number under two
-    names -- the residual |dE/dR| at the converged geometry -- and the first is
-    what the driving force at the INPUT geometry is called everywhere else.
-    Only the unambiguous name travels.
+    A walk's record names the residual |dE/dR| at the converged geometry
+    `opt_grad_max`; `grad_max` is the driving force at the INPUT geometry
+    everywhere else, so only the first travels.
 
     The refreeze is reported as the drift of the conventions at the minimum,
     E_new(R*) - E_old(R*) at one geometry (meV, `optimize.refreeze_pass`),
@@ -604,7 +543,9 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
     has frozen its conventions at R0. `scf_flags`: every mean field the two
     surfaces' chains read with |F_ia| above `scf_force_tol`, warned about and
     carried on (`scf_flags`); `casida_warnings`: every Casida solve whose read
-    roots were left above read_tol or unconfirmed, kept as solved.
+    roots were left above read_tol or unconfirmed, kept as solved;
+    `numerical_flag_warnings`: every named flag the excited chain's forward
+    raised (`numerical_flags.flag`), with the geometry it was first raised at.
     """
     refuse_other_numerics(excited, ground)
     with stage(timer, 'record_force'):
@@ -649,6 +590,8 @@ def vertical_block(excited, ground, mol, timer=None, gradient=True,
             'held_grid': diagnostics.get('held_grid'),
             'scf_flags': scf_flags(excited, ground),
             'casida_warnings': merged_logs('casida_warnings', diagnostics),
+            'numerical_flag_warnings': merged_logs('numerical_flag_warnings',
+                                                   diagnostics),
             'physics': physics_record(excited),
             'state_specific': state_specific_record(excited, mol),
             'realization': excited.realization,
@@ -726,6 +669,7 @@ def saddle_checked_state(relaxed, engine='auto', **walk_kw):
 
     _, again, record = saddle_check(relaxed['surface'], relaxed['mol'], walk)
     if again is None:
+        record['numerical_flags'] = saddle_verdict('saddle check', record)
         return relaxed, record
     record['saddle_walk'] = dict(relaxation_fields(first),
                                  converged=first.get('converged'),
@@ -791,6 +735,7 @@ def emission_block(excited, ground, mol, refreeze, engine, optimizer,
         qp_hamiltonian_warnings=merged_logs('qp_hamiltonian_warnings', *logs),
         scf_flags=scf_flags(excited, relaxed['surface'], ground),
         casida_warnings=merged_logs('casida_warnings', *logs),
+        numerical_flag_warnings=merged_logs('numerical_flag_warnings', *logs),
         **relaxation_fields(relaxed['info']))
     return record, relaxed
 

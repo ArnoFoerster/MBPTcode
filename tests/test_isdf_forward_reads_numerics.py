@@ -1,12 +1,10 @@
 """The ISDF forward reads the grid and the fit from the one Numerics it is handed.
 
-- `separable_factors` with a Numerics alone builds the grid the Numerics names
-  (it once refused: no grid asked for), bit for bit the grid of the keyword;
-- a keyword naming another grid than the Numerics is refused (counts= once
-  silently won over numerics.isdf.counts);
-- `solve_bse_isdf` fits its factors on the Numerics it stamps on its result
-  (it once fitted at the default fit settings and stamped the Numerics it was
-  given, B0b): its roots equal the roots on factors fitted on that Numerics;
+- `separable_factors` with a Numerics alone builds the grid the Numerics names,
+  bit for bit the grid of the keyword;
+- a keyword naming another grid than the Numerics is refused;
+- `solve_bse_isdf` fits its factors on the Numerics it stamps on its result:
+  its roots equal the roots on factors fitted on that Numerics;
 - `ISDFJK` reads numerics.scf.grid_level and refuses counts naming another grid.
 
 Water/cc-pVDZ, RHF, G1; BSE@HF (qp=None), so no GW stage runs.

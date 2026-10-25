@@ -11,8 +11,9 @@ run with k-point sampling, for crystals and slabs.
 ## Methods
 
 - **[ADC](docs/methods/adc.md)** — Dyson IP/EA-ADC(2)-X and ADC(3), RHF
-  spin-adapted and UHF/spin-orbital, dense and matrix-free; generated
-  ADC(2) to ADC(5); excitation-energy ADC(2) and ADC(3).
+  spin-adapted and UHF/spin-orbital, dense and matrix-free; Faddeev-ADC(3)
+  and Faddeev-ADC(4); generated ADC(2) to ADC(5); excitation-energy ADC(2)
+  and ADC(3).
 - **[GW and linear response](docs/methods/gw.md)** — G0W0, evGW/evGW0 and
   qsGW/qsGW0, restricted or unrestricted, on three routes from O(N⁶) to O(N³);
   Casida/RPA and RPA correlation energies.

@@ -20,7 +20,6 @@ if MBPTCODE_ROOT not in sys.path:
 import numpy as np
 import torch
 
-from src.autograd_oracle import torch_chain as tc
 from src.autograd_oracle.frozen import load
 from src.autograd_oracle import torch_nuclear as tn
 

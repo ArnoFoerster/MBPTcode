@@ -35,7 +35,7 @@ from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.ADC import solve as adc_solve
 from src.Base.utils.linear_algebra import diagonalization as _diag_backend
 from src.SingleReference.LinearResponse import casida as casida_mod
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 
 def ranks_without_elpa():

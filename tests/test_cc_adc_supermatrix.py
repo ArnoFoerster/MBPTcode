@@ -1,6 +1,6 @@
-"""CC-ADC(3) amplitude substitution in the generated supermatrix (the parts of the CC amplitude tests
-that need the generated runtime; the amplitude
-conventions themselves are pinned in test_cc_adc_amplitudes):
+"""CC-ADC(3) amplitude substitution in the generated supermatrix (the parts
+that need the generated runtime; the amplitude conventions themselves are
+pinned in test_cc_adc_amplitudes):
 
   * the supermatrix stays Hermitian under the substitution (t-adjoints, not
     CC Lambdas, in the bra slots);
@@ -140,7 +140,7 @@ def test_gfree_df_route_equals_the_dense_route_on_the_same_integrals(water_df):
 def test_gfree_construction_refuses_what_it_cannot_do(water_df):
     """g-free means no EN dressing (the EN shifts read dense g slices): it must
     raise at construction, not compute something else. The MBPT amplitude
-    pool is no longer refused: a g-free solver builds it from the DF
+    pool is not refused: a g-free solver builds it from the DF
     numerators."""
     eps = get_orbital_energies(water_df, representation='spatial')
     B = DFIntegrals.from_scf(water_df.mol, water_df).B_aa

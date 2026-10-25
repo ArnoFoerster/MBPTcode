@@ -1,5 +1,4 @@
-"""A relaunch walks a stored walk that did not converge again,
-as the solvated driver does (`_drop_unconverged`): the stage
+"""A relaunch walks a stored walk that did not converge again, as the solvated driver does (`_drop_unconverged`): the stage
 whose record, or whose '<stage>_walked', is flagged 'walk_not_converged' is
 set aside with every stage built on its minimum (`stages.walk_again`), into
 unconverged/<stage>-<time>/, and the stage walks again from its start. A

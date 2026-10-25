@@ -26,21 +26,20 @@ THE GATE'S SURFACE IS SMOOTHER THAN PRODUCTION'S, on purpose:
   * every mean field it builds -- the walks, the refreeze, the finite
     difference -- integrates the exchange-correlation potential on pyscf's
     grid level GATE_XC_GRID_LEVEL = 5 instead of production's
-    XC_GRID_LEVEL = 4 (`--xc-grid`). On level 3, production's until
-    2026-10-22,
+    XC_GRID_LEVEL = 4 (`--xc-grid`). On level 3,
     pyscf's LRC-wPBEh puts steps of up to 1.2e-7 Ha into the Kohn-Sham
     orbital energies between geometries 2.5e-4 Bohr apart (none in E_KS),
     which G0W0 carries into the excitation energy, -8e-9 Ha at 1.4e-3 Bohr
     from the toluene minimum: a five-point miss of 6.6e-7 Ha/Bohr at
-    h = 1e-3. Level 5 has none there (two cluster runs);
+    h = 1e-3. Level 5 has none there;
   * the Davidson converges to GATE_BSE_CONV_TOL = 1e-10. At the default
     1e-8 two evaluations of one geometry differ by up to 1.2e-9 Ha in
     toluene, 1e-8 to 4e-8 Ha/Bohr at h = 5e-4, which failed the gate on one
     run in two; at 1e-10 they differ by 3e-13 Ha and every miss at h = 5e-4
     was below 2.5e-9 in three repeats.
 The step and the bar are NUCLEAR_FD_STEP and ISDF_GRADIENT_FLOOR as before.
-Production is on XC grid level 4 (smooth there
-too, at +1% per SCF and +6% per force) and the default Davidson tolerance.
+Production is on XC grid level 4 (smooth there too, at +1% per SCF and +6%
+per force) and the default Davidson tolerance.
 
 The negative control: a NotImplementedError raised by the quasiparticle
 solve at the first trial step leaves the walk instead of collapsing its
@@ -152,8 +151,7 @@ def test_the_production_walk(setting, tmp_path, gate_surface):
     # and where a seeded solve stops inside BSE_DAVIDSON_CONV_TOL depends on
     # its seed: in toluene-split up to ~1e-10 Ha (test_chain_record), and the
     # five-point stencil at h = 5e-4 read warm missed by 1.4e-7 and 2.0e-7
-    # Ha/Bohr against 1.9e-8 cold (two cluster runs, at the default
-    # Davidson tolerance). The force is the same either way.
+    # Ha/Bohr against 1.9e-8 cold (at the default Davidson tolerance). The force is the same either way.
     chain.davidson_warm_start = None
     for u in internal_directions(mol, DIRECTIONS, DIRECTION_SEED):
         analytic = float(np.sum(grad * u))

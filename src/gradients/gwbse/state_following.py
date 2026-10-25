@@ -17,6 +17,7 @@ from src.Base.numerics.constants import (ROOT_FOLLOW_MARGIN_MIN,
                                          ROOT_FOLLOW_RESOLVE_FACTOR,
                                          ROOT_FOLLOW_WEIGHT_MIN, BSE_FORCE_RESIDUAL_TOL,
                                          CASIDA_PHASE_TIE_TOL)
+from src.Base.numerical_flags import collecting, gathered
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.GW.qp_solve import add_reaction_field
 from src.SingleReference.GW.qp_states import frozen_scissor
@@ -249,13 +250,27 @@ class StateFollower:
                 and (held.read is None or (read is not None
                                            and read <= held.read))):
             return held.shared, held.solution
-        shared, solution = self._forward_pass(mol, mf)
+        raised = []
+        with collecting(raised):
+            shared, solution = self._forward_pass(mol, mf)
+        self._log_flags(gathered(raised))
         for other in self.chain.evaluations.values():
             other.shared = None
         if held is None or held.mf is not mf:
             held = self.chain.evaluations.put(mol, Evaluation(mf))
         held.shared, held.solution, held.read = shared, solution, read
         return shared, solution
+
+    def _log_flags(self, raised):
+        """Log in `numerical_flag_log` the named flags (`numerical_flags`)
+        a forward pass raised on any thread or rank, each once, at the
+        geometry it was first raised at; each was warned about where it
+        was raised."""
+        geometry = self.chain.resolved.geometry
+        log = self.chain.__dict__.setdefault('numerical_flag_log', [])
+        held = {(e['flag'], e['message']) for e in log}
+        log.extend(dict(e, geometry=geometry) for e in raised
+                   if (e['flag'], e['message']) not in held)
 
     def _forward_pass(self, mol, mf):
         """One forward pass: the shared forward and this spin's Casida step,

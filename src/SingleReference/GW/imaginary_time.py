@@ -447,12 +447,8 @@ def self_energy_matrix_imaginary_time(X_ao, D, W_omega, mo_coeff, eps, nocc,
 
     Memory is (len(omega_out), nao, nao) complex: the returned array and
     little else; the time points are folded in as they are built. Project it
-    down with one of
-
-        sigma_ao_to_mo           full MO matrix     -> qsGW, scGW
-        sigma_ao_to_mo_diagonal  MO diagonal        -> evGW, G0W0
-
-    and discard, or loop over frequency blocks, if that does not fit.
+    down to the MO diagonal with `sigma_ao_to_mo_diagonal` (evGW, G0W0) and
+    discard, or loop over frequency blocks, if that does not fit.
     """
     occ, virt = get_occ_virt_indices(eps, nocc)
     if mu is None:

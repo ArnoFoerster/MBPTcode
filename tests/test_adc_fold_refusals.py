@@ -47,7 +47,7 @@ from src.Base.utils.parallel.simulated_comm import simulated_world
 from src.gradients import df_correlation_force_tiled as tcf
 from src.SingleReference.ADC.eeADC import ee_driver, ee_fold, ee_spin_blocks
 from src.gradients.adc import ee_gradient
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.gradients.adc import ee_state_model
 from src.SingleReference.ADC.eeADC.ee_follow import FollowingWarning, root_missing
 from src.SingleReference.BSE import bse_upfolded as B

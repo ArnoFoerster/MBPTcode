@@ -2,9 +2,9 @@
 
 An imaginary mode (negative from `vibronic.normal_modes`) is a saddle, and a
 mode below VIBRONIC_MODE_FLOOR_CM is a rigid-body remnant or a flat
-direction whose Huang-Rhys factor g^2 / (2 omega^3) has no bound. Both were
-dropped silently (S = 0, or the mode skipped), which changes the sum rule
-unseen; every entry now refuses them.
+direction whose Huang-Rhys factor g^2 / (2 omega^3) has no bound. Dropping
+one silently (S = 0, or the mode skipped) would change the sum rule unseen;
+every entry refuses them.
 """
 import numpy as np
 import pytest

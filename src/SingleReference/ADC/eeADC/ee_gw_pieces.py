@@ -46,7 +46,7 @@ _K_LIVE = 3
 # every p = 1 term; the absolute residual lets terms far above min D drift as R grows.
 # The grid is fitted to 1/x only: the p = 2 terms (the derivative image, weights
 # w_t τ_t) are not bounded by it, pointwise 2e-9 on [0.3, 8], 8e-9 on [0.3, 40],
-# 3.4e-8 on [0.01, 100] (measured); water 6-31G, every vector: <= 1.2e-10
+# 3.4e-8 on [0.01, 100]; water 6-31G, every vector: <= 1.2e-10
 _LAPLACE_TARGET = 1e-9
 
 

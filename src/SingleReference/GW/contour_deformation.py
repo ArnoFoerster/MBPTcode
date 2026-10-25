@@ -26,7 +26,7 @@ and never enters. The imaginary-axis screening comes in as W(i.nu) Bp (`wbp`)
 or, better, already contracted to wc[nu, q] = Bp[:,q]^T [W(i.nu) - I] Bp[:,q]
 (`wc`, nfreq x norb): nothing else of it is ever needed, and each later Sigma
 evaluation then costs nfreq x norb. Built from proj(tau) by
-`cd_screening_contraction` the whole route is O(N^3); built explicitly from
+`cd_screening_contraction_multi` the whole route is O(N^3); built explicitly from
 C_ov by `wc_explicit` it is O(naux^2 nocc nvirt) per frequency.
 
 WHAT MAKES IT WRONG. A residue frequency landing on a particle-hole transition
@@ -247,7 +247,7 @@ def wc_explicit(Bp, C_ov, d, nu_points):
 
 def cd_screening_contraction_multi(proj_tau, cosft_wt, Bps,
                                    tile_gb=ISDF_TILE_GB, freq_indices=None):
-    """`cd_screening_contraction` for a LIST of bra slices, sharing the work.
+    """wc[nu, q] of the module docstring for a LIST of bra slices, sharing the work.
 
     The matrix [1 - chi0(i.nu)] depends on the frequency alone, not on which
     state is being screened, so rebuilding chi0 and factorizing it once per

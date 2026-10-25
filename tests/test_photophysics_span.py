@@ -1,7 +1,7 @@
 """The span of a photophysics run is declared, never chosen by refusal, and
 the records name the cut that ran.
 
-On PXZ-TRZ
+The span is never cut by refusal: on PXZ-TRZ
 aug-cc-pVDZ in toluene the 1e-3 span moved T1 by -29 and dEST by +30 meV
 against DF in the full basis. Every basis is tried in the full basis; a
 molecule whose orbital densities the factors miss is refused there.

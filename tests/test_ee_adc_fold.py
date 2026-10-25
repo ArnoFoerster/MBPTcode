@@ -258,7 +258,7 @@ def check_gf2(eps, B, no):
 def check_folded_operator(mf, eps, B, no):
     """Check 3: A_eff(w) at the full solve's roots."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     nv = len(eps) - no
     n_s = 2 * no * nv
@@ -304,7 +304,7 @@ def check_folded_operator(mf, eps, B, no):
 def check_solve_folded(mf, eps, B, no):
     """Check 4: solve_folded at adc2 against the full Davidson roots."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     nv = len(eps) - no
     n_s = 2 * no * nv
@@ -386,7 +386,7 @@ def check_degenerate_set():
     """CH4 / cc-pVDZ: the degenerate T2 singlet triple is followed without a
     skip, each partner its own vector."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     mol = gto.M(atom=CH4, basis='cc-pvdz', verbose=0)
@@ -454,7 +454,7 @@ def check_routes_and_channels(mf, eps, B, no):
     """The Davidson branch of the fold (dense_limit=0) against the dense one, and
     spin=None against the full solve over both channels."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
@@ -477,7 +477,7 @@ def check_gf2_solves(mf, eps, B, no):
     """gf2 end to end: the fold against the full gf2 channel solve, and the dense
     integral route against the DF route with exact factors."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='gf2', pieces=True)
@@ -532,7 +532,7 @@ def check_gf2_solves(mf, eps, B, no):
 def check_boundaries(mf, eps, B, no):
     """The refusals and the step budget; inputs left as they were handed in."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     try:
         ee_r_sigma_df.build_operator(eps, B, no, level='adc2', parity=1.0,
@@ -973,7 +973,7 @@ def check_seeding_gap():
     """CH4 / 6-31G triplet: M's lowest state folds above the T2 triple, so the
     lowest root is seeded by the count check, not by M."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     mol = gto.M(atom=CH4, basis='6-31g', verbose=0)

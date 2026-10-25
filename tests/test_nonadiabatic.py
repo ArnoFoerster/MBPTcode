@@ -399,8 +399,8 @@ def test_the_error_falls_as_the_step_squared_with_no_noise_floor(
     Antisymmetry and the translational sum rule are both residuals of something
     the construction satisfies exactly, so each is pure stencil error and each
     must fall as h^2. An error that FLATTENED or ROSE at the small-h end would
-    be the displaced solves' own convergence entering as O(eps/h) -- the discriminator a finite-difference check uses
-    -- and there is none of it down to
+    be the displaced solves' own convergence entering as O(eps/h) -- the
+    discriminator a finite-difference check uses -- and there is none of it down to
     a quarter of the default step. The coupling itself is then step-independent
     far below the level it is used at.
     """

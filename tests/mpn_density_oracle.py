@@ -1,6 +1,6 @@
 """The hand-written MP2/MP3 1-RDM corrections (interleaved spin-orbital
 MP2/MP3DensityMatrixSolver, spin-blocked MP2/MP3DensityMatrixSolverUnrestricted)
-and their spin-orbital block entries compute_mp2/mp3_density_matrix: the
+and the spin-orbital MP2 block entry compute_mp2_density_matrix: the
 independent oracles the generated MPn density drivers
 (src/SingleReference/DensityMatrix/mpn_density_driver*.py), which production
 runs, are checked against. Test-only."""
@@ -1006,28 +1006,6 @@ class MP3DensityMatrixSolverUnrestricted(MP2DensityMatrixSolverUnrestricted):
         ov_b = t1_3_bb + term_b_b + term_c_b
 
         return oo_a, oo_b, ov_a, ov_b, vv_a, vv_b
-
-
-def compute_mp3_density_matrix(mf, mol=None, nocc=None):
-    """
-    Build the spin-orbital blocks (oo, ov, vv) of the unrelaxed MP3
-    1-particle density-matrix correction, restricted spin only.
-
-    Spin-orbital basis is interleaved alpha/beta (even=alpha, odd=beta),
-    matching compute_mp2_density_matrix; each block is to be added to the
-    corresponding block of the reference spin-orbital density.
-    """
-    if isinstance(mf, scf.uhf.UHF):
-        raise NotImplementedError("compute_mp3_density_matrix is currently restricted-spin only.")
-
-    mol = mol if mol is not None else mf.mol
-    nocc = nocc if nocc is not None else mol.nelectron // 2
-    eps_spin = get_orbital_energies(mf, representation='spin')
-    eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-    g_anti_spin = get_antisymmetrized_spin_eri(eri_chemist)
-
-    solver = MP3DensityMatrixSolver(eps_spin, g_anti_spin, nocc_spin=2 * nocc)
-    return solver.compute_gamma3_blocks()
 
 
 def compute_mp2_density_matrix(mf, mol=None, nocc=None):

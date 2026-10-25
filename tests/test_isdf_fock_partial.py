@@ -31,12 +31,11 @@ from pyscf import dft, gto
 from src.Base.numerics.numerics import Numerics
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from src.gradients.isdf_mean_field import isdf_jk_with_force
-from src.gradients.isdf_derivatives import (auxmol_of,
-                                            isdf_exchange_adjoints,
+from src.gradients.isdf_derivatives import (isdf_exchange_adjoints,
                                             isdf_fock_partial_exchange)
 from src.gradients.mean_field_response import (fock_partial_skeleton,
                                                fock_partial_skeleton_df)
-from src.Base.pyscf.pyscf_interface import exchange_channels, xc_hybrid_coeff
+from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels, xc_hybrid_coeff
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 

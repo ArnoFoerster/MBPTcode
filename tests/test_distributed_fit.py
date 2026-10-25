@@ -48,9 +48,8 @@ owns a different set of them:
 
 A rank's rows batched into one GEMM is invisible here on a BLAS that gives
 those rows the same bits at every call shape (MKL); OpenBLAS does not, and
-tests/test_distributed_fit_mpi.py covered that class of defect while it was
-gated bitwise; at a few ulp a last-bit move of that
-kind no longer shows there either.
+at a few ulp a last-bit move of that kind does not show in
+tests/test_distributed_fit_mpi.py either.
 """
 import os
 import subprocess

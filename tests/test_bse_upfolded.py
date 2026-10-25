@@ -173,8 +173,8 @@ def test_driver_end_to_end_with_gw_energies():
 def test_an_unconverged_davidson_says_so():
     """max_cycle exhausted, or tol out of reach until the corrections are
     spanned: the Ritz values are returned with a warning and the flag
-    'upfolded_bse_not_converged' (refuse inputs,
-    warn numerics), refused on request."""
+    'upfolded_bse_not_converged' (a numerical shortfall warns and carries
+    a named flag), refused on request."""
     _, _, eps, e_qp, gb, no, nv = _case()
     diag = B.diagonal(eps, e_qp, gb, no, nv, 'singlet')
     aop = lambda v: B.sigma(v, eps, e_qp, gb, no, nv, 'singlet')

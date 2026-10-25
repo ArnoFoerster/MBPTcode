@@ -8,8 +8,7 @@ at the S1 minimum and RISC at the T1 minimum.
 
 Synthetic inputs, no SCF: water's three atoms at three geometries, five
 modes drawn, of which the four vibrations are passed (the imaginary one is
-refused now, and was dropped before with nothing of it in any
-number), random spin-orbit tables and derivatives. The frozen
+refused), random spin-orbit tables and derivatives. The frozen
 numbers are what the two former script drivers printed or wrote, bit for bit
 (`float.hex`), with every crossing out of a triplet re-recorded once at a
 third of its rate (the sublevel average); the TADF table reproduces the TADF
@@ -19,8 +18,8 @@ derivative and lambda at both minima), with the per-mode derivative its vib
 record held. Two runs are not bitwise: every frozen
 number holds to PIN_SAME_ULPS ulp of itself under the recording BLAS and to
 PIN_CROSS_BLAS_BAR of itself, relative, under another (`same_numbers`), where
-the random modes' QR and the Franck-Condon sums round differently (a cluster's
-MKL: 28 of 160 numbers moved, k_ic most, 1.2e-14 relative).
+the random modes' QR and the Franck-Condon sums round differently (the
+cluster's MKL: 28 of 160 numbers moved, k_ic most, 1.2e-14 relative).
 
 The frozen numbers predate the Franck-Condon and decay guards
 (`rates.fc_lambda_guard`), which refuse this synthetic displacement (its sum

@@ -67,7 +67,7 @@ from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from tests.adc_common import H2CO, WATER_ORIGIN, check, df_rhf_converged, rhf_df
 from tests.pins import RECORDING_BLAS, matches
 

@@ -1,5 +1,4 @@
-"""Increment 1 gate of the spin-free ADC(2)-(5) plan
-every spin-blocked
+"""Gate of the spin-free generated ADC(2) blocks: every spin-blocked
 ADC(2) block function (generate_adcn.generate_adc2_restricted ->
 generatedADC/adc2_blocks_restricted.py) must reproduce its spin-orbital
 counterpart (adc2_blocks.py) EXACTLY at the corresponding interleaved
@@ -11,12 +10,10 @@ For a block over free indices with a fixed spin pattern (the function's
 where s = 0 for an alpha index, 1 for beta (alpha=even interleaving, the
 same convention spin_adapt.py locks in). This is a direct, per-element
 equivalence -- no config-space assembly involved -- so it isolates the
-spin-blocked codegen itself before the restricted driver (increment 2) is
-built on top.
+spin-blocked codegen itself from the restricted driver built on top.
 
 H2O/sto-3g is the decisive system (H2's degeneracies mask real errors);
-H2/sto-3g kept as a smoke
-case. RHF -> alpha==beta spin blocks, so the spin-orbital block is the exact
+H2/sto-3g kept as a smoke case. RHF -> alpha==beta spin blocks, so the spin-orbital block is the exact
 oracle.
 """
 import inspect

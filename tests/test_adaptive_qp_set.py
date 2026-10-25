@@ -400,7 +400,7 @@ def test_a_set_grown_to_the_window_is_the_admitted_surface(system, flag,
     whole window solves the admitted set, and the surface is the admitted
     one refrozen at the same geometry, to rounding, energy and force. Also
     where a root has a pole strength outside (0, 1]: both keep it as solved
-    and flag it (it was demoted to a probe's shift)."""
+    and flag it."""
     m = system['displaced']
     cands = tuple(system['window'])
     if flag is not None:

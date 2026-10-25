@@ -131,8 +131,7 @@ def test_the_solver_default_moved_no_number(water):
 
     Not a method tolerance: the two must run the SAME eigensolver on the same
     blocks, so the energy, the excitation energy and every gradient component
-    are the same float up to the last bits two runs may move.
-    A looser tolerance here would accept exactly the divergence
+    are the same float up to the last bits two runs may move. A looser tolerance here would accept exactly the divergence
     the flip has to be proved not to have introduced.
     """
     mol, mf = water

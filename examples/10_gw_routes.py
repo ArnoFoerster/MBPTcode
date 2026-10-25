@@ -17,7 +17,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
 from src.Base.factorization.isdf_jk import separable_factors_from_jk
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.factorization.separable_ri import resolve_isdf_grid
-from src.SingleReference import calc_qp_energy
+from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 

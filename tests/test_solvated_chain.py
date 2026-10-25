@@ -252,8 +252,8 @@ def test_every_gradient_entry_point_now_carries_the_environment(water):
         gg = getattr(gas, name)(*args)[0]
         # a force, and not the gas-phase one
         hits += int(np.isfinite(g).all() and np.abs(g - gg).max() > 1e-5)
-    check(hits == 3, 'every gradient entry point returns a solvated force '
-                     'that differs from the gas-phase one', f'{hits}/3')
+    assert check(hits == 3, 'every gradient entry point returns a solvated force '
+                            'that differs from the gas-phase one', f'{hits}/3')
 
 
 def test_one_fit_and_one_static_screening_serve_both_gauges(water):

@@ -33,9 +33,8 @@ Gates, water/cc-pVDZ at 2, 3 and 8 simulated ranks:
   * an audited run of every kernel here finds nothing to report on identical
     inputs, and reports a factor one ulp off at the first kernel to read it;
   * `lockstep_mean_field` lives below GW: importing `mpi_grid` imports no GW
-    module, which is what removes `replicate_mean_field` from the import
-    cycle environment -> distributed_df -> GW.space_time -> ... ->
-    environment.
+    module, which keeps replicating a mean field out of the import cycle
+    environment -> distributed_df -> GW.space_time -> ... -> environment.
 
 What breaks each gate:
 
@@ -49,7 +48,7 @@ What breaks each gate:
   * the context fallback in qp_set_gradient removed:
     test_kernels_find_the_context at 2, 3 and 8, each rank running the serial
     call.
-  * `replicate_factors` a no-op: test_lockstep_mean_field_and_the_re_exports,
+  * `replicate_factors` a no-op: test_lockstep_mean_field_and_replicate_factors,
     and test_simulated_ranks' perturbed-rank BSE at 2 and 3.
 """
 import copy
@@ -72,7 +71,6 @@ from src.Base.utils.parallel.mpi_grid import (
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import (replicate_factors,
-                                               replicate_mean_field,
                                                separable_factors,
                                                solve_qp_energy_space_time)
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
@@ -457,9 +455,9 @@ def test_audit_reports_a_drifted_factor(water, size):
         assert untouched == (r != 1)
 
 
-def test_lockstep_mean_field_and_the_re_exports(water):
-    """`lockstep_mean_field` leaves rank 0's five attributes everywhere; the
-    names the chains import keep an explicit comm, None staying serial."""
+def test_lockstep_mean_field_and_replicate_factors(water):
+    """`lockstep_mean_field` leaves rank 0's five attributes everywhere, and
+    `replicate_factors` rank 0's separable fit."""
     w = water
 
     def one_rank(comm):
@@ -471,19 +469,17 @@ def test_lockstep_mean_field_and_the_re_exports(water):
             mf.mo_energy += 1e-3
             mf.mo_coeff *= 1.0 + 1e-6
             mf.e_tot, mf.converged = mf.e_tot + 1.0, False
-        untouched = replicate_mean_field(mf, None).mo_energy.copy()
         lockstep_mean_field(mf)
         factors = tuple(np.array(a, copy=True) for a in w['factors'])
         if comm.Get_rank():
             factors[0][...] *= 1.0 + 1e-6
         replicate_factors(factors, comm)
-        return mf, untouched, factors
+        return mf, factors
 
-    for r, (mf, untouched, factors) in enumerate(run_simulated(one_rank, 3)):
+    for mf, factors in run_simulated(one_rank, 3):
         assert _bitwise(mf.mo_energy, w['mf'].mo_energy)
         assert _bitwise(mf.mo_coeff, np.asarray(w['mf'].mo_coeff))
         assert mf.e_tot == w['mf'].e_tot and mf.converged == w['mf'].converged
-        assert _bitwise(untouched, w['mf'].mo_energy) == (r == 0)
         for a, b in zip(factors, w['factors']):
             assert _bitwise(a, b)
 

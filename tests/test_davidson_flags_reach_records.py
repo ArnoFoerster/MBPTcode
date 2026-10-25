@@ -1,6 +1,6 @@
 """A Davidson root left unconverged outside the excited-state chain is kept
-as solved, warned about and named in what its caller returns
-(every Davidson caller warns and flags instead of refusing):
+as solved, warned about and named in what its caller returns (every
+Davidson caller warns and flags instead of refusing):
 
   * `solve_bse` (and the two matrix-free drivers under it): info's
     'davidson_flags' (`davidson.davidson_flags`), empty on the dense route;

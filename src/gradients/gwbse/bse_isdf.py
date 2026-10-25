@@ -6,7 +6,7 @@ BSE excitation energy, so that the nuclear assembly is reached unchanged and
 nothing new is needed downstream.
 
 Everything is written in the variables production already uses
-(`davidson.isdf_bse_factors`): the separable factors X (M, norb) and D
+(`SingleReference.BSE.solve.isdf_bse_factors`): the separable factors X (M, norb) and D
 (M, naux), and the STATIC screening as an (naux, naux) matrix
 
     W_aux = [1 - chi0(0)]^-1 ,
@@ -137,7 +137,7 @@ def bse_cache(X, D, eps_qp, nocc, spin='singlet', bse_tda=False):
 
     `bse_blocks` builds the dense Casida matrices and is the small-system
     reference; production solves the same problem matrix-free
-    (`davidson.solve_bse_isdf`), which returns the eigenvectors and never forms
+    (`SingleReference.BSE.solve.solve_bse_isdf`), which returns the eigenvectors and never forms
     a block. The adjoint needs only those eigenvectors and these B blocks, each
     (naux, n_occ, n_vir) or smaller, so pairing this with the Davidson solver
     removes the last pair-space array from the route.

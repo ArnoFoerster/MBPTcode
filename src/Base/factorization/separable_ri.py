@@ -2227,7 +2227,7 @@ def shipped_radii():
     `optimize_atomic_radii`'s on-disk cache is gitignored and the optimizer is
     a local descent whose result is not reproducible (see the note on the
     cache below), so without the table a clean checkout lands on other grids
-    (the BSE roots pinned in tests/test_bse_isdf_driver.py move by 6.5-8.7 meV
+    (BSE roots moved by 6.5-8.7 meV
     between a populated and an empty cache). The table does not make a bad
     grid good, which is why each row carries the `fit_error` and the
     `score_mHa_per_atom` it was accepted at: a fit error approaching 1 is a
@@ -2464,7 +2464,7 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
     return_candidates: also return every start's (radii, fit_error). The fit
         error does not predict the exchange error (two carbon grids at
         4.50e-04 differ 2.4x in |dE_x| on benzene), so a caller with a better
-        criterion (`ISDFJK.check_k` on a probe) can choose among the local
+        criterion (the exchange-energy error on a probe) can choose among the local
         minima itself. The cache holds the best by fit error.
 
     r_max:    None selects the box by `search_r_max`: the legacy 5.0 for a

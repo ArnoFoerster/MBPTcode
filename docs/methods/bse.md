@@ -72,8 +72,10 @@ that product cheap. A few points the user may want to know:
   stable. With `probe=True` the code checks this after the solve and refuses
   the roots if the reference is unstable, the usual situation for some
   triplets on top of Hartree-Fock. The stand-alone drivers skip the check
-  unless asked; the gradient chains run it after every full-BSE (not
-  Tamm-Dancoff) matrix-free solve.
+  unless called with `probe=`, since on a large DF run it can cost more than
+  the solve; the gradient chains run it after every full-BSE (not
+  Tamm-Dancoff) matrix-free solve, as `Numerics(bse={'probe': ...})` says
+  (True by default, `'sign'` to prove only the sign, False to skip).
 - **Memory and parallel runs.** The Davidson keeps as many trial vectors as
   the available memory allows. Under MPI the trial vectors are split over the
   ranks; the roots agree with a serial run to within the convergence

@@ -215,11 +215,6 @@ class PBCDFIntegrals:
     def virt_slice(self, k):
         return slice(self.nocc[k], self.nmo)
 
-    def L_ov(self, q, ki):
-        """Occ-virt block L^{q}_{i in ki, a in ki+q}, shape (naux, nocc_ki, nvirt_kj)."""
-        kj = self.kconserv_pair[q, ki]
-        return self.L[q][ki][:, self.occ_slice(ki), self.virt_slice(kj)]
-
     def Lblock(self, k1, k2):
         """Full MO 3-center factor L^{k1,k2}_{L,pq}, shape (naux, nmo, nmo).
 
@@ -229,15 +224,6 @@ class PBCDFIntegrals:
         """
         q = self.pair_to_q(k1, k2)
         return self.L[q][k1]
-
-    def eri_block(self, k1, k2, k3, k4, s1, s2, s3, s4):
-        """DF chemist MO integral (p_k1 q_k2 | r_k3 s_k4) for orbital ranges
-        s1..s4 (slices), from the stored L^q. Momentum must conserve:
-        k1 - k2 + k3 - k4 = 0. Returns a 4-index block, no conjugation
-        (see the module-level convention note)."""
-        L12 = self.Lblock(k1, k2)[:, s1, s2]
-        L34 = self.Lblock(k3, k4)[:, s3, s4]
-        return np.einsum('Lpq,Lrs->pqrs', L12, L34)
 
     # ---- validation ----
 

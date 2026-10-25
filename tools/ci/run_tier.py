@@ -15,8 +15,9 @@ The run goes on past a failure and exits non-zero at the end if any file
 failed or timed out.
 
 Several tiers run one after the other. --generated keeps only the files that
-read the generated ADC runtime (GENERATED_MARKERS), for a machine that has
-written it with GenerateRuntime (src.SingleReference.ADC.generated_modules).
+read the generated ADC runtime or run the pdaggerq generators
+(GENERATED_MARKERS), for a machine that has pdaggerq and has written the
+runtime with GenerateRuntime (src.SingleReference.ADC.generated_modules).
 """
 import argparse
 import os
@@ -28,9 +29,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
 
-# A test file that names one of these reads the generated ADC runtime.
+# A test file that names one of these reads the generated ADC runtime or runs
+# the pdaggerq generators (`pdaggerq_available`; the generated routes of the
+# refactor pins skip with the last phrase where the runtime is missing).
 GENERATED_MARKERS = ('requires_runtime', 'missing_runtime', 'generated_modules',
-                     'generatedADC')
+                     'generatedADC', 'pdaggerq_available',
+                     'is not generated on this machine')
 
 
 def reads_generated_runtime(test):

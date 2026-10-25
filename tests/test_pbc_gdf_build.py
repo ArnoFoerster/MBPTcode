@@ -11,7 +11,7 @@ builds agree to 3e-12:
 * Over three ranks, each building one AO-row slice, the rows assembled on the
   owners are the one-rank factors (`assert_same`: a few ulp under the
   recording BLAS, the vector class bar under another, where a slice's lattice
-  sums and fit run in another call shape: 3.2e-13 on a cluster's MKL, 5e-13 of the
+  sums and fit run in another call shape: 3.2e-13 on the cluster's MKL, 5e-13 of the
   largest element): the q = 0 neutralisation of a
   slice not starting at AO 0 takes its own overlap rows (pyscf's loader would
   take rows 0..i1-i0 and put the q = 0 blocks O(10) off), and every slice is

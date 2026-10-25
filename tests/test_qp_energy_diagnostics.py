@@ -1,8 +1,8 @@
 """`calc_qp_energy(..., diagnostics=)` hands the contour driver's decisions out.
 
-The audit tool records the CD grid size, the residues swept, the pole guard,
-the Newton seed and the pole model's admission per route; without this hook it
-would re-derive them with production's own helpers, which cannot see a guard
+A caller that records the CD grid size, the residues swept, the pole guard,
+the Newton seed and the pole model's admission per route would, without this
+hook, re-derive them with production's own helpers, which cannot see a guard
 the Newton relaxed. With `'diagnostics'` dropped from `CONTOUR_KEYWORDS` the
 first test fails with the TypeError the second expects for 'pade'.
 """

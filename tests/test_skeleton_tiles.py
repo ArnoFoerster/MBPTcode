@@ -68,12 +68,12 @@ from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_derivatives import (  # noqa: E402
-    auxmol_of, isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
+    isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
     two_centre_adjoint)
 from src.gradients.mean_field_response import (  # noqa: E402
     exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa
-from src.Base.pyscf.pyscf_interface import exchange_channels  # noqa: E402
+from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels  # noqa: E402
 from tests import test_force_serial_shaped as shaped  # noqa: E402
 from tests.test_mpi_routes import HeldCensus  # noqa: E402
 from tests.isdf_test_grid import g1

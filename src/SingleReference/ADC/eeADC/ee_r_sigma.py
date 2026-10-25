@@ -24,6 +24,7 @@ spin-flip involution `spin_flip_vector` splits them (singlet = +1, triplet =
 """
 import numpy as np
 
+from src.Base.pyscf.pyscf_interface import get_coulomb_exchange_diagonals
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_en as _en
@@ -191,7 +192,7 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
         d_amp, d_ia_amp = _en.en_denominators_spin_free(
-            eps, *_en.jk_from_V(V), no, nv, en_dress)
+            eps, *get_coulomb_exchange_diagonals(V), no, nv, en_dress)
         # what the EN denominator has resummed, so amplitudes() can
         # take it back out of the t2^(2) numerator and not count the
         # diagonal ladder twice (see ee_equations.amplitudes)

@@ -73,19 +73,20 @@ def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):
 
 
 def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='minimax',
-                                          w0=None):
+                                          w0=None, flags=None):
     """dRPA correlation energy via imaginary-frequency-axis integration (eqs 26-28, Spadetto et al., JCTC 2023, 19, 1499).
 
     E_c = (1/2pi) int dw Tr{log(1-Z(iw)) + Z(iw)} = sum_k w_k Tr{log(1-Z(i*wk)) + Z(i*wk)},
     with Tr[log(1-Z)] from `space_time.dielectric_log_determinant`, which
-    warns (and flags) a frequency whose det(1 - Z) is not positive. Restricted spin, DF
+    warns about a frequency whose det(1 - Z) is not positive and names it in
+    flags['nonpositive_det'] when `flags` is a dict. Restricted spin, DF
     only. Should agree with rpa_correlation_energy_casida to grid precision.
 
     grid: 'minimax' (default) or 'gauss_legendre' (uses w0, default gap_scaled_w0).
-    numerics: the run's `Numerics`; the frequency count is `rpa_quadrature`'s,
-    the one every dRPA energy of the run reads.
+    numerics: the run's `Numerics`; the frequency count is `rpa_quadrature`'s
+    for `grid`, the one every dRPA energy of the run reads.
     """
-    nfreq = rpa_quadrature(numerics_or_default(numerics))[1]
+    nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
     eps = lr_solver.eps
     occ, virt = get_occ_virt_indices(eps, nocc)
 
@@ -103,7 +104,8 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='
 
     e_c = 0.0
     for k, Z in enumerate(Z_grid):
-        e_c += freq_weights[k] * (dielectric_log_determinant(np.eye(Z.shape[-1]) - Z, k)
+        e_c += freq_weights[k] * (dielectric_log_determinant(np.eye(Z.shape[-1]) - Z, k,
+                                                             flags)
                                   + np.trace(Z))
     return e_c / (2.0 * np.pi)
 

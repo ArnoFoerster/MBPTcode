@@ -89,7 +89,7 @@ WARM_CONV_TOL = 1e-10
 #: pairs, and at WARM_CONV_TOL cold and warm solves alike stall near a 1e-9
 #: residual and end only when the trial space spans every pair, one correction
 #: per cycle, so the count is how fast that space fills (warm 15 to 20 cycles
-#: against cold 18 to 20, workstation and a cluster).
+#: against cold 18 to 20, workstation and cluster).
 WARM_FIRST_RESIDUAL_RATIO = 0.1
 #: Each rank thread's Davidsons, the largest root residual of their first
 #: cycle in order (`recording_casida_rows`).

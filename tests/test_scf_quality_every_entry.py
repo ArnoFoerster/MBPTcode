@@ -4,11 +4,9 @@ mean field, and carries on.
 The gradient Lagrangian assumes the occupied-virtual Fock block vanishes; what
 an SCF leaves there is amplified in the force. The interstate numerator, the
 quasiparticle force, the couplings read off a shared evaluation and
-`StateManifold.evaluate` asked for couplings once took such a mean field
-silently, then refused it; under the rule (refuse
-inputs, warn numerics) each warns, flags it in the chain's `scf_flags`
-(which the vertical record carries) or the coupling's diagnostics, and goes
-on. Each is handed here a mean field converged to conv_tol_grad 1e-4, far
+`StateManifold.evaluate` asked for couplings each warn about such a mean
+field, flag it in the chain's `scf_flags` (which the vertical record carries)
+or the coupling's diagnostics, and go on. Each is handed here a mean field converged to conv_tol_grad 1e-4, far
 above `scf_force_tol`. The relaxed excitation density (the force's
 Lagrangian, which a solvation loop reads each cycle), the equilibrium-shift
 gradient and the dRPA correlation gradient do the same. A mean field

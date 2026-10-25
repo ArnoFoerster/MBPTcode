@@ -225,22 +225,6 @@ def _eh_recouple(t):
     return out
 
 
-def second_order_doubles_ccd(mycc):
-    """The complete second-order alpha-beta doubles t^(2)[i,j,a,b] from a
-    pyscf RHF CC object (DF or not; its integrals, canonical orbitals):
-    update_amps maps t2 to [V + L(t2) + Q(t2)] / D with the CCD residual
-    quadratic, so t^(2) = u(t1) - t1 - [u(2 t1) - 2 u(t1) + u(0)] / 2,
-    t1 = u(0) the first-order doubles, at zero singles."""
-    eris = mycc.ao2mo()
-    O = mycc.nocc
-    V = mycc.nmo - O
-    z1 = np.zeros((O, V))
-    u = lambda t: np.asarray(mycc.update_amps(z1, t, eris)[1])
-    u0 = u(np.zeros((O, O, V, V)))
-    u1, u2 = u(u0), u(2.0 * u0)
-    return u1 - u0 - 0.5 * (u2 - 2.0 * u1 + u0)
-
-
 def channel_amplitudes(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
                        t2_second=None):
     """First- and second-order parts of the restricted channel amplitudes:
@@ -251,7 +235,7 @@ def channel_amplitudes(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
     RPA routes ('phonon', 'riccati'): own channel. eh per spin from the
     Casida matrices, D0 T2 + T2 D0 = -(A1 T1 + T1 A1); pp from the ladder
     Riccati equation, D t2 = -(<kl|mn> t1 + t1 <ef|cd>). 'ccd': the complete
-    second-order doubles t2_second (second_order_doubles_ccd), recoupled into
+    second-order alpha-beta doubles t2_second[i,j,a,b], recoupled into
     the eh channels as adc_r_faddeev.ccd_channels does."""
     eps = np.asarray(eps)
     norb = len(eps)

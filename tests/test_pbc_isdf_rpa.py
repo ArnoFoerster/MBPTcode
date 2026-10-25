@@ -135,8 +135,8 @@ def test_polarizability_is_negative_semidefinite(thc):
 def test_a_nonpositive_determinant_is_warned_and_flagged():
     """det(1 - V Pi) <= 0 is a numerical outcome (a broken Pi), not an input:
     the block energy is still returned, from log|det|, with a RuntimeWarning
-    and the (q, w) recorded under flags['nonpositive_det'] (warn and flag,
-    never raise on numerics). Synthetic, so no SCF is needed:
+    and the (q, w) recorded under flags['nonpositive_det'] (a
+    numerical event warns and is flagged, it never raises). Synthetic, so no SCF is needed:
     V = 1 and Pi = diag(2, -1) give 1 - V Pi = diag(-1, 2)."""
     Vq = np.eye(2)
     Pi = np.array([np.diag([-0.5, -1.0]), np.diag([2.0, -1.0])])

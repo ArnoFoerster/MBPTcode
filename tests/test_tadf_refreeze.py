@@ -6,8 +6,8 @@ every minimum on a surface built at another geometry. `Run.walk` hands
 the root the walk followed off the surface the LAST walk ran on, and the
 record keeps the drift of the conventions at the minimum in meV and whether
 it is within REFREEZE_TOL_MEV; a refused drift, like a last walk that did
-not converge, is warned about and flagged (refuse
-inputs, warn numerics).
+not converge, is warned about and flagged (a bad input is refused; a
+numerical shortfall warns).
 """
 import types
 

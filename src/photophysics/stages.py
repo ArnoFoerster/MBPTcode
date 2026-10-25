@@ -74,8 +74,9 @@ stage record's `numerical_flags` ({flag: what it says}, empty when clean):
 'walk_not_converged' and 'refreeze_not_converged' of a walk (`relaxation_flags`),
 'saddle_check' where the saddle check did not end on a minimum,
 'hessian_asymmetric' where one of its finite-difference Hessians was,
-'scf_not_converged' (the count of SCFs the stage built that stopped short)
-and 'isdf_df_check_failed' (vert, s1, t1). The rate table gathers them under
+'scf_not_converged' (the count of SCFs the stage built that stopped short),
+'isdf_df_check_failed' (vert, s1, t1), and every named flag a solver inside
+the stage raised (`numerical_flags.flag`), with its messages. The rate table gathers them under
 `numerical_flags` by stage, beside its own ('fc_integrand_not_decayed'), so
 every rate, adiabatic energy and dE_ST built on a flagged step says so.
 """
@@ -88,6 +89,7 @@ from typing import Callable, NamedTuple
 import numpy as np
 from pyscf import gto
 
+from src.Base.numerical_flags import collecting, gathered
 from src.Base.numerics.constants import (HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation
@@ -1160,12 +1162,21 @@ def describe_run(run, stages, grid):
 def flag_scfs(run, name, stage):
     """The record of `stage(run)`, with 'scf_not_converged' in its
     `numerical_flags` where SCFs it built stopped short (each warned about
-    by `chain.mean_field_factory`)."""
+    by `chain.mean_field_factory`), and every named flag the stage raised
+    on any thread or rank (`numerical_flags.collecting`), as
+    {flag: [its messages]}."""
     since = len(run.histories)
-    record = stage(run)
+    raised = []
+    with collecting(raised):
+        record = stage(run)
     short = run.unconverged_scfs(since)
-    if short and name != 'rate' and run.store.has(name):
-        run.flag(name, scf_not_converged=short)
+    named = {}
+    for entry in gathered(raised):
+        named.setdefault(entry['flag'], []).append(entry['message'])
+    if short:
+        named['scf_not_converged'] = short
+    if named and name != 'rate' and run.store.has(name):
+        run.flag(name, **named)
         record = run.read(name)
     return record
 

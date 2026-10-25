@@ -46,8 +46,8 @@ from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_ADC_DENSE_LIMIT,
                                          EE_FOLD_DENSE_LIMIT, EE_RI_TILE_GB)
 from src.SingleReference.ADC.eeADC import ee_driver as _drv
 from src.SingleReference.ADC.eeADC import ee_state_specific
-from src.SingleReference.ADC.eeADC.ee_driver import EEResult  # noqa: F401  (exported)
-from src.SingleReference.ADC.eeADC.ee_en import validate_dress
+from src.SingleReference.ADC.eeADC.ee_en import DRESS_KEYS
+from src.SingleReference.EpsteinNesbet import validate_en_dress
 
 
 def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
@@ -59,13 +59,15 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  device='cpu', state_specific='off', ss_density='unrelaxed',
                  spin_scaling=None, relaxed_density=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
-    an EEResult: the tuple, plus .converged, one flag per root (a Davidson or
-    fold root that did not converge also warns).
+    an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
+    per root (a Davidson or fold root that did not converge also warns).
 
-    en_dress: Epstein-Nesbet channel dict (ee_en); True means the standard
-    hole-hole + particle-particle dressing. It dresses the DOUBLES amplitude
-    denominators only -- the singles amplitude and the supermatrix keep their
-    MP zeroth order, matching the IP/EA side's en_dress convention.
+    en_dress: Epstein-Nesbet channel dict ('hh', 'pp', 'hp'; ee_en), checked
+    by EpsteinNesbet.validate_en_dress; True means the hole-hole +
+    particle-particle dressing, as on the IP/EA side. It dresses the DOUBLES
+    amplitude denominators only -- the singles amplitude and the supermatrix
+    keep their MP zeroth order, so the IP/EA keys 'singles', 'shift' and
+    'spin_adapted' are refused.
 
     return_parity: spin-free route only; returns (e, Z, parity) with
     parity[k] = <Z_k | F Z_k> under the alpha<->beta flip F: +1 for a singlet
@@ -155,6 +157,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                              'continuum (environment)')
         # 'equilibrium' without eps_static: refused before the solve
         ee_state_specific.shift_modes(env, state_specific)
+    en_dress = validate_en_dress(en_dress, keys=DRESS_KEYS)
     if fold:
         return _drv.solve_folded_ri(mf, mol, level, nroots, spin, conv_tol,
                                     en_dress, frozen, auxbasis, dense_limit,
@@ -164,7 +167,6 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
-    en_dress = validate_dress(en_dress)
     if en_dress is not None and level in ('adc1', 'gf2'):
         raise ValueError(f'level={level!r} carries no amplitudes, so en_dress has '
                          'nothing to dress')

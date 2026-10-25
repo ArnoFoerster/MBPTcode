@@ -22,10 +22,10 @@ shift. G0W0 adds the shift after its solve instead (`reaction_field.
 shift_after_solve`, keyed on the anchor every cycle hands the route); doing
 that here too would count it a second time on top of the shifted levels.
 """
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.pyscf_interface import get_orbital_energies
@@ -39,8 +39,9 @@ SCREENINGS = ('updated', 'fixed')
 
 class EvGWNotConverged(RuntimeWarning):
     """The evGW loop ended without a fixed point: the spectrum returned is the
-    last iterate and its record says info['converged'] False (refuse inputs,
-    warn numerics), as qsGW's `QsGWNotConverged`."""
+    last iterate, its record says info['converged'] False, and the named
+    flag 'evgw_not_converged' is raised (refuse inputs, warn numerics), as
+    qsGW's `QsGWNotConverged`."""
 
 
 def shifted_mean_field(mf, eps):
@@ -217,7 +218,8 @@ def evgw_eigenvalues(mf, mol=None, mode='space-time', screening='updated',
             'residual_untested': untested_history[-1],
             'eps_mean_field': eps0, 'shift': eps - eps0}
     if not converged:
-        warnings.warn(
+        flag(
+            'evgw_not_converged',
             f'{label} not converged after {len(history)} of '
             f'max_cycle = {max_cycle} cycles, max |delta eps| = '
             f'{history[-1]:.3e} Ha ({history[-1] * HARTREE_TO_EV:.4f} eV) '

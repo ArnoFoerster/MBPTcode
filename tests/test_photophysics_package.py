@@ -29,7 +29,7 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import Excitation
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.photophysics import cli, stages
 from src.photophysics.declaration import DeclarationRefused, Policies
 from src.photophysics.minimum import (GroundModes, StateMinimum, from_adc2,

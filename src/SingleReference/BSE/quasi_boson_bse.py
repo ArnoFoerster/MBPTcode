@@ -27,6 +27,7 @@ import numpy as np
 
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import KAPPA, QP_WINDOW_Z_MIN
+from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.common.eri_blocks import as_blocks
 from src.Base.utils.parallel.threads import openmp_threads, row_map
 from src.SingleReference.GW.quasi_boson import QPqb
@@ -159,7 +160,7 @@ class BSEqb:
         Wd4 = eri4.oovv - S_d                              # (i,j,a,b)
         W_direct = Wd4.transpose(0, 2, 1, 3).reshape(n_ov, n_ov)
 
-        d_qp = (self.eps_qp[virt][None, :] - self.eps_qp[occ][:, None]).ravel()
+        d_qp = ov_energies(self.eps_qp, nocc_)
         self.A_bse = np.diag(d_qp) + self.kappa * v_iajb - W_direct
 
         if bse_tda:

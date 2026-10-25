@@ -1148,7 +1148,7 @@ def agreement(x, comm=None, label=None, audit_only=False):
     return same
 
 
-def lockstep_mean_field(mf, comm=None):
+def lockstep_mean_field(mf, comm=None, check=False):
     """Rank 0's orbital energies, orbitals, occupations, e_tot and converged
     flag on every rank, written into `mf`; `mf` is returned.
 
@@ -1163,6 +1163,8 @@ def lockstep_mean_field(mf, comm=None):
 
     comm: defaults to `current_comm()`; None or one rank returns `mf`
           untouched. Collective, as `lockstep` is.
+    check: passed to `lockstep` (the arrays move only where a digest shows a
+          rank apart).
     """
     if comm is None:
         comm = current_comm()
@@ -1170,7 +1172,8 @@ def lockstep_mean_field(mf, comm=None):
         return mf
     fields = [name for name in ('mo_energy', 'mo_coeff', 'mo_occ', 'e_tot',
                                 'converged') if hasattr(mf, name)]
-    values = lockstep(tuple(getattr(mf, name) for name in fields), comm)
+    values = lockstep(tuple(getattr(mf, name) for name in fields), comm,
+                      check=check)
     for name, value in zip(fields, values):
         setattr(mf, name, value)
     return mf

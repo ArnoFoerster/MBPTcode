@@ -6,7 +6,8 @@ derivative-integral tensor fits whole.
 
 The factor provider. The force reads the RI factors of the correlation fit
 (B = X J, X = L^-1, V = L L^T) through one object, which the method hands
-over (`gradients.adc.fold_factors` for MP2 and ADC(2)): `f` the factors
+over (`gradients.df_factors.mp2_factors` for MP2, `gradients.adc.fold_factors`
+for an ADC(2) state): `f` the factors
 (`L`, `LT`, `BooP`, `bvv(chunk, p0, p1)`, `eo`, `ev`, `naux`), `no` and `nv`,
 `comm`, the auxiliary `chunks` with this rank's `my_chunks`, their `owners`
 and `chunk_ranges`, `ints(k0, k1)` the (ia|jb) of an occupied tile, and
@@ -62,6 +63,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FO
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
                                               distributed, lockstep, lockstep_mean_field,
@@ -312,11 +314,6 @@ def _owners(n, size):
     return [k * size // max(n, 1) for k in range(n)]
 
 
-def _ranges(blocks, owners, size):
-    return [[(b[2], b[3]) for b, o in zip(blocks, owners) if o == r]
-            for r in range(size)]
-
-
 def on_root(fn, shapes, comm):
     """The arrays fn() returns, computed on rank 0 alone and broadcast
     (lockstep); shapes theirs. For the replicated pyscf pieces: once instead
@@ -486,7 +483,8 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
     ri = _RIFit(auxmol, C, nf, no, d, Xw, factors)
     f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + metric_force(auxmol, G2ri)
     # the SCF's JK fit
-    auxjk = pyscf_df.addons.make_auxmol(mol, dcf.jk_fit(mf))
+    dcf.jk_fit(mf)                 # refuses a mean field with no JK fit
+    auxjk = auxmol_of(mf, mol)
     Co = np.ascontiguousarray(C[:, :nocc])
     f2 += fitted_fock_skeleton(mol, auxjk, gamma_ao, 2.0 * Co @ Co.T,
                                occ=np.sqrt(2.0) * Co, exchange=1.0, comm=comm)
@@ -540,7 +538,7 @@ def mp2_force_tiled(mf, mol, factors, frozen=0, auxbasis=None, tile_gb=EE_RI_TIL
     tiled route over comm's ranks (prepare); factors(mol, mf, frozen,
     auxbasis, tile_gb, comm, aux_chunk) -> the factor provider (module
     docstring), built once the memory estimate has passed
-    (`gradients.adc.fold_factors.ground_factors`)."""
+    (`gradients.df_factors.mp2_factors`)."""
     comm, est = prepare(mf, mol, frozen, auxbasis, False, tile_gb, block_gb,
                         max_memory, comm)
     provider = factors(mol, mf, frozen, auxbasis, tile_gb, comm, aux_chunk)

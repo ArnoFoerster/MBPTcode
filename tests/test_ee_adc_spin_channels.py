@@ -40,7 +40,7 @@ from pyscf.lib import logger
 from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
                                             get_two_electron_integrals_chemist)
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988

@@ -24,6 +24,7 @@ import pytest
 from pyscf import gto
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.numerics import Numerics
 from src.Base.step_failed import StepFailed
 import src.properties.optimize as optimize_module
 from src.properties.optimize import optimize_geometric
@@ -102,8 +103,9 @@ def stub(monkeypatch, outcomes):
 
 def test_the_iteration_cap_is_a_status_not_an_exception(monkeypatch, water):
     stub(monkeypatch, ['cap'])
-    mol_opt, info = optimize_geometric(Harmonic(water), water, maxiter=7,
-                                       verbose=False)
+    mol_opt, info = optimize_geometric(
+        Harmonic(water), water, numerics=Numerics(walk={'max_cycle': 7}),
+        verbose=False)
     assert info['converged'] is False
     assert info['status'] == 'maxiter (7) reached without convergence'
     assert info['cycles'] == 2 and len(info['history']) == 2

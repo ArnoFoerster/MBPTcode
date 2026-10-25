@@ -45,10 +45,9 @@ from src.SingleReference.ADC.adc_order_rule import refuse_above_max_order
 from src.CodeGeneration.diagrammatic.goldstone import (
     BLOCKS, Line, Skeleton, enumerate_orderings)
 
-# external letters (per BLOCKS) are excluded from the dummy pools;
-# uppercase members of the same index families extend the pools far enough
-# for every order this package emits (up to 2n-1 lines of one kind)
-_EXTERNALS = {'e', 'f', 'm', 'n'}
+# the external letters of BLOCKS (e, f, m, n) are excluded from the dummy
+# pools; uppercase members of the same index families extend the pools far
+# enough for every order this package emits (up to 2n-1 lines of one kind)
 _OCC_POOL = sorted(set('ijklopqrst')) + sorted(set('IJKLMNOPQRST'))
 _VIR_POOL = sorted(set('abcdghuvwxyz')) + sorted(set('ABCDEFGH'))
 

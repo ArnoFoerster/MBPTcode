@@ -43,7 +43,7 @@ from src.Base.numerics.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
 #: the recording one: Hartree, Ha/Bohr on a gradient, the same number of a
 #: dimensionless pole strength, and for 'vector' (vectors and orbital
 #: coefficients, compared after `align_signs`) and 'root' (roots and matrix
-#: elements, Ha) the class bars.
+#: elements, Ha) their own bars.
 PIN_CROSS_BLAS_BARS = {'energy': PIN_CROSS_BLAS_BAR,
                        'gradient': PIN_CROSS_BLAS_GRADIENT_BAR,
                        'continued': PIN_CROSS_BLAS_CONTINUED_BAR,

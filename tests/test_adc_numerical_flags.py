@@ -9,13 +9,19 @@ flag to the caller, instead of raising:
 - a FLEX Lanczos resolvent: `settled`, and `solve_qp(...)['converged']`;
 - the Lanczos inverse square root of the Faddeev metric.
 
+Each also raises a named flag, which an ADC solver's `solve()` hands to
+`last_result['numerical_flags']`.
+
 H2O/STO-3G and stand-ins; each check runs in about a second.
 """
+import functools
+
 import numpy as np
 import pytest
 from pyscf import gto, scf
 
 from src.SingleReference.ADC import adc_r_faddeev, adc_r_flex, cc_amplitudes
+from src.SingleReference.ADC.base import ADCSolver
 from src.SingleReference.ADC.solve import ADCNotConverged, apply_inverse_sqrt
 
 
@@ -77,3 +83,17 @@ def test_a_short_inverse_square_root_keeps_its_approximation():
         y = apply_inverse_sqrt(lambda x: N @ x, rng.standard_normal(40), tol=0.0,
                                max_steps=2)
     assert np.all(np.isfinite(y))
+
+
+def test_a_short_ladder_ccd_reaches_the_solvers_last_result(water, monkeypatch):
+    short = functools.partial(adc_r_faddeev.solve_ladder_amplitudes_restricted,
+                              max_iter=1)
+    monkeypatch.setattr(adc_r_faddeev, 'solve_ladder_amplitudes_restricted', short)
+    solver = ADCSolver(water, level='faddeev_adc3', pair_route='riccati')
+    with pytest.warns(ADCNotConverged, match='ladder CCD not converged'):
+        solver.solve(nroots=1)
+    named = [e['flag'] for e in solver.last_result['numerical_flags']]
+    assert named == ['ladder_amplitudes_not_converged']
+    # a later solve reuses the channels, and its result still says so
+    solver.solve(nroots=1)
+    assert solver.last_result['numerical_flags'][0]['flag'] == named[0]

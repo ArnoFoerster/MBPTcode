@@ -1,11 +1,11 @@
-"""Records written before the module moves still load.
+"""Records that name classes by their old modules still load.
 
 Modules moved, and a record names each class it holds as
 'module:qualname'. `record_io.record_class` reads an old name through the
 generated map `src/Base/utils/record_names.json`. The fixture
 `tests/data/pre_r3/pre_r3_record.json` was written by the tree before the move
-(of the record classes) and names Numerics and its nested
-settings, NoEnvironment and FirstPoint by their old modules.
+of the record classes and names Numerics and its nested settings,
+NoEnvironment and FirstPoint by their old modules.
 """
 import importlib
 import json

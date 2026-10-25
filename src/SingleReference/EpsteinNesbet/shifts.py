@@ -89,6 +89,8 @@ def epstein_nesbet_shift(g, no, layout='pphh', bare_sign=1.0, hh=True, pp=False,
         raise ValueError(f"layout={layout!r}; expected 'pphh' or 'hhpp'")
 
     def _place(mat, ax_a, ax_b):
+        if ax_a > ax_b:              # 'hhpp' puts the hole axis of a cross pair first
+            mat, ax_a, ax_b = mat.T, ax_b, ax_a
         bshape = [1, 1, 1, 1]
         bshape[ax_a], bshape[ax_b] = mat.shape
         return mat.reshape(bshape)

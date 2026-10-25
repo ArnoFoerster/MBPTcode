@@ -17,7 +17,7 @@ routes stay separable; the solver's methods delegate here.
 """
 import numpy as np
 
-from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices, ov_energies
 from src.SingleReference.LinearResponse.space_time import (chi0_aux,
                                                            dyson_screening)
 
@@ -95,14 +95,13 @@ def solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary=False):
         occ_a, virt_a = get_occ_virt_indices(lr.eps_a, nocc_a)
         occ_b, virt_b = get_occ_virt_indices(lr.eps_b, nocc_b)
         
-        d_a = (lr.eps_a[virt_a][None, :] - lr.eps_a[occ_a][:, None]).ravel()
-        d_b = (lr.eps_b[virt_b][None, :] - lr.eps_b[occ_b][:, None]).ravel()
+        d_a = ov_energies(lr.eps_a, nocc_a)
+        d_b = ov_energies(lr.eps_b, nocc_b)
         
         if lr.coeff_ov is not None:
             C_ov_a, C_ov_b = lr.coeff_ov
         else:
-            C_ov_a = lr.coeff_a[:, occ_a[:, None], virt_a].reshape(lr.naux, -1)
-            C_ov_b = lr.coeff_b[:, occ_b[:, None], virt_b].reshape(lr.naux, -1)
+            C_ov_a, C_ov_b = lr.ov_factors_unrestricted(occ_a, virt_a, occ_b, virt_b)
         
         return np.array([dyson_screening(chi0_aux(
             [(C_ov_a, f_rpa(lr, d_a, w, is_imaginary)),
@@ -110,7 +109,7 @@ def solve_rpa_screening_df(lr, omega_grid, nocc, is_imaginary=False):
             for w in omega_grid])
     else:
         occ, virt = get_occ_virt_indices(lr.eps, nocc)
-        d = (lr.eps[virt][None, :] - lr.eps[occ][:, None]).ravel()
+        d = ov_energies(lr.eps, nocc)
         # Prefer the standalone ov block: slicing it out of a full
         # (naux, norb, norb) coeff_df forces the caller to build that tensor.
         C_ov = (lr.coeff_ov if lr.coeff_ov is not None
@@ -136,14 +135,10 @@ def solve_rpa_screening_full(lr, omega_grid, nocc, is_imaginary=False):
         n_pair_b = nocc_b_val * nvirt_b_val
         n_pair = n_pair_a + n_pair_b
         
-        d_a = (lr.eps_a[virt_a][None, :] - lr.eps_a[occ_a][:, None]).ravel()
-        d_b = (lr.eps_b[virt_b][None, :] - lr.eps_b[occ_b][:, None]).ravel()
+        d_a = ov_energies(lr.eps_a, nocc_a)
+        d_b = ov_energies(lr.eps_b, nocc_b)
         
-        V_aa = lr.eri_a[np.ix_(occ_a, virt_a, occ_a, virt_a)].reshape(n_pair_a, n_pair_a)
-        V_bb = lr.eri_b[np.ix_(occ_b, virt_b, occ_b, virt_b)].reshape(n_pair_b, n_pair_b)
-        V_ab = lr.eri_ab[np.ix_(occ_a, virt_a, occ_b, virt_b)].reshape(n_pair_a, n_pair_b)
-        
-        V_trans = np.block([[V_aa, V_ab], [V_ab.T, V_bb]])
+        V_trans = lr.ov_coulomb_unrestricted(occ_a, virt_a, occ_b, virt_b)
         
         W_grid = []
         for w in omega_grid:
@@ -156,7 +151,7 @@ def solve_rpa_screening_full(lr, omega_grid, nocc, is_imaginary=False):
     else:
         occ, virt = get_occ_virt_indices(lr.eps, nocc)
         n_pair = len(occ) * len(virt)
-        d = (lr.eps[virt][None, :] - lr.eps[occ][:, None]).ravel()
+        d = ov_energies(lr.eps, nocc)
         
         V_trans = lr.eri_chemist[np.ix_(occ, virt, occ, virt)].reshape(n_pair, n_pair)
         

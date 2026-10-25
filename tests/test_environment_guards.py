@@ -12,9 +12,8 @@ different system.
      RPA-screened beside a CC-screened Sigma.
   3. A pyscf PCM ground state and the optical screening attached to it must
      share one cavity; a different Lebedev order is refused.
-  4. `SolventScreening.mean_field` without eps_static refuses (it
-     warned before) unless the frozen-polarization limit is declared, and
-     then hands back the gas-phase SCF.
+  4. `SolventScreening.mean_field` without eps_static refuses unless
+     the frozen-polarization limit is declared, and then hands back the gas-phase SCF.
   5. The Eq. (18) cache distinguishes calls that differ in anything but the
      environment -- here, the occupation the orbitals are split by.
 

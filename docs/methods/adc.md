@@ -33,6 +33,22 @@ hierarchy can be built in more than one way, and the results differ, so
 Below ADC(4) the three coincide, and leaving `construction` out gives the
 two-sector operator.
 
+### Faddeev-ADC(4)
+
+Faddeev-ADC(4) is the Faddeev-ADC(3) pencil with the second-order parquet
+kernel: a static second-order dressing of every line, and the couplings to the
+3h2p/3p2h space taken from diagrammatic ADC(4). Its self-energy agrees with
+diagrammatic ADC(4) through fourth order (`tests/test_faddeev_adc4.py` and
+`tests/test_faddeev_adc4_restricted.py` hold the difference to fifth order).
+It is not an `ADCSolver` level; it has two entry points:
+
+- `adc_u_faddeev4.build_supermatrix(s, nocc, ...)`: the dense spin-orbital
+  supermatrix, on a solver with dense integrals;
+- `adc_r_faddeev4.FaddeevADC4Operator(s, gen, nocc, ...)`: restricted and
+  matrix-free, density-fitted or dense, with the 3h2p/3p2h space folded
+  exactly; `gen` is the generated restricted ADC(4) operator on the same
+  orbitals, so this route needs the generated modules.
+
 ## Excitation energies
 
 `solve_ee_adc(mf, level=..., nroots=..., spin=...)` (from

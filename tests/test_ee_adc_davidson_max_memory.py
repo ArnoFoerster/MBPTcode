@@ -24,7 +24,7 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.Base.utils.parallel import memory
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers import davidson as dav
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'

@@ -134,9 +134,9 @@ def _arrowhead_roots(num, pol, a):
 
 
 def test_an_uncoupled_pole_is_no_pole_of_the_equation():
-    """A pole of zero weight (a span-cut orbital, a symmetry-forbidden
-    pair) beside the quasiparticle gave the arrowhead route a root ON that
-    pole and 0/0 in its slope, so Z = NaN. The bracketed solve drops it and
+    """A pole of zero weight (a span-cut orbital, a symmetry-forbidden pair)
+    beside the quasiparticle would give an arrowhead eigensolve a root ON
+    that pole and 0/0 in its slope, so Z = NaN. The bracketed solve drops it and
     returns the root and Z of the equation without it, with no warning."""
     num = np.array([3e-3, 0.0, 2e-3, 0.0])
     pol = np.array([-0.9, 0.1, 1.2, 0.1])
@@ -264,13 +264,15 @@ def test_one_weight_rule():
 
 def test_a_converged_root_is_returned_with_its_weight():
     """A root is returned as it is, whatever its Z (here 2, no root of a
-    Dyson equation), and the weight test says it is no quasiparticle; no
-    linearized energy of another approximation stands in for it."""
+    Dyson equation), warned about as Z outside (0, 1] and nothing else, and
+    the weight test says it is no quasiparticle; no linearized energy of
+    another approximation stands in for it."""
     # Sigma rising through the root: dSigma/dw = +0.5, Z = 2
     f = lambda w: w - EPS[3] - (0.5 * (w - EPS[3]) - 0.01)
-    with warnings.catch_warnings():
-        warnings.simplefilter('error', RuntimeWarning)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
         w, z = solve_qp_equation_scan(f, lambda w: 0.5, EPS[3])
+    assert [c.category for c in caught] == [qpe.QPWeightOutside]
     assert abs(w - (EPS[3] - 0.02)) < 1e-10 and abs(z - 2.0) < 1e-12
     assert not quasiparticle_weight(z)
 

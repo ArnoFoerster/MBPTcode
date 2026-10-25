@@ -1,10 +1,10 @@
 """Solver machinery shared by every ADC route: root-following Davidson,
-dense diagonalization, the downfolded/satellite seed builders, and the
+dense diagonalization, the downfolded seed builder, and the
 Lanczos/continued-fraction spectral solver."""
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import INV_SQRT_LANCZOS_MAX_STEPS, INV_SQRT_LANCZOS_TOL
 from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
 from src.Base.utils.linear_algebra.matrix_functions import eigh_sym, invsqrtm_sym
@@ -121,86 +121,6 @@ def downfolded_seed_vectors(aop_vec, diag, nH, norb, orbital_window, omega0,
     return e_eff, seeds
 
 
-def select_resonant_configs(diag, norb, omega0, tol=0.05, max_candidates=20):
-    """2h1p/2p1h configuration indices (>= norb) whose zeroth-order (diagonal
-    K) energy lies within `tol` Ha of `omega0` -- candidate host
-    configurations for a satellite at that energy, for satellite_seed_vectors.
-    Same units/convention as downfolded_seed_vectors's omega0 (Hartree,
-    compared directly against `diag`). Returns indices sorted by |diag-omega0|
-    ascending, capped at max_candidates."""
-    idx = np.arange(norb, diag.size)
-    dist = np.abs(diag[idx] - omega0)
-    order = np.argsort(dist)
-    sel = idx[order][dist[order] < tol]
-    return sel[:max_candidates]
-
-
-def satellite_seed_vectors(aop_vec, diag, nH, norb, orbital_window,
-                           satellite_indices, omega0, eta=0.01):
-    """Mixed-orbital + 2h1p/2p1h Davidson seeds for SATELLITE root-following.
-
-    downfolded_seed_vectors folds the *entire* 2h1p+ manifold into an
-    effective correction on the orbital block, so its seeds carry zero
-    weight beyond the window rows by construction -- useless for a satellite,
-    whose defining feature is non-negligible weight surviving on a 2h1p+ row.
-    This variant instead keeps a chosen RESONANT subset of 2h1p+
-    configurations (satellite_indices, e.g. from select_resonant_configs)
-    fully explicit -- only the remaining, off-resonant continuum gets folded
-    away, exactly as before. Diagonalizing the resulting small
-    (window + satellite_indices)-dimensional block can therefore produce
-    genuinely mixed 1h/2h1p eigenvectors: the renormalized-QP root(s) stay
-    ~100% on the window rows, while the satellite root picks up real weight
-    on the satellite_indices rows -- use dominant_satellite_seed to select it.
-
-    Returns (e_eff, seeds, full_idx): e_eff ascending (m,) where
-    m = len(orbital_window) + len(satellite_indices); seeds (nH, m) unit
-    vectors carrying the H_block eigenvectors on the window+satellite rows
-    (zeros elsewhere); full_idx (m,) = concatenate([orbital_window,
-    satellite_indices]), the row order seeds/e_eff are indexed by."""
-    window = np.asarray(orbital_window, dtype=int)
-    sat = np.asarray(satellite_indices, dtype=int)
-    full_idx = np.concatenate([window, sat])
-    nw = window.size
-
-    cols = np.empty((full_idx.size, nH))
-    for k, p in enumerate(full_idx):
-        e_p = np.zeros(nH)
-        e_p[p] = 1.0
-        cols[k] = aop_vec(e_p)
-
-    # off-resonant remainder: the 2h1p+ block minus the explicit satellite set
-    remainder_mask = np.ones(nH - norb, dtype=bool)
-    remainder_mask[sat - norb] = False
-    R = np.arange(norb, nH)[remainder_mask]
-
-    U_w = cols[:nw, R]  # window -> off-resonant coupling, same as
-                        # downfolded_seed_vectors's U_w but with R excluding
-                        # the satellite set
-    d = omega0 - diag[R]
-    fold = (U_w * (d / (d * d + eta * eta))) @ U_w.T  # (nw, nw)
-
-    H_block = cols[:, full_idx]  # direct (m, m): window+satellite, undownfolded
-    H_block[:nw, :nw] += fold    # only the window-window sub-block is corrected
-    H_block = 0.5 * (H_block + H_block.T)
-
-    e_eff, C = np.linalg.eigh(H_block)
-    seeds = np.zeros((nH, full_idx.size))
-    seeds[full_idx] = C
-    return e_eff, seeds, full_idx
-
-
-def dominant_satellite_seed(e_eff, seeds, full_idx, window_size):
-    """From satellite_seed_vectors' output, pick the eigenvector with the
-    largest weight on the explicit satellite rows (full_idx[window_size:])
-    -- the one to feed as ref_vec into davidson_follow so it tracks the
-    satellite instead of re-locking onto a renormalized-QP root. Returns
-    (e_guess, seed_vec)."""
-    sat_rows = full_idx[window_size:]
-    weight_on_sat = np.sum(seeds[sat_rows, :] ** 2, axis=0)
-    k = np.argmax(weight_on_sat)
-    return e_eff[k], seeds[:, k]
-
-
 def diag_dense(H, norb, threshold=5000):
     """Dense diagonalization on the shared backend (ELPA-distributed above
     threshold); (eGF, Z, Reigv) sorted ascending. Only rank 0 gets Reigv/Z
@@ -301,7 +221,7 @@ def apply_inverse_sqrt(matvec, v, tol=INV_SQRT_LANCZOS_TOL,
                                and np.linalg.norm(cur - prev) < tol * vnorm):
             return cur
         prev = cur
-    warnings.warn(f"apply_inverse_sqrt: not settled to {tol:g} in {max_steps} Lanczos "
+    flag('inverse_sqrt_not_settled', f"apply_inverse_sqrt: not settled to {tol:g} in {max_steps} Lanczos "
                   "steps; the last approximation is returned", ADCNotConverged, stacklevel=2)
     return cur
 

@@ -11,7 +11,6 @@ wrong cause.
 """
 import numpy as np
 import pytest
-from scipy.sparse.linalg import ArpackNoConvergence
 
 import src.SingleReference.LinearResponse.davidson as davidson
 from src.SingleReference.LinearResponse.probe import AmbProbeNotConverged
@@ -37,13 +36,10 @@ def test_a_defect_in_the_probe_raises_as_itself(monkeypatch):
 
 
 @pytest.mark.parametrize('exc', [
-    ArpackNoConvergence('planted', np.array([]), np.array([])),
-    'AmbProbeNotConverged',
+    AmbProbeNotConverged('planted'),
     ValueError('ranks apart at the lockstep'),
 ])
 def test_a_probe_that_did_not_converge_is_a_breakdown(monkeypatch, exc):
-    if exc == 'AmbProbeNotConverged':
-        exc = AmbProbeNotConverged('planted')
     monkeypatch.setattr(davidson, 'lowest_amb_from_action',
                         _probe_raising(exc))
     err = davidson._casida_breakdown(_no_action, DIAG, 1e-6)

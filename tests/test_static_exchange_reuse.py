@@ -28,9 +28,9 @@ What is gated:
     evGW loop, and not at all when the caller hands one in, with the roots
     the same to a few ulp either way;
   * the window's quasiparticle energies are the built ones to a few ulp,
-    serially and under simulated ranks (two computations,
+    serially and under simulated ranks (two computations;
     the few-ulp bar is floored at one Ha, so the HF diagonal
-    cases below, whose whole term is 1e-16 Ha, no longer see a 1e-6
+    cases below, whose whole term is 1e-16 Ha, do not see a 1e-6
     relative perturbation);
   * `exchange='df-direct'` forms no such matrix and refuses a handed-in one;
   * the AO operator under the matrix is built once per mean field and

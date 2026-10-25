@@ -32,3 +32,9 @@ def ov_energies(eps, nocc):
     """d_(i,a) = eps_a - eps_i on the flattened pair index of C_ov."""
     occ, virt = get_occ_virt_indices(eps, nocc)
     return (eps[virt][None, :] - eps[occ][:, None]).ravel()
+
+
+def ov_factor(coeff, occ, virt):
+    """C_ov: the occupied-virtual block of a DF factor coeff[Q, p, q],
+    (naux, nocc * nvirt) on the pair index of ov_energies."""
+    return coeff[:, occ[:, None], virt].reshape(coeff.shape[0], -1)

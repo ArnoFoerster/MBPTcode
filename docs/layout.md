@@ -27,8 +27,10 @@ src/Base/                      the foundation
                                constants.py: every named number
     pyscf/                     pyscf_interface.py (integrals, the mean field's
                                pieces), scf_convergence.py, dispersion.py
-                               (empirical D3/D4), cphf.py (the one orbital-
-                               response solver)
+                               (empirical D3/D4), cphf.py (the CPHF /
+                               Z-vector solve of the relaxed densities; the
+                               gradient layer's multiplier solve is
+                               gradients/multipliers.py)
     factorization/             separable_ri.py (ISDF / separable RI of the
                                ERIs, with its radii table in data/),
                                isdf_jk.py (ISDF Coulomb and exchange for the
@@ -47,10 +49,16 @@ src/Base/                      the foundation
                                memory budgets
     utils/record_io.py         JSON records and checkpoints, the code id a
                                record carries
+    utils/timing.py            wall-clock seconds of a named stage,
+                               accumulated into a dict
     declaration.py             GroundState, Excitation, ChargedExcitation,
                                QPStates: the physics a surface is asked for
     environment_seam.py        the one contract every route reads its
                                surroundings through
+    numerical_flags.py         named numerical flags: a solver that stops
+                               short warns and raises a flag, which the
+                               function returning the record collects (see
+                               warnings.md)
     orbital_spaces.py          the occupied/virtual split
     step_failed.py             StepFailed, which a walk catches to shorten a
                                step
@@ -115,7 +123,11 @@ src/gradients/                 the method-neutral core: surface.py (the
                                (potential_energy_surface)
     adc/                       ADC(2) forces and the ADC(2) state model
 src/properties/                optimize.py (walks, refreeze), vibronic.py,
-                               hessian.py, conformers.py, spin_orbit.py,
+                               hessian.py, mode_hessian.py (force constants
+                               along chosen normal modes), curvilinear.py
+                               (displacements in valence internal
+                               coordinates, for Huang-Rhys factors),
+                               conformers.py, spin_orbit.py,
                                spin_vibronic.py, nonadiabatic.py,
                                characters.py, band_shape.py,
                                franck_condon.py, excitations.py (vertical

@@ -329,7 +329,7 @@ def test_the_closed_form_is_the_old_one(water):
 def test_the_quasiparticle_loop_is_the_old_loop(water):
     """Same root, same Z: the bracketed pole-sum solve lands on the loop's
     root and Z by the pin rule (8 ulp on the recording BLAS, the energy class
-    bar under another; a cluster's MKL: 2 ulp, 1.1e-16 Ha). Not bitwise: both end on a Newton step below 1e-11 from
+    bar under another; the cluster's MKL: 2 ulp, 1.1e-16 Ha). Not bitwise: both end on a Newton step below 1e-11 from
     different starts (the loop from eps_p, the bracketed solve from inside
     its interval)."""
     eps, nocc, b, c_ov, nu, _ = water

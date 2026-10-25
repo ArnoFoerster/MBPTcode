@@ -559,8 +559,10 @@ class DiabaticGradient:
             tuple(np.ascontiguousarray(a, dtype=float)
                   for a in (chain + canon + loc, chain, canon, loc)),
             check=True)
+        # the partition's solver flags (`FragmentPartition.guard_flags`) and
+        # this gradient's own response flags
         return total, dict(chain=chain, canonical=canon, localization=loc,
-                           flags=dict(self.flags))
+                           flags={**self.partition.guard_flags, **self.flags})
 
     def matrix(self):
         """The matrix being differentiated: A_eff(Omega_0), or A_PP undressed."""

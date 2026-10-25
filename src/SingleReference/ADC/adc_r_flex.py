@@ -33,11 +33,11 @@ Faddeev operator with only that pair on, or in closed form (pp_term='poles'):
 that operator is block-diagonal in the spectator, so one pair
 diagonalization per spin gives all its poles and residues.
 """
-import warnings
 
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.numerical_flags import flag
 from src.SingleReference.ADC import adc_r_faddeev as FR
 from src.SingleReference.ADC.second_order import sigma2_poles
 from src.SingleReference.ADC.solve import ADCNotConverged, LanczosState, lanczos_extend
@@ -114,7 +114,7 @@ class _Resolvent:
             if abs(s1 - s0) < SIGMA_CF_TOL:
                 return s1, d1
             if n >= LANCZOS_MAX_STEPS:
-                warnings.warn(f"FLEX resolvent: Sigma({w}) not settled in {n} Lanczos "
+                flag('flex_resolvent_not_settled', f"FLEX resolvent: Sigma({w}) not settled in {n} Lanczos "
                               f"steps (last change {abs(s1 - s0):.2e}); the last value "
                               f"is used (converged=False)", ADCNotConverged, stacklevel=3)
                 self.settled = False

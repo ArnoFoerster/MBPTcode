@@ -47,6 +47,7 @@ from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                                          ORBITAL_MULTIPLIER_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
+from src.Base.numerical_flags import collecting
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.cphf import CphfNotConverged
 from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
@@ -318,6 +319,27 @@ def test_an_operator_blind_to_one_pair_is_caught_by_the_residual():
                                              flags=flags)
     assert res > ORBITAL_MULTIPLIER_RESIDUAL_TOL
     assert [f['flag'] for f in flags] == ['orbital_response_not_converged']
+
+
+def test_the_orbital_response_flag_reaches_the_block_once():
+    """The multiplier solve raises its flag through `numerical_flags.flag`:
+    the `collecting` block in flight receives it, and so does a separate
+    `flags` list the caller hands in, but a list that is the block's own gets
+    it once."""
+    eps = np.array([-0.7, -0.2, 0.3, 1.1])
+    Y_E = np.array([[0.0, 0.25, 0.4, -0.2],
+                    [0.55, 0.0, 0.1, 0.7],
+                    [-0.3, 0.6, 0.0, 0.15],
+                    [0.5, -0.1, 0.9, 0.0]])
+    matvec = _pair_blind_matvec(eps, (0, 1))
+    for own in (False, True):
+        block = []
+        flags = block if own else []
+        with collecting(block), pytest.warns(CphfNotConverged):
+            solve_orbital_multipliers(matvec, Y_E, eps,
+                                      numerics=FIVE_ITERATIONS, flags=flags)
+        assert [f['flag'] for f in block] == ['orbital_response_not_converged']
+        assert [f['flag'] for f in flags] == ['orbital_response_not_converged']
 
 
 def test_the_same_right_hand_side_solves_with_the_whole_operator():

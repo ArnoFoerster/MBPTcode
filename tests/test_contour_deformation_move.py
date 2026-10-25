@@ -6,8 +6,8 @@ ulp (two computations of each number: `assert_same` of tests/pins.py).
 and `gradients/contour_deformation_adjoint.py` the adjoints. Production must
 reproduce the reference numbers, so every gate here is a few ulp, not a
 physics tolerance -- except the root itself: the reference's pole-guarded Newton is
-replaced by the one root finder of `Solvers.qp_equation`,
-which lands on the reference's root wherever
+replaced by the one root finder of `Solvers.qp_equation` (one quasiparticle
+root finder everywhere), which lands on the reference's root wherever
 that root is a quasiparticle, to the finder's tolerance, from another path.
 
 What breaks each gate:

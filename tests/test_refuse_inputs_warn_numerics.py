@@ -6,13 +6,9 @@
   `mf.relaxation`, on the geomeTRIC route (pyscf's driver, whose `optimize`
   returned the stop point as the minimum with no word) and on the Cartesian
   one. A converged relaxation carries the flag True.
-- An ISDF grid with no row in the shipped radii table: re-optimized at run
-  time with a warning that every number built on it is unvalidated. Now
-  refused (`UntabulatedISDFGrid`) unless `IsdfNumerics.runtime_radii` (or the
+- An ISDF grid with no row in the shipped radii table is an input: refused
+  (`UntabulatedISDFGrid`) unless `IsdfNumerics.runtime_radii` (or the
   `runtime_radii` keyword) declares the run-time grid.
-
-The relaxation refused or, through pyscf's driver, said nothing; the grid
-warned and went on.
 """
 import warnings
 

@@ -12,7 +12,7 @@ with rho^{S,q} the aux-basis projection of the transfer-q eigenvectors
 (pbc_casida.solve_rpa_spectral's rho, which carries sqrt(f_m - f_n), or
 project_XpY here for BSE vectors on the occupied-virtual rectangle).
 The (transfer-q) rho contracts directly with the (transfer -q) L^{kp,km} block
-via the same aux-index contraction as PBCDFIntegrals.eri_block.
+via the same aux-index contraction as PBCDFIntegrals.reconstruct_eri.
 """
 import numpy as np
 from pyscf.pbc.lib.kpts_helper import conj_mapping

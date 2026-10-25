@@ -397,8 +397,10 @@ def optimize(surface, mol=None, hess_init=None, conv=None, refreeze=0,
     """Relax `surface`'s state. Returns (mol, info).
 
     numerics: the walk's settings (`walk_numerics`: max_cycle, trust,
-        trust_max, trust_min of `Numerics.walk`) for a surface that holds no
-        `Numerics`; a surface that holds one walks on its own.
+        trust_max, trust_min of `Numerics.walk`); None walks on the
+        surface's own `Numerics` (the defaults where it holds none). Beside a
+        surface that holds one it may differ from it in its walk section
+        only.
 
     nudge: the walk starts `start_nudge(surface, mol, nudge)` away from
         `mol`: by default START_NUDGE_BOHR on an excited-state surface, so a
@@ -736,14 +738,19 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max, trust_min,
 # geomeTRIC: internal coordinates, when it is installed
 # ---------------------------------------------------------------------------
 
-def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
-                       coordsys='tric', refreeze=0, verbose=True,
-                       workdir=None, hess_init=None, nudge=None,
-                       checkpoint=None, resume=None,
-                       trust_min=WALK_TRUST_MIN_BOHR):
+def optimize_geometric(surface, mol=None, converge='GAU', coordsys='tric',
+                       refreeze=0, verbose=True, workdir=None, hess_init=None,
+                       nudge=None, checkpoint=None, resume=None, conv=None,
+                       numerics=None):
     """Relax `surface`'s state through geomeTRIC. Returns (mol, info).
 
     nudge: the symmetry-breaking start, as in `optimize` (`start_nudge`).
+
+    numerics: the walk's settings as in `optimize` (`walk_numerics`):
+        geomeTRIC takes at most `max_cycle` steps and ends a walk whose
+        trust radius falls below `trust_min`; its trust radius is its own.
+    converge: geomeTRIC's convergence set; conv: thresholds overriding it,
+        named as in GEOM_OPT_CONV (`geometric_criteria`).
 
     Preferred over `optimize` beyond a handful of atoms: the Cartesian
     optimizer's step count grows with the system because Cartesians couple
@@ -794,7 +801,7 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     entry the count when it was evaluated, and `info['retries']` holds each
     rejection's failed step, new radius and message. geomeTRIC's own rejection
     of a poor step is its business and is not counted. The iteration budget
-    `maxiter` is shared by the restarts: each gets what the accepted steps
+    `max_cycle` is shared by the restarts: each gets what the accepted steps
     before it left.
 
     A walk that does not converge is a record, not an exception, as in
@@ -826,13 +833,31 @@ def optimize_geometric(surface, mol=None, maxiter=100, converge='GAU',
     geometric_engine()
     mol = surface.mol0 if mol is None else mol
     refreeze = refreeze_asked(refreeze)
+    walk = walk_numerics(surface, numerics)
+    criteria = geometric_criteria(converge, conv)
     start, nudged = start_nudge(surface, mol, nudge)
     mol_opt, info = with_final_surface(surface, *_geometric_walk(
-        surface, start, maxiter, converge, coordsys, refreeze, verbose,
-        workdir, hess_init, checkpoint=checkpoint, resume=resume,
-        trust_min=trust_min))
+        surface, start, walk.max_cycle, criteria, coordsys, refreeze,
+        verbose, workdir, hess_init, checkpoint=checkpoint, resume=resume,
+        trust_min=walk.trust_min))
     info['start_nudge'] = nudged
     return mol_opt, info
+
+
+def geometric_criteria(converge, conv=None):
+    """geomeTRIC's convergence keywords: the set `converge`, with the
+    thresholds `conv` names (as in GEOM_OPT_CONV, `resolved_conv`; forces in
+    Ha/Bohr, steps in Bohr, which geomeTRIC measures in Angstrom) in place of
+    the set's own."""
+    criteria = {'convergence_set': converge}
+    if conv is None:
+        return criteria
+    asked = resolved_conv(conv)
+    criteria.update(convergence_gmax=asked['opt_grad_max'],
+                    convergence_grms=asked['grad_rms'],
+                    convergence_dmax=asked['step_max'] * BOHR_TO_ANGSTROM,
+                    convergence_drms=asked['step_rms'] * BOHR_TO_ANGSTROM)
+    return criteria
 
 
 def geometric_engine():
@@ -985,7 +1010,8 @@ class GeometricWalk:
                 f'the state stopped evaluating ({status})')
 
     def run(self, tag, tmp, maxiter, converge, coordsys, hess_init):
-        """Run geomeTRIC, restarting after each rejected step. Returns
+        """Run geomeTRIC, restarting after each rejected step; `converge`
+        holds its convergence keywords (`geometric_criteria`). Returns
         (converged, status)."""
         Engine, GeoMolecule, run_optimizer, NotConverged = geometric_engine()
         engine = self.engine(Engine, GeoMolecule)
@@ -1011,7 +1037,7 @@ class GeometricWalk:
                 return False, f'maxiter ({maxiter}) reached without convergence'
             try:
                 run_optimizer(customengine=engine(here), coordsys=coordsys,
-                              maxiter=budget, convergence_set=converge,
+                              maxiter=budget, **converge,
                               input=tag, prefix=os.path.join(tmp, prefix),
                               check=0, write_cart_hess=self.hess_out,
                               **given, **trust)
@@ -1357,9 +1383,12 @@ def relax(surface, mol=None, engine='auto', **kw):
     method produced the geometry, because the two converge to different
     residuals on the same minimum.
 
-    With 'auto' the caller does not know which engine runs, so each takes
-    the keywords it has and drops the other's (`engine_keywords`); a keyword
-    neither has is refused. A named engine takes `kw` as it is.
+    Both engines take the walk's settings (`numerics`, `conv`, `refreeze`,
+    `hess_init`, `nudge`, `checkpoint`, `resume`, `verbose`). With 'auto' the
+    caller does not know which engine runs: the Cartesian fallback drops
+    what only places geomeTRIC's own files and coordinates (`coordsys`,
+    `workdir`) and refuses by name any other keyword it does not take
+    (`engine_keywords`). A named engine takes `kw` as it is.
     """
     if engine == 'cartesian':
         mol_opt, info = optimize(surface, mol, **kw)
@@ -1374,16 +1403,23 @@ def relax(surface, mol=None, engine='auto', **kw):
     return mol_opt, info
 
 
+#: The keywords of `optimize_geometric` that only steer geomeTRIC itself
+#: (which coordinates it steps in, where its files go): the Cartesian
+#: fallback of `relax(engine='auto')` drops them.
+GEOMETRIC_ONLY = frozenset({'coordsys', 'workdir'})
+
+
 def engine_keywords(walker, kw):
-    """The keywords of `kw` that `walker` takes; one that neither optimizer
-    takes is refused rather than dropped."""
-    taken = {name: set(inspect.signature(f).parameters)
-             for name, f in (('optimize', optimize),
-                             ('optimize_geometric', optimize_geometric))}
-    unknown = set(kw) - set.union(*taken.values())
+    """The keywords of `kw` for `walker`: a keyword it does not take is
+    refused by name rather than dropped, except geomeTRIC's own
+    (`GEOMETRIC_ONLY`) on the Cartesian optimizer."""
+    taken = set(inspect.signature(walker).parameters)
+    if walker is optimize:
+        kw = {k: v for k, v in kw.items() if k not in GEOMETRIC_ONLY}
+    unknown = sorted(set(kw) - taken)
     if unknown:
-        raise TypeError(f'relax: no optimizer takes {sorted(unknown)}')
-    return {k: v for k, v in kw.items() if k in taken[walker.__name__]}
+        raise TypeError(f'relax: {walker.__name__} takes no {unknown}')
+    return dict(kw)
 
 
 def relax_ground_state(mol, scf_factory, engine='auto', verbose=False,
@@ -1426,7 +1462,7 @@ def relax_ground_state(mol, scf_factory, engine='auto', verbose=False,
         if engine != 'cartesian':
             try:
                 opt, info = optimize_geometric(
-                    surface, mol, maxiter=maxsteps,
+                    surface, mol, numerics=walk_on,
                     converge='GAU' if converge is None else converge,
                     verbose=verbose)
                 name = 'geometric'

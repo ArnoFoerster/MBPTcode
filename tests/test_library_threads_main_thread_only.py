@@ -4,7 +4,7 @@ threadpoolctl finds the loaded libraries with dl_iterate_phdr and a Python
 callback, so it holds the dynamic loader's lock while it waits for the GIL. A
 second thread that holds the GIL and needs that lock waits for the first, and
 neither moves: numpy's temporary elision walks the C stack through
-dl_iterate_phdr on every large `scalar * array`. On a cluster (py311, numpy 2.4)
+dl_iterate_phdr on every large `scalar * array`. On the cluster (py311, numpy 2.4)
 two simulated ranks of `test_block_action_split` deadlocked so in every run,
 one in `openmp_threads`, the other in the perturbed rank's array product (gdb
 showed the two locks). The workstation's numpy does not

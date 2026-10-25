@@ -17,7 +17,7 @@ tensor, gas phase or solvated, `solve_bse_isdf` or `ExcitedStateChain` or
 `CasidaSolver` on `build_casida_matrices`, singlet-triplet or the periodic
 Casida -- hands back the same (omega, X, Y) with X, Y of shape
 (n_ov, nroots), and that is the whole interface. The signature deliberately
-mirrors `davidson.oscillator_strengths(mf, mol, nocc, omega, X, Y)`, the
+mirrors `BSE.solve.oscillator_strengths(mf, mol, nocc, omega, X, Y)`, the
 codebase's other property over Casida vectors, for the same reason.
 
 NORMALIZATION IS THE REPO'S, AND IT IS CHECKED. Every solver here returns

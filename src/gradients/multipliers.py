@@ -21,10 +21,10 @@ iterate is returned, `CphfNotConverged` is warned, and the flag
 a list. A degenerate pair that carries gradient is an input the equation does
 not cover (a symmetry the caller has to adapt to) and is refused.
 """
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.cphf import CphfNotConverged
@@ -139,10 +139,9 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
 
 
 def not_converged(text, flags=None):
-    """Warn `CphfNotConverged` with `text` and append the flag
-    'orbital_response_not_converged' to `flags` where it is a list: the one
-    failure policy of the gradient layer's orbital-response solves."""
-    warnings.warn(text, CphfNotConverged, stacklevel=3)
-    if flags is not None:
-        flags.append({'flag': 'orbital_response_not_converged',
-                      'message': text})
+    """Warn `CphfNotConverged` with `text` and raise the named flag
+    'orbital_response_not_converged' (`numerical_flags.flag`), also into
+    `flags` where it is a list: the one failure policy of every
+    orbital-response solve, `Base.pyscf.cphf.solve`'s too."""
+    flag('orbital_response_not_converged', text, CphfNotConverged,
+         stacklevel=3, into=flags)

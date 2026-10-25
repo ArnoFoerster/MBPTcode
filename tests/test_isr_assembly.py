@@ -1,4 +1,4 @@
-"""Gate for the ORDER-GENERAL blockwise ISR assembly (Phase 1c keystone,
+"""Gate for the ORDER-GENERAL blockwise ISR assembly:
 src/SingleReference/ADC/isr_assembly.py.
 
 Three layers, most fundamental last:

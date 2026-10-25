@@ -120,21 +120,6 @@ def pdaggerq_available():
     return True
 
 
-def check_safe_indices(op_str):
-    """Raise ValueError if an operator string uses an index letter pdaggerq mis-handles (gotcha 1)."""
-    m = re.search(r'\((.*?)\)', op_str)
-    if not m:
-        return
-    for idx in m.group(1).split(','):
-        idx = idx.strip()
-        if idx and idx not in PDAGGERQ_SAFE_OCC | PDAGGERQ_SAFE_VIR:
-            raise ValueError(
-                f"index '{idx}' in '{op_str}' is outside pdaggerq's safe sets "
-                f"(virtual {sorted(PDAGGERQ_SAFE_VIR)}, occupied "
-                f"{sorted(PDAGGERQ_SAFE_OCC)}); pdaggerq would silently derive "
-                f"a wrong equation")
-
-
 def _slice_letter(idx):
     return 'o' if idx in OCC_LETTERS else 'v'
 

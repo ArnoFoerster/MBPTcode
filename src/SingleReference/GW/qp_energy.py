@@ -35,6 +35,7 @@ from src.Base.pyscf.pyscf_interface import (require_closed_shell_or_unrestricted
                                             get_two_electron_integrals_chemist,
                                             spin_index)
 from src.Base.environment_seam import environment_of
+from src.Base.numerical_flags import flags_into_out
 from src.Base.utils.parallel.threads import blas_single_threaded, row_map
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift, equilibrium_level_shift,
@@ -289,6 +290,7 @@ def _qp_energy_qsgw(mf, mol, mode_key, selfenergy, polarizability, state,
     return out
 
 
+@flags_into_out
 def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                    eta=None, state='homo',
                    spin_channel='alpha', printSpectralFunction=False,
@@ -362,14 +364,19 @@ def calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True,
                         Its pole count and fit stride are `numerics.qp`, on top of the
                         CD grid, which is the grid the pole model is fitted on.
     diagnostics:    a dict that receives what the contour driver decided:
-                    the CD grid it resolved, the residues swept, the pole
-                    guard in force, the Newton seed, the residue treatment
-                    that ran and the Laplace transform's representation error
-                    where it did. 'cd', 'laplace' and 'sop' only.
+                    the continuation, the grid sizes it resolved (ntau,
+                    nfreq_cd, w0_cd), the residue treatment that ran
+                    (residue_route_taken), and per state (states) the level
+                    the root was judged at, the residues swept, the Laplace
+                    transform's representation error where it ran and the
+                    pole model's admission. 'cd', 'laplace' and 'sop' only.
     out:            a dict, or None: receives 'reference_diagnostics', the
                     unrestricted reference's spin contamination and stability
                     (`unrestricted_reference_diagnostics`, warned about;
-                    None for a restricted one), for the caller's record.
+                    None for a restricted one), and 'numerical_flags', every
+                    named flag the calculation raised on any thread or rank
+                    (`numerical_flags.flags_into_out`), for the caller's
+                    record.
     return_z:       return (energy, Z) instead of the energy. The three
                     contour continuations take Z from their own Newton slope,
                     the exact derivative of the equation they solved; the other

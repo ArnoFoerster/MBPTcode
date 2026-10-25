@@ -15,8 +15,8 @@ below are one and `e_total` is the walk's energy to the bit.
 that stopped short of its convergence would put |F_ia| into the force
 unannounced. A force on a mean field whose |F_ia| exceeds what it was
 converged to (`scf_force_tol`) warns, is flagged in `scf_flags` and carries
-on, as an energy does (refuse inputs, warn
-numerics).
+on, as an energy does (a bad input is refused; a numerical shortfall
+warns).
 
 Formaldehyde S1, HF/cc-pVDZ, the chain's defaults.
 """

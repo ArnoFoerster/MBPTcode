@@ -38,8 +38,8 @@ cancellation by hand for n=2). No manual "drop the disconnected piece"
 filtering is done anywhere in this module -- the recursion handles it.
 
 Scope/limitation: pdaggerq operator strings only accept index letters a-f
-(virtual) / i-n (occupied) safely (src/CodeGeneration/pdaggerq_interface.py's
-check_safe_indices gotcha), capping any single bra/ket rank at 6.
+(virtual) / i-n (occupied) safely (PDAGGERQ_SAFE_VIR/OCC in
+src/CodeGeneration/pdaggerq_interface.py), capping any single bra/ket rank at 6.
 ranks_present() is capped at MAX_RANK=4: MP4 (n=4) needs T4^(2) (quadruples)
 for N^(4)'s <Psi2|Psi2> term and M^(4)'s <Psi2|op|Psi2> term, but does NOT
 need any rank-5 amplitude (verified by the same adjacency argument: n=4's

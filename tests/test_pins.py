@@ -32,8 +32,8 @@ def another_blas():
 
 @pytest.mark.parametrize('quantity', sorted(PIN_CROSS_BLAS_BARS))
 def test_the_same_blas_holds_to_a_few_ulp(quantity):
-    """Two runs on one machine differ by an ulp
-    (1.1e-16 Ha); PIN_SAME_ULPS ulp of max(|pin|, 1) pass, twice that
+    """Two runs on one machine differ by an ulp (1.1e-16 Ha seen on one
+    workstation); PIN_SAME_ULPS ulp of max(|pin|, 1) pass, twice that
     fails."""
     here = blas_identity()
     unit = '1' if quantity == 'vector' else 'Ha'

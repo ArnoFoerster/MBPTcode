@@ -1,6 +1,6 @@
 """A quasiparticle root with a pole strength outside (0, 1] is kept, warned
-about and flagged; it is neither refused nor demoted (it
-can happen, rarely, and is often harmless -- the one exception to refusing every shortfall).
+about and flagged; it is neither refused nor demoted (it can happen,
+rarely, and is often harmless).
 
 The declaration `QPStates()` (kind='admitted', threshold='gap') names its
 orbitals from the mean-field spectrum by Eq. (27) before anything is solved,
@@ -24,9 +24,6 @@ plant the Newton root (19.286 eV, Z = -0.0122) for orbital 17 and check:
 - a displaced geometry keeps the set and the flags, and warns on its own
   roots without refusing;
 - under ranks every rank keeps rank 0's verdict.
-
-The demotion this replaced moved orbital 17 to the scissor of probe 16; the
-number that moves with the change is recorded in
 """
 import functools
 import os
