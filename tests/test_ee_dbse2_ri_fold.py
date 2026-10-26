@@ -110,6 +110,7 @@ from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee
                                            ee_gw_pieces)
 from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, aux_chunks, drive
 from src.SingleReference.LinearResponse import linear_response
+from tests.pins import same_bar
 
 # the run choice that puts the device paths on the GPU
 ON_GPU = Numerics(layout={'device': 'gpu'})
@@ -237,8 +238,10 @@ def check_operator(eps, B, no, sets):
                 ok &= check(close(d, dref, zero),
                             f'{tag}: doubles_dot at two frequencies',
                             f'{d:.6e} against {dref:.6e}')
-                ok &= check(op.pieces()['d_min'] == float(P['D'].min()),
-                            f'{tag}: d_min is min D exactly',
+                d_min, d_ref = op.pieces()['d_min'], float(P['D'].min())
+                # two roundings of one difference of orbital energies
+                ok &= check(abs(d_min - d_ref) <= same_bar(d_min, d_ref),
+                            f'{tag}: d_min is min D to PIN_SAME_ULPS ulp',
                             f"{op.d_min:.6f} Ha, sets' minima "
                             + ', '.join(f'{P["D"][sl].min():.6f}' for _, _, sl
                                         in P['segments']['a'][::2]))
