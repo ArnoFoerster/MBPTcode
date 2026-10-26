@@ -27,6 +27,15 @@ ELPA's Python binding `pyelpa` both import, on one rank or on several.
 Otherwise, or with `MBPT_USE_ELPA=0`, they call `scipy.linalg.eigh`, as they do
 for every complex Hermitian matrix.
 
+A visible GPU takes such a solve first. With the run's
+`numerics.layout.eigh_device` at its default `auto` (or no `Numerics` passed to
+`diagonalize_matrix` / `eigh_symmetric`), rank 0 solves a matrix of dimension
+5000 or more on the GPU through CuPy when one is visible, and on the host when
+the device runs out of memory or cuSOLVER refuses the size; `cpu` never uses the
+GPU, `gpu` always does, at any size, and raises where it cannot. The served ranks
+stay idle through a GPU solve.
+`tests/test_eigh_device.py` pins the device solve to the host's.
+
 Rank 0 runs the script alone; the other ranks wait to serve its eigensolves.
 Open and close the script with
 

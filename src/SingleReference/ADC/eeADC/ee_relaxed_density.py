@@ -294,7 +294,7 @@ def tiled_pieces(op, y, omega, tile_gb=EE_RI_TILE_GB):
     if op.level == 'adc1':
         return Pieces(symmetrize(g_oo), symmetrize(g_vv), GL, Goo, Xvv, y, lr, q)
     ro, rv = y @ y.T, y.T @ y
-    Ky = op._k_apply(y.reshape(-1, 1))[:, 0].reshape(no, nv)
+    Ky = op.k_apply(y.reshape(-1, 1))[:, 0].reshape(no, nv)
     roL = (ro @ L.reshape(no, -1)).reshape(no * nv, naux)     # sum_i ro_ki L_id
     tiles = tile_ranges(no, 8.0 * nv * no * nv * DF_FORCE_PIECES_TILE_ARRAYS, tile_gb, ranks)
     mine = [(t, kk) for t, kk in enumerate(tiles) if t % ranks == rank]
@@ -307,7 +307,7 @@ def tiled_pieces(op, y, omega, tile_gb=EE_RI_TILE_GB):
         Ty[k0:k1] = (T.reshape((k1 - k0) * nv, -1) @ y.ravel()).reshape(k1 - k0, nv)
     reduce_sum(Ty, comm)
     # the doubles' dressed factor, every rank
-    BtT = op._dressed(y.ravel())
+    BtT = op.dressed(y.ravel())
     BtR = np.ascontiguousarray(BtT.T)                         # (no nv, naux)
     # sums over the tiles, in tile order; rows of one tile each, any order
     fock = Pass(op, {'g_oo': (no, no), 'g_vv': (nv, nv)})
@@ -387,7 +387,7 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
     term += A2.T @ L[r0:r1]
     del A, A2
     # the doubles (ee_ri_fold._doubles_tile's R)
-    H, HT = op._pair(BtT, k0, k1)
+    H, HT = op.pair(BtT, k0, k1)
     w = 1.0 / (omega - D)
     if singlet:
         G = H + HT
@@ -423,7 +423,7 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
 
 def _tile_ints(op, k0, k1):
     """(kc|ld) of the tile's rows, (kt, nv, no, nv)."""
-    return op._ints(k0, k1)
+    return op.ints(k0, k1)
 
 
 # ----------------------------------------------------------------------
@@ -571,7 +571,7 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
 
 def operator_back_vv(op, G):
     """sum_bP G^P_ib B^P_ab (no, nv) for G (no nv, naux), on the operator's
-    tiles and B_vv chunks (ee_ri_fold.RIFoldADC2._back_vv): a collective."""
+    tiles and B_vv chunks (ee_ri_fold.RIFoldADC2.back_vv): a collective."""
     nv = op.nv
     gams = {t: G[k0 * nv:k1 * nv][None] for t, (k0, k1) in op.my_tiles}
-    return -op._back_vv(gams, 1)[0].reshape(op.no, nv)
+    return -op.back_vv(gams, 1)[0].reshape(op.no, nv)

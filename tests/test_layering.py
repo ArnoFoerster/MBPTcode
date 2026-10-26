@@ -333,11 +333,8 @@ SIBLINGS = (('src.gradients.gwbse', 'src.gradients.adc'),
 #: module outside it.
 ISOLATED = ('src.SingleReference.Periodic',)
 #: Private names read across modules that stay as aliases: ee_spin_blocks
-#: keeps `_ew`, `_ksum`, `_slab_plan`, `_stream` and ee_driver
-#: `_channel_basis` as aliases for ee_fold and ee_gw_pieces.
+#: keeps `_ew`, `_ksum`, `_slab_plan`, `_stream` as aliases for ee_gw_pieces.
 PRIVATE_EXCEPTIONS = {
-    'src/SingleReference/ADC/eeADC/ee_fold.py': {
-        'src.SingleReference.ADC.eeADC.ee_driver._channel_basis'},
     'src/SingleReference/ADC/eeADC/ee_gw_pieces.py': {
         'src.SingleReference.ADC.eeADC.ee_spin_blocks._ew',
         'src.SingleReference.ADC.eeADC.ee_spin_blocks._ksum',

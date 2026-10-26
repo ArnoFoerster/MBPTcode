@@ -60,6 +60,7 @@ from src.SingleReference.common.active_space import frozen_core
 from src.Base.numerics.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,
                                          EE_RI_AMPLITUDE_CACHE_GB, EE_RI_FOLD_TILE_ARRAYS,
                                          EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
+from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import code_id
 from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
                                               lockstep_mean_field)
@@ -297,7 +298,8 @@ def run(args, comm):
                                  nroots=args.nroots, fold=True, frozen=nfrozen,
                                  auxbasis=args.auxbasis, environment=env,
                                  conv_tol=args.conv_tol, return_fold=True,
-                                 tile_gb=args.tile_gb, device=args.device,
+                                 tile_gb=args.tile_gb,
+                                 numerics=Numerics(layout={'device': args.device}),
                                  state_specific=args.state_specific,
                                  ss_density=args.ss_density,
                                  spin_scaling=(None if args.spin_scaling == 'none'

@@ -34,14 +34,14 @@ Checks, water (RHF, DF factors), basis per check:
      slab, on three of width 2 that the budget _STREAM_GB sets, and on those three
      with two in flight; the folded singlets with and without it agree to 1e-9 Ha;
      a singles vector with a flip parity raises NotImplementedError; a slab holds
-     at most _K_LIVE slab blocks per slab index (the slope of tracemalloc's peak
-     from width 1 to 2, water cc-pVTZ, TDA).
+     at most EE_GW_SLAB_BLOCKS slab blocks per slab index (the slope of tracemalloc's
+     peak from width 1 to 2, water cc-pVTZ, TDA).
   9. build_pieces_gw(..., laplace=True) (6-31G, TDA and RPA screening): W is None;
      M, and Vt (D - ω)^-1 V and its norm through the DF forms of V and Vt, equal the
      W pieces' to 1e-12 relative; pieces['K'], kernel_laplace, equals the W pieces'
      V, divide, Vt at 0.3, -0.2 and 0.05 Ha and 3e-3 Ha below min D for powers
      (1, 2) and its norm to 1e-8 relative, on the grid minimax_points_for_accuracy
-     gives for relative error _LAPLACE_TARGET (1e-9); the folded singlets and
+     gives for relative error EE_GW_LAPLACE_TARGET (1e-9); the folded singlets and
      triplets equal the W pieces' to 1e-6 eV; 1e-7 Ha below min D, where
      no tabulated grid reaches the target, and above min D, K is kernel_df's exact
      kernel (1e-12 relative); a flip parity raises NotImplementedError;
@@ -60,7 +60,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import (EE_GW_LAPLACE_TARGET, EE_GW_SLAB_BLOCKS,
+                                         HARTREE_TO_EV)
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_fold, ee_gw_pieces, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
@@ -404,7 +405,7 @@ def check_streamed_kernel(eps, B, no):
     0.3 Ha, powers (1, 2) and (), both screenings, to 1e-12 relative per block, its
     norm against dnorm2; on one slab, on three of width 2, and on those three two at
     a time; the folded singlets with and without K to 1e-9 Ha; a y1 with a flip
-    parity refused; at most _K_LIVE slab blocks per slab index."""
+    parity refused; at most EE_GW_SLAB_BLOCKS slab blocks per slab index."""
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     ok = True
     nv = len(eps) - no
@@ -415,7 +416,7 @@ def check_streamed_kernel(eps, B, no):
     def rel(a, b):
         return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
 
-    live = ee_gw_pieces._K_LIVE
+    live = EE_GW_SLAB_BLOCKS
     for screening, df in (('tda', False), ('rpa', False), ('tda', True),
                           ('rpa', True)):
         tag = f'{screening}, df' if df else screening
@@ -481,7 +482,7 @@ def check_streamed_kernel(eps, B, no):
         slope = (held[2] - held[1]) / (8 * per3)
         ok &= check(slope <= live,
                     f"{'df: ' if df else ''}a slab of pieces['K'] holds at most "
-                    f'_K_LIVE = {live} slab blocks per slab index',
+                    f'EE_GW_SLAB_BLOCKS = {live} slab blocks per slab index',
                     f'{slope:.2f}, water cc-pVTZ, tda')
     return ok
 
@@ -549,7 +550,7 @@ def check_laplace_kernel(eps, B, no):
             n2_ref = P['dnorm2'](Yt)
             ntau, err = minimax_points_for_accuracy(
                 d_min - w_at, float(np.max(PL['D'])) - w_at,
-                ee_gw_pieces._LAPLACE_TARGET, relative=True)
+                EE_GW_LAPLACE_TARGET, relative=True)
             ws, n2 = PL['K'](y1, w_at, (1, 2))
             ws0, n20 = PL['K'](y1, w_at, ())
             d = [max(rel(w.get(s), r.get(s)) for s in ('aa', 'bb'))

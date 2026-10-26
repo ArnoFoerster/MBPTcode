@@ -319,19 +319,24 @@ class WalkNumerics:
 
 @dataclass(frozen=True)
 class LayoutNumerics:
-    """Memory and tiling: the working-set cap of the tiled intermediates, the
-    row fit's tile edge, the factors cut over ranks, the ISDF-K Z mode and
-    row block, and the working set of the fit's blocked loops (`fit_gb`,
-    ISDF_TILE_GB where None; its block edge moves the fit's last bits).
-    Recorded, and NOT in the identity: the bitwise gates fix
-    them explicitly. sliced None takes a given factorization's, else the
-    whole factors on every rank."""
+    """Memory, tiling and devices: the working-set cap of the tiled
+    intermediates, the row fit's tile edge, the factors cut over ranks, the
+    ISDF-K Z mode and row block, the working set of the fit's blocked loops
+    (`fit_gb`, ISDF_TILE_GB where None; its block edge moves the fit's last
+    bits), the device of the folded operators' doubles and the static
+    second-order kernel (`device`, 'cpu' or 'gpu'), and the device of a dense
+    symmetric eigensolve (`eigh_device`: 'auto' takes a visible GPU at or above
+    the solve's threshold, 'cpu' never, 'gpu' always). Recorded, and NOT in the
+    identity: the bitwise gates fix them explicitly. sliced None takes a given
+    factorization's, else the whole factors on every rank."""
     tile_gb: Optional[float] = None
     fit_block: Optional[int] = None
     fit_gb: Optional[float] = None
     sliced: Optional[bool] = None
     z_mode: Optional[str] = None
     block: Optional[int] = None
+    device: str = 'cpu'
+    eigh_device: str = 'auto'
 
 
 @dataclass(frozen=True)

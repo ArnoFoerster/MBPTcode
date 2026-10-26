@@ -417,6 +417,13 @@ COMPOSED_GRAD_K = 3
 # excitation energy and squared in every oscillator strength.
 CASIDA_NORM_TOL = 1e-4
 
+# GiB of the per-block intermediates of the static second-order GW kernel on the
+# GPU (`linear_response.static_second_order_kernel_df`, layout.device 'gpu'): every
+# block over virtuals is capped where its intermediates reach this, beside the
+# pair-sized accumulators and the DF factors, which it does not count. It moves
+# the memory and the GEMM shapes only, never a number beyond the summation order.
+BSE2_GPU_BLOCK_GB = 16.0
+
 # Closest a classical polarizable site may sit to a QM nucleus, in Bohr. The
 # exact folding of W onto the QM region holds only where the two subsystems'
 # orbitals do not overlap (Li, D'Avino, Duchemin, Beljonne and Blase, Phys.
@@ -2218,3 +2225,15 @@ EE_FOLD_DENSE_LIMIT = 64
 # kernel holds at once (ee_r_sigma_df; the traced peak of
 # tests/test_ee_adc_fold.py), what slab_plan budgets the slab width with.
 EE_COUPLING_SLAB_BLOCKS = 11
+# (nk, nv, nm) slab blocks one slab of the GW fold's eq 66 kernel holds at once
+# (ee_gw_pieces; the traced peak of tests/test_ee_gw_fold.py), what slab_plan
+# budgets the slab width with.
+EE_GW_SLAB_BLOCKS = 3
+# The Laplace grid target of the GW and dBSE2 folds' kernel_laplace:
+# max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled to [1, R]
+# (time_frequency.laplace_test_error, relative=True), the relative error of every
+# p = 1 term; the absolute residual lets terms far above min D drift as R grows.
+# The grid is fitted to 1/x only: the p = 2 terms (the derivative image, weights
+# w_t τ_t) are not bounded by it, pointwise 2e-9 on [0.3, 8], 8e-9 on [0.3, 40],
+# 3.4e-8 on [0.01, 100]; water 6-31G, every vector: <= 1.2e-10
+EE_GW_LAPLACE_TARGET = 1e-9

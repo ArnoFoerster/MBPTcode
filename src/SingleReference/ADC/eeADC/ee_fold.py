@@ -16,7 +16,10 @@ metric the supermatrix is symmetric (K is a spin-resolved (k, l, c, d)). Level
 gw (ee_gw_pieces, eq 66: BSE@GW with one doubles set) has the same shape with
 K = (k, c, m) per spin block, a particle-hole pair times a screening mode,
 D_kcm = Ω_m + ε_c - ε_k, and the plain sum over its blocks as the doubles norm
-(pieces['dnorm2']).
+(pieces['dnorm2']). Level dbse2 (ee_dbse2_pieces, eq 71 of Monino and Loos) puts
+two copies of its doubles on one diagonal with the metric η = diag(+1, -1): its
+'Vt' is the η-transpose of V and its dnorm2 the signed norm |Z+|² - |Z-|², so the
+derivative below carries both signs and T1 may exceed 1.
 For the eigenpair (λ(ω), y) of A_eff(ω) with sum_ia y_ia² = 1,
 
     dλ/dω = -sum_K (sum_jb V_K,jb y_jb)² / (D_K - ω)²,
@@ -31,16 +34,18 @@ by Newton, or per root by Newton alone (solver='newton'),
 with a fixed-point fallback ω_{k+1} = λ(ω_k), DIIS-accelerated, when T1 falls
 under t_min (a doubles element near ω makes the derivative unreliable). This
 is the shape of Turbomole's RI-CC2 solver on the ADC operator; the doubles
-vector exists only inside one matvec.
+vector exists only inside one matvec. fold_step takes the first-order step of Monino
+and Loos eqs 40 to 43 once from a static start with the vector frozen; for a unit
+eigenvector of A_static it is that Newton step.
 
 Flat singles vectors here are the singles segments of ee_r_sigma's layout,
 length 2 no nv (aa block then bb block); with a spin channel, the channel basis
-of ee_driver._channel_basis at the singles layout (level 'adc1').
+of ee_spin_adapt.channel_basis at the singles layout (level 'adc1').
 
 References
 ----------
 E. Monino and P.-F. Loos, J. Chem. Phys. 159, 034105 (2023), eq 53 (gf2), eq 66
-(gw).
+(gw), eqs 40 to 43 (fold_step).
 C. Hättig and F. Weigend, J. Chem. Phys. (2000), doi:10.1063/1.1290013 (the
 folded-doubles solver of RI-CC2).
 """
@@ -69,7 +74,7 @@ from src.Base.utils.linear_algebra.orthogonalization import extend_orthonormal
 from src.Solvers.davidson import (diagonal_seeds, jacobi_davidson_precond,
                                   overlap_pick, solve_symmetric)
 
-FOLD_LEVELS = ('adc2', 'gf2', 'gw')
+FOLD_LEVELS = ('adc2', 'gf2', 'gw', 'dbse2')
 _CHANNEL = {'singlet': +1.0, 'triplet': -1.0}
 # the progress record of the solve_folded call in flight at verbose >= 1, else None
 _TRACE = contextvars.ContextVar('ee_fold_trace', default=None)
@@ -180,10 +185,10 @@ def _check_level(pieces):
     if pieces['level'] not in FOLD_LEVELS:
         raise ValueError(f"the fold needs a bare-diagonal doubles block; level="
                          f"{pieces['level']!r} is not one of {FOLD_LEVELS}")
-    if pieces['level'] == 'gw' and pieces.get('dnorm2') is None:
-        # the adc2 flat layout would read none of the (k, c, m) blocks
-        raise ValueError("level='gw' needs pieces['dnorm2'], the norm of its "
-                         "(k, c, m) doubles")
+    if pieces['level'] in ('gw', 'dbse2') and pieces.get('dnorm2') is None:
+        # the adc2 flat layout would read none of these doubles blocks
+        raise ValueError(f"level={pieces['level']!r} needs pieces['dnorm2'], the norm "
+                         "of its own doubles layout")
 
 
 def _check_vector(u, n):
@@ -209,7 +214,8 @@ def folded_operator(pieces, omega, spin=None):
         'Vt' (the reverse map), 'D' (ndarray, shape (no, no, nv, nv), index
         order (i, j, a, b), or, at level gw, shape (no, nv, nm), index order
         (k, c, m)), 'level', 'no', 'nv', 'be'; 'dnorm2' (optional: SB doubles
-        -> float sum_K Y_K², for a doubles layout other than adc2's);
+        -> float sum_K Y_K², for a doubles layout other than adc2's; the signed
+        |Z+|² - |Z-|² at level dbse2);
         'dense_limit' (optional int, default 0: solve_folded's dense_limit when
         the caller passes None); 'K' (optional: the fused kernel
         K(y1, omega, powers) -> (ws, dn2) with y1 an SB singles vector, ws[i]
@@ -226,8 +232,9 @@ def folded_operator(pieces, omega, spin=None):
     matvec : callable
         u (n,) -> A_eff(ω) u (n,), n = 2 no nv or the channel's size.
     dmatvec : callable
-        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float), so that
-        dλ/dω = -dmatvec(y) for a unit eigenvector y; 0.0 when omega is None.
+        u (n,) -> sum_K (sum_jb V_K,jb u_jb)² / (D_K - ω)² (a float; the pieces'
+        signed dnorm2 at level dbse2), so that dλ/dω = -dmatvec(y) for a unit
+        eigenvector y; 0.0 when omega is None.
         dmatvec(u, vector=True) -> dA_eff/dω u = -V^T (D - ω)^-2 V u (n,), so
         that u @ dmatvec(u, vector=True) == -dmatvec(u); zeros when omega is
         None.
@@ -253,9 +260,9 @@ def folded_operator(pieces, omega, spin=None):
     else:
         if spin not in _CHANNEL:
             raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
-        from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
-        embed, restrict, reps = _channel_basis(n_full, no, nv, 'adc1',
-                                               _CHANNEL[spin])
+        from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
+        embed, restrict, reps = channel_basis(n_full, no, nv, 'adc1',
+                                              _CHANNEL[spin])
     n = reps.size
     # diag of M on the singles layout: M_ia,ia of the aa and the bb block
     m_diag = np.concatenate([np.einsum('iaia->ia', M.get('aaaa')).ravel(),
@@ -309,17 +316,17 @@ def folded_operator(pieces, omega, spin=None):
 def _operator_folded(pieces, omega, spin):
     """folded_operator for pieces carrying an operator (ee_ri_fold.RIFoldADC2):
     it acts on its own spin channel, whose basis is the alpha block of the
-    flip pairs (ee_driver._channel_basis at level 'adc1'), so embed and
+    flip pairs (ee_spin_adapt.channel_basis at level 'adc1'), so embed and
     restrict are those of that basis and the matvec has a block form."""
-    from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+    from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
     from src.SingleReference.ADC.eeADC.ee_ri_fold import FoldedMatvec
     op = pieces['operator']
     if spin != op.spin:
         raise ValueError(f"the operator solves the {op.spin} channel; spin="
                          f"{spin!r} asked")
     no, nv = pieces['no'], pieces['nv']
-    embed, restrict, _ = _channel_basis(2 * no * nv, no, nv, 'adc1',
-                                        _CHANNEL[spin])
+    embed, restrict, _ = channel_basis(2 * no * nv, no, nv, 'adc1',
+                                       _CHANNEL[spin])
     mv = FoldedMatvec(op, omega)
 
     def dmatvec(u, vector=False):
@@ -354,7 +361,8 @@ class FoldResult:
     y : ndarray, shape (n, nout), unit singles vectors in the channel basis
     x1 : ndarray, shape (n, nout), sqrt(T1) y, the singles part of the unit full
         eigenvector; embed(x1[:, r]) is the full flat spin-orbital singles vector
-    t1 : ndarray, shape (nout,), singles weights in (0, 1]
+    t1 : ndarray, shape (nout,), singles weights in (0, 1], above 1 at level dbse2 on
+        a rising branch (dnorm2 < 0)
     level : ndarray, shape (nout,), int, the level of each root; the partners of a
         degenerate level share its index and its omega, and a seed level that
         A_eff splits gives each of its roots a level of its own
@@ -525,6 +533,83 @@ def _eig_at(pieces, omega, spin, ref, dense, tol_residual, label):
     return lam, y, t1, embed, conv
 
 
+def fold_step(pieces, omega0, spin, x, static=None):
+    """The first-order dynamical step of Monino and Loos (eqs 40 to 43),
+
+        ω = ω0 + ζ (x·A_eff(ω0)·x − x·A_static·x),
+        ζ = 1 / (1 − x·(dA_eff/dω)(ω0)·x)
+          = 1 / (1 + sum_K (sum_jb V_K,jb x_jb)² / (D_K − ω0)²),
+
+    QuAcK's dynamical-TDA correction (ζ is _eig_at's T1 at (ω0, x)); for x a unit
+    eigenvector of A_static and static = ω0 it is the Newton step of λ(ω) = ω with
+    the vector held at x. x enters as given, so a unit TDA eigenvector gives the TDA
+    step and QuAcK's Casida X in the metric X·X − Y·Y = 1 the ABBA step (QuAcK's
+    first-order formula, not a Newton step), its factor X·X = 1 + Y·Y the caller's
+    to report; on a signed level ζ is not confined to (0, 1]: each term of the sum
+    over K carries the sign of its doubles copy, as T1 does.
+
+    Parameters
+    ----------
+    pieces : dict
+        folded_operator's pieces, any level.
+    omega0 : float
+        Start frequency in Hartree, below min_K D_K.
+    spin : {'singlet', 'triplet', None}
+        The channel x lives in.
+    x : ndarray, shape (n,)
+        Start vector x_jb in the channel basis (folded_operator's), n = 2 no nv or
+        the channel's size; not normalised here.
+    static : float or None
+        x·A_static·x in Hartree; None means ω0, x a unit eigenvector of A_static
+        with eigenvalue ω0.
+
+    Returns
+    -------
+    omega : float
+        ω, Hartree.
+    zeta : float
+        ζ, dimensionless.
+    delta : float
+        x·A_eff(ω0)·x − static, Hartree, so that omega = omega0 + zeta delta.
+
+    Raises
+    ------
+    ValueError
+        omega0 at or above min_K D_K, or x of another length than n.
+
+    Warns
+    -----
+    RuntimeWarning
+        1 − x·(dA_eff/dω)(ω0)·x ≤ 0, possible on a signed level: ζ is infinite
+        (at exactly 0) or negative and the step points away from the root.
+
+    Notes
+    -----
+    A_eff(ω) of the module docstring; A_static_ia,jb the matrix x was solved from:
+        δ = sum_ia,jb x_ia (A_eff(ω0)_ia,jb − A_static_ia,jb) x_jb ,
+        ζ = 1 / (1 + sum_K (sum_jb V_K,jb x_jb)² / (D_K − ω0)²) .
+    """
+    d_min = _d_min(pieces)
+    if omega0 >= d_min:
+        msg = (f'omega0 = {omega0:.6f} Ha at or above min D = {d_min:.6f} Ha; the '
+               'step needs omega0 below the doubles')
+        raise ValueError(msg)
+    matvec, dmatvec, diag_s, embed, restrict = folded_operator(pieces, omega0, spin)
+    x = _check_vector(x, diag_s.size)
+    if static is None:
+        static = omega0
+    # δ = sum_ia,jb x_ia A_eff(ω0)_ia,jb x_jb − x·A_static·x
+    delta = float(x @ matvec(x)) - static
+    # the scalar dmatvec is -x·(dA_eff/dω)·x, the negative of x @ dmatvec(x, True)
+    g = 1.0 + dmatvec(x)
+    if g <= 0.0:
+        warnings.warn(f'1 + dmatvec(x) = {g:.3e} <= 0 at omega0 = {omega0:.6f} Ha: '
+                      'zeta is infinite or negative, the step points away from the '
+                      'root', RuntimeWarning, stacklevel=2)
+    zeta = np.inf if g == 0.0 else 1.0 / g
+    return omega0 + zeta * delta, zeta, delta
+
+
 def _subspace_pick(Y):
     """A davidson1 `pick` keeping the nroots Ritz vectors of largest projection
     |Y^T x|² onto span(Y), Y (n, g) orthonormal, sorted ascending; the score is the
@@ -558,15 +643,23 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
         count check solves what is missing by index)
 
     Every branch λ_j(ω) of H(ω), j the sorted index, is followed from om0. Its
-    slope c_j^T H1 c_j is ≤ 0, so g(ω) = λ_j(ω) - ω falls with slope ≤ -1, the
-    root is unique and lies between ω and ω + g(ω) for every ω: Newton
-    ω + g / (1 - c_j^T H1 c_j) inside the bracket so narrowed, bisection where a
-    step leaves it (a kink where two branches of H(ω) cross exactly). λ_j ≤ λ_j+1
-    at every ω, so the roots rise with j: the first branch whose root reaches d_min
-    ends the search. Returns oms (r,) ascending, r ≤ nroots, and C (m, r), the
-    subspace eigenvectors at the roots.
+    slope c_j^T H1 c_j is at most s_max, the largest eigenvalue of H1 (≤ 0 where the
+    doubles carry a positive metric; small and positive on a rising branch of the
+    signed fold, whose T1 exceeds 1). For s_max < 1, g(ω) = λ_j(ω) - ω falls with
+    slope ≤ s_max - 1 < 0, the root is unique and lies between ω and
+    ω + g(ω) / (1 - s_max) for every ω: Newton ω + g / (1 - c_j^T H1 c_j) inside
+    the bracket so narrowed ([ω, ω + g] where s_max ≤ 0), bisection where a step
+    leaves it (a kink where two
+    branches of H(ω) cross exactly). A model with s_max ≥ 1 keeps the bracket
+    [ω, ω + g] and may drop its branches. λ_j ≤ λ_j+1 at every ω, so the roots rise
+    with j: the first branch whose root reaches d_min ends the search. Returns oms
+    (r,) ascending, r ≤ nroots, and C (m, r), the subspace eigenvectors at the roots.
     """
     m = H0.shape[0]
+    # the bracket's reach on a rising branch (0 < s_max < 1), 1/(1 - s_max): g falls
+    # at least at that rate; [ω, ω + g] where the metric is positive, as before
+    s_max = float(np.linalg.eigvalsh(H1).max())
+    reach = 1.0 / (1.0 - s_max) if 0.0 < s_max < 1.0 else 1.0
     found = []
     for j in range(m):
         if len(found) == nroots:
@@ -578,8 +671,10 @@ def _model_roots(H0, H1, om0, nroots, d_min, tol):
             g = float(w[j]) - om
             if abs(g) < tol:
                 break
-            # the root lies in [ω, ω + g] for g > 0, in [ω + g, ω] for g < 0
-            lo, hi = (max(lo, min(om, om + g)), min(hi, max(om, om + g)))
+            # the root lies in [ω, ω + g reach] for g > 0, in [ω + g reach, ω] for
+            # g < 0
+            lo, hi = (max(lo, min(om, om + g * reach)),
+                      min(hi, max(om, om + g * reach)))
             nxt = om + g / (1.0 - float(c @ H1 @ c))      # Newton on λ_j(ω) - ω
             om = nxt if lo < nxt < hi else 0.5 * (lo + hi)
         if not abs(g) < tol:
@@ -1623,8 +1718,8 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
 
     Completeness (solvers 'davidson' and 'newton'): below min_K D_K each
     eigenvalue λ_j(ω) of
-    A_eff(ω), counted from the lowest, falls with ω (dλ/dω ≤ 0), so λ_j(ω) = ω
-    has one root ω_j, and
+    A_eff(ω), counted from the lowest, has slope dλ/dω < 1 (≤ 0 for a positive
+    metric), so λ_j(ω) = ω has one root ω_j, and
     ω_1 ≤ ω_2 ≤ ...: the folded roots at or below ω number the λ_j(ω) ≤ ω, and
     the nroots lowest roots are those of branches 1 to nroots. The fold can
     reorder the seeds of M, so at ω_c, the nroots-th lowest root found, the

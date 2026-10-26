@@ -326,7 +326,7 @@ def _solve_bse_dense(mf, mol, nocc, integrals, nroots, numerics, qp='G0W0',
         if amb <= 0:
             raise unstable_reference(amb, 'before the solve')
 
-    omega, X, Y = CasidaSolver(A, B).solve(tda=tda)
+    omega, X, Y = CasidaSolver(A, B).solve(tda=tda, numerics=numerics)
     t['dense'] = time.time() - t0
 
     n_states = len(omega)
