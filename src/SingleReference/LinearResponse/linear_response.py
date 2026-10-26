@@ -5,13 +5,14 @@ from src.Base.orbital_spaces import ov_energies, ov_factor
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (BSE2_GPU_BLOCK_GB, CASIDA_NORM_TOL,
                                          DEFAULT_BROADENING_ETA)
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.pyscf_interface import occupied_count, spin_index
 from src.SingleReference.LinearResponse import imaginary_frequency
 
 try:
     import cupy as cp
     from cupy import cublas      # a submodule `import cupy` leaves unbound
-except ImportError:              # optional: only device='gpu' needs it
+except ImportError:              # optional: only layout.device='gpu' needs it
     cp = cublas = None
 
 DEVICES = ('cpu', 'gpu')
@@ -623,7 +624,7 @@ def static_screened_coulomb_aux(eps, coeff_df, nocc):
 
 
 def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8,
-                                  channel='singlet', kernel='printed', device='cpu'):
+                                  channel='singlet', kernel='printed', numerics=None):
     """Static second-order GW kernel Θ^GW (BSE2@GW) as Casida A and B blocks.
 
     The two blocks to add to the BSE@GW Casida matrices of
@@ -658,12 +659,13 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
         The class the particle-hole term carries: 'printed' the loop class of
         the reference's eq 72 as printed, 'eq71' the crossed class its eq 71
         holds (the Notes).
-    device : {'cpu', 'gpu'}
-        'gpu' forms the blocks on this process's GPU (CuPy, FP64) from the
-        host's Cholesky factor of W_aux, `_second_order_kernel_gpu`, and
-        returns them as host arrays, equal to the CPU path's to rounding. A
-        device whose free memory cannot hold two (n_pair, n_pair) arrays and
-        the DF factors raises ValueError before any upload.
+    numerics : Numerics or None
+        The run's settings (None: the defaults); its layout.device 'gpu' forms
+        the blocks on this process's GPU (CuPy, FP64) from the host's Cholesky
+        factor of W_aux, `_second_order_kernel_gpu`, and returns them as host
+        arrays, equal to the CPU path's to rounding. A device whose free memory
+        cannot hold two (n_pair, n_pair) arrays and the DF factors raises
+        ValueError before any upload.
 
     Returns
     -------
@@ -723,8 +725,10 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
         raise ValueError(f"channel must be 'singlet' or 'triplet', got {channel!r}")
     if kernel not in ('printed', 'eq71'):
         raise ValueError(f"kernel must be 'printed' or 'eq71', got {kernel!r}")
+    device = numerics_or_default(numerics).layout.device
     if device not in DEVICES:
-        raise ValueError(f'device={device!r}; expected one of {DEVICES}')
+        raise ValueError(f'numerics.layout.device={device!r}; expected one of '
+                         f'{DEVICES}')
     occ, virt = get_occ_virt_indices(eps, nocc)
     no, nv = len(occ), len(virt)
     n_pair = no * nv
@@ -919,7 +923,8 @@ def _second_order_kernel_gpu(eps, coeff_df, L, occ, virt, reg, blksize, channel,
     so the two paths agree to rounding, not to the bit.
     """
     if cp is None:
-        raise ImportError("device='gpu' needs CuPy, which is not importable")
+        raise ImportError("layout.device='gpu' needs CuPy, which is not "
+                          'importable')
     no, nv = len(occ), len(virt)
     n_pair = no * nv
     if kernel == 'eq71' and channel == 'triplet':

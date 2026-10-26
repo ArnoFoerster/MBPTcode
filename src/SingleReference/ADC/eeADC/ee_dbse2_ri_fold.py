@@ -97,6 +97,7 @@ import warnings
 import numpy as np
 
 from src.Base.numerics.constants import EE_GW_LAPLACE_TARGET, EE_RI_TILE_GB
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.grids.grids import minimax_time_grid
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
                                              ordered_sum)
@@ -612,7 +613,8 @@ class _DoublesDBSE2GPU:
     def __init__(self, op, xp=None):
         xp = cp if xp is None else xp
         if xp is None:
-            raise ImportError("device='gpu' needs CuPy, which is not importable")
+            raise ImportError("layout.device='gpu' needs CuPy, which is not "
+                              'importable')
         self.xp = xp
         self.coupling, self.spin, self.square = op.coupling, op.spin, op.square
         self.to_host = getattr(xp, 'asnumpy', np.asarray)
@@ -747,11 +749,11 @@ class RIFoldDBSE2(RIFoldADC2):
     count than bare.naux names naux). tile_gb, threads, comm,
     aux_chunk as RIFoldADC2 (threads reaches the inner operator and the
     back-transformation; the tile's element-wise passes run on one core; rho is held
-    whole on every rank, never chunked); device 'cpu',
-    or 'gpu' for the doubles of every set and both forms on this rank's GPU
-    (_DoublesDBSE2GPU, CuPy). Attributes: sets, screening (from_mo's, else None), nm,
-    om, rho, L2b (the
-    bare factor as (naux, no nv)), d_min the lower of the sets' minima, kt from
+    whole on every rank, never chunked); numerics the run's Numerics (None: the
+    defaults), whose layout.device 'cpu', or 'gpu' for the doubles of every set
+    and both forms on this rank's GPU (_DoublesDBSE2GPU, CuPy). Attributes: sets,
+    screening (from_mo's, else None), nm, om, rho, L2b (the bare factor as
+    (naux, no nv)), d_min the lower of the sets' minima, kt from
     _tile_bytes plus _mode_bytes, dm_min and dm_max the mode set's own extremes of D
     (None without one). The inherited fold_diagonal returns zeros (no second-order
     model at this level); pieces() hands the operator to ee_fold.solve_folded;
@@ -761,7 +763,7 @@ class RIFoldDBSE2(RIFoldADC2):
 
     def __init__(self, bare, dressed, spin, kernel='eq71', singles=None,
                  form=None, sets=('eq71',), modes=None, tile_gb=EE_RI_TILE_GB,
-                 threads=None, comm=None, aux_chunk=None, device='cpu'):
+                 threads=None, comm=None, aux_chunk=None, numerics=None):
         sets = tuple(sorted(sets))
         if sets not in SETS:
             raise ValueError(f"sets={sets!r}; expected one of {SETS}")
@@ -779,10 +781,13 @@ class RIFoldDBSE2(RIFoldADC2):
             raise ValueError(f"kernel={kernel!r}; expected one of {_pieces.KERNELS}")
         if singles not in _pieces.SINGLES:
             raise ValueError(f"singles={singles!r}; expected one of {_pieces.SINGLES}")
+        device = numerics_or_default(numerics).layout.device
         if device not in DEVICES:
-            raise ValueError(f'device={device!r}; expected one of {DEVICES}')
+            raise ValueError(f'numerics.layout.device={device!r}; expected one of '
+                             f'{DEVICES}')
         if device == 'gpu' and cp is None:
-            raise ImportError("device='gpu' needs CuPy, which is not importable")
+            raise ImportError("layout.device='gpu' needs CuPy, which is not "
+                              'importable')
         if dressed is None and (has71 or singles == 'eq62+eq59'):
             raise ValueError(f"dressed=None with sets={sets!r}, singles={singles!r}: "
                              "eq 71's set and eq 59's exchange take dressed factors")
@@ -818,10 +823,11 @@ class RIFoldDBSE2(RIFoldADC2):
                                          rho, om, bare.no))
         # M = eq 62 at the GW energies: CIS on the bare factors
         self.m_op = RIFoldADC2(bare, spin, level='adc1', tile_gb=tile_gb,
-                               threads=threads, comm=comm, aux_chunk=aux_chunk)
+                               threads=threads, comm=comm, aux_chunk=aux_chunk,
+                               numerics=numerics)
         super().__init__(bare if dressed is None else dressed, spin, level='adc1',
                          tile_gb=tile_gb, threads=threads, comm=comm,
-                         aux_chunk=aux_chunk)
+                         aux_chunk=aux_chunk, numerics=numerics)
         self.level = 'gw' if square else 'dbse2'
         # L2[P, (l, d)] = B~_P,ld, the dressed factor eq 71's images close through;
         # L2b the bare one of the mode set
@@ -884,7 +890,7 @@ class RIFoldDBSE2(RIFoldADC2):
         spin : {'singlet', 'triplet'}
         screening : {'tda', 'rpa'}, the screening of the modes (read for a mode set)
         **kw : the constructor's keywords (kernel, singles, form, sets, modes, tile_gb,
-            threads, comm, aux_chunk, device); modes given here are taken as they are
+            threads, comm, aux_chunk, numerics); modes given here are taken as they are
 
         Returns
         -------

@@ -61,7 +61,7 @@ def _frequencies(omega2, eta):
 
 
 def casida_eigensolve(halves, factor='amb', lowest=None, threshold=5000,
-                      eta=CASIDA_NUMERICAL_EPS):
+                      eta=CASIDA_NUMERICAL_EPS, numerics=None):
     """(omega, X, Y, Z, is_distributed): THE dense Casida eigensolve,
     [[A, B], [B, A]] [X, Y] = omega [X, -Y] with <X|X> - <Y|Y> = 1, from its
     Hermitian halves halves = [A + B, A - B], real or complex Hermitian. The
@@ -81,7 +81,9 @@ def casida_eigensolve(halves, factor='amb', lowest=None, threshold=5000,
     an omega^2 <= 0, raises `CasidaInstability`: the reference is unstable
     there and the omega^2 reduction invalid. omega is floored at eta.
     lowest: how many of the lowest roots are kept (None: all). Distributed, Z, X and Y are
-    None on every rank but the one holding Z whole (`eigh_symmetric`).
+    None on every rank but the one holding Z whole (`eigh_symmetric`). numerics:
+    the run's Numerics, whose layout.eigh_device the eigensolve reads (None: the
+    default).
     """
     if factor not in ('amb', 'apb'):
         raise ValueError(f"factor={factor!r}: 'amb' or 'apb'")
@@ -105,7 +107,8 @@ def casida_eigensolve(halves, factor='amb', lowest=None, threshold=5000,
         H *= root[:, None]
         H *= root[None, :]
         del plus
-        omega2, Z, distributed = eigh_symmetric(H, threshold=threshold)
+        omega2, Z, distributed = eigh_symmetric(H, threshold=threshold,
+                                                numerics=numerics)
         del H
         omega = _frequencies(omega2, eta)[keep]
         if Z is None:
@@ -129,7 +132,8 @@ def casida_eigensolve(halves, factor='amb', lowest=None, threshold=5000,
         del factored
         H = L.conj().T @ (other @ L)
         del other
-        omega2, Z, distributed = eigh_symmetric(H, threshold=threshold)
+        omega2, Z, distributed = eigh_symmetric(H, threshold=threshold,
+                                                numerics=numerics)
         del H
         omega = _frequencies(omega2, eta)[keep]
         if Z is None:
@@ -194,11 +198,12 @@ class CasidaSolver:
         self.keep_intermediates = keep_intermediates
         self.Z = None
 
-    def solve(self, threshold=5000, tda=False):
+    def solve(self, threshold=5000, tda=False, numerics=None):
         """Cholesky factorization where possible; switches to parallel ELPA above `threshold` dim when MPI is available.
 
         tda=True ignores B (Tamm-Dancoff): plain Hermitian diagonalization of A,
         omega = eig(A), X = eigenvectors (X^T X = 1 normalization), Y = 0.
+        numerics: as casida_eigensolve's.
         """
         if self.A is None:
             raise RuntimeError(
@@ -209,7 +214,8 @@ class CasidaSolver:
             if not self.keep_intermediates:
                 self.A = None
                 self.B = None
-            omega, Z_res, is_distributed = eigh_symmetric(A, threshold=threshold)
+            omega, Z_res, is_distributed = eigh_symmetric(A, threshold=threshold,
+                                                          numerics=numerics)
             del A
             if Z_res is None:
                 self.is_distributed = True
@@ -253,7 +259,7 @@ class CasidaSolver:
         halves = [ApB, minus]
         del ApB, minus
         omega, X, Y, Z_res, is_distributed = casida_eigensolve(
-            halves, factor, threshold=threshold, eta=self.eta)
+            halves, factor, threshold=threshold, eta=self.eta, numerics=numerics)
         if Z_res is None:
             # Z came back whole on rank 0; the other ranks are done.
             self.is_distributed = True

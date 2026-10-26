@@ -37,6 +37,7 @@ import numpy as np
 from pyscf import mp
 
 from src.Base.numerics.constants import ADC2_SPIN_SCALING
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold, ee_u_dense_full, ee_utils
@@ -44,6 +45,8 @@ from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from tests.adc_common import WATER_ORIGIN, check, rhf_df
 from tests.pins import RECORDING_BLAS, matches, same_solution
 
+# the run choice that puts the device paths on the GPU
+ON_GPU = Numerics(layout={'device': 'gpu'})
 SCALINGS = (ADC2_SPIN_SCALING['scs'], ADC2_SPIN_SCALING['sos'], (0.7, 1.9))
 
 
@@ -219,7 +222,7 @@ def check_gpu(F):
     for spin in ee_ri_fold.SPINS:
         c = ee_ri_fold.RIFoldADC2(F, spin, scaling=ADC2_SPIN_SCALING['scs'])
         g = ee_ri_fold.RIFoldADC2(F, spin, scaling=ADC2_SPIN_SCALING['scs'],
-                                  device='gpu')
+                                  numerics=ON_GPU)
         pc, nc = c.apply(U, [0.4, 0.7])
         pg, ng = g.apply(U, [0.4, 0.7])
         fc, fg = c.fold_images(U, [0.3])[1], g.fold_images(U, [0.3])[1]

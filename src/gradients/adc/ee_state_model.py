@@ -63,7 +63,7 @@ class ADC2State:
     """One folded ADC(2) root of one spin channel (module docstring)."""
 
     def __init__(self, mp2, spin, root=0, nroots=3, lr_environment=None,
-                 conv_tol=EE_ADC_CONV_TOL, tile_gb=EE_RI_TILE_GB, device='cpu',
+                 conv_tol=EE_ADC_CONV_TOL, tile_gb=EE_RI_TILE_GB,
                  level='adc2', follow='overlap'):
         if follow not in ('overlap', 'index'):
             raise ValueError(f"follow must be 'overlap' or 'index', not {follow!r}")
@@ -74,7 +74,7 @@ class ADC2State:
         self.follow = follow
         self.spin, self.root, self.nroots = spin, root, nroots
         self.lr_environment = lr_environment
-        self.conv_tol, self.tile_gb, self.device = conv_tol, tile_gb, device
+        self.conv_tol, self.tile_gb = conv_tol, tile_gb
         self.level = level
         self.y_follow = None
         # (h, e, omega, FollowedRoot) of the last call's root: the force's root
@@ -92,7 +92,8 @@ class ADC2State:
                                      auxbasis=self.mp2.auxbasis,
                                      environment=self.lr_environment,
                                      conv_tol=self.conv_tol, return_fold=True,
-                                     tile_gb=self.tile_gb, device=self.device,
+                                     tile_gb=self.tile_gb,
+                                     numerics=self.mp2.numerics,
                                      relaxed_density=True)
         omega_all, y, t1_all, d_all, conv = lockstep((
             np.array(res.omega, float), np.array(res.y), np.array(res.t1, float),

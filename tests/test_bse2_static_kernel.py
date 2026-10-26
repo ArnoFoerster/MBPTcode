@@ -51,6 +51,7 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies)
 from src.SingleReference.LinearResponse import linear_response
@@ -63,6 +64,8 @@ from src.SingleReference.LinearResponse.linear_response import (
 cupy = linear_response.cp
 
 # QuAcK mol/H2O.xyz, Angstrom
+# the run choice that puts the device paths on the GPU
+ON_GPU = Numerics(layout={'device': 'gpu'})
 GEOM = 'O 0.0000 0.0000 0.0000; H 0.7571 0.0000 0.5861; H -0.7571 0.0000 0.5861'
 # QuAcK G0W0@RHF e_QP, eV, all 24 orbitals (full_bse.log of the run above)
 QUACK_QP_EV = np.array([
@@ -354,13 +357,14 @@ if __name__ == '__main__':
     # 6. device='gpu' against the CPU path on the same factors; the sign-change
     #    warning concerns the physics of an input, not the comparison
     try:
-        static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='tpu')
+        static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
+                                      numerics=Numerics(layout={'device': 'tpu'}))
         all_ok &= check(False, 'unknown device raises ValueError')
     except ValueError:
         all_ok &= check(True, 'unknown device raises ValueError')
     if cupy is None:
         try:
-            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='gpu')
+            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, numerics=ON_GPU)
             all_ok &= check(False, "device='gpu' without CuPy raises ImportError")
         except ImportError:
             all_ok &= check(True, "device='gpu' without CuPy raises ImportError")
@@ -386,7 +390,7 @@ if __name__ == '__main__':
                             ref = static_second_order_kernel_df(
                                 eps_s, coeff_s, w_s, nocc_s, **kw)
                             got = static_second_order_kernel_df(
-                                eps_s, coeff_s, w_s, nocc_s, device='gpu', **kw)
+                                eps_s, coeff_s, w_s, nocc_s, numerics=ON_GPU, **kw)
                         host &= all(type(x) is np.ndarray for x in got)
                         scale = max(np.abs(ref[0]).max(), np.abs(ref[1]).max(),
                                     1e-300)
@@ -405,7 +409,7 @@ if __name__ == '__main__':
                 ref = static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
                                                     kernel=kernel)
                 got = static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc,
-                                                    kernel=kernel, device='gpu')
+                                                    kernel=kernel, numerics=ON_GPU)
                 scale = max(np.abs(ref[0]).max(), np.abs(ref[1]).max())
                 devs.append(max(np.abs(got[0] - ref[0]).max(),
                                 np.abs(got[1] - ref[1]).max()) / scale)
@@ -426,7 +430,7 @@ if __name__ == '__main__':
             get_default_memory_pool=lambda: types.SimpleNamespace(
                 free_bytes=lambda: 1024))
         try:
-            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, device='gpu')
+            static_second_order_kernel_df(eps_hf, coeff, w_aux, nocc, numerics=ON_GPU)
             msg = 'no error'
         except ValueError as e:
             msg = str(e)

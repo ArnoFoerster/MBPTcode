@@ -56,7 +56,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  ms_sector='auto', max_subspace=None, return_parity=False,
                  dense_limit=None, threshold=5000, fold=False,
                  environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
-                 device='cpu', state_specific='off', ss_density='unrelaxed',
+                 numerics=None, state_specific='off', ss_density='unrelaxed',
                  spin_scaling=None, relaxed_density=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
     an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
@@ -90,8 +90,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     docstring): Z is then the singles part of each full eigenvector,
     sqrt(T1) y, on the flat spin-orbital singles layout (2 nocc nvir, frozen
     orbitals dropped); conv_tol is both its residual and its frequency
-    tolerance (Hartree); tile_gb bounds a tile's working set; device 'gpu' runs
-    the folded route's doubles kernel on each rank's GPU. return_fold
+    tolerance (Hartree); tile_gb bounds a tile's working set; numerics the
+    run's Numerics (None: the defaults), whose layout.device 'gpu' runs the
+    folded route's doubles kernel on each rank's GPU. return_fold
     adds the ee_fold.FoldResult (singles weights T1, steps, converged).
 
     environment: a continuum, or None for the one attached to mf (if any);
@@ -161,7 +162,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if fold:
         return _drv.solve_folded_ri(mf, mol, level, nroots, spin, conv_tol,
                                     en_dress, frozen, auxbasis, dense_limit,
-                                    return_fold, env, tile_gb, route, device,
+                                    return_fold, env, tile_gb, route, numerics,
                                     state_specific, ss_density, scaling,
                                     relaxed_density)
     if return_parity and route != 'spinfree':

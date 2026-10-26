@@ -103,6 +103,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee_fold,
@@ -110,6 +111,8 @@ from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee
 from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, aux_chunks, drive
 from src.SingleReference.LinearResponse import linear_response
 
+# the run choice that puts the device paths on the GPU
+ON_GPU = Numerics(layout={'device': 'gpu'})
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 HARTREE_TO_EV = 27.211386245988
 KERNELS = ('eq71', 'printed')
@@ -275,7 +278,8 @@ def check_refusals(eps, B, no):
         ('energies', lambda: direct(bare_hf, dressed_gw, 'singlet')),
         ('kernel', lambda: make(eps_gw, eps, B, no, 'singlet', kernel='x')),
         ('singles', lambda: make(eps_gw, eps, B, no, 'singlet', singles='x')),
-        ('device', lambda: make(eps_gw, eps, B, no, 'singlet', device='tpu')),
+        ('device', lambda: make(eps_gw, eps, B, no, 'singlet',
+                                numerics=Numerics(layout={'device': 'tpu'}))),
         ('dressed', lambda: direct(bare_gw, None, 'singlet')),
         ('modes', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',))),
         ('naux', lambda: direct(bare_gw, None, 'singlet', sets=('eq61',),
@@ -750,7 +754,7 @@ def check_device(eps, B, no):
                         f'NotImplementedError naming {named}', str(err)[:70])
     if ee_dbse2_ri_fold.cp is None:
         try:
-            make(eps_gw, eps, B, no, 'singlet', device='gpu')
+            make(eps_gw, eps, B, no, 'singlet', numerics=ON_GPU)
             ok &= check(False, "device='gpu' without CuPy raises ImportError")
         except ImportError as err:
             ok &= check('CuPy' in str(err), "device='gpu' without CuPy raises "

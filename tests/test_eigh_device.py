@@ -1,8 +1,8 @@
-"""diagonalize_matrix on the GPU (MBPT_EIGH_DEVICE) reproduces the host solve.
+"""diagonalize_matrix on the GPU (layout.eigh_device) reproduces the host solve.
 
     python tests/test_eigh_device.py
 
-1. MBPT_EIGH_DEVICE: an unknown value raises ValueError; 'cpu', and 'auto' below
+1. layout.eigh_device: an unknown value raises ValueError; 'cpu', and 'auto' below
    the threshold, never reach the device.
 2. Without CuPy or without a visible GPU: 'gpu' raises RuntimeError and 'auto'
    solves on the host without a warning; the device rows print a skip line.
@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import scipy.linalg as la
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.utils.linear_algebra import diagonalization as diag
 from src.Base.utils.linear_algebra.diagonalization import diagonalize_matrix
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -46,10 +47,14 @@ def sym(scale, dtype=float):
     return (G + G.conj().T) / 2
 
 
+def on(device):
+    """The Numerics whose layout.eigh_device is `device`."""
+    return Numerics(layout={'eigh_device': device})
+
+
 def solve(device, M, threshold=5000):
-    """(w, Z) of diagonalize_matrix under MBPT_EIGH_DEVICE=device."""
-    os.environ['MBPT_EIGH_DEVICE'] = device
-    w, Z, _, _, _ = diagonalize_matrix(M, threshold=threshold)
+    """(w, Z) of diagonalize_matrix with layout.eigh_device=device."""
+    w, Z, _, _, _ = diagonalize_matrix(M, threshold=threshold, numerics=on(device))
     return w, Z
 
 
@@ -60,7 +65,6 @@ def column_signs(X_ref, X):
     return s[None, :]
 
 
-keep_env = os.environ.get('MBPT_EIGH_DEVICE')
 all_ok = True
 M_real = np.diag(np.linspace(1.0, 3.0, N)) + sym(0.02)
 w_ref, Z_ref = la.eigh(M_real)
@@ -68,9 +72,9 @@ w_ref, Z_ref = la.eigh(M_real)
 # 1. the switch
 try:
     solve('tpu', M_real)
-    all_ok &= check(False, 'unknown MBPT_EIGH_DEVICE raises ValueError')
+    all_ok &= check(False, 'unknown layout.eigh_device raises ValueError')
 except ValueError:
-    all_ok &= check(True, 'unknown MBPT_EIGH_DEVICE raises ValueError')
+    all_ok &= check(True, 'unknown layout.eigh_device raises ValueError')
 
 keep_gpu, calls = diag._eigh_gpu, []
 diag._eigh_gpu = lambda *a, **k: calls.append(1)
@@ -134,10 +138,10 @@ else:
     for label, (A, B, tda) in {'A-B diagonal': (D + K, K, False),
                                'A-B full': (D + K, sym(0.02), False),
                                'TDA': (D + K, K, True)}.items():
-        os.environ['MBPT_EIGH_DEVICE'] = 'cpu'
-        ref = CasidaSolver(A.copy(), B.copy()).solve(threshold=10, tda=tda)
-        os.environ['MBPT_EIGH_DEVICE'] = 'gpu'
-        got = CasidaSolver(A.copy(), B.copy()).solve(threshold=10, tda=tda)
+        ref = CasidaSolver(A.copy(), B.copy()).solve(threshold=10, tda=tda,
+                                                     numerics=on('cpu'))
+        got = CasidaSolver(A.copy(), B.copy()).solve(threshold=10, tda=tda,
+                                                     numerics=on('gpu'))
         s = column_signs(ref[1], got[1])
         domega = np.abs(got[0] - ref[0]).max() / np.abs(ref[0]).max()
         dvec = max(np.abs(got[1] * s - ref[1]).max(), np.abs(got[2] * s - ref[2]).max())
@@ -176,9 +180,5 @@ else:
         finally:
             cp.linalg.eigh = keep_eigh
 
-if keep_env is None:
-    os.environ.pop('MBPT_EIGH_DEVICE', None)
-else:
-    os.environ['MBPT_EIGH_DEVICE'] = keep_env
 print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
 sys.exit(0 if all_ok else 1)

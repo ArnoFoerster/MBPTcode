@@ -95,7 +95,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_FOLD_DIAG_HOLE, EE_RI_FOLD_DIAG_PARTICLE,
                                          EE_RI_FOLD_DIAG_STEP, EE_RI_FOLD_DIAG_TAIL,
                                          EE_RI_FOLD_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import Numerics, numerics_or_default
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (NodeShared, allgather_ranges, current_comm,
                                               exchange_blocks, ordered_chain_sum, ordered_sum,
@@ -104,7 +104,7 @@ from src.Base.utils.parallel.threads import openmp_threads, row_map
 
 try:
     import cupy as cp
-except ImportError:              # optional: only device='gpu' needs it
+except ImportError:              # optional: only layout.device='gpu' needs it
     cp = None
 
 SPINS = ('singlet', 'triplet')
@@ -388,7 +388,8 @@ class _DoublesGPU:
 
     def __init__(self, op):
         if cp is None:
-            raise ImportError("device='gpu' needs CuPy, which is not importable")
+            raise ImportError("layout.device='gpu' needs CuPy, which is not "
+                              'importable')
         self.op = op
         f = op.f
         self.no, self.nv, self.naux = op.no, op.nv, f.naux
@@ -523,9 +524,10 @@ class RIFoldADC2:
     reaction_field: a TransitionReactionField or None. tile_gb bounds the
     tile working set; threads the element-wise passes (default: the
     process's OpenMP count); aux_chunk the width of the auxiliary chunks
-    (default: aux_chunks' rule), which split factors were built with; device
-    'gpu' runs the doubles kernel on this rank's GPU (_DoublesGPU), 'cpu' on
-    the host. scaling: None (ADC(2)) or the spin-component factors
+    (default: aux_chunks' rule), which split factors were built with;
+    numerics the run's Numerics (None: the defaults), whose layout.device 'gpu'
+    runs the doubles kernel on this rank's GPU (_DoublesGPU), 'cpu' on the
+    host. scaling: None (ADC(2)) or the spin-component factors
     (c_os, c_ss) of SCS/SOS-ADC(2) (module docstring).
 
     Over MPI ranks (comm, default the current one) the occupied tiles are
@@ -540,14 +542,16 @@ class RIFoldADC2:
 
     def __init__(self, factors, spin, level='adc2', reaction_field=None,
                  tile_gb=EE_RI_TILE_GB, threads=None, comm=None, aux_chunk=None,
-                 device='cpu', scaling=None):
+                 numerics=None, scaling=None):
         if spin not in SPINS:
             raise ValueError(f'spin={spin!r}; the folded route solves one '
                              f'channel, one of {SPINS}')
         if level not in LEVELS:
             raise ValueError(f'level={level!r}; expected one of {LEVELS}')
+        device = numerics_or_default(numerics).layout.device
         if device not in DEVICES:
-            raise ValueError(f'device={device!r}; expected one of {DEVICES}')
+            raise ValueError(f'numerics.layout.device={device!r}; expected one of '
+                             f'{DEVICES}')
         if scaling is not None and (len(scaling) != 2 or min(scaling) < 0):
             raise ValueError(f'scaling={scaling!r}; expected (c_os, c_ss) >= 0')
         self.f, self.spin, self.level = factors, spin, level

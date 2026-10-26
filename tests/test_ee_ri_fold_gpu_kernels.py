@@ -27,10 +27,13 @@ import numpy as np
 import pytest
 
 from src.Base.numerics.constants import ADC2_SPIN_SCALING, EE_RI_TILE_GB
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_ri_fold
 from tests.adc_common import WATER_ORIGIN, rhf_df
 
+# the run choice that puts the device paths on the GPU
+ON_GPU = Numerics(layout={'device': 'gpu'})
 CC = shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
 _C_TYPES = {'float64': ('double', ctypes.c_double),
             'int64': ('long long', ctypes.c_longlong),
@@ -110,7 +113,7 @@ def _compare(F, spin, scaling, tile_gb):
     the products of the module docstring."""
     cpu = ee_ri_fold.RIFoldADC2(F, spin, scaling=scaling, tile_gb=tile_gb)
     dev = ee_ri_fold.RIFoldADC2(F, spin, scaling=scaling, tile_gb=tile_gb,
-                                device='gpu')
+                                numerics=ON_GPU)
     rng = np.random.default_rng(3)
     U = rng.standard_normal((F.no * F.nv, 2))
     w1, w2 = 0.5 * cpu.d_min, 0.8 * cpu.d_min

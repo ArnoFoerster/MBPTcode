@@ -114,7 +114,7 @@ def spin_scaling_factors(spin_scaling):
 
 def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
-                    device='cpu', state_specific='off', ss_density='unrelaxed',
+                    numerics=None, state_specific='off', ss_density='unrelaxed',
                     scaling=None, relaxed_density=False):
     """fold=True: the density-fitted tiled fold of ee_ri_fold."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
@@ -139,7 +139,7 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
     # over MPI ranks the operator's tiles are shared out and rank 0 alone
     # iterates (ee_ri_fold.drive); serially this is the plain solve
     op = ee_ri_fold.RIFoldADC2(factors, spin, level=level, reaction_field=rf,
-                               tile_gb=tile_gb, device=device, scaling=scaling)
+                               tile_gb=tile_gb, numerics=numerics, scaling=scaling)
 
     def solve(o):
         if level == 'adc2':

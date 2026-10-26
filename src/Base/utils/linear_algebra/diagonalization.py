@@ -8,6 +8,7 @@ import numpy as np
 import scipy.linalg as la
 
 from src.Base.numerics.constants import INT32_MAX, MPI_COUNT_MAX
+from src.Base.numerics.numerics import numerics_or_default
 
 # mpi4py/ELPA are imported ON DEMAND, never at module import time.
 #
@@ -54,10 +55,10 @@ def _try_init_mpi():
 
 
 # CuPy is imported on the first solve that may use it, as mpi4py is above.
-# MBPT_EIGH_DEVICE picks the device of a dense solve: 'auto' (the default) uses a
-# visible GPU at or above the threshold and the host below it, or when the
-# device runs out of memory or cuSOLVER refuses the size; 'cpu' never uses the
-# GPU; 'gpu' always does, at any size, and raises where it cannot.
+# numerics.layout.eigh_device picks the device of a dense solve: 'auto' (the
+# default) uses a visible GPU at or above the threshold and the host below it,
+# or when the device runs out of memory or cuSOLVER refuses the size; 'cpu'
+# never uses the GPU; 'gpu' always does, at any size, and raises where it cannot.
 EIGH_DEVICES = ('auto', 'cpu', 'gpu')
 _CP = None
 _CP_TRIED = False
@@ -76,11 +77,11 @@ def _cupy():
     return _CP
 
 
-def _eigh_device():
-    """MBPT_EIGH_DEVICE, checked; unset or empty is 'auto'."""
-    device = (os.environ.get('MBPT_EIGH_DEVICE') or 'auto').lower()
+def _eigh_device(numerics):
+    """numerics.layout.eigh_device, checked; None reads the default."""
+    device = numerics_or_default(numerics).layout.eigh_device
     if device not in EIGH_DEVICES:
-        raise ValueError(f'MBPT_EIGH_DEVICE={device!r}; expected one of '
+        raise ValueError(f'layout.eigh_device={device!r}; expected one of '
                          f'{EIGH_DEVICES}')
     return device
 
@@ -93,7 +94,8 @@ def _eigh_gpu(M, required):
     cp = _cupy()
     if cp is None:
         if required:
-            raise RuntimeError('MBPT_EIGH_DEVICE=gpu needs CuPy and a visible GPU')
+            raise RuntimeError("layout.eigh_device='gpu' needs CuPy and a "
+                               'visible GPU')
         return None
     try:
         w, Z = cp.linalg.eigh(cp.asarray(M))
@@ -230,10 +232,10 @@ def _warn_elpa_unavailable(global_N):
         f'MBPT_USE_ELPA=0 to silence this.', RuntimeWarning, stacklevel=3)
 
 
-def diagonalize_matrix(M, threshold=5000):
-    """Diagonalize symmetric M: on the GPU as MBPT_EIGH_DEVICE selects, else
-    distributed ELPA if dim >= threshold and MPI available, else local
-    scipy.linalg.eigh.
+def diagonalize_matrix(M, threshold=5000, numerics=None):
+    """Diagonalize symmetric M: on the GPU as numerics.layout.eigh_device
+    selects (None: its default), else distributed ELPA if dim >= threshold and
+    MPI available, else local scipy.linalg.eigh.
 
     Returns (eigenvalues, Z, is_distributed, solver, comm). Distributed, M is
     read on rank 0 only, scattered in block-cyclic chunks, and Z comes back whole
@@ -242,7 +244,7 @@ def diagonalize_matrix(M, threshold=5000):
     """
     global_N = M.shape[0] if M is not None else 0
 
-    device = _eigh_device()
+    device = _eigh_device(numerics)
     if M is not None and (device == 'gpu'
                           or (device == 'auto' and global_N >= threshold)):
         out = _eigh_gpu(M, required=device == 'gpu')
@@ -291,7 +293,7 @@ def diagonalize_matrix(M, threshold=5000):
     return eigenvalues, Z, False, None, None
 
 
-def eigh_symmetric(M, threshold=5000):
+def eigh_symmetric(M, threshold=5000, numerics=None):
     """THE dense symmetric eigensolver for a method's final matrix. Every
     route that ends in a dense diagonalization -- ADC (charged and ee),
     Casida -- goes through here, so they share one backend, one threshold and
@@ -317,7 +319,8 @@ def eigh_symmetric(M, threshold=5000):
     downfolded seed window) stay local too -- there is nothing to distribute,
     and diagonalize_matrix would short-circuit anyway.
     """
-    w, Z, is_distributed, solver, comm = diagonalize_matrix(M, threshold=threshold)
+    w, Z, is_distributed, solver, comm = diagonalize_matrix(M, threshold=threshold,
+                                                            numerics=numerics)
     if is_distributed:
         # Z came back whole on rank 0; the other ranks are done.
         solver.destroy()
