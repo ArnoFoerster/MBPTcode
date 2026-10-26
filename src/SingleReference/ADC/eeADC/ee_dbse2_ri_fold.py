@@ -30,14 +30,14 @@ vector, ZI_P,kc = Σ_i B~_P,ik u_ic and ZK_P,kc = Σ_a u_ka B~_P,ac.
 form='exact': the operator's own tiles over the occupied index (sized by _tile_bytes),
 RIFoldADC2's auxiliary chunks and back-transformation halves on the dressed factors.
 Per tile the images I = H, J = Hᵀ of ZI and K = H, L = Hᵀ of ZK are _vertex_images'
-four GEMMs (RIFoldADC2._pair's shape), the swap (k, c) <-> (l, d) being the pair's
+four GEMMs (RIFoldADC2.pair's shape), the swap (k, c) <-> (l, d) being the pair's
 transpose. Every
 back-transformation is row-local to the tile: with v^sw the swap of a doubles vector v
 and D swap-symmetric,
 Aᵀ v = (A^sw)ᵀ v^sw, so Jᵀ R_J = Iᵀ R_J^sw and Lᵀ R_L = Kᵀ R_L^sw, where the swapped
 R is the same combination of the four images with the coefficients of I and J (K and L)
-exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (_back_oo) and B~_vv
-(_back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact.
+exchanged. Θ u = Iᵀ R_I + Kᵀ R_K then closes through B~_oo (back_oo) and B~_vv
+(back_vv) on the tile's rows, as RIFoldADC2's doubles do; the divide is exact.
 
 form='laplace', the default where it runs (form=None takes it on one rank with every
 B_vv whole and 'exact' with a warning otherwise): 1/(D_K - ω) =
@@ -64,8 +64,8 @@ V± = (J ± K)/√2 on η) closes as
     Θ^61 u = Jᵀ R_J + Kᵀ R_K,   R_J = w Y^K,   R_K = w Y^J,
     |Z+|² - |Z-|² = 2 Σ w² Y^J Y^K,
 
-through the bare B_oo and B_vv: with Γ = R ρᵀ, Jᵀ R_J = -√2 _back_oo(Γ_J) and Kᵀ R_K =
--√2 _back_vv(Γ_K) (the +√2 of Kᵀ against _back_vv's minus), the inner operator's
+through the bare B_oo and B_vv: with Γ = R ρᵀ, Jᵀ R_J = -√2 back_oo(Γ_J) and Kᵀ R_K =
+-√2 back_vv(Γ_K) (the +√2 of Kᵀ against back_vv's minus), the inner operator's
 back-transformation on this operator's tiles (_mode_tile, _mode_overlap). With
 form='laplace' the mode set runs _mode_laplace instead: per τ one Π^τ_PQ = Σ_m exp(-τ
 (Ω_m - Ω_min)) ρ_P,m ρ_Q,m (n_aux² n_m), the screened interaction at imaginary time,
@@ -243,8 +243,8 @@ def _tile_core(xp, L2, eo, ev, k0, k1, ZI, ZK, pair, spin, nodes, derivative):
     -------
     gam_I, gam_K : ndarray, shape (p, kt nv, naux), index order (q, (k, c), P),
         Gam_kc,P = Σ_ld R_kc,ld B~_P,ld for R = R_I and R = R_K: the Iᵀ half closes
-        through B~_oo on the tile's rows (_back_oo), the Kᵀ half through B~_vv
-        (_back_vv, with its minus sign)
+        through B~_oo on the tile's rows (back_oo), the Kᵀ half through B~_vv
+        (back_vv, with its minus sign)
     nrm : ndarray, shape (p,), host, the signed norm Σ_K Zx_K Zy_K at each node
 
     Notes
@@ -366,7 +366,7 @@ def _mode_tile(xp, rho, om, eo, ev, k0, k1, ZI, ZK, nodes, derivative, square):
     -------
     gam_J, gam_K : ndarray, shape (p, kt nv, naux), index order (q, (k, c), P),
         Γ_kc,P = Σ_m R_kcm ρ_P,m for R = R_J and R = R_K: the Jᵀ half closes through
-        B_oo on the tile's rows (-√2 _back_oo), the Kᵀ half through B_vv (-√2 _back_vv)
+        B_oo on the tile's rows (-√2 back_oo), the Kᵀ half through B_vv (-√2 back_vv)
     nrm : ndarray, shape (p,), host, the signed norm at each node
 
     Notes
@@ -614,7 +614,7 @@ class _DoublesDBSE2GPU:
         if xp is None:
             raise ImportError("device='gpu' needs CuPy, which is not importable")
         self.xp = xp
-        self.pair, self.spin, self.square = op.pair, op.spin, op.square
+        self.coupling, self.spin, self.square = op.coupling, op.spin, op.square
         self.to_host = getattr(xp, 'asnumpy', np.asarray)
         has71, mode_set = 'eq71' in op.sets, op.rho is not None
         laplace = op.form == 'laplace'
@@ -674,13 +674,13 @@ class _DoublesDBSE2GPU:
     def tile(self, k0, k1, Z, nodes, derivative):
         """_tile_core on the device: (gam_I, gam_K, nrm), the halves as host arrays."""
         gI, gK, nrm = _tile_core(self.xp, self.L2, self.eo, self.ev, k0, k1, Z[0],
-                                 Z[1], self.pair, self.spin, nodes, derivative)
+                                 Z[1], self.coupling, self.spin, nodes, derivative)
         return self.to_host(gI), self.to_host(gK), nrm
 
     def overlap(self, k0, k1, Zr, wr, Zs, ws):
         """_tile_overlap on the device, a float."""
         return _tile_overlap(self.xp, self.L2, self.eo, self.ev, k0, k1, Zr, wr, Zs,
-                             ws, self.pair, self.spin)
+                             ws, self.coupling, self.spin)
 
     def laplace(self, Z, g, tau, wt, lo, coefs):
         """_laplace_sums on the device, the sums as host arrays."""
@@ -809,7 +809,7 @@ class RIFoldDBSE2(RIFoldADC2):
         form = _resolve_form(form, comm, has71, mode_set, bare, dressed)
         self.sets, self.kernel, self.singles, self.form = sets, kernel, singles, form
         self.screening = None
-        self.pair = _pieces.coupling_pairs(kernel, 'singlet')[0]
+        self.coupling = _pieces.coupling_pairs(kernel, 'singlet')[0]
         self.laplace_fallbacks = 0
         self.square = square
         # eq 70's Ā as its two blocks, read by _setup and _singles
@@ -855,7 +855,7 @@ class RIFoldDBSE2(RIFoldADC2):
         if form == 'laplace':
             if has71:
                 self.d_max = 2.0 * (self.f.ev.max() - self.f.eo.min())
-                self.g = _closure_coefficients(self.pair, spin)
+                self.g = _closure_coefficients(self.coupling, spin)
                 # the closures' layouts: B~_Q,ik as [i, (Q, k)] (one copy) and B~_Q,ac
                 # as [(Q, c), a], a view of Bvv's [a, Q, c]
                 self.Boo_i = np.ascontiguousarray(
@@ -982,7 +982,7 @@ class RIFoldDBSE2(RIFoldADC2):
         ZI_P,kc = Σ_i B~_P,ik u_ic and ZK_P,kc = Σ_a u_ka B~_P,ac on the factors f
         (self.f, the dressed ones, by default; self.m_op.f for the bare ones of the
         mode set). Each rank forms the rows of its auxiliary chunks; they travel whole
-        to every rank (allgather_ranges), as RIFoldADC2._dressed does."""
+        to every rank (allgather_ranges), as RIFoldADC2.dressed does."""
         f = self.f if f is None else f
         no, nv = self.no, self.nv
         u = np.ascontiguousarray(u, float).reshape(no, nv)
@@ -1014,15 +1014,16 @@ class RIFoldDBSE2(RIFoldADC2):
         for t, (k0, k1) in self.my_tiles:
             if self.gpu is None:
                 gI, gK, nrm = _tile_core(np, self.L2, self.f.eo, self.f.ev, k0, k1, ZI,
-                                         ZK, self.pair, self.spin, nodes, derivative)
+                                         ZK, self.coupling, self.spin, nodes,
+                                         derivative)
             else:
                 gI, gK, nrm = self.gpu.tile(k0, k1, Z, nodes, derivative)
-            parts.append((t, np.concatenate([self._back_oo(gI, k0, k1).ravel(), nrm])))
+            parts.append((t, np.concatenate([self.back_oo(gI, k0, k1).ravel(), nrm])))
             gams_K[t] = gK
         tot = ordered_sum(parts, self.comm, shape=(p * n + p,),
                           onto=np.zeros(p * n + p))
-        # _back_vv carries ADC(2)'s minus sign; Kᵀ R enters with plus
-        F = tot[:p * n].reshape(p, n) - self._back_vv(gams_K, p)
+        # back_vv carries ADC(2)'s minus sign; Kᵀ R enters with plus
+        F = tot[:p * n].reshape(p, n) - self.back_vv(gams_K, p)
         return F, tot[p * n:]
 
     def _laplace(self, Z, grid, coefs):
@@ -1038,7 +1039,7 @@ class RIFoldDBSE2(RIFoldADC2):
         channel vector with bare vertex factors Zb = (ZI, ZK) at the nodes (or the
         ω-derivative) and the signed norm, the tiles' Jᵀ halves and norms summed in
         tile order, the Kᵀ halves by the auxiliary chunks' owners in chunk order
-        through the inner operator's _back_vv on this operator's tiles; no collective
+        through the inner operator's back_vv on this operator's tiles; no collective
         inside the tile loop."""
         n, p = self.n, nodes.size
         fb = self.m_op.f
@@ -1049,14 +1050,14 @@ class RIFoldDBSE2(RIFoldADC2):
                                          Zb[0], Zb[1], nodes, derivative, self.square)
             else:
                 gJ, gK, nrm = self.gpu.mode_tile(k0, k1, Zb, nodes, derivative)
-            parts.append((t, np.concatenate([self.m_op._back_oo(gJ, k0, k1).ravel(),
+            parts.append((t, np.concatenate([self.m_op.back_oo(gJ, k0, k1).ravel(),
                                              nrm])))
             gams_K[t] = gK
         tot = ordered_sum(parts, self.comm, shape=(p * n + p,),
                           onto=np.zeros(p * n + p))
-        # Jᵀ R_J = -√2 _back_oo(Γ_J); Kᵀ R_K = +√2 Σ_Pc B_P,ac Γ_ic,P, which is
-        # -√2 _back_vv(Γ_K) against its minus
-        F = -np.sqrt(2.0) * (tot[:p * n].reshape(p, n) + self.m_op._back_vv(gams_K, p))
+        # Jᵀ R_J = -√2 back_oo(Γ_J); Kᵀ R_K = +√2 Σ_Pc B_P,ac Γ_ic,P, which is
+        # -√2 back_vv(Γ_K) against its minus
+        F = -np.sqrt(2.0) * (tot[:p * n].reshape(p, n) + self.m_op.back_vv(gams_K, p))
         return F, tot[p * n:]
 
     def _mode_laplace(self, Zb, grid, coefs):
@@ -1245,7 +1246,7 @@ class RIFoldDBSE2(RIFoldADC2):
         parts = []
         for t, (k0, k1) in self.my_tiles:
             v = (_tile_overlap(np, self.L2, self.f.eo, self.f.ev, k0, k1, Zr, wr, Zs,
-                               ws, self.pair, self.spin) if self.gpu is None
+                               ws, self.coupling, self.spin) if self.gpu is None
                  else self.gpu.overlap(k0, k1, Zr, wr, Zs, ws))
             parts.append((t, np.array([v])))
         return float(ordered_sum(parts, self.comm, shape=(1,), onto=np.zeros(1))[0])

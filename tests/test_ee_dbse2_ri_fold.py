@@ -1120,12 +1120,12 @@ def check_budget(eps, B, no):
 
     nodes, deriv = np.array([0.3, 0.4]), np.array([False, True])
     core = peak(lambda: ee_dbse2_ri_fold._tile_core(
-        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr[0], Zr[1], op.pair, op.spin, nodes,
+        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr[0], Zr[1], op.coupling, op.spin, nodes,
         deriv))
     ok &= bounded(core, ee_dbse2_ri_fold._tile_bytes(kt, no, nv, naux, 2),
                   'the tile budget bounds _tile_core at two nodes (triplet)')
     overlap = peak(lambda: ee_dbse2_ri_fold._tile_overlap(
-        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr, 0.3, Zs, 0.5, op.pair, op.spin))
+        np, op.L2, op.f.eo, op.f.ev, k0, k1, Zr, 0.3, Zs, 0.5, op.coupling, op.spin))
     tile = ee_dbse2_ri_fold._tile_bytes(kt, no, nv, naux)
     ok &= bounded(overlap, tile, 'the tile budget bounds _tile_overlap of two vectors')
     # the printed singlet holds every closure, the largest Laplace node

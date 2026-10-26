@@ -107,7 +107,7 @@ class Pass:
 def _amplitudes(op, k0, k1):
     """(tau, ts) of the occupied rows k0..k1-1, shape (kt, nv, no, nv)."""
     f = op.f
-    I = op._ints(k0, k1)
+    I = op.ints(k0, k1)
     D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
     tau = I / D
     del I
@@ -118,7 +118,7 @@ def _doubles(op, BtT, k0, k1, omega, scale, s):
     """(Z, W) of the occupied rows k0..k1-1 (module docstring), from the
     auxiliary-major dressed factor BtT (naux, no nv)."""
     f = op.f
-    H, HT = op._pair(BtT, k0, k1)
+    H, HT = op.pair(BtT, k0, k1)
     D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
     w = scale / (omega - D)
     del D
@@ -166,7 +166,7 @@ def _pass_amplitudes(op, x, s, p1_oo, p1_vv):
         r = np.zeros((no, nv))
         r[k0:k1] = ((ts + s * tau).reshape(kt * nv, -1) @ x.ravel()).reshape(kt, nv)
         G = (ts + tau).reshape(kt * nv, -1) @ f.L                  # G_icP
-        num = 2.0 * op._back_oo(G, k0, k1).reshape(no, nv)
+        num = 2.0 * op.back_oo(G, k0, k1).reshape(no, nv)
         gams[t] = G[None]
         del G
         blocks = {'r': r, 'p0_ov': num,
@@ -192,7 +192,7 @@ def _pass_amplitudes(op, x, s, p1_oo, p1_vv):
         p1.add(t, blocks)
     a = p1.total()
     # the B_vv half of p0_ov's back-transformation, in chunk order
-    num = a['p0_ov'] + 2.0 * op._back_vv(gams, 1)[0].reshape(no, nv)
+    num = a['p0_ov'] + 2.0 * op.back_vv(gams, 1)[0].reshape(no, nv)
     del gams
     r = a['r']
     d_ia = f.eo[:, None] - f.ev[None, :]
@@ -212,7 +212,7 @@ def _pass_doubles(op, y, x, omega, t1, s, mine):
     no, nv = op.no, op.nv
     p2 = Pass(op, {'oo_dd': (no, no), 'vv_dd': (nv, nv), 'p2_ov': (no, nv),
                     'tu_oo': (no, no), 'tu_vv': (nv, nv)})
-    BtT = op._dressed(y)
+    BtT = op.dressed(y)
     scale = np.sqrt(t1) / (2.0 * np.sqrt(2.0))
     for t, (k0, k1) in mine:
         kt = k1 - k0

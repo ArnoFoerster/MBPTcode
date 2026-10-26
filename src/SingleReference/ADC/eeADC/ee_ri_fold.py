@@ -615,7 +615,7 @@ class RIFoldADC2:
         return (ev[c0:c1, None, None] + ev[None, None, :]
                 - eo[kg] - eo[None, :, None])
 
-    def _ints(self, k0, k1):
+    def ints(self, k0, k1):
         """I[k, c, l, d] = (kc|ld) for k in the tile, shape (kt, nv, no, nv)."""
         L, nv = self.f.L, self.nv
         I = L[k0 * nv:k1 * nv] @ L.T
@@ -675,7 +675,7 @@ class RIFoldADC2:
         # products while they fit EE_RI_AMPLITUDE_CACHE_GB on this rank
         self._T, kept = {}, 0.0
         for t, (k0, k1) in self.my_tiles:
-            I = self._ints(k0, k1)
+            I = self.ints(k0, k1)
             tau = np.empty_like(I)
 
             def seg(k, c0, c1, I=I, tau=tau, k0=k0):
@@ -823,7 +823,7 @@ class RIFoldADC2:
         (kc|ld) by the same arithmetic, so the bits do not depend on the cache."""
         if t in self._T:
             return self._T[t]
-        I = self._ints(k0, k1)
+        I = self.ints(k0, k1)
         if self.spin != 'singlet':
             return self._triplet_amplitudes(I, k0)
         T = np.empty_like(I)
@@ -878,7 +878,7 @@ class RIFoldADC2:
         return ordered_chain_sum(terms, self.owners, self.comm,
                                  np.zeros((len(kinds), no * nv, m)))
 
-    def _k_apply(self, X, ex=None):
+    def k_apply(self, X, ex=None):
         """K X: singlet 2 (ia|kc) - (ic|ka), triplet -(ic|ka); ex the term
         sum_kc (ic|ka) X_kc where already made."""
         if ex is None:
@@ -887,7 +887,7 @@ class RIFoldADC2:
             return 2.0 * self._coulomb(X) - ex
         return -ex
 
-    def _dressed(self, x):
+    def dressed(self, x):
         """Bt^P_kc = sum_i B_kiP x_ic - sum_a x_ka B_aPc, auxiliary-major as
         (naux, no nv): each rank forms the rows of its auxiliary chunks, which
         travel verbatim to every rank (allgather_ranges)."""
@@ -903,7 +903,7 @@ class RIFoldADC2:
             BtT[p0:p1] = t.reshape(pc, -1)
         return allgather_ranges(BtT, self.chunk_ranges, self.comm)
 
-    def _pair(self, BtT, k0, k1):
+    def pair(self, BtT, k0, k1):
         """(H, H^T) of a tile, each (kt, nv, no, nv): H_kc,ld = sum_P Bt_kcP B_ldP
         and H^T_kc,ld = sum_P B_kcP Bt_ldP, from the auxiliary-major factors."""
         nv, no = self.nv, self.no
@@ -913,7 +913,7 @@ class RIFoldADC2:
         HT = (LT2[:, rows].T @ BtT).reshape(kt, nv, no, nv)
         return H, HT
 
-    def _back_oo(self, Gam, k0, k1):
+    def back_oo(self, Gam, k0, k1):
         """sum_kP B_kjP Gam_kbP of the rows k0..k1-1 of G, Gam (..., kt nv, naux),
         (..., no nv): the B_oo half of the back-transformation, local to a tile."""
         f, no, nv = self.f, self.no, self.nv
@@ -924,7 +924,7 @@ class RIFoldADC2:
         Bjk = np.ascontiguousarray(f.Boo[k0:k1].transpose(1, 0, 2)).reshape(no, -1)
         return (Bjk @ GkPb).reshape(lead + (-1,))
 
-    def _back_vv(self, gams, p):
+    def back_vv(self, gams, p):
         """-sum_cP Gam_kcP B_cPb for every tile's rows, gams {t: (p, kt nv, naux)}
         of this rank's tiles: each auxiliary slice goes to its chunk's owner
         (exchange_blocks), which contracts it with its B_vv chunk; the chunks are
@@ -996,7 +996,7 @@ class RIFoldADC2:
         for j in range(m):
             u = U[:, j].reshape(no, nv)
             out[:, j] += (self.xo @ u + u @ self.xv).ravel()
-        KU = self._k_apply(U, ex[1])
+        KU = self.k_apply(U, ex[1])
         W = np.concatenate([U, KU], axis=1)            # (n, 2m)
         # T W by tiles of rows; rows of other ranks' tiles stay zero, so the
         # sum over ranks is exact in any order
@@ -1007,13 +1007,13 @@ class RIFoldADC2:
             TW[k0 * nv:k1 * nv] = T.reshape(kt * nv, -1) @ W
             del T
         reduce_sum(TW, self.comm)
-        out -= 0.5 * (self._k_apply(TW[:, :m]) + TW[:, m:])
+        out -= 0.5 * (self.k_apply(TW[:, :m]) + TW[:, m:])
         if omegas is None:
             return out, norms
         # the doubles, one vector at a time: one dressed factor is held
         omegas = np.broadcast_to(np.asarray(omegas, float), (m,))
         for j in range(m):
-            BtT = self._dressed(U[:, j])
+            BtT = self.dressed(U[:, j])
             Btg = None if self.gpu is None else self.gpu.upload(BtT)
             parts, gams = [], {}
             for t, (k0, k1) in self.my_tiles:
@@ -1027,7 +1027,7 @@ class RIFoldADC2:
             tot = ordered_sum(parts, self.comm, shape=(self.n + 1,),
                               onto=np.zeros(self.n + 1))
             out[:, j] += tot[:-1]
-            out[:, j] += self._back_vv(gams, 1)[0]
+            out[:, j] += self.back_vv(gams, 1)[0]
             norms[j] = tot[-1]
         return out, norms
 
@@ -1036,7 +1036,7 @@ class RIFoldADC2:
         folded image (no nv,), its |Y|^2)."""
         nv, L = self.nv, self.f.L
         kt = k1 - k0
-        H, HT = self._pair(BtT, k0, k1)
+        H, HT = self.pair(BtT, k0, k1)
         wt = self.weights
         if self.spin == 'singlet':
             def seg_g(k, c0, c1):
@@ -1064,7 +1064,7 @@ class RIFoldADC2:
         nrm = sum(self._rows(kt, seg_r))
         Gam = R.reshape(kt * nv, -1) @ L
         del H, HT, R
-        return Gam, self._back_oo(Gam, k0, k1), nrm
+        return Gam, self.back_oo(Gam, k0, k1), nrm
 
     def fold_images(self, U, nodes, derivative=None):
         """(M U, F): F (p, n, m), F[q] = sum_K C_K (C^T U)_K / (w_q - D_K) =
@@ -1087,7 +1087,7 @@ class RIFoldADC2:
             return MU, np.zeros((p, n, m))
         F = np.empty((p, n, m))
         for j in range(m):
-            BtT = self._dressed(U[:, j])
+            BtT = self.dressed(U[:, j])
             Btg = None if self.gpu is None else self.gpu.upload(BtT)
             parts, gams = [], {}
             for t, (k0, k1) in self.my_tiles:
@@ -1099,7 +1099,7 @@ class RIFoldADC2:
             # the tiles in tile order, then the B_vv half in chunk order
             F[:, :, j] = ordered_sum(parts, self.comm, shape=(p * n,),
                                      onto=np.zeros(p * n)).reshape(p, n)
-            F[:, :, j] += self._back_vv(gams, p)
+            F[:, :, j] += self.back_vv(gams, p)
         return MU, F
 
     def _images_tile(self, k0, k1, BtT, nodes, derivative):
@@ -1107,7 +1107,7 @@ class RIFoldADC2:
         half of its images (p, no nv)), derivative[q] as fold_images'."""
         nv, L = self.nv, self.f.L
         kt = k1 - k0
-        H, HT = self._pair(BtT, k0, k1)
+        H, HT = self.pair(BtT, k0, k1)
         # S = H + H^T, held in HT
         def seg_s(k, c0, c1):
             HT[k, c0:c1] += H[k, c0:c1]
@@ -1134,15 +1134,15 @@ class RIFoldADC2:
                 R[k, c0:c1] = -Gt[k, c0:c1] / (x * x) if two else Gt[k, c0:c1] / x
             self._rows(kt, seg_r)
             gams[q] = R.reshape(kt * nv, -1) @ L
-        return gams, self._back_oo(gams, k0, k1)
+        return gams, self.back_oo(gams, k0, k1)
 
     def doubles_dot(self, ur, wr, us, ws):
         """sum_K Y_K(ur, wr) Y_K(us, ws), the doubles images' overlap."""
         if self.level == 'adc1':
             return 0.0
         same = ur is us or np.array_equal(ur, us)
-        Br = self._dressed(ur)
-        Bs = Br if same else self._dressed(us)
+        Br = self.dressed(ur)
+        Bs = Br if same else self.dressed(us)
         if self.gpu is not None:
             Bgr = self.gpu.upload(Br)
             Bgs = Bgr if same else self.gpu.upload(Bs)
@@ -1154,8 +1154,8 @@ class RIFoldADC2:
         parts = []
         for t, (k0, k1) in self.my_tiles:
             kt = k1 - k0
-            Hr, Tr = self._pair(Br, k0, k1)
-            Hs, Ts = (Hr, Tr) if same else self._pair(Bs, k0, k1)
+            Hr, Tr = self.pair(Br, k0, k1)
+            Hs, Ts = (Hr, Tr) if same else self.pair(Bs, k0, k1)
 
             def seg(k, c0, c1):
                 D = self._denom(k0 + k, c0, c1)

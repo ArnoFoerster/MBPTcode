@@ -8,7 +8,7 @@ the MP2 force the same bits as its default provider
 its occupied-tile integrals, its auxiliary chunks and their owners, its
 communicator, and the frozen core's factors in the same fit.
 
-The occupied-tile integrals are the fold's own (`RIFoldADC2._ints`), read here
+The occupied-tile integrals are the fold's own (`RIFoldADC2.ints`), read here
 and nowhere else in the gradient layer.
 """
 from src.Base.numerics.constants import EE_RI_TILE_GB
@@ -27,7 +27,7 @@ class FoldFactors:
 
     def ints(self, k0, k1):
         """(ia|jb) of the occupied rows k0..k1-1 from the fold's factors."""
-        return self.op._ints(k0, k1)
+        return self.op.ints(k0, k1)
 
     def core_factors(self, mol, mf, frozen, auxbasis):
         """B^P_cq of the frozen core against every active orbital, in the
