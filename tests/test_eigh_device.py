@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import scipy.linalg as la
 
-from src.Base.utils.linearAlgebra import diagonalization as diag
-from src.Base.utils.linearAlgebra.diagonalization import diagonalize_matrix
+from src.Base.utils.linear_algebra import diagonalization as diag
+from src.Base.utils.linear_algebra.diagonalization import diagonalize_matrix
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 
 N = 300

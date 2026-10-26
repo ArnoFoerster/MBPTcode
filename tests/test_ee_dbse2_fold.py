@@ -81,7 +81,7 @@ import numpy as np
 import scipy.linalg
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces, ee_fold, ee_gw_pieces
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (

@@ -96,10 +96,11 @@ import warnings
 
 import numpy as np
 
-from src.Base.constants import EE_RI_TILE_GB
-from src.Base.utils.grids import minimax_time_grid
-from src.Base.utils.mpi_grid import allgather_ranges, ordered_chain_sum, ordered_sum
-from src.Base.utils.time_frequency import minimax_points_for_accuracy
+from src.Base.numerics.constants import EE_RI_TILE_GB
+from src.Base.utils.grids.grids import minimax_time_grid
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
+                                             ordered_sum)
+from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces as _pieces
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import _LAPLACE_TARGET as LAPLACE_TARGET
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import gw_modes_df, static_term_pq
