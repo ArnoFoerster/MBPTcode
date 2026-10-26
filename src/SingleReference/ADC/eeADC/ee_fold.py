@@ -38,7 +38,7 @@ vector exists only inside one matvec.
 
 Flat singles vectors here are the singles segments of ee_r_sigma's layout,
 length 2 no nv (aa block then bb block); with a spin channel, the channel basis
-of ee_driver._channel_basis at the singles layout (level 'adc1').
+of ee_spin_adapt.channel_basis at the singles layout (level 'adc1').
 
 References
 ----------
@@ -258,9 +258,9 @@ def folded_operator(pieces, omega, spin=None):
     else:
         if spin not in _CHANNEL:
             raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
-        from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
-        embed, restrict, reps = _channel_basis(n_full, no, nv, 'adc1',
-                                               _CHANNEL[spin])
+        from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
+        embed, restrict, reps = channel_basis(n_full, no, nv, 'adc1',
+                                              _CHANNEL[spin])
     n = reps.size
     # diag of M on the singles layout: M_ia,ia of the aa and the bb block
     m_diag = np.concatenate([np.einsum('iaia->ia', M.get('aaaa')).ravel(),
@@ -314,17 +314,17 @@ def folded_operator(pieces, omega, spin=None):
 def _operator_folded(pieces, omega, spin):
     """folded_operator for pieces carrying an operator (ee_ri_fold.RIFoldADC2):
     it acts on its own spin channel, whose basis is the alpha block of the
-    flip pairs (ee_driver._channel_basis at level 'adc1'), so embed and
+    flip pairs (ee_spin_adapt.channel_basis at level 'adc1'), so embed and
     restrict are those of that basis and the matvec has a block form."""
-    from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+    from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
     from src.SingleReference.ADC.eeADC.ee_ri_fold import FoldedMatvec
     op = pieces['operator']
     if spin != op.spin:
         raise ValueError(f"the operator solves the {op.spin} channel; spin="
                          f"{spin!r} asked")
     no, nv = pieces['no'], pieces['nv']
-    embed, restrict, _ = _channel_basis(2 * no * nv, no, nv, 'adc1',
-                                        _CHANNEL[spin])
+    embed, restrict, _ = channel_basis(2 * no * nv, no, nv, 'adc1',
+                                       _CHANNEL[spin])
     mv = FoldedMatvec(op, omega)
 
     def dmatvec(u, vector=False):

@@ -437,9 +437,6 @@ def _subspace_memory(mf):
     return max(0, mf.max_memory - memory.current_memory_mb())
 
 
-# kept for ee_fold, which imports it from here
-_channel_basis = channel_basis
-
 
 def solve_spin_orbital(mf, mol, level, nroots, spin, matrix_free,
                        conv_tol, en_dress=None, ms_sector='auto',
