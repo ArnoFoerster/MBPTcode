@@ -418,7 +418,7 @@ COMPOSED_GRAD_K = 3
 CASIDA_NORM_TOL = 1e-4
 
 # GiB of the per-block intermediates of the static second-order GW kernel on the
-# GPU (`linear_response.static_second_order_kernel_df`, device='gpu'): every
+# GPU (`linear_response.static_second_order_kernel_df`, layout.device 'gpu'): every
 # block over virtuals is capped where its intermediates reach this, beside the
 # pair-sized accumulators and the DF factors, which it does not count. It moves
 # the memory and the GEMM shapes only, never a number beyond the summation order.

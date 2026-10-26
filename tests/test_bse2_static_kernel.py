@@ -11,10 +11,9 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
 2. With QuAcK's G0W0@HF energies on the diagonal (graphical roots, full-RPA W,
    eta = 0) the lowest singlet and triplet of BSE@GW and BSE2@GW, full and TDA,
    reproduce QuAcK master 2236bfc, whose RGW_phBSE2_static_kernel_A/B is added to
-   both manifolds with the HF energies in the denominators: run
-   2026-09-25_quack-xcheck-h2o on WSL, files full_bse, tda_fullw_bse, full_bse2,
-   tda_fullw_bse2 (same-input match to 1e-6 eV in
-   2026-09-25_h2o-bse2-vs-quack-sameqp).
+   both manifolds with the HF energies in the denominators: QuAcK's printed
+   roots for this input, full and TDA, BSE and BSE2 (a same-input match to
+   1e-6 eV).
 3. Shifting the HF energies by -0.3 Ha puts the LUMO below zero, so a
    particle-particle denominator eps_c + eps_d changes sign inside its sum: the
    routine warns once, and stays silent on the unshifted set.
@@ -23,8 +22,7 @@ so the eigh/Cholesky factorisation of the full ERI tensor). Four checks:
 5. kernel='eq71', the crossed class of eq 71 in place of the loop class of the
    printed eq 72, on H2O/6-31G: the DF blocks against the crossed class in the
    spin-orbital vertex form of the second-order block (the twelve-class split of
-   `developments/ee_gw_fold/dbse2_derivation_2026-10-13/eq74_block_classes.py` in
-   mbpt-tooling) with the static denominator, plus the dense ladders, at the default
+   eq 74's blocks) with the static denominator, plus the dense ladders, at the default
    block size and at one with a partial last block, the B block by the letter swap
    j <-> b that takes the printed A blocks to their B blocks; the loop class in
    the vertex form against the printed particle-hole term, which ties the vertex

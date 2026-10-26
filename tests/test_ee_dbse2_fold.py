@@ -32,11 +32,11 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      (completeness to the sixth); newton and davidson agree to 1e-8 Ha and 1e-8 on T1,
      their matvec counts and solver loops per root printed side by side (the 6-31G
      Davidson leg of both kernels on sets=('eq71',) keeps its model, asserted: the
-     printed kernel's roots have T1 > 1, and since 2026-10-17 the model's bracket
-     follows the rising branch); the count of complex eigenvalues and the lowest
+     printed kernel's roots have T1 > 1, and the model's bracket follows the
+     rising branch); the count of complex eigenvalues and the lowest
      complex real part against min D are printed. Regression guard: on sets=('eq71',)
-     the two lowest newton roots per channel equal M0_ROOTS, measured on 2026-10-18
-     (test_ee_dbse2_fold_m0_roots_64ff9c2.txt in the tooling repo), to 1e-8 Ha.
+     the two lowest newton roots per channel equal M0_ROOTS, recorded from this
+     code, to 1e-8 Ha.
   3. eq 74 as printed (kernel 'printed', I.J + K.L - I.K - K.I) and Yamada's kernel
      ('eq71', I.J + K.L - I.L - L.I) transcribed on spin orbitals at omega = 0.3 Ha
      against A_eff(omega) - M from the pieces, singlet and triplet, 6-31G, to 1e-11 Ha;
@@ -47,9 +47,8 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      channels, the two channels' Theta^61 equal to 1e-12 (no exchange in eq 61's
      couplings); the two-set Theta is the sum of the two sets' to 1e-12. The builder's
      stored dressed factors equal dressed_factors' (check 5 pins those to W_aux). The
-     product table is the spec's, pinned by the derivation (eq74_fold_identity.py,
-     eq74_vs_yamada.out.txt in the tooling repo) and re-derived by
-     transcription_printed_eq74, eq 74's four printed terms as einsums, to 1e-11.
+     product table is the spec's, re-derived by transcription_printed_eq74, eq 74's
+     four printed terms as einsums, to 1e-11.
   4. the static limit of the pieces' terms (static_limit_pieces) against
      static_second_order_kernel_df(..., kernel=, channel=) at the GW energies, both
      kernels, both channels, 6-31G, to 1e-10 Ha; eq 71's triplet leg compares zero
@@ -89,9 +88,7 @@ from src.SingleReference.LinearResponse.linear_response import (
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 # the two lowest roots (Ha) of check 2's pieces on sets=('eq71',), singles='eq62+eq59',
-# gw_like_uniform's energies, solver newton at tol_omega 1e-12, measured on 2026-10-18
-# (the lane's milestone 2 close) on WSL: test_ee_dbse2_fold_m0_roots_64ff9c2.txt
-# beside its generator in the tooling repo
+# gw_like_uniform's energies, solver newton at tol_omega 1e-12
 M0_ROOTS = {
     ('sto-3g', 'eq71', 'singlet'): (0.442968065932, 0.527190875894),
     ('sto-3g', 'eq71', 'triplet'): (0.370338072713, 0.445326163321),
@@ -135,8 +132,8 @@ def gw_like(eps, no):
 
 
 def gw_like_uniform(eps, no):
-    """The uniform shift M0_ROOTS was measured with on 2026-10-18 (the HF gap closed by
-    0.08 Ha, no orbital-dependent part): the regression guard keeps its input."""
+    """The uniform shift M0_ROOTS was recorded with (the HF gap closed by 0.08 Ha, no
+    orbital-dependent part): the regression guard keeps its input."""
     e = np.array(eps, float)
     e[:no] += 0.03
     e[no:] -= 0.05
@@ -551,7 +548,7 @@ def check_transcription(eps, B, no):
             ok &= check(d < 1e-11 and d0 < 1e-12,
                         f'{kernel} {spin}: Theta(omega) from the pieces equals the '
                         'transcription', f'max |d| {d:.1e} Ha, M {d0:.1e}')
-    # the vertex table against eq 74 as printed, term by term (tests I1 of milestone 1)
+    # the vertex table against eq 74 as printed, term by term
     paper = transcription_printed_eq74(Bt, eps_gw, no, omega)
     for spin in ('singlet', 'triplet'):
         d = float(np.max(np.abs(ref['printed'][spin] - paper[spin])))
@@ -754,7 +751,7 @@ def check_fold_vs_unfolded(basis):
                             f'{tag} {kernel} {basis} {spin}: newton and davidson agree',
                             f'max |dw| {dw:.1e} Ha, max |dT1| {dt:.1e}')
                 if sets == ('eq71',) and spin is not None:
-                    # the regression guard: the roots recorded on 2026-10-18
+                    # the regression guard: the recorded roots
                     ref = np.array(M0_ROOTS[basis, kernel, spin])
                     dg = float(np.max(np.abs(np.sort(a.omega)[:2] - ref)))
                     ok &= check(dg < 1e-8, f'{tag} {kernel} {basis} {spin}: the two '
