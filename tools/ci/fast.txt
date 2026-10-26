@@ -442,3 +442,6 @@ pytest test_nondyson_restricted.py
 pytest test_qp_scan_weight_sum.py
 pytest test_isdf_fit_ranks.py
 pytest test_solvated_ground_surface.py
+# Placed by the 60 s rule on workstation wall times (8 threads): test_eigh_device 0.4 s, test_bse2_static_kernel 33 s
+script test_eigh_device.py
+script test_bse2_static_kernel.py

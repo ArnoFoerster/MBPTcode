@@ -150,3 +150,6 @@ pytest test_adc5_archive_pins.py  # needs the ADC(5) runtime; skips without it
 pytest test_adc5_decoupling_laplace.py  # needs the ADC(5) runtime; skips without it
 pytest test_adc5_union_poles.py  # needs the ADC(5) runtime; skips without it; about 35 minutes with it
 pytest test_laplace_amplitudes.py  # needs the ADC(5) runtime; skips without it
+# Placed by the 60 s rule on workstation wall times (8 threads): test_ee_dbse2_ri_fold 81 s, test_ee_dbse2_fold 1329 s
+script test_ee_dbse2_ri_fold.py
+script test_ee_dbse2_fold.py
