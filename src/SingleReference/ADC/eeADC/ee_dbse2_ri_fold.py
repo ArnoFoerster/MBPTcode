@@ -96,13 +96,12 @@ import warnings
 
 import numpy as np
 
-from src.Base.numerics.constants import EE_RI_TILE_GB
+from src.Base.numerics.constants import EE_GW_LAPLACE_TARGET, EE_RI_TILE_GB
 from src.Base.utils.grids.grids import minimax_time_grid
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
                                              ordered_sum)
 from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_dbse2_pieces as _pieces
-from src.SingleReference.ADC.eeADC.ee_gw_pieces import _LAPLACE_TARGET as LAPLACE_TARGET
 from src.SingleReference.ADC.eeADC.ee_gw_pieces import gw_modes_df, static_term_pq
 from src.SingleReference.ADC.eeADC.ee_ri_fold import DEVICES, RIFactors, RIFoldADC2
 from src.SingleReference.LinearResponse.linear_response import device_memory_check
@@ -942,9 +941,9 @@ class RIFoldDBSE2(RIFoldADC2):
     def _grid(self, omega, omega2=None, span=None):
         """(tau, wt, lo) of the minimax grid for 1/(D - ω) over one set's doubles on
         [min D - max ω, max D - min ω] over the one or two frequencies at
-        LAPLACE_TARGET, lo its lower end and the exponent shift of the set's sums; span
-        is the set's own (min D, max D), eq 71's (d71_min, d_max) by default and the
-        mode set's (dm_min, dm_max) for _mode_laplace, since each set's split is
+        EE_GW_LAPLACE_TARGET, lo its lower end and the exponent shift of the set's
+        sums; span is the set's own (min D, max D), eq 71's (d71_min, d_max) by default
+        and the mode set's (dm_min, dm_max) for _mode_laplace, since each set's split is
         against its own extremes and not the level's; None where a frequency is at or
         above the set's min D (no Laplace transform) or no tabulated grid reaches the
         target: kernel_laplace's rule."""
@@ -953,8 +952,9 @@ class RIFoldDBSE2(RIFoldADC2):
         if max(omegas) >= d_lo:
             return None
         lo, hi = d_lo - max(omegas), d_hi - min(omegas)
-        ntau, err = minimax_points_for_accuracy(lo, hi, LAPLACE_TARGET, relative=True)
-        if ntau is None or err > LAPLACE_TARGET:
+        ntau, err = minimax_points_for_accuracy(lo, hi, EE_GW_LAPLACE_TARGET,
+                                                relative=True)
+        if ntau is None or err > EE_GW_LAPLACE_TARGET:
             return None
         tau, wt = minimax_time_grid(ntau, lo, hi)
         return np.asarray(tau, float), np.asarray(wt, float), lo

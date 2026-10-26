@@ -30,6 +30,7 @@ import numpy as np
 import scipy.linalg
 
 from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.Base.numerics.constants import EE_GW_LAPLACE_TARGET, EE_GW_SLAB_BLOCKS
 from src.Base.utils.grids.grids import minimax_time_grid
 from src.Base.utils.grids.time_frequency import minimax_points_for_accuracy
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
@@ -39,16 +40,6 @@ from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, _ew, _ksum, _stream
 from src.SingleReference.GW.quasi_boson import QPqb
 from src.SingleReference.LinearResponse.linear_response import gram_product
 
-# (nk, nv, nm) slab blocks one slab of the eq 66 kernel holds at once (traced peak,
-# check 8 of tests/test_ee_gw_fold.py), what _sb._slab_plan budgets with
-_K_LIVE = 3
-# kernel_laplace's grid target: max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled
-# to [1, R] (time_frequency.laplace_test_error, relative=True), the relative error of
-# every p = 1 term; the absolute residual lets terms far above min D drift as R grows.
-# The grid is fitted to 1/x only: the p = 2 terms (the derivative image, weights
-# w_t τ_t) are not bounded by it, pointwise 2e-9 on [0.3, 8], 8e-9 on [0.3, 40],
-# 3.4e-8 on [0.01, 100]; water 6-31G, every vector: <= 1.2e-10
-_LAPLACE_TARGET = 1e-9
 
 
 def _eri_blocks(B, nocc):
@@ -302,7 +293,7 @@ def kernel_df(eps, B, rho, omega, nocc):
         if y1.parity is not None:
             raise NotImplementedError('kernel_df takes y1 without a flip parity')
         Z = {s: _df_couple(Boo, Bvv, y1.get(s)) for s in ('aa', 'bb')}
-        width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
+        width, workers = _sb._slab_plan(no, nv * nm, EE_GW_SLAB_BLOCKS)
 
         def slab(k0, k1):
             nk = k1 - k0
@@ -361,13 +352,13 @@ def kernel_laplace(eps, B, rho, omega, nocc):
 
     and dn2 = sum_kcm (V y1)_kcm² / (D_kcm - ω)², both spin blocks summed. At
     ω ≥ min D, where 1/(D - ω) has no Laplace transform, and where no tabulated
-    grid reaches _LAPLACE_TARGET (ω close below min D), K is kernel_df's, exact.
+    grid reaches EE_GW_LAPLACE_TARGET (ω close below min D), K is kernel_df's, exact.
 
     Notes
     -----
     On x = D_kcm - ω in [min D - ω, max D - ω], the minimax grid (τ_t, w_t) of
     grids.minimax_time_grid, sized by minimax_points_for_accuracy for relative
-    error _LAPLACE_TARGET, gives
+    error EE_GW_LAPLACE_TARGET, gives
 
         1 / x^p = sum_t c_p,t exp(-τ_t x),    c_p,t = w_t τ_t^(p-1) / (p-1)!,
 
@@ -415,9 +406,9 @@ def kernel_laplace(eps, B, rho, omega, nocc):
         if om >= d_min:
             return exact(y1, om, powers)
         lo, hi = d_min - om, d_max - om
-        ntau, err = minimax_points_for_accuracy(lo, hi, _LAPLACE_TARGET,
+        ntau, err = minimax_points_for_accuracy(lo, hi, EE_GW_LAPLACE_TARGET,
                                                 relative=True)
-        if err > _LAPLACE_TARGET:
+        if err > EE_GW_LAPLACE_TARGET:
             return exact(y1, om, powers)
         tau, wt = minimax_time_grid(ntau, lo, hi)
         # Z_Q,kc of both spins, (Q, s, k, c)
@@ -550,7 +541,7 @@ def build_pieces_gw(eps, B, nocc, screening='tda', laplace=False, df=False):
             # occupied index: Y_kcm exists for the slab's k alone, (k1 - k0, nv, nm)
             if y1.parity is not None:
                 raise NotImplementedError('kernel takes y1 without a flip parity')
-            width, workers = _sb._slab_plan(no, nv * nm, _K_LIVE)
+            width, workers = _sb._slab_plan(no, nv * nm, EE_GW_SLAB_BLOCKS)
 
             def slab(k0, k1):
                 nk = k1 - k0
