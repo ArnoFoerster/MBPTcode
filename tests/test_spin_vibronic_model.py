@@ -130,7 +130,7 @@ def golden_rule_explicit(delta_e, v_of_q, n=40):
     g = np.exp(-0.5 * (de / SIGMA) ** 2) / (np.sqrt(2 * np.pi) * SIGMA)
     w = (fc[:, :, None, None] * vib2[None, None, :, :]
          * pa[None, :, None, None] * pp[None, None, None, :])
-    return rates._golden_rule(1.0, float((w * g).sum()))
+    return rates.golden_rule(1.0, float((w * g).sum()))
 
 
 def rho(delta_e):

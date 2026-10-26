@@ -1,12 +1,12 @@
-"""Fragment-localized orbitals: the orbital basis the fragment-partitioned BSE
-is written in.
+"""Fragment-localized orbitals: the orbital basis the fragment partition of a
+singles operator (GW-BSE, ADC(2)) is written in.
 
 A supersystem is split into fragments (lists of atom indices), and its
 occupied and its virtual canonical orbitals are rotated, separately, into
 orbitals that each belong to one fragment. An electron-hole configuration
 (i, a) is then LOCAL when i and a sit on the same fragment and CHARGE
-TRANSFER when they do not, and the BSE matrix in this basis splits into the
-blocks `src.gradients.gwbse.fragment_bse` partitions.
+TRANSFER when they do not, and a singles operator (the BSE, ADC(2)) in this
+basis splits into the blocks `src.fragments.partition` partitions.
 
 THE FUNCTIONAL IS PIPEK-MEZEY OVER FRAGMENT POPULATIONS. Each orbital's
 population on a fragment is the sum of its populations on that fragment's
@@ -32,8 +32,8 @@ SUBSPACES only, not on rotations inside one fragment, and the tests check
 that invariance.
 
 THE ROTATION IS KEPT. `u_occ` and `u_vir` are the canonical-to-local
-rotations, C_loc = C_can U, because the BSE is assembled and differentiated
-in the canonical basis and only rotated into this one.
+rotations, C_loc = C_can U, because the singles operator is assembled and
+differentiated in the canonical basis and only rotated into this one.
 """
 from dataclasses import dataclass, field
 

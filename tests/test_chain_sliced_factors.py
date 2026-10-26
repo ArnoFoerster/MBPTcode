@@ -8,7 +8,7 @@ rank, ONE `SlicedFactors` per geometry: each rank's `contiguous_block` of the
 grid rows of X_mo, D and X_ao, cut from the whole products after they are
 formed exactly as the whole layout forms them. Gated over 2, 3 and 8
 simulated ranks (`run_simulated`, threads of this process with the real
-collectives) on water/cc-pVDZ Hartree-Fock at 148 points per atom, each rank
+collectives) on water/cc-pVDZ Hartree-Fock on the G1 grid, each rank
 on its own Mole (the nuclear gradient writes `mol._env` in place), against
 the whole layout on the same rank count:
 
@@ -56,15 +56,13 @@ What breaks each gate:
     grid); `test_state_pair_chain_on_slices` does not see it, since a gather
     moves bytes, not bits.
 
-HEXAMER ESTIMATE (the whole per-stage table is in
-`src/gradients/rpa/factor_chain.py`'s module docstring), per rank over 8 ranks,
-factor arrays only, from M 117762, nmo = nao 10980, nocc 972, naux 28236
-(14721 rows per rank), GB whole -> sliced:
-
-  between steps                      43.3 -> 5.9 per live geometry
-  chi0/W adjoint sweep               127.6 -> 79.8 (adjoints 36.9 whole)
-  quasiparticle self-energy solve    90.6 -> 53.2
-  BSE Davidson, per trial vector     90.6 -> 8.0
+LARGE-SYSTEM ESTIMATE per rank, factor arrays only, with M grid points,
+nmo = nao, naux auxiliaries and M / ranks rows per rank: the replicated chain
+holds X_mo, X_ao and D whole at every stage; the sliced chain holds a rank's
+rows between steps and in the Davidson action, and gathers whole only what the
+chi0/W adjoint sweep and the quasiparticle self-energy solve read. The sliced
+peak is below the replicated one at every stage, by the largest factor between
+steps and in the BSE Davidson action.
 """
 import os
 import sys

@@ -24,13 +24,14 @@ is imported only when they are reached:
 pip install openfermion
 ```
 
-Three more optional dependencies, each imported only when the feature is
+Four more optional dependencies, each imported only when the feature is
 reached:
 
 ```bash
 pip install geometric        # geomeTRIC relaxation, in properties.optimize
 pip install cppe             # polarizable embedding from a real potential file
 pip install pyscf-dispersion # D3/D4 empirical dispersion
+pip install torch            # src/autograd_oracle: a torch reference for the GW-BSE forces, tests only
 ```
 
 `Solvers.active_space_solver.Block2DMRGSolver` additionally needs `block2`:

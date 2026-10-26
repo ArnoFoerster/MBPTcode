@@ -47,11 +47,13 @@ from pyscf import scf as pyscf_scf
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_closed_shell_or_unrestricted,
                                             spin_index, occupied_count)
-from src.Base.factorization.separable_ri import (aux_metric_sqrt,
+from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  build_separable_ri, fit_M_streaming,
                                                  molecular_points_covariant,
                                                  refuse_unrepresented_factors,
                                                  resolve_grid)
+from src.Base.factorization.ao_product_fit import (ao_product_fit, pivoted_points,
+                                                   placed)
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
@@ -169,6 +171,13 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      `DistributedISDFJK.fit_tiles`), read instead of fitting
                      where its points and settings are this call's, ignored
                      otherwise; `timings['fit_reused_tiles']` says it was read.
+
+    `numerics.isdf.test_set` 'ao_products' fits every AO product in the
+    Coulomb metric (`ao_product_fit`, replicated only), and
+    `numerics.isdf.pivot_points` replaces the grid by that many points
+    pivoted from it at this geometry (`ao_product_fit.pivoted_points`):
+    a selection made per call, for energies at one geometry; a gradient
+    chain freezes its selection (`FrozenFactorization`).
     """
     return _separable_factors(
         mf, mol, True, auxbasis=auxbasis, radii=radii, counts=counts,
@@ -199,6 +208,11 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
     sliced, fit_block = bool(req['sliced']), req['fit_block']
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
+    isdf = numerics_or_default(numerics).isdf
+    ao_products = isdf.test_set == 'ao_products'
+    if ao_products and fit == 'rows':
+        raise ValueError("test_set='ao_products' is fitted whole: "
+                         "fit='replicated'")
     _t0 = _time.time()
     comm = current_comm() if comm is None else comm
     auxbasis = req['auxbasis'] or paired_auxbasis(mol.basis)
@@ -212,7 +226,14 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
         where='separable_factors')
 
     _t = _time.time()
-    coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
+    if isdf.pivot_points is not None:
+        frames = atomic_frames(mol)[0]
+        pts_local, _, _ = pivoted_points(mol, radii, origins, frames,
+                                         isdf.pivot_points, numerics, comm)
+        coords = placed(mol, pts_local, frames)
+    else:
+        coords = molecular_points_covariant(mol, radii,
+                                            origin_by_element=origins)
     if timings is not None:
         timings['fit_points'] = _time.time() - _t
     if comm is not None and comm.Get_size() > 1:
@@ -226,9 +247,14 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
                            fit_block, _t0, fit_tiles)
         return _represented(out, mf, mol, auxmol, comm) if refuse else out
     # Z = M^T V M is never read here: D = M^T V^1/2 below carries the metric.
-    X, _, M = build_separable_ri(mol, coords, auxmol=auxmol,
-                                 numerics=numerics, comm=comm, timings=timings,
-                                 with_Z=False)
+    if ao_products:
+        # the projection divided over the ranks by point tiles, the solve
+        # by every rank; `replicate_factors` leaves rank 0's below
+        X, M, _ = ao_product_fit(mol, auxmol, coords, numerics, comm)
+    else:
+        X, _, M = build_separable_ri(mol, coords, auxmol=auxmol,
+                                     numerics=numerics, comm=comm,
+                                     timings=timings, with_Z=False)
 
     # Symmetric V^1/2 gauge on the auxiliary index -- the one Sigma expects,
     # dressed by the environment attached to the mean field (v -> v + vtilde).

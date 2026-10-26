@@ -760,6 +760,58 @@ def test_the_reference_is_its_own_refreeze(mol):
     assert surf.refreeze(molecule(_offset(31))) is surf
 
 
+def ao_numerics(mol):
+    """`numerics` with the AO-product fit on 200 points pivoted from the G1
+    parent (the solvated driver's --isdf-test-set / --pivot-points)."""
+    return Numerics(bse={'solver': 'dense'},
+                    isdf={'counts': g1(mol), 'test_set': 'ao_products',
+                          'pivot_points': 200},
+                    solvent={'loop_tol_q': 1e-10, 'loop_tol_energy': 1e-12})
+
+
+def _ao_surface(m0):
+    """S1 in toluene on the AO-product fit, one model moved as a walk's."""
+    ref = []
+
+    def make_state(m, field):
+        if not ref:
+            ref.append(setup(m, 'singlet', field=field, num=ao_numerics(m0))[1])
+            return ref[0]
+        return ref[0].at(m, make_scf, field.transition_environment())
+    return SolvatedSurface(
+        m0, lambda m: ContinuumField.from_environment(screening(m)), make_state,
+        label='S1 toluene', numerics=ao_numerics(m0)), ref
+
+
+def test_the_ao_fit_solvated_force_is_its_energy_derivative(mol):
+    """The SolvatedSurface force on the AO-product fit (points pivoted once,
+    carried by their atoms) against the central difference of its energy along
+    a random unit direction, 1e-6 Ha/Bohr, as on the tabulated grid."""
+    surf, _ = _ao_surface(mol)
+    F = surf.total_gradient(mol)[0]
+    d = np.random.default_rng(29).standard_normal((mol.natm, 3))
+    d /= np.linalg.norm(d)
+    fd = central(lambda t: surf.total_energy(molecule(t * d)), FD_STEP_SOLVATION)
+    assert abs(fd - float(np.sum(F * d))) < 1e-6
+
+
+def test_an_ao_fit_refreeze_pivots_again(mol):
+    """A refreeze on the AO-product fit is the vertical surface at the new
+    geometry: its points are pivoted there, not the moved reference's."""
+    surf, ref = _ao_surface(mol)
+    surf.total_energy(mol)
+    r1 = molecule(_offset(31))
+    old = surf.total_energy(r1)
+    rebuilt = surf.refreeze(r1)
+    new = rebuilt.total_energy(r1)
+    field, state = setup(r1, 'singlet', num=ao_numerics(mol))
+    assert same_solve(new, loop(state, field).energy)
+    assert abs(new - old) > 1e-8
+    chain = rebuilt.last['state'].chain
+    assert chain is not ref[0].chain
+    assert chain.factorization.test_set == 'ao_products'
+
+
 #: Formaldehyde (Angstrom, planar): its T1 is bound, water's S1 and T1 are
 #: dissociative (a walk ends in a collapsed radius at the BSE instability).
 H2CO = [('C', (0.0, 0.0, -0.528)), ('O', (0.0, 0.0, 0.677)),

@@ -16,6 +16,10 @@
     rates          the rate formulas: golden-rule transfer (Marcus,
                    Marcus-Levich-Jortner, spin-vibronic, internal
                    conversion), radiative, and the photoluminescence kinetics
+    forster        Förster (dipole-dipole) transfer and annihilation: the
+                   overlap of a donor's emission with an acceptor's
+                   absorption, excited-state absorption included, C6 and the
+                   Förster radius
     records        what every stage shares: state labels, the log line and
                    a walk's record
     uisc           the UISC protocol of Samanta et al.: the promoting-mode

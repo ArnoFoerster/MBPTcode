@@ -1146,10 +1146,15 @@ def describe_run(run, stages, grid):
     """The run's header line: system, chain, ranks, SCF, policies, stages
     and store; then what the store holds."""
     d, store = run.declaration, run.store
+    isdf = d.numerics.isdf
+    points = (f'{grid["grid_points_per_atom"]} points per atom'
+              if isdf.pivot_points is None else
+              f'{isdf.pivot_points} points pivoted from its parent')
+    fit = '' if isdf.test_set is None else f', {isdf.test_set} fit'
     log(f'{d.system.name}: {run.mol_in.natm} atoms, nao '
         f'{run.mol_in.nao_nr()}, {d.reference}/{run.mol_in.basis}, '
-        f'{d.mean_field_name}, factors {d.numerics.isdf.level} '
-        f'({grid["grid_points_per_atom"]} points per atom), {d.environment}, '
+        f'{d.mean_field_name}, factors {isdf.level} ({points}{fit}), '
+        f'{d.environment}, '
         f'kernel {d.kernel}, {n_ranks()} '
         f'rank(s), SCF {d.numerics.scf.conv_tol:.0e}/'
         f'{d.numerics.scf.conv_tol_grad:.0e}'

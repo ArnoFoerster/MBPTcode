@@ -134,7 +134,7 @@ def _saddle(delta_e, s_k, omega_k, n_k, lam_cl, gauss, kt):
     return tau, f_min, d2F(tau)
 
 
-def _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
+def log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
     """ln G(z) of `fc_weighted_dos` without the Lorentzian, at complex times z."""
     z = np.asarray(z, complex)
     phi = np.zeros_like(z)
@@ -153,7 +153,7 @@ class FCIntegrandNotDecayed(RuntimeWarning):
     its `numerical_flags`)."""
 
 
-def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
+def real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
                        dt_per_period, t_decay, max_points):
     """rho(dE) for every dE off ONE real-axis grid, with e^{-gamma |t|}.
 
@@ -259,7 +259,7 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
             'bath, say which.')
 
     def log_g(z):
-        return _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
+        return log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
                                         gauss)
 
     de = np.atleast_1d(np.asarray(delta_e, float))
@@ -268,7 +268,7 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
         variance = (float((s_k * omega_k ** 2 * (2.0 * n_k + 1.0)).sum())
                     + 2.0 * gauss)
         lam_total = float((s_k * omega_k).sum()) + lam_cl
-        rho = _real_axis_density(de, log_g, variance, lam_total, gamma,
+        rho = real_axis_density(de, log_g, variance, lam_total, gamma,
                                  float(omega_k.max()), dt_per_period, t_decay,
                                  max_points)
         rho = np.maximum(rho, 0.0)

@@ -5,7 +5,7 @@ independent spelling, to a few ulp.
 functional -- the reaction-field matrix N in the dressed auxiliary gauge, the
 (screening, counter-term) pair of the fold, and the solute-solvent dispersion
 term `solute_solvent_dispersion_energy` (not `Base.dispersion`'s empirical
-D3/D4 correction). `gradients/solvated_rpa_energy.py` holds the reverse pass
+D3/D4 correction). `gradients/rpa/solvated_energy.py` holds the reverse pass
 (`fold_bar_to_gauge`) and the four-sweep diagnostic that drives it
 (`solvated_correlation_energies`).
 

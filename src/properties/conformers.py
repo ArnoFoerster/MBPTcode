@@ -22,6 +22,14 @@ a gradient. Every relaxation goes through `relax` and every energy through
 minima are the EXCITED state's, which is the twisted-ICT case: the emitting
 conformer need not be the one the ground state relaxes to.
 
+BEYOND THE TORSIONAL GRID. Ring puckers and nitrogen inversions are extra
+starts (`ring_conformers`, through `extra_starts`); a chiral minimum stands for
+itself and its mirror image and is counted twice (`mirror_degeneracy`); the
+vibrational and rotational entropy is `conformer_weights`; barriers and the
+following of one state through a twist are `torsion_scan`; and
+`excited_conformers` relaxes each ground-state conformer on an excited surface
+and pairs them, the twisted-ICT case.
+
 ONE FROZEN SURFACE FOR THE WHOLE SEARCH. Every start is relaxed on the surface
 as it was handed in, frozen conventions and all, because energies from two
 differently frozen surfaces are not comparable and the whole point here is to
@@ -54,6 +62,11 @@ from src.properties.optimize import relax
 # only ever split classes further, so a missed automorphism costs a duplicate
 # conformer and never a wrong merge.
 COLOUR_REFINEMENT_ROUNDS = 3
+#: Torsion change between a ground-state conformer and the excited minimum it
+#: relaxes to, degrees, above which the pair is a twisted-ICT pair: a
+#: carbazole-triazine dihedral goes from 50-60 in S0 towards 90 in a TICT
+#: state, and a planar-to-twisted switch moves by more.
+CONFORMER_TWIST_TOL = 25.0
 
 
 @dataclass
@@ -83,7 +96,9 @@ class Conformer:
     does not cancel between two different geometries. `torsions` are the
     dihedrals of the relaxed structure in degrees, one per rotatable bond.
     `start` is the grid offset tuple that produced it and `starts` every start
-    index that relaxed into it.
+    index that relaxed into it. `degeneracy` is 2 for a chiral conformer,
+    whose mirror image the deduplication merged into it (`mirror_degeneracy`),
+    else 1; the weight counts it.
     """
 
     mol: object
@@ -94,6 +109,7 @@ class Conformer:
     starts: list = field(default_factory=list)
     converged: bool = True
     info: dict = field(default_factory=dict)
+    degeneracy: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +448,45 @@ def deduplicate(records, mol, perms=None, energy_tol=CONFORMER_ENERGY_TOL,
 # populations and the search
 # ---------------------------------------------------------------------------
 
-def boltzmann_weights(energies, temperature=CONFORMER_TEMPERATURE):
-    """Populations exp(-E/kT) normalized to one, from TOTAL energies in Hartree.
+def boltzmann_weights(energies, temperature=CONFORMER_TEMPERATURE,
+                      degeneracies=None):
+    """Populations g exp(-E/kT) normalized to one, from TOTAL energies in
+    Hartree (or free energies) and the degeneracy g of each (1 when None).
 
-    Electronic energies only. The conformational entropy -- the vibrational
-    partition function of each minimum, and the multiplicity of the symmetry
-    images merged into it -- is not in here, and for a pair of minima separated
-    by a few k_B T those are corrections of the same order as the gap itself.
+    With electronic energies and the mirror degeneracy this is what
+    `search_conformers` reports. The rest of the conformational entropy -- the
+    vibrational and rotational partition functions of each minimum and its
+    rotational symmetry number -- is `conformer_weights.free_energy_weights`,
+    which needs a Hessian per conformer; for minima a few k_B T apart those
+    are corrections of the same order as the gap itself.
     """
     e = np.asarray(energies, float)
-    w = np.exp(-(e - e.min()) / (BOLTZMANN_HARTREE_PER_KELVIN * temperature))
+    g = np.ones_like(e) if degeneracies is None else np.asarray(degeneracies,
+                                                                float)
+    w = g * np.exp(-(e - e.min()) / (BOLTZMANN_HARTREE_PER_KELVIN
+                                     * temperature))
     return w / w.sum()
+
+
+def mirror_degeneracy(mol, perms=None, rmsd_tol=CONFORMER_RMSD_TOL):
+    """2 when `mol`'s mirror image is a different structure, 1 when it is the
+    same one.
+
+    The comparison `deduplicate` makes, without the reflection: the heavy-atom
+    RMSD between the structure and its mirror image over proper superpositions
+    and the graph's automorphisms. Above `rmsd_tol` the two are enantiomers,
+    which `conformer_rmsd` merges into ONE conformer -- so that conformer
+    stands for two minima and is counted twice in the populations (RT ln 2 =
+    18 meV at 300 K). gauche-butane is 2, anti-butane 1.
+    """
+    heavy = heavy_atoms(mol)
+    x = np.asarray(mol.atom_coords())[heavy] * BOHR_TO_ANGSTROM
+    if len(x) < 4:
+        return 1          # three points are always planar: achiral
+    perms = graph_automorphisms(mol) if perms is None else perms
+    mirror = x * np.array([-1.0, 1.0, 1.0])
+    best = min(kabsch_rmsd(x, mirror[perm]) for perm in perms)
+    return 2 if best > rmsd_tol else 1
 
 
 def _relax_start(surface, mol, engine, loose, relax_kw):
@@ -470,8 +514,13 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
                       refine=True, torsions=None,
                       energy_tol=CONFORMER_ENERGY_TOL,
                       rmsd_tol=CONFORMER_RMSD_TOL, verbose=True, map_fn=None,
-                      **relax_kw):
+                      extra_starts=(), **relax_kw):
     """Torsional minima of `surface`'s state. Returns [Conformer], lowest first.
+
+    extra_starts: [(coords in Bohr, label)] relaxed beside the torsional grid:
+        the ring puckers and inversions of `ring_conformers`
+        (`puckering_starts`, `inversion_starts`), or any geometry the caller
+        wants searched. Their Conformer.start is the label.
 
     Enumerate a coarse grid over the rotatable bonds, relax every start on the
     surface at loose convergence, merge the duplicates, relax the survivors to
@@ -500,10 +549,12 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
     adj = molecular_graph(mol)
     torsions = rotatable_bonds(mol, adj) if torsions is None else torsions
     perms = graph_automorphisms(mol, adj)
-    starts = torsion_starts(mol, torsions, n_grid, max_starts)
+    starts = (torsion_starts(mol, torsions, n_grid, max_starts)
+              + [(np.asarray(c, float), label) for c, label in extra_starts])
     if verbose:
         print(f'  [conformers] {len(torsions)} rotatable bond(s), '
-              f'{len(starts)} start(s) on {surface.label()}')
+              f'{len(extra_starts)} extra start(s), {len(starts)} start(s) on '
+              f'{surface.label()}')
 
     # Every start relaxes on its own; `map_fn` (map's signature, default the
     # builtin) is where a process pool spreads them. The mapped function hands
@@ -569,9 +620,11 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
         records = refined
 
     reps = [rep for rep, _ in groups]
-    weights = boltzmann_weights([r['energy'] for r in reps], temperature)
+    degeneracy = [mirror_degeneracy(r['mol'], perms, rmsd_tol) for r in reps]
+    weights = boltzmann_weights([r['energy'] for r in reps], temperature,
+                                degeneracy)
     out = []
-    for (rep, members), w in zip(groups, weights):
+    for (rep, members), w, g in zip(groups, weights, degeneracy):
         merged = []
         for n in members:
             idx = records[n]['index']
@@ -581,13 +634,15 @@ def search_conformers(surface, mol=None, n_grid=CONFORMER_TORSION_GRID,
                              torsions=torsion_values(rep['mol'], torsions),
                              start=rep['offsets'], starts=sorted(merged),
                              converged=rep['converged'],
-                             info=dict(rep['info'], failed_starts=failed)))
+                             info=dict(rep['info'], failed_starts=failed),
+                             degeneracy=g))
     if verbose:
-        print(f'  {"E - E0 / eV":>12s} {"weight":>8s}  {"torsions / deg":>s}')
+        print(f'  {"E - E0 / eV":>12s} {"weight":>8s} {"g":>2s}  '
+              f'{"torsions / deg":>s}')
         for c in out:
             tors = ' '.join(f'{t:7.1f}' for t in c.torsions)
             print(f'  {(c.energy - out[0].energy) * HARTREE_TO_EV:12.4f} '
-                  f'{c.weight:8.4f}  {tors}')
+                  f'{c.weight:8.4f} {c.degeneracy:2d}  {tors}')
     return out
 
 
@@ -610,3 +665,88 @@ def conformer_average(conformers, routine, surface=None):
     w = np.array([c.weight for c in conformers])
     average = sum(wi * np.asarray(v, float) for wi, v in zip(w, values))
     return {'values': values, 'weights': w, 'average': average}
+
+
+def excited_conformers(ground, surface, torsions=None, engine='auto',
+                       refreeze=1, energy_tol=CONFORMER_ENERGY_TOL,
+                       rmsd_tol=CONFORMER_RMSD_TOL,
+                       twist_tol=CONFORMER_TWIST_TOL, verbose=True,
+                       **relax_kw):
+    """The excited minima reached from each ground-state conformer: the
+    twisted-ICT case, where the emitting conformer need not be the absorbing
+    one: search the ground state, relax each of its conformers on the
+    excited surface, and pair the two sets.
+
+    ground: [Conformer] of the ground state (`search_conformers` on it), with
+        their populations. surface: the excited state's surface; each
+        relaxation starts on `surface.refreeze(conformer.mol)` and refreezes
+        its conventions `refreeze` more times at its own minimum (the outer
+        loop of `optimize`), so no frozen convention is carried across the
+        torsion. A surface that follows its root by overlap follows it along
+        each walk.
+
+    Returns (pairs, minima). `pairs`: one dict per ground conformer --
+    'ground' (the Conformer), 'excited' (index into minima or None when the
+    walk failed), 'gap' (E_excited - E_ground, total energies, Hartree: the
+    adiabatic gap of that pair), 'twist' (degrees per torsion, excited minus
+    ground, wrapped to [-180, 180)), 'tict' (any |twist| above `twist_tol`),
+    'status'. `minima`: the distinct excited minima (`deduplicate`), each a
+    dict with 'mol', 'energy', 'torsions', 'from' (ground indices), 'info'.
+
+    A rate exponential in the gap is dominated by the SMALLEST gap of the
+    populated pairs, not by their mean: read the pairs, not an average.
+    """
+    if not ground:
+        raise ValueError('no ground-state conformers to start from')
+    mol = ground[0].mol
+    if torsions is None:
+        torsions = rotatable_bonds(mol)
+    perms = graph_automorphisms(mol)
+    records, pairs = [], []
+    for n, c in enumerate(ground):
+        start = surface.refreeze(c.mol)
+        try:
+            mol_opt, info = _relax_start(start, c.mol, engine, False,
+                                         dict(relax_kw, refreeze=refreeze))
+            why = None if info.get('energy') is not None else info.get(
+                'status', 'no energy')
+        except StepFailed as exc:
+            why = f'{type(exc).__name__}: {exc}'
+        if why is not None:
+            pairs.append({'ground': c, 'excited': None, 'gap': None,
+                          'twist': None, 'tict': None, 'status': why})
+            continue
+        records.append({'mol': mol_opt, 'energy': float(info['energy']),
+                        'info': info, 'ground': n})
+        twist = ((torsion_values(mol_opt, torsions)
+                  - torsion_values(c.mol, torsions) + 180.0) % 360.0 - 180.0)
+        pairs.append({'ground': c, 'excited': None,
+                      'gap': float(info['energy']) - c.energy,
+                      'twist': twist,
+                      'tict': bool(np.any(np.abs(twist) > twist_tol)),
+                      'status': 'relaxed', 'record': len(records) - 1})
+    minima = []
+    if records:
+        for rep, members in deduplicate(records, mol, perms, energy_tol,
+                                        rmsd_tol):
+            minima.append({'mol': rep['mol'], 'energy': rep['energy'],
+                           'torsions': torsion_values(rep['mol'], torsions),
+                           'from': [records[m]['ground'] for m in members],
+                           'info': rep['info']})
+            for p in pairs:
+                if p.get('record') in members:
+                    p['excited'] = len(minima) - 1
+    for p in pairs:
+        p.pop('record', None)
+    if verbose:
+        print(f'  {"ground":>6s} {"weight":>8s} {"gap / eV":>9s} {"TICT":>5s}  '
+              f'twist / deg')
+        for n, p in enumerate(pairs):
+            if p['gap'] is None:
+                print(f'  {n:6d} {p["ground"].weight:8.4f}  failed: '
+                      f'{p["status"]}')
+                continue
+            print(f'  {n:6d} {p["ground"].weight:8.4f} '
+                  f'{p["gap"] * HARTREE_TO_EV:9.4f} {str(p["tict"]):>5s}  '
+                  + ' '.join(f'{t:7.1f}' for t in p['twist']))
+    return pairs, minima

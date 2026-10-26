@@ -1,6 +1,7 @@
 pytest test_adaptive_qp_set.py
 script test_adc3.py
 pytest test_adjoint_grid_tiles.py
+pytest test_ao_product_isdf_k.py
 pytest test_autograd_oracle.py   # torch oracle, skips without torch
 pytest test_band_shape.py
 pytest test_body_fixed_frames.py
@@ -14,6 +15,7 @@ pytest test_chain_record.py
 pytest test_chain_row_fit.py
 pytest test_chain_row_fit_adjoint.py
 pytest test_chain_sliced_factors.py
+pytest test_conformer_space.py
 pytest test_conformers.py
 pytest test_davidson_preconditioner.py
 pytest test_dense_qp_roots.py
@@ -25,22 +27,27 @@ pytest test_dispersion_quick.py
 pytest test_distributed_df.py
 pytest test_distributed_scf_grid.py
 pytest test_distributed_trial_space.py
+pytest test_duschinsky.py
 pytest test_dyson_over_frequencies.py
 pytest test_ee_adc_channel_seeds.py
 script test_ee_adc_fold.py
 pytest test_ee_adc_ri_fold.py
 pytest test_ee_adc_spin_channels.py
+pytest test_ee_adc_transition_density.py
 pytest test_ee_adc_uhf_df.py
 script test_eom_ccsdt.py
 pytest test_equilibrium_solvation.py
 pytest test_evgw.py
 pytest test_excitations.py
 pytest test_excited_state.py
+pytest test_forster.py
 pytest test_fit_adjoint_memory.py
 pytest test_flex.py
 pytest test_force_serial_shaped.py
 pytest test_frequency_rounds.py
 script test_grid_radii_optimizer.py
+pytest test_herzberg_teller.py
+pytest test_herzberg_teller_bse.py
 pytest test_hessian_frozen_pair_layout.py
 script test_imaginary_axis_gw.py
 pytest test_isdf_fock_partial.py
@@ -98,6 +105,8 @@ pytest test_state_pair_force_distributed_ks.py
 pytest test_surface_comm.py
 pytest test_surface_route.py
 pytest test_thc_rank_grids.py
+pytest test_transfer_rates.py
+pytest test_tta_coupling.py
 pytest test_unrestricted_imaginary_axis.py
 pytest test_vertical_arms.py
 pytest test_xc_grid_response.py
@@ -138,7 +147,7 @@ pytest test_sigma_u4_laplace.py
 # GW-BSE state model in the solvation loop: 11 min on the workstation (2 threads), slow by the 60 s rule
 pytest test_gwbse_solvation_loop.py
 pytest test_generated_committed.py   # regenerates the committed CC, MPn and QDPT modules (pdaggerq; ~8 min)
-# Faddeev-ADC(4): slow by the 60 s rule (on a cluster node: test_faddeev_adc4 254 s, test_adc4_scale_walls 971 s; test_faddeev_adc4_restricted ~40 min on a workstation)
+# Faddeev-ADC(4): slow by the 60 s rule (workstation: test_faddeev_adc4 ~4 min, test_faddeev_adc4_restricted ~3 min and test_adc4_scale_walls ~2 min on LiH/STO-3G; the complete settings are the _full twins in heavy.txt)
 pytest test_faddeev_adc4.py
 pytest test_faddeev_adc4_restricted.py
 pytest test_adc4_scale_walls.py

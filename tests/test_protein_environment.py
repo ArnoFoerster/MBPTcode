@@ -31,7 +31,8 @@ from pyscf import scf
 from src.environments.composite_environment import CompositeEnvironment
 from src.environments.protein_environment import (LINK_BOND_LENGTH, embed, read_pqr)
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.gwbse.fragment_diabatic import DiabaticGradient
+from src.gradients.fragment_diabatic import DiabaticGradient
+from src.gradients.gwbse.fragment_diabatic import BSEFragmentMethod
 from tests.fragment_diabatic_fd import diabatic_derivative
 from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1
@@ -157,11 +158,12 @@ def test_diabatic_gradient_in_charges_and_polarizable_sites(tmp_path):
     assert emb.report['n_sites'] > 0 and not emb.report['dropped_sites']
     chain = ExcitedStateChain(emb.mol, factory, bse_tda=True, environment=emb.environment, numerics=numerics_of({'auxbasis': 'cc-pvdz-ri', 'counts': g1(emb.mol)}))
     sites, ct = {0: 1, 1: 1}, {(0, 1): 1, (1, 0): 1}
-    grad = DiabaticGradient(chain, emb.fragments, sites, ct, omega0=0.31)
+    method = BSEFragmentMethod(chain)
+    grad = DiabaticGradient(method, emb.fragments, sites, ct, omega0=0.31)
     rng = np.random.default_rng(23)
     direction = rng.normal(size=(emb.mol.natm, 3))
     direction /= np.linalg.norm(direction)
-    fd = [diabatic_derivative(chain, emb.fragments, sites, direction, ct,
+    fd = [diabatic_derivative(method, emb.fragments, sites, direction, ct,
                               omega0=0.31, step=h)[0]['a_eff']
           for h in (5e-4, 2.5e-4)]
     fd = (4.0 * fd[1] - fd[0]) / 3.0

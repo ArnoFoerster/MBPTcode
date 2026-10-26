@@ -5,8 +5,14 @@ script test_distributed_isdf_scf_mpi.py  # real MPI: mpirun script
 script test_elpa_casida.py  # real MPI: mpirun script (needs pyelpa; prints SKIPPED without it)
 pytest test_fragment_diabatic.py  # about an hour on a cluster node
 script test_fragment_diabatic_ranks.py  # real MPI: mpirun script
+pytest test_fragment_adc2.py  # fragment-diabatic ADC(2), singlets and triplets, with finite differences
+pytest test_fragment_triplet_transfer.py  # triplet fragment partition and Dexter coupling, with finite differences
 script test_mpi_grid_distribution.py  # real MPI: mpirun -n 3 script; passes at 3 ranks; conftest.py ignores it
 script test_mpi_routes.py  # real MPI: mpirun script; passes at 3 ranks; conftest.py ignores it
 pytest test_protein_environment.py  # about 13 minutes on a cluster node
 script test_solvated_scf_mpi.py  # real MPI: mpirun script
+script test_spin_orbit_mpi.py  # real MPI: mpirun script
 pytest test_laplace_df_twins.py  # generated ADC(5) Laplace DF twins, about 16 minutes on a cluster node; skips without the generated modules
+pytest test_ee_adc_transition_density_heavy.py  # the exact-ISR oracle on LiH/6-31G, about 15 minutes on a workstation
+pytest test_faddeev_adc4_restricted_full.py  # complete setting of the restricted Faddeev-ADC(4) checks (H2O, LiH, LiH/6-31+G, DF H2O/6-31G), about 45 minutes on a workstation
+pytest test_adc4_scale_walls_full.py  # complete setting of the ADC(4) memory-wall checks (dense eigh poles on H2O/STO-3G, g-free pool on H2O/6-31G), about 2 hours on a workstation

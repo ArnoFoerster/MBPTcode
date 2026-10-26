@@ -2,7 +2,7 @@
 
 `SingleReference/GW/sum_over_poles.py` holds the forward physics -- the
 auxiliary-pole fit, the closed-form Sigma^c and its slope, the compression
-guards and the quasiparticle root -- and `gradients/sum_over_poles_adjoint.py`
+guards and the quasiparticle root -- and `gradients/gwbse/sum_over_poles_adjoint.py`
 the reverse pass. Production must reproduce the reference numbers, so every
 gate here is a few ulp (`same`), not a method tolerance, and the reference each one
 compares against is a verbatim copy of the original code: recomputing it

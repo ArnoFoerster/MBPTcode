@@ -42,7 +42,7 @@ bit.
 import numpy as np
 
 from src.Base.numerics.constants import ISDF_TILE_GB, KAPPA
-from src.SingleReference.LinearResponse.casida import casida_eigensolve
+from src.SingleReference.LinearResponse.casida import casida_solve
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
 from src.SingleReference.LinearResponse.space_time import b_block
 from src.Base.orbital_spaces import get_occ_virt_indices
@@ -175,22 +175,10 @@ def bse_blocks(X, D, eps_qp, W_aux, nocc, spin='singlet', bse_tda=False):
 
 
 def bse_solve(A, Bb):
-    """(Omega, Xn, Yn) from the Casida problem, every root; Xn, Yn are
-    (n_ov, n_ov).
-    The Tamm-Dancoff A alone by `eigh`; the full problem by THE dense Casida
-    eigensolve (`casida.casida_eigensolve`, A - B factored), replicated on
-    every rank, which raises `CasidaInstability` where the reference is
-    singlet/triplet unstable (triplets are the usual culprit -- use the
-    Tamm-Dancoff form)."""
-    if Bb is None:
-        w, Z = np.linalg.eigh(0.5 * (A + A.T))
-        return w, Z, np.zeros_like(Z)
-    plus, minus = A + Bb, A - Bb
-    halves = [0.5 * (plus + plus.T), 0.5 * (minus + minus.T)]
-    del plus, minus
-    omega, x, y, _, _ = casida_eigensolve(halves, factor='amb',
-                                          threshold=np.inf)
-    return omega, x, y
+    """(Omega, Xn, Yn) of the BSE blocks (A, B), every root:
+    `casida.casida_solve`, the one dense Casida solve (B None: the
+    Tamm-Dancoff A alone)."""
+    return casida_solve(A, Bb)
 
 
 def bse_backward(n, X, D, eps_qp, W_aux, _nocc, cache, Xn, Yn, omega_bar=1.0,

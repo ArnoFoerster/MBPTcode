@@ -72,14 +72,18 @@ def adc2_pieces(op, y, omega, t1, spin, nf, nocc, nmo, rf=None, env=None,
 
 
 def solve_root(mol, mf, spin, nroots, frozen, auxbasis, env=None,
-               conv_tol=EE_FORCE_ROOT_TOL, tile_gb=EE_RI_TILE_GB, comm=None, aux_chunk=None):
+               conv_tol=EE_FORCE_ROOT_TOL, tile_gb=EE_RI_TILE_GB, comm=None, aux_chunk=None,
+               factors=None):
     """(op, rf, {omega, y, t1}) of the folded ADC(2) roots on mf, the LR term
     of singlets when env (a transition environment) is given. Over comm's
     ranks (default: none, serial) the operator is distributed and rank 0
     iterates (ee_ri_fold.drive); every rank returns the same roots. aux_chunk:
-    the width of the fold's auxiliary chunks (ee_ri_fold.aux_chunks)."""
-    f = ee_ri_fold.bare_factors(mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm,
-                                aux_chunk=aux_chunk)
+    the width of the fold's auxiliary chunks (ee_ri_fold.aux_chunks).
+    factors: the bare factors (ee_ri_fold.bare_factors) of the same mf,
+    frozen, auxbasis, comm and aux_chunk when already built (the other spin
+    of one geometry); None builds them."""
+    f = factors if factors is not None else ee_ri_fold.bare_factors(
+        mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm, aux_chunk=aux_chunk)
     rf = (ee_ri_fold.TransitionReactionField.from_environment(env, mol, mf, frozen)
           if env is not None and spin == 'singlet' else None)
     op = ee_ri_fold.RIFoldADC2(f, spin, level='adc2', reaction_field=rf,

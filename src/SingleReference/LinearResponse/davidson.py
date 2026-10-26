@@ -67,7 +67,7 @@ from src.Base.numerics.constants import (
     BYTES_PER_GB, BSE_DENSE_MAX_NOV, DAVIDSON_FLOOR_EPS_MULTIPLE,
     DAVIDSON_GUESS_FACTOR, DAVIDSON_LINDEP, DAVIDSON_MIN_NEW_FRACTION,
     DAVIDSON_PRECONDITIONER, DAVIDSON_SIZED_RESIDUAL, DAVIDSON_SPACE_FRACTION,
-    DAVIDSON_SPACE_GB, DAVIDSON_WARM_START_MAX_SHIFT)
+    DAVIDSON_SPACE_GB, DAVIDSON_WARM_START_MAX_SHIFT, EVALUATION_CACHE_SIZE)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.step_failed import DavidsonNotConverged, DavidsonRefusal, StepFailed
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
@@ -131,8 +131,12 @@ class DavidsonWarmStart:
         # spin -> (mol, mo_coeff, nocc, X, Y): a chain and its spin views
         # share one holder, and each spin starts from its own roots
         self.held = {}
-        # (geometry, spin) -> what `keep` would hold, offered since the last
-        # accepted geometry and waiting for `accept`
+        # (geometry, spin) -> (mo_coeff, nocc, X, Y), what `keep` would hold
+        # minus the Mole, offered since the last accepted geometry and waiting
+        # for `accept`, which is handed the Mole: holding it here kept every
+        # displaced geometry's mol, and with it the chain's weak-keyed fit
+        # cache entry, alive until a walk accepted; only the newest
+        # EVALUATION_CACHE_SIZE geometries stay (`offer`)
         self.offered = {}
         self.used = self.declined = 0
 
@@ -161,16 +165,24 @@ class DavidsonWarmStart:
     def offer(self, mol, mo_coeff, nocc, spin, X, Y):
         """The roots (X, Y) of a solve of `spin` at `mol`, held as `keep`
         holds them once a walk accepts `mol` (`accept`)."""
-        self.offered[(_nuclei(mol), spin)] = (
-            mol, np.array(mo_coeff, dtype=float), int(nocc),
+        key = (_nuclei(mol), spin)
+        self.offered.pop(key, None)
+        self.offered[key] = (
+            np.array(mo_coeff, dtype=float), int(nocc),
             np.array(X, dtype=float), np.array(Y, dtype=float))
+        # a chain evaluates the last EVALUATION_CACHE_SIZE geometries and
+        # commits one of those: an older offer can never be accepted
+        newest = list(dict.fromkeys(at for at, _ in reversed(self.offered)))
+        newest = set(newest[:EVALUATION_CACHE_SIZE])
+        self.offered = {k: v for k, v in self.offered.items()
+                        if k[0] in newest}
 
     def accept(self, mol):
         """A walk accepted `mol`: the roots offered there, of every spin,
         are the held ones; every other offer is dropped. True when one was
         offered there."""
         here = _nuclei(mol)
-        taken = {spin: v for (at, spin), v in self.offered.items()
+        taken = {spin: (mol,) + v for (at, spin), v in self.offered.items()
                  if at == here}
         self.held.update(taken)
         self.offered = {}

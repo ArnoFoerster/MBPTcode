@@ -65,7 +65,7 @@ def test_the_factor_chains_are_surfaces_with_their_reference_mean_field():
 
 
 def test_the_diabatic_and_solvated_surfaces_are_surfaces():
-    from src.gradients.gwbse.fragment_diabatic import DiabaticSurface
+    from src.gradients.fragment_diabatic import DiabaticSurface
     from src.gradients.solvated_surface import SolvatedSurface
     for cls in (DiabaticSurface, SolvatedSurface):
         assert issubclass(cls, PotentialEnergySurface) and not cls.__abstractmethods__, cls

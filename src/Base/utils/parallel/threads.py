@@ -46,8 +46,8 @@ nothing: ranks are processes and each calls this from its own main thread.
 
 A THIRD POOL: numpy's element-wise work. A ufunc runs on the thread that
 calls it, so an element-wise stage between the libcint and the BLAS calls --
-the ISDF fit's test co-densities, a shell block of them 3 GB at the
-chlorophyllide dimer -- runs on one core whatever OMP_NUM_THREADS says, and
+the ISDF fit's test co-densities, a shell block of them gigabytes on a
+large chromophore dimer -- runs on one core whatever OMP_NUM_THREADS says, and
 more ranks are the only thing that divides it. `row_map` cuts such a stage's
 rows over Python threads (numpy releases the GIL inside its loops), as many
 as the process's OpenMP pool (`openmp_threads`). Every element is still made

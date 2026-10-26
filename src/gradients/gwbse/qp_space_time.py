@@ -27,10 +27,10 @@ the reverse pass costs one more factorization per frequency than holding it
 would -- naux^3 each, against the sweep's M^2 (norb + naux) per tau -- and
 removes the (nfreq, naux, norb) array.
 
-At the chlorophyllide hexamer (M 117762, naux 28236, ntau 24, four states)
-the reverse call's peak falls from 601 GB a rank with every block whole to
-181 GB by rows at 8 ranks; the explicit residue route is refused there, C_ov
-alone being 2197 GB.
+On a large chromophore aggregate at a triple-zeta basis the reverse call's
+peak falls from several hundred GB a rank with every block whole to about a
+third of that by rows at 8 ranks; the explicit residue route is refused there,
+C_ov alone being thousands of GB.
 
 Residues -- states whose root has crossed a neighbouring orbital energy, which
 is every state but the frontier pair -- need W at a REAL frequency. Below the
@@ -817,11 +817,11 @@ class QPSetPass:
                     else:
                         owned[k] = terms
                     terms = wtbs = None
-                # B_p_bar is (naux, nmo) a frequency, 0.34 GB at the
-                # chlorophyllide dimer/cc-pVTZ: a round's terms join the
-                # running sum in frequency order as soon as the round is
-                # solved, so a rank holds one frequency's, whatever the number
-                # of frequencies
+                # B_p_bar is (naux, nmo) a frequency, a fraction of a GB
+                # on a large chromophore dimer at a triple-zeta basis: a
+                # round's terms join the running sum in frequency order as soon
+                # as the round is solved, so a rank holds one frequency's,
+                # whatever the number of frequencies
                 if fb.owners is not None:
                     for k, owner in zip(fb.block, fb.owners):
                         chain_frequency(int(owner), owned.get(k))
@@ -1063,8 +1063,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
     active set off the weights; X and D are identical by construction and are
     not broadcast again, an audited run comparing their digests on entry and
     the outputs' on exit. proj(tau) and projbar are held by auxiliary rows
-    (`ProjRows`, 19.1 GB a rank at the chlorophyllide hexamer over 8 ranks
-    where the whole array is 153): the tau sweep is split over tau and its
+    (`ProjRows`, a rank's share of the whole array): the tau sweep is split over tau and its
     slices exchanged into rows, its reverse split over tau and reduced once
     (the three adjoints); the forward contraction and the reverse pass are
     split over the contour-deformation frequencies, each frequency's chi0

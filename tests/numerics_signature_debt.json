@@ -477,11 +477,11 @@
  "src/gradients/rpa/space_time_adjoint.py::three_index_slice_backward": [
   "tile_gb"
  ],
- "src/gradients/gwbse/fragment_bse.py::_casida_davidson": [
+ "src/fragments/partition.py::_casida_davidson": [
   "max_cycle",
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::_guard_lowest": [
+ "src/fragments/partition.py::_guard_lowest": [
   "max_cycle",
   "tol"
  ],
@@ -554,25 +554,25 @@
  "src/gradients/gwbse/contour_deformation_adjoint.py::__init__": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::_lowest": [
+ "src/fragments/partition.py::_lowest": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::_lowest_pencil": [
+ "src/fragments/partition.py::_lowest_pencil": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::_batched_cg": [
+ "src/fragments/partition.py::_batched_cg": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::build": [
+ "src/fragments/partition.py::build": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::_q_lowest": [
+ "src/fragments/partition.py::_q_lowest": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_bse.py::root": [
+ "src/fragments/partition.py::root": [
   "tol"
  ],
- "src/gradients/gwbse/fragment_diabatic.py::solve": [
+ "src/gradients/fragment_diabatic.py::solve": [
   "tol"
  ],
  "src/gradients/gwbse/qp_set.py::resolve_qp_set": [

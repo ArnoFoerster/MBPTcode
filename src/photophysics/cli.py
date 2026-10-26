@@ -16,6 +16,17 @@ The physics policies (--temperature, --lambda-env, --nudge, --far-start or
 given. The numerical settings default to the production chain's
 (`production_numerics`), and the help names each default.
 
+On augmented bases the tabulated points miss the diffuse AO products. There
+the factors take the AO-product fit (--isdf-test-set ao_products) on
+--pivot-points points pivoted from the --grid-accuracy level's parent grid,
+fitted whole on every rank and laid out in grid rows; the mean field is best
+density-fitted (--scf df, J and K on <basis>-jkfit):
+
+    srun --mpi=pmi2 -n 8 python -m src.photophysics --xyz emitter.xyz \\
+        --basis aug-cc-pvdz --environment toluene ... --tda --scf df \\
+        --grid-accuracy G3 --isdf-test-set ao_products --pivot-points 9000 \\
+        --scf-grad-tol 1e-9 --out tadf --distribute
+
 The thread environment (--threads) is set before this module is imported
 (`launch`, from `__main__` and the launcher): numpy sizes its pools at
 import.
@@ -23,7 +34,7 @@ import.
 import argparse
 import pathlib
 
-from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID,
+from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID, ISDF_TEST_SETS,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_OPTIMIZATION_CONV_TOL,
                                          SCF_OPTIMIZATION_GRAD_TOL, TADF_ALLOCATION_MB,
@@ -154,6 +165,14 @@ def add_numerics(ap):
     num.add_argument('--grid-accuracy', default=TADF_GRID_ACCURACY,
                      help=f'the factors\' grid level (default '
                           f'{TADF_GRID_ACCURACY})')
+    num.add_argument('--isdf-test-set', default=None, choices=ISDF_TEST_SETS,
+                     help='the products the factors\' fit is trained on; '
+                          'omitted is the Duchemin-Blase set, fitted by rows; '
+                          'ao_products on augmented bases')
+    num.add_argument('--pivot-points', type=int, default=None,
+                     help='with --isdf-test-set ao_products, the points '
+                          'pivoted from the --grid-accuracy level\'s parent '
+                          'grid; omitted places that grid as it is')
     num.add_argument('--hessian-grid', default=None,
                      help='the numerical Hessian\'s grid; omitted is '
                           'ISDF_HESSIAN_MIN_GRID')
@@ -195,9 +214,11 @@ def add_launch(ap):
 # ----------------------------------------------------------- declaration
 def production_numerics(args):
     """The `Numerics` of the production chain with the command line's
-    choices: the factors on --grid-accuracy fitted by rows and sliced, the
-    grid adjoint, the ISDF-K mean field on --scf-grid converged for a walk,
-    the span cut --span declares (`span_cut_of`)."""
+    choices: the factors on --grid-accuracy fitted by rows and sliced (with
+    --isdf-test-set ao_products the AO-product fit on --pivot-points pivoted
+    points, fitted whole and sliced), the grid adjoint, the ISDF-K mean field
+    on --scf-grid converged for a walk, the span cut --span declares
+    (`span_cut_of`)."""
     bse = {'nroots': args.nroots, 'adjoint': 'grid',
            'track': 'overlap' if args.track == 'overlap' else None}
     if args.bse_conv_tol is not None:
@@ -205,7 +226,7 @@ def production_numerics(args):
     if args.no_probe:
         bse['probe'] = False
     return Numerics(
-        isdf={'level': args.grid_accuracy, 'fit': 'rows'},
+        isdf=isdf_numerics_of(args),
         layout={'sliced': True},
         scf={'route': args.scf,
              'grid_level': (None if args.scf == 'df'
@@ -221,6 +242,20 @@ def production_numerics(args):
             'hamiltonian': args.qp_hamiltonian,
             'residue_route': args.residues},
         bse=bse)
+
+
+def isdf_numerics_of(args):
+    """The factors' fit: the Duchemin-Blase set fitted by rows on
+    --grid-accuracy, or with --isdf-test-set ao_products the AO-product fit,
+    which is fitted whole, on --pivot-points points pivoted from that level's
+    parent grid. A pivot count without the AO-product set is refused."""
+    if args.isdf_test_set != 'ao_products':
+        if args.pivot_points is not None:
+            raise SystemExit('--pivot-points pivots the points of '
+                             '--isdf-test-set ao_products: pass both')
+        return {'level': args.grid_accuracy, 'fit': 'rows'}
+    return {'level': args.grid_accuracy, 'test_set': 'ao_products',
+            'pivot_points': args.pivot_points}
 
 
 def span_option(text):

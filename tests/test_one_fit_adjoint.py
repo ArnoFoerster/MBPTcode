@@ -94,10 +94,10 @@ GEOMS = {
     'formaldehyde': ('C 0 0 -0.5296; O 0 0.02 0.6763; H 0 0.9357 -1.1172; '
                      'H 0.02 -0.9557 -1.1172'),
 }
-#: Row tile edge of the kernel gates: water's 444 points in 7 tiles.
+#: Row tile edge of the kernel gates: water's 888 points on G1 in 14 tiles.
 TILE = 64
-#: The handed-in rows' tile edges: 7 tiles, and 2 (a third rank owns none).
-HANDED_TILES = (64, 256)
+#: The handed-in rows' tile edges: 14 tiles, and 2 (a third rank owns none).
+HANDED_TILES = (64, 512)
 XCS = ('hf', 'pbe0', 'lrc-wpbeh')
 FORCE_SIZES = (1, 2, 3)
 KERNEL_SIZES = (1, 2, 3, 5, 8)
@@ -324,12 +324,9 @@ def calls(log):
 # --------------------------------------------------------- (i) one fit
 @pytest.mark.parametrize('tile', HANDED_TILES)
 @pytest.mark.parametrize('size', (1, 2, 3))
-def test_the_handed_tiles_are_the_fit(size, tile, request):
+def test_the_handed_tiles_are_the_fit(size, tile):
     """The handle's tiles read through `fit_rows(tiles=)` are to a few ulp the fit
     made again; another tile edge, regularization or point set refits."""
-    if (size, tile) == (3, 256):
-        request.node.add_marker(pytest.mark.xfail(
-            strict=True, reason='premise tuned to the retired 148-point grid: at tile 256 every one of three ranks holds a tile on G1; re-tune'))
     def rank(comm):
         warnings.simplefilter('ignore')
         mol = molecule('water')
@@ -374,7 +371,7 @@ def test_the_handed_tiles_are_the_fit(size, tile, request):
         assert reused and not refit
         assert others == [False, False, False], others
         assert readonly and (held > 0) == (owned > 0)
-    if size == 3 and tile == 256:
+    if size == 3 and tile == 512:
         assert min(o[4] for o in out) == 0, 'no rank without a tile'
 
 

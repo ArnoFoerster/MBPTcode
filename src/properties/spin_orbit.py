@@ -63,9 +63,7 @@ thermalized initial sublevels (|V|^2 / 3; Bredas 2017 keeps the sum).
 import copy
 
 import numpy as np
-from pyscf import lib
 from pyscf.data import nist
-from pyscf.scf import _vhf
 from pyscf.x2c import sfx2c1e, x2c
 
 from src.Base.numerics.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
@@ -79,6 +77,7 @@ from src.SingleReference.LinearResponse.davidson import (
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
+from src.gradients.spin_orbit_mean_field import mean_field_term
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 
 # alpha^2/4, the Breit-Pauli prefactor of the PAULI MATRIX: H_SO =
@@ -110,39 +109,6 @@ def koseki_charge(z):
     if z < 48:
         return z * (4.680 + 0.060 * (z - 38))
     return float(z)
-
-
-def _soc_jk(mol, dm):
-    """(vj, vk) of the two-electron SOC operator at density `dm`, (3, nao, nao).
-
-    K here is the sum of BOTH exchange contractions, (pi|iq) + (iq|pi), which is
-    what the SOMF factor of 3/2 multiplies.
-    """
-    vj, vk, vk1 = _vhf.direct_mapdm(mol._add_suffix('int2e_p1vxp1'),
-                                    'a4ij', ('lk->s2ij', 'jk->s1il', 'li->s1kj'),
-                                    dm, 3, mol._atm, mol._bas, mol._env)
-    for i in range(3):
-        lib.hermi_triu(vj[i], hermi=2, inplace=True)
-    return vj, vk + vk1
-
-
-def _soc_jk_amfi(mol, dm):
-    """(vj, vk) in the atomic-mean-field approximation: one-centre blocks only.
-
-    The two-electron SOC operator is short-ranged and dominated by the nucleus
-    it is centred on, so the multi-centre blocks are discarded. Cost falls from
-    nao^4 to sum_A nao_A^4, which is what makes a 60-90 atom emitter reachable.
-    """
-    nao = mol.nao_nr()
-    vj = np.zeros((3, nao, nao))
-    vk = np.zeros((3, nao, nao))
-    atom = copy.copy(mol)
-    for b0, b1, p0, p1 in mol.aoslice_by_atom():
-        atom._bas = mol._bas[b0:b1]
-        vj1, vk1 = _soc_jk(atom, np.asarray(dm)[p0:p1, p0:p1])
-        vj[:, p0:p1, p0:p1] = vj1
-        vk[:, p0:p1, p0:p1] = vk1
-    return vj, vk
 
 
 def x2c_one_electron(mol):
@@ -222,16 +188,13 @@ def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
                          f"reduction and needs the ground-state density; pass "
                          f"dm=mf.make_rdm1(). Only two_electron=None and "
                          f"one_electron='koseki' do not.")
-    if two_electron == 'amfi':
-        vj, vk = _soc_jk_amfi(mol, dm)
-    elif two_electron == 'somf':
-        vj, vk = _soc_jk(mol, dm)
-    else:
+    if two_electron not in ('amfi', 'somf'):
         raise ValueError(f"two_electron={two_electron!r}: 'somf', 'amfi' "
                          f"or None")
     # the mean-field term stays Breit-Pauli whichever one-electron operator
-    # is used, which is the standard x2c-plus-mean-field compromise
-    return h1 + (vj - 1.5 * vk) * SOC_PREFACTOR
+    # is used, which is the standard x2c-plus-mean-field compromise; it is
+    # built once over the ranks (rank 0's, on every rank)
+    return h1 + mean_field_term(mol, dm, two_electron) * SOC_PREFACTOR
 
 
 def soc_operator_mo(mf, mol=None, two_electron='somf', one_electron='x2c'):
@@ -364,6 +327,36 @@ def soc_vectors(h_mo, nocc, singlet, triplet):
     xs, ys, xt, yt = (None if a is None else np.asarray(a, float).ravel()
                       for a in (xs, ys, xt, yt))
     return EXCITED_SPIN_FACTOR * interstate_element(h_mo, nocc, xs, xt, ys, yt)
+
+
+def density_vector(h_mo, gamma):
+    """T_eta = sum_pq h^eta_pq gamma_pq, the (3,) real vector of one SPIN
+    transition density gamma_pq = <S|a^dag_pa a_qa - a^dag_pb a_qb|T, M = 0>
+    (alpha minus beta of the Ms = 0 component; S a singlet or the ground
+    state), both in the MO basis of h_mo. Its norm is the coupling |V|
+    (Hartree) with no spin factor: the Ms = 0 component meets sigma_z alone,
+    and the two other sublevels follow from the same three numbers
+    (`sublevel_elements` with spin factor 1). The Casida elements above read
+    the amplitudes instead, which between two excited states ARE this
+    density (EXCITED_SPIN_FACTOR 1) and for the ground state are it over
+    sqrt 2 (GROUND_SPIN_FACTOR). Any method that supplies the density, of
+    any order and with or without relaxation, takes this route."""
+    return np.einsum('xpq,pq->x', np.asarray(h_mo, float),
+                     np.asarray(gamma, float), optimize=True)
+
+
+def socme_table_from_densities(h_mo, ground, pairs):
+    """(n_singlet + 1, n_triplet) table of |<S_I|H_SO|T_J>| in Hartree from
+    spin transition densities (`density_vector`), row 0 the ground state:
+    ground[j] = gamma^(0, T_j), pairs[i][j] = gamma^(S_i, T_j), each in the
+    MO basis of h_mo."""
+    n_t = len(ground)
+    out = np.zeros((len(pairs) + 1, n_t))
+    for j in range(n_t):
+        out[0, j] = np.linalg.norm(density_vector(h_mo, ground[j]))
+        for i, row in enumerate(pairs):
+            out[i + 1, j] = np.linalg.norm(density_vector(h_mo, row[j]))
+    return out
 
 
 def slope_from_squares(v2_plus, v2_minus, v2_centre, dq):

@@ -1,7 +1,7 @@
 """Planar-interface screening for periodic GW-BSE: v -> v + vtilde on a slab.
 
 src/SingleReference/Periodic/pbc_solvent_screening.py -- the periodic analogue
-of Base/solvent_screening.py's reaction term, with the closed-cavity PCM
+of environments/solvent_screening.py's reaction term, with the closed-cavity PCM
 replaced by an image-charge boundary condition at a planar interface, which is
 what a slab with electrolyte above (and optionally a metal electrode below)
 actually is.
@@ -78,10 +78,11 @@ def make_slab(nrep, kmesh, mesh):
 
 # --- fixtures -------------------------------------------------------------
 #
-# Runs both ways: `pytest` collects these, and `python tests/..._screening.py`
-# runs them in order with a summary. Without the fixtures pytest reads `cell`,
-# `mf` and `coulG` as missing and ERRORS on five of the six tests -- a silent
-# hole in an unattended run rather than a failure anyone would notice.
+# Runs both ways: `pytest` collects these, and
+# `python tests/test_pbc_solvent_screening.py` runs them in order with a
+# summary. Without the fixtures pytest reads `cell`, `mf` and `coulG` as
+# missing and ERRORS on five of the six tests -- a silent hole in an
+# unattended run rather than a failure anyone would notice.
 #
 # Module-scoped: `make_slab` is an SCF, built once and shared.
 

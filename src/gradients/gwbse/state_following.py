@@ -316,7 +316,7 @@ class StateFollower:
         reverse solve reads proj(tau) and the slices from it instead of
         sweeping them again, bitwise. A quantity that needs the kernel but
         not the supermolecular roots -- the fragment-diabatic elements
-        (`fragment_bse`) -- starts here, and so does its gradient
+        (`fragments.partition`) -- starts here, and so does its gradient
         (`fold_to_nuclei` reads nothing from the roots). With no roots there
         is no eigenvector check of an adaptive set (`verify_selection`)."""
         self.anchored_first(mol, lambda: self.chain.forward(self.chain.mol0, self.chain.mf0))

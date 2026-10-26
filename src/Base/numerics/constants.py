@@ -316,6 +316,32 @@ FIT_REALIZATIONS = ('replicated', 'rows')
 # runs in the fit's grid-row tiles (`fit='rows'`).
 WHOLE_FIT_ADJOINT_MAX_GB = 256.0
 
+# What the ISDF fit is trained on (`IsdfNumerics.test_set`). 'duchemin_blase':
+# every AO times the AOs up to l_max_second plus the auxiliary functions, the
+# residual on the RI coefficients (Duchemin and Blase, JCP 150, 174120 (2019)).
+# 'ao_products': every AO product chi_m chi_n and nothing else, the residual in
+# the Coulomb metric (`ao_product_fit`). On augmented bases the first misses the
+# densities of near-null AO combinations, and a BSE on such factors binds a
+# spurious root (CBP, LRC-wPBEh/aug-cc-pVDZ in the full basis: S1 2.6 eV below
+# DF-RI at 27528 points, on the tabulated G3 grid and on pivoted points alike);
+# the second puts every root within 0.5 meV of DF-RI at 9000 pivoted points.
+ISDF_TEST_SETS = ('duchemin_blase', 'ao_products')
+
+# The parent grid points are hard-pivoted from (`IsdfNumerics.pivot_points`):
+# the tabulated atomic grid of the level or counts with every sub-shell's radii
+# resampled this many times as densely (log r interpolated over the sorted
+# radii, the optimized clustering kept). Two was measured: on CBP and PXZ-TRZ
+# (aug-cc-pVDZ, about 55000 parent points) the pivot reaches DF-RI within
+# 0.6 meV at 9000-10000 points.
+ISDF_PIVOT_PARENT_FACTOR = 2
+
+# GB of the pivot's factor columns one rank may hold (`ao_product_fit.pivot_gb`):
+# count x (the parent rows it owns) float64; the parent's Gram matrix is never
+# formed. About 16 GB over the ranks at 20000 of 100000 parent points (a
+# 119-atom molecule in aug-cc-pVDZ). Above it the pivot is refused before
+# anything is formed: run it over more ranks.
+ISDF_PIVOT_MAX_GB = 64.0
+
 # The most a composed force may move, in Ha/Bohr, when the Casida-level seeds
 # its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
 # A fit adjoint formed from single solves of the Gram matrix (cond ~ 2e8)
@@ -856,6 +882,21 @@ SPEED_OF_LIGHT_AU = 137.035999177        # CODATA 2022
 # hc in Hartree nm: a photon of E Hartree has the vacuum wavelength
 # HARTREE_WAVELENGTH_NM / E nm (lambda = 2 pi c / E in Bohr).
 HARTREE_WAVELENGTH_NM = 2.0 * math.pi * SPEED_OF_LIGHT_AU * BOHR_TO_ANGSTROM / 10.0
+# Avogadro's number, exact in the 2019 SI.
+AVOGADRO = 6.02214076e23
+# A molar absorption coefficient in M^-1 cm^-1 per absorption cross section in
+# Bohr^2: eps = sigma N_A / (1000 cm^3 L^-1 ln 10), the decadic convention of
+# a measured spectrum.
+MOLAR_ABSORPTION_PER_BOHR2 = ((BOHR_TO_ANGSTROM * 1e-8) ** 2 * AVOGADRO
+                              / (1000.0 * math.log(10.0)))
+# Grid points per standard deviation of the narrowest band in a Förster
+# overlap integral (`photophysics.forster`): by default, and the fewest a
+# supplied grid may have. The overlap interpolates the convolution of two
+# bands, at least as wide as either, by a cubic spline between grid points;
+# for a Gaussian of width sigma its error is about (5/384) 3 (h/sigma)^4 of
+# the peak: 2e-7 at 20 points, 1e-5 at 8.
+FORSTER_POINTS_PER_WIDTH = 20
+FORSTER_MIN_POINTS_PER_WIDTH = 8
 # FWHM of a Gaussian per standard deviation, 2 sqrt(2 ln 2).
 GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
 # Exponent F below which a Franck-Condon density e^F times its bell integral is
@@ -932,6 +973,11 @@ FRAGMENT_DENSE_MAX = 3000
 FRAGMENT_MATRIX_FREE_DENSE_MAX = 256
 FRAGMENT_SOLVE_TOL = 1e-10
 FRAGMENT_POLE_MARGIN = 0.01
+# A partition checkpoint (`fragments.checkpoint`) is reused only
+# when its fingerprint arrays agree with the new build's to this much, relative
+# to the larger of 1 and the array's largest entry: at the solvers' own
+# tolerance, far below what a 5e-4 Bohr step or another orbital choice moves.
+FRAGMENT_CHECKPOINT_MATCH_TOL = 1e-10
 
 # Finite-difference diabats (`tests/fragment_diabatic_fd.py`): a displaced diabat that
 # overlaps its reference by less than this has mixed within its block, and its

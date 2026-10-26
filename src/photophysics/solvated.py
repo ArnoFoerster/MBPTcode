@@ -90,6 +90,39 @@ root are flagged by the surface (SolvatedSurface.flags) and a minimum's
 the flags it is built on: absorption_flags, emission_flags, adiabatic_flags,
 dEST_adiabatic_flags (empty when clean). A rerun walks an unconverged
 minimum again (e.g. with a larger --maxiter) and drops what was built on it.
+
+A walk interrupted part way (a job's time limit) is not lost: every accepted
+step writes the walk's geometry and optimizer Hessian to `<out>.walk.<medium>.<state>.json`,
+and a rerun starts that walk again from there, not nudged, on a surface
+built at that geometry (a GW-BSE surface freezes its conventions there, so
+the restarted walk stands on another surface than the first; the refreeze
+loop at its minimum measures and removes that, as for any walk). The
+minimum records `restarted_from` (the pass, the accepted steps and G at the
+restart geometry); the file goes once the minimum is in the record. A
+checkpoint of another calculation (settings, medium, state or start) is
+refused.
+
+A Kohn-Sham reference is integrated on --xc-grid (pyscf's grid level; omitted
+is the Numerics default, XC_GRID_LEVEL). GW-BSE reads the frozen shift
+beyond the explicit quasiparticle set (--outside-scissor) and the residue
+route (--residues) from the command line, each the Numerics default when
+omitted. Every molecule's memory budget is pyscf's (PYSCF_MAX_MEMORY).
+
+On augmented bases the tabulated points miss the diffuse products. There GW-BSE
+takes the AO-product fit (--isdf-test-set ao_products) on --pivot-points
+points pivoted from the --isdf-grid level's parent grid:
+
+    python -m src.photophysics solvated --method gwbse --xc lrc-wpbeh \
+        --basis aug-cc-pvdz --jk-auxbasis aug-cc-pvdz-jkfit --isdf-grid G3 \
+        --isdf-test-set ao_products --pivot-points 3500 \
+        --xyz mol.xyz --solvent toluene --out record.json
+
+The mean field stays density-fitted (--jk-auxbasis); only the GW-BSE factors
+are interpolated. The points are pivoted where a surface is built, so a walk
+keeps them (they move with their atoms) and a refreeze pivots again at the
+minimum.
+--distribute runs the calculation over the ranks of the launch (rank 0
+writes the record and the checkpoints, every rank holds rank 0's numbers).
 """
 import argparse
 import hashlib
@@ -99,16 +132,20 @@ import platform
 import time
 import warnings
 
+import numpy as np
 from pyscf import dft, gto, scf
 
 from src.environments import solvation_loop as sl
 from src.SingleReference.common.active_space import frozen_core
 from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         ISDF_TEST_SETS,
                                          REFREEZE_TOL_MEV, START_NUDGE_BOHR,
-                                         WALK_VERTICAL_G_FLAG_FACTOR)
+                                         WALK_VERTICAL_G_FLAG_FACTOR,
+                                         XC_GRID_LEVEL)
 from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, is_root
 from src.environments.reaction_field import ContinuumField, NoMedium
-from src.Base.utils.record_io import code_id, same_code
+from src.Base.utils.record_io import code_id, record_hash, same_code
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
@@ -124,7 +161,13 @@ from src.gradients.solvated_surface import SolvatedSurface
 ADC2_DEFAULTS = dict(auxbasis='cc-pvdz-ri', nroots=3)
 #: The options of one method only, refused with the other.
 ADC2_ONLY = ('auxbasis', 'nroots', 'frozen')
-GWBSE_ONLY = ('xc', 'isdf_grid', 'bse_solver', 'bse_kernel', 'refreeze')
+GWBSE_ONLY = ('xc', 'isdf_grid', 'bse_solver', 'bse_kernel', 'refreeze',
+              'outside_scissor', 'residues', 'xc_grid', 'isdf_test_set',
+              'pivot_points')
+#: The settings added after records were first written, and the value an
+#: older record that lacks them was made with.
+LATER_SETTINGS = dict(outside_scissor=None, residues=None, xc_grid=None,
+                      isdf_test_set=None, pivot_points=None)
 
 
 def _parse_args(argv=None):
@@ -141,6 +184,21 @@ def _parse_args(argv=None):
     p.add_argument('--bse-kernel', choices=('tda', 'full'), default=None,
                    help='gwbse: the BSE kernel (default tda: walks run on the Tamm-Dancoff '
                         'BSE, whose triplets have no (A - B) instability; full is a comparison)')
+    p.add_argument('--outside-scissor', default=None,
+                   help='gwbse: the frozen shift beyond the explicit set')
+    p.add_argument('--residues', default=None,
+                   help="gwbse: the route of Sigma's real-axis residues")
+    p.add_argument('--isdf-test-set', choices=ISDF_TEST_SETS, default=None,
+                   help="gwbse: the products the ISDF fit is trained on (default "
+                        "the Duchemin-Blase pair set; ao_products on augmented bases)")
+    p.add_argument('--pivot-points', type=int, default=None,
+                   help='gwbse: with --isdf-test-set ao_products, the points pivoted '
+                        "from the --isdf-grid level's parent grid")
+    p.add_argument('--xc-grid', type=int, default=None,
+                   help="pyscf's XC grid level of a Kohn-Sham reference "
+                        '(default XC_GRID_LEVEL)')
+    p.add_argument('--distribute', action='store_true',
+                   help='run over the ranks of the launch')
     p.add_argument('--basis', default='cc-pvdz')
     p.add_argument('--auxbasis', default=None, help='adc2: default cc-pvdz-ri')
     p.add_argument('--jk-auxbasis', default='cc-pvdz-jkfit')
@@ -173,7 +231,7 @@ def _parse_args(argv=None):
 RESUME_KEY = ('xyz_sha256', 'basis', 'auxbasis', 'jk_auxbasis', 'solvent', 'frozen',
               'nroots', 'follow', 'saddle_check', 'tol_q', 'tol_energy', 'code',
               'state_method', 'xc', 'isdf_grid', 'bse_solver', 'bse_kernel',
-              'refreeze')
+              'refreeze') + tuple(LATER_SETTINGS)
 
 
 def _settings(args):
@@ -188,7 +246,8 @@ def _settings(args):
                 tol_q=args.tol_q, tol_energy=args.tol_energy, code=code_id(),
                 state_method=args.method, xc=args.xc, isdf_grid=args.isdf_grid,
                 bse_kernel=args.bse_kernel,
-                bse_solver=args.bse_solver, refreeze=args.refreeze)
+                bse_solver=args.bse_solver, refreeze=args.refreeze,
+                **{k: getattr(args, k, None) for k in LATER_SETTINGS})
 
 
 def _start_record(args):
@@ -198,14 +257,18 @@ def _start_record(args):
     if os.path.isfile(args.out):
         with open(args.out) as fh:
             rec = json.load(fh)
-        differ = {k: (rec.get(k, '<absent>'), settings[k]) for k in RESUME_KEY
-                  if rec.get(k, '<absent>') != settings[k]
-                  and not (k == 'code' and same_code(rec.get(k), settings[k]))}
+        made = {k: rec.get(k, LATER_SETTINGS.get(k, '<absent>')) for k in RESUME_KEY}
+        differ = {k: (made[k], settings[k]) for k in RESUME_KEY
+                  if made[k] != settings[k]
+                  and not (k == 'code' and same_code(made[k], settings[k]))}
         if differ:
             raise SystemExit(f'{args.out} was made with other settings (record, this '
                              f'run): {differ}; write to another --out')
+    fit = ('' if getattr(args, 'isdf_test_set', None) is None else
+           f', {args.isdf_test_set} fit'
+           + ('' if args.pivot_points is None else f' on {args.pivot_points} pivoted points'))
     what = ('ADC(2) (folded, DF) on DF-MP2' if args.method == 'adc2' else
-            f'G0W0-BSE (scheme B, ISDF {args.isdf_grid}) on {args.xc}')
+            f'G0W0-BSE (scheme B, ISDF {args.isdf_grid}{fit}) on {args.xc}')
     rec.update(settings, host=platform.node(), method=f'{what}, '
                'equilibrium/non-equilibrium state-specific PCM with relaxed '
                'densities (src.environments.solvation_loop)')
@@ -213,16 +276,21 @@ def _start_record(args):
 
 
 def _save(rec, out):
-    """Write the record to out atomically."""
+    """Write the record to out atomically (rank 0 under ranks)."""
+    if not is_root():
+        return
     with open(out + '.tmp', 'w') as fh:
         json.dump(rec, fh, indent=1)
     os.replace(out + '.tmp', out)
 
 
-def _make_scf(m, jk_auxbasis, xc='hf'):
-    """The tightly converged density-fitted RHF (or RKS of xc) of m."""
+def _make_scf(m, jk_auxbasis, xc='hf', xc_grid=None):
+    """The tightly converged density-fitted RHF (or RKS of xc on pyscf's
+    XC grid level xc_grid) of m."""
     mf = (scf.RHF(m) if xc == 'hf' else dft.RKS(m, xc=xc)).density_fit(
         auxbasis=jk_auxbasis)
+    if xc != 'hf':
+        mf.grids.level = xc_grid
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle, mf.verbose = 1e-12, 1e-10, 200, 0
     return mf
 
@@ -230,7 +298,7 @@ def _make_scf(m, jk_auxbasis, xc='hf'):
 def _check_args(args, mol0):
     """Refuse the other method's options; fill this method's defaults."""
     other = GWBSE_ONLY if args.method == 'adc2' else ADC2_ONLY
-    given = [name for name in other if getattr(args, name) is not None]
+    given = [name for name in other if getattr(args, name, None) is not None]
     if given:
         raise SystemExit(f'--method {args.method} takes no '
                          + ', '.join('--' + g.replace('_', '-') for g in given))
@@ -245,6 +313,11 @@ def _check_args(args, mol0):
         raise SystemExit('--method gwbse needs --isdf-grid (no default grid)')
     if args.xc is None:
         args.xc = 'hf'
+    if args.xc == 'hf' and getattr(args, 'xc_grid', None) is not None:
+        raise SystemExit('--xc-grid sets the grid of a Kohn-Sham reference; '
+                         'the Hartree-Fock reference has none')
+    if args.xc != 'hf' and getattr(args, 'xc_grid', None) is None:
+        args.xc_grid = XC_GRID_LEVEL
     if args.bse_kernel is None:
         args.bse_kernel = 'tda'
     if args.refreeze is None:
@@ -253,13 +326,25 @@ def _check_args(args, mol0):
 
 def gwbse_numerics(args, mol0):
     """The one Numerics of a GW-BSE run: the chain's grid (refused here when
-    the radii table lacks an element) and solver, the loop's tolerances."""
+    the radii table lacks an element) and its fit's test set and pivoted
+    points, the quasiparticle options and solver, the reference's XC grid, the loop's
+    tolerances; an option not given is the Numerics default (a pivot without
+    the AO-product test set is refused there)."""
     bse = {'track': 'overlap' if args.follow == 'overlap' else None}
     if args.bse_solver is not None:
         bse['solver'] = args.bse_solver
     counts = resolve_isdf_grid(args.isdf_grid, args.basis,
                                elements=tuple(sorted(set(mol0.elements))))[0]
-    return Numerics(isdf={'counts': counts}, bse=bse,
+    qp = {key: getattr(args, name) for key, name in
+          (('outside_scissor', 'outside_scissor'), ('residue_route', 'residues'))
+          if getattr(args, name, None) is not None}
+    scf_ = {} if getattr(args, 'xc_grid', None) is None else {'xc_grid': args.xc_grid}
+    isdf = {'counts': counts}
+    isdf.update({key: getattr(args, key) for key in ('isdf_test_set', 'pivot_points')
+                 if getattr(args, key, None) is not None})
+    if 'isdf_test_set' in isdf:
+        isdf['test_set'] = isdf.pop('isdf_test_set')
+    return Numerics(isdf=isdf, bse=bse, qp=qp, scf=scf_,
                     solvent={'loop_tol_q': args.tol_q, 'loop_tol_energy': args.tol_energy})
 
 
@@ -293,7 +378,8 @@ def _factories(args, medium, loop_kw):
             SolventScreening(m, solvent=medium))
 
     def make_scf(m):
-        return _make_scf(m, args.jk_auxbasis, args.xc or 'hf')
+        return _make_scf(m, args.jk_auxbasis, args.xc or 'hf',
+                         getattr(args, 'xc_grid', None))
 
     if args.method == 'gwbse':
         return make_field, _gwbse_states(args, make_scf, loop_kw['numerics'])
@@ -340,7 +426,61 @@ def _walk_record(info, asked):
     return out
 
 
-def _minimum(args, surf, start, nudge, kind):
+def _walk_path(args, medium, key):
+    """The checkpoint file of the walk of state `key` in `medium`."""
+    return f'{args.out}.walk.{medium}.{key}.json'
+
+
+def _checkpoint_key(args, kind, start):
+    """What a walk checkpoint belongs to: the record's settings (the code
+    apart, which the record itself checks), the state and the start."""
+    settings = _settings(args)
+    return record_hash(dict({k: settings[k] for k in RESUME_KEY if k != 'code'},
+                            kind=kind,
+                            start=np.round(start.atom_coords(), 10).tolist()))
+
+
+def _walk_checkpoint(path, key):
+    """`checkpoint(state)` for relax: the walk's pass, accepted steps, G,
+    geometry (Bohr) and optimizer Hessian (None where the engine keeps its
+    own) written to path by rank 0 after every accepted step."""
+    def save(state):
+        if not is_root():
+            return
+        hessian = state.get('hessian')
+        data = dict(key=key, walk_pass=int(state['pass']),
+                    accepted_steps=len(state['history']), G=float(state['energy']),
+                    coords_bohr=np.asarray(state['coords'], float).tolist(),
+                    hessian=None if hessian is None else np.asarray(hessian, float).tolist())
+        with open(path + '.tmp', 'w') as fh:
+            json.dump(data, fh)
+        os.replace(path + '.tmp', path)
+    return save
+
+
+def _restart_point(path, key, start):
+    """(mol, Hessian, restarted_from) of the walk checkpoint at path; (start,
+    None, None) when there is none. A checkpoint of another walk is refused."""
+    if not os.path.isfile(path):
+        return start, None, None
+    with open(path) as fh:
+        data = json.load(fh)
+    if data.get('key') != key:
+        raise SystemExit(f'{path} is the checkpoint of another walk (settings, state '
+                         'or start differ): remove it or write to another --out')
+    m = start.copy()
+    m.set_geom_(np.array(data['coords_bohr'], float), unit='Bohr')
+    hessian = None if data['hessian'] is None else np.array(data['hessian'], float)
+    return m, hessian, {k: data[k] for k in ('walk_pass', 'accepted_steps', 'G')}
+
+
+def _drop_checkpoint(path):
+    """Remove a walk's checkpoint once its minimum is in the record."""
+    if is_root() and os.path.isfile(path):
+        os.remove(path)
+
+
+def _minimum(args, surf, start, nudge, kind, checkpoint=None):
     """(mol, the record) of a walk on surf from start, refrozen where its
     surface freezes conventions (`_refreezes`) and saddle-checked when it
     converged (`excitations.saddle_check`, the photophysics stages' check);
@@ -349,18 +489,29 @@ def _minimum(args, surf, start, nudge, kind):
     'refreeze_not_converged', 'saddle_check' and 'hessian_asymmetric', each warned about
     (`excitations.relaxation_flags`, `saddle_verdict`). The saddle check, its
     escape walk (refrozen as the first) and G are taken on the surface the
-    last walk ran on."""
+    last walk ran on.
+    checkpoint: the file the first walk writes after every accepted step and
+    restarts from (module docstring); None writes none."""
     t = time.time()
     refreeze = _refreezes(args, kind)
     asked = None if (args.method == 'adc2' or kind == 'S0') else refreeze
+    first, restarted = {}, None
+    if checkpoint is not None:
+        key = _checkpoint_key(args, kind, start)
+        start, hessian, restarted = _restart_point(checkpoint, key, start)
+        if restarted is not None:
+            nudge = 0
+        first = dict(checkpoint=_walk_checkpoint(checkpoint, key), hess_init=hessian)
 
-    def walk(s, at, nudge=0):
+    def walk(s, at, nudge=0, **kw):
         return relax(s, at, nudge=nudge, refreeze=refreeze,
                      numerics=derived_walk(s, 'the command line caps the walk',
-                                           max_cycle=args.maxiter))
-    m, info = walk(surf, start, nudge)
+                                           max_cycle=args.maxiter), **kw)
+    m, info = walk(surf, start, nudge, **first)
     final = info.get('final_surface', surf)
     out = _walk_record(info, asked)
+    if restarted is not None:
+        out['restarted_from'] = restarted
     flags = relaxation_flags(kind, info)
     if args.saddle_check and out['converged']:
         m, again, chk = saddle_check(final, m, walk)
@@ -448,7 +599,10 @@ def _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw):
     if 'S0' not in R:
         surf = SolvatedSurface(mol0, make_field, make_state('S0'),
                                label=f'S0 {medium}', **loop_kw)
-        _store_minimum(rec, args.out, R, 'S0', _minimum(args, surf, mol0, 0, 'S0')[1])
+        path = _walk_path(args, medium, 'S0')
+        _store_minimum(rec, args.out, R, 'S0',
+                       _minimum(args, surf, mol0, 0, 'S0', checkpoint=path)[1])
+        _drop_checkpoint(path)
 
 
 def _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw):
@@ -468,8 +622,11 @@ def _excited_minimum(args, rec, X, key, kind, medium, mS0, make_field, make_stat
     if 'minimum' not in X:
         surf = SolvatedSurface(mS0, make_field, make_state(kind),
                                label=f'{key} {medium}', **loop_kw)
+        path = _walk_path(args, medium, key)
         _store_minimum(rec, args.out, X, 'minimum',
-                       _minimum(args, surf, mS0, START_NUDGE_BOHR, kind)[1])
+                       _minimum(args, surf, mS0, START_NUDGE_BOHR, kind,
+                                checkpoint=path)[1])
+        _drop_checkpoint(path)
 
 
 def _emission(args, rec, R, X, kind, make_field, make_state, loop_kw):
@@ -519,7 +676,9 @@ def _run_medium(args, rec, medium, mol0, loop_kw):
 
 
 def _print_summary(rec, media):
-    """Print the eV entries of the record for the media run."""
+    """Print the eV entries of the record for the media run (rank 0)."""
+    if not is_root():
+        return
     print(json.dumps({m: {k: {kk: vv for kk, vv in v.items() if kk.endswith('eV')}
                           if isinstance(v, dict) else v
                           for k, v in rec[m].items()} for m in media}, indent=1))
@@ -539,7 +698,12 @@ def main(argv=None):
     rec = _start_record(args)
     media = ((['gas'] if 'gas' in args.media else [])
              + ([args.solvent] if args.solvent and 'solvent' in args.media else []))
-    for medium in media:
-        _run_medium(args, rec, medium, mol0, loop_kw)
-    _print_summary(rec, media)
+    comm = None
+    if args.distribute:
+        world, _, size = grid_comm()
+        comm = None if size == 1 else world
+    with distributed(comm):
+        for medium in media:
+            _run_medium(args, rec, medium, mol0, loop_kw)
+        _print_summary(rec, media)
     return 0

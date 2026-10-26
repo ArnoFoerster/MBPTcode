@@ -29,7 +29,13 @@ property takes any surface that provides the ingredients it reads
 random displacement of the input geometry, so a symmetric start can still reach
 a minimum of lower symmetry. `vibronic` gives normal modes and Huang-Rhys
 factors by two independent routes; `conformers` the Boltzmann-weighted average
-over torsional minima a soft emitter has; `spin_orbit` and `nonadiabatic` the
+over torsional minima a soft emitter has (chiral minima counted twice), with
+the ring puckers and nitrogen inversions of `ring_conformers` as extra starts,
+free-energy populations from per-conformer Hessians in `conformer_weights`,
+relaxed torsion scans, barriers and the following of one state through a large
+twist in `torsion_scan` (an increment whose point is lost or does not converge is
+halved, then the scan stops with the reason), and `excited_conformers` for a twisted-ICT emitter
+whose emitting conformer is not its absorbing one; `spin_orbit` and `nonadiabatic` the
 two couplings a Marcus-Levich-Jortner or golden-rule rate needs; `characters`
 labels a BSE root by its charge-transfer weight; `hessian` the nuclear Hessian
 by central differences of the analytic gradient, for a route pyscf's own
@@ -113,6 +119,52 @@ exponent has underflowed, the far side of a cold band. `band_grid` builds an
 energy grid that covers and resolves both bands, and `gaussian_limit_fwhm` the
 width of the second cumulant alone. See `examples/20_vibronic_band_shape.py`
 for formaldehyde S1 end to end, both Huang-Rhys routes.
+
+`vibronic_band(model, e00, temperature, energies, *, gaussian_fwhm,
+lorentzian_fwhm)` is the same band for any model on the `VibronicModel`
+protocol (a density per direction and its first two cumulants);
+`band_shape` is it on `DisplacedOscillators`. `properties.duschinsky` gives
+each state its own modes and frequencies: `duschinsky_model(ground, excited)`
+takes two Hessians at their own minima (anything with `.mol` and `.hessian`;
+`read_orca_hessian` reads an ORCA `.hess` file as data) and returns J, K and
+both frequency sets, and `DuschinskyOscillators(model)` feeds
+`vibronic_band`. The density is the Fourier transform of the thermal
+correlation function of the two harmonic surfaces, with the zero-point shift
+of the 0-0 line included:
+
+```python
+from src.properties.band_shape import vibronic_band, vibronic_band_grid
+from src.properties.duschinsky import (CartesianHessian, DuschinskyOscillators,
+                                       duschinsky_model)
+
+model = duschinsky_model(CartesianHessian(mol_s0, hess_s0, 'S0 analytic'),
+                         CartesianHessian(mol_s1, hess_s1, 'S1'))
+fc = DuschinskyOscillators(model)
+e = vibronic_band_grid(fc, e_adiabatic, 300.0, gaussian_fwhm=0.002,
+                       lorentzian_fwhm=0.0)
+band = vibronic_band(fc, e_adiabatic, 300.0, e, gaussian_fwhm=0.002,
+                     lorentzian_fwhm=0.0)
+print(band['fwhm_emission'], band['peak_emission'])
+```
+
+**Herzberg-Teller intensity** — `properties.herzberg_teller.TransitionDipole`
+holds mu0 and dmu/dq at one state's minimum on that state's normal
+coordinates; `DuschinskyOscillators(model, dipole)` then carries the Condon,
+Herzberg-Teller and cross terms in the same correlation function, and its
+density has <|mu|^2> as its area. dmu/dq comes from an analytic Cartesian
+derivative (`dipole_from_cartesian`) or from central differences of any
+routine that returns the transition dipole at a geometry
+(`dipole_derivative`, which warns when the two displaced dipoles look like a
+phase flip). For an excited state of a Casida-type solve (BSE@GW) the routine
+is `PhaseTrackedDipole(solve_at, mol, root)`: each displaced solve is aligned
+to the one at `mol` by the transported overlap of the eigenvectors, a group of
+near-degenerate roots as a subspace, and a displaced solve that no longer holds
+the roots is refused. On formaldehyde BSE@G0W0@PBE0/cc-pVDZ the forbidden S1
+borrows along the out-of-plane wag and the b2 modes, and its dmu/dq does not
+move under random sign flips of the displaced eigenvectors. A displaced-oscillator model with Herzberg-Teller terms is
+`DuschinskyModel.from_displacement(omega, dq)` with the signed displacements.
+`photophysics.rates.vibronic_radiative_rate` integrates E^3 over the emission
+band, so a weakly allowed emitter's rate includes what it borrows.
 
 **Rates** — `src/photophysics/rates.py` holds the golden-rule,
 Marcus-Levich-Jortner and spin-vibronic rates, `photoluminescence`, and

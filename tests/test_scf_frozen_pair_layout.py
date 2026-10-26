@@ -5,13 +5,16 @@ discrete choice. Screened again at every geometry, the ground-state energy
 steps wherever a pair crosses the threshold, while the force differentiates
 the fit on one column set and cannot see the step: a central difference
 across the crossing then grows as the step shrinks instead of falling as
-h^2. Formaldehyde/cc-pVDZ Hartree-Fock on the default grid drops one pair of
-the SCF's screen when a hydrogen moves 0.0558216 Bohr along y; the reference
-sits 3.7e-5 Bohr short of that, so every stencil below straddles it.
+h^2. Formaldehyde/cc-pVDZ Hartree-Fock on the G1 grid drops one pair (27, 35)
+of the SCF's screen when a hydrogen moves 0.0106110 Bohr along y; the
+reference sits 3.7e-5 Bohr short of that, so every stencil below straddles it.
+The shift was found by scanning the displacement of that hydrogen along y in
+steps of 4e-3 Bohr and bisecting the first change of the screen to 1e-13
+Bohr; the next change, which adds the pair back, is at 0.0315804 Bohr.
 
 Measured (diff = analytic - central difference, Ha/Bohr, h = 5e-4, 2.5e-4,
 1.25e-4): re-screened, the difference grows as h shrinks; on the frozen
-layout 9.5e-6, 2.2e-6, 5.5e-7.
+layout 5.9e-6, 1.5e-6, 3.7e-7 (G1).
 """
 import os
 import sys
@@ -35,8 +38,8 @@ from tests.isdf_test_grid import g1
 
 ATOM = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.58; H 0 -0.94 -0.58'
 AUXBASIS = 'cc-pvdz-ri'
-#: Bohr, hydrogen 2 along y: 3.7e-5 short of the pair crossing.
-SHIFT = 0.0557846
+#: Bohr, hydrogen 2 along y: 3.7e-5 short of the pair crossing at 0.0106110.
+SHIFT = 0.010574
 MOVED = (2, 1)
 STEPS = (5e-4, 2.5e-4, 1.25e-4)
 
@@ -80,8 +83,6 @@ def _layout(mol):
     return separable_ri.fit_test_set_layout(mol, isdf_grid(mol, auxbasis=AUXBASIS, counts=g1(mol)))
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the displacement crosses no pair of the screen on G1; the premise is to be re-tuned on G1'))
 def test_every_stencil_straddles_a_pair_crossing():
     mol0 = _reference()
     s0 = _screen(mol0)
@@ -105,8 +106,6 @@ def test_the_ground_state_force_follows_its_energy_across_the_crossing():
     assert diffs[2] < 7e-7, diffs
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the displacement crosses no pair of the screen on G1; the premise is to be re-tuned on G1'))
 def test_a_displaced_mean_field_fits_on_the_reference_layout():
     mol0 = _reference()
     surface = MeanFieldSurface(mol0, _factory)
@@ -121,8 +120,6 @@ def test_a_displaced_mean_field_fits_on_the_reference_layout():
     assert surface.total_energy(_at(mol0, 0.0)) == e0
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the displacement crosses no pair of the screen on G1; the premise is to be re-tuned on G1'))
 def test_refreeze_takes_the_layout_at_the_new_reference():
     mol0 = _reference()
     surface = MeanFieldSurface(mol0, _factory)
@@ -142,8 +139,6 @@ def test_the_chain_mean_field_keeps_the_reference_layout():
     assert mf.with_df.pair_layout is chain.scf_layout()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the displacement crosses no pair of the screen on G1; the premise is to be re-tuned on G1'))
 def test_the_distributed_scf_fits_on_the_frozen_layout():
     mol0 = _reference()
     moved = _at(mol0, STEPS[0])

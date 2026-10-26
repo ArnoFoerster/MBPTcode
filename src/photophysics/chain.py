@@ -9,7 +9,10 @@ density-fitted on <basis>-jkfit), E_0 = E_KS, space-time GW with the
 sum-over-poles residues on the declared quasiparticle set and the frozen
 scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
 the sliced factors and the row-distributed fit in the gas phase and in a
-continuum alike. The factors sit on `numerics.isdf.level`.
+continuum alike. The factors sit on `numerics.isdf.level`; with
+`numerics.isdf.test_set` 'ao_products' they are the AO-product fit, fitted
+whole, on the points `numerics.isdf.pivot_points` pivots from that level's
+parent grid where a surface is built.
 
 The chain stands on the declaration's one `Numerics`, which `chain_spec`
 hands to `SurfaceSpec.numerics` whole; `potential_energy_surface` refuses a

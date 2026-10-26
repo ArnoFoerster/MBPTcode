@@ -956,6 +956,11 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     fit = exchange_fit(fit)
     dm = mf.make_rdm1() if dm is None else np.asarray(dm)
     channels = exchange_channels(mf) if channels is None else list(channels)
+    if getattr(mf.with_df, 'test_set', None) == 'ao_products':
+        # the AO-product fit has its own reverse pass, whatever `fit` names;
+        # cycle: that module builds on the pieces of this one
+        from src.gradients.ao_product_fit_adjoint import exchange_skeleton
+        return exchange_skeleton(mf, dm, dm_other, prefactor, channels)
     if fit == 'rows':
         return _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels)
     with_df = mf.with_df
@@ -1184,7 +1189,9 @@ def _mean_field_exchange_target(mf, keys):
     """The mean-field force's exchange skeleton as a target of a pending
     call -- its key, chain, seeds, attenuated term and the request it
     answers -- where its fit is among `keys`; None otherwise."""
-    if not mean_field_exchange_wanted(mf):
+    if (not mean_field_exchange_wanted(mf)
+            or getattr(mf.with_df, 'test_set', None) == 'ao_products'):
+        # the AO-product fit's skeleton is not a row-fit target
         return None
     key, chain, mt, X = _exchange_rows_fit(mf)
     if key not in keys:

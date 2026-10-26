@@ -28,6 +28,13 @@ each flag test shows the warning and the named flag.
   - the PCM force refuses a continuum around an enclosing shell
   - the loop refuses a state whose LR continuum is not its field's
   - a state model refuses an SCF whose orbital gradient is not converged
+  - the driver integrates a Kohn-Sham reference on the Numerics XC grid
+    (--xc-grid) and refuses a grid for Hartree-Fock; GW-BSE carries the
+    quasiparticle options into its Numerics; an older record without these settings resumes, a Kohn-Sham one
+    is refused (it ran on pyscf's default grid)
+  - a walk writes its checkpoint after every accepted step and a rerun
+    restarts it there, not nudged, from the stored Hessian, recorded as
+    restarted_from; the checkpoint of another walk is refused
 """
 import json
 import os
@@ -511,3 +518,117 @@ def test_driver_walk_warns_through_the_one_walk_policy(tmp_path, monkeypatch):
     with pytest.warns(WalkNotRelaxed, match='did not relax'):
         out = mod._minimum(args, _Surface(-1.0), 'R0', 0.0, 'triplet')[1]
     assert out['flags'] == ['walk_not_converged'] and out['converged'] is False
+
+
+# Kohn-Sham grid, GW-BSE options, walk checkpoints ----------------------------
+
+def test_driver_kohn_sham_reference_on_the_xc_grid(tmp_path):
+    """A Kohn-Sham reference is integrated on the Numerics XC grid, not on
+    pyscf's default; --xc-grid sets it, and is refused for Hartree-Fock."""
+    from src.Base.numerics.constants import XC_GRID_LEVEL
+    mod = driver()
+    for given, level in ((None, XC_GRID_LEVEL), (5, 5)):
+        args = _args(tmp_path, **GWBSE_ARGS, xc='pbe0', xc_grid=given)
+        mod._check_args(args, None)
+        _, make_state = mod._factories(args, 'gas', dict(numerics=Numerics()))
+        s0 = make_state('S0')(molecule(ATOMS), NoMedium(molecule(ATOMS)))
+        assert s0.make_scf(molecule(ATOMS)).grids.level == level == args.xc_grid
+    with pytest.raises(SystemExit, match='Hartree-Fock reference has none'):
+        mod._check_args(_args(tmp_path, **GWBSE_ARGS, xc_grid=4), None)
+    with pytest.raises(SystemExit, match='takes no --xc-grid'):
+        mod._check_args(_args(tmp_path, xc_grid=4), None)
+
+
+def test_driver_gwbse_numerics_carry_the_qp_options(tmp_path):
+    """The outside scissor, the residue route and the XC grid reach the one
+    Numerics; omitted, each is the Numerics default."""
+    mod = driver()
+    mol = molecule(ATOMS, basis='cc-pvdz')
+    args = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz', xc='pbe0',
+                 outside_scissor='curve', residues='sop')
+    mod._check_args(args, mol)
+    num = mod.gwbse_numerics(args, mol)
+    assert (num.qp.outside_scissor, num.qp.residue_route) == ('curve', 'sop')
+    assert num.scf.xc_grid == args.xc_grid
+    plain = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz')
+    mod._check_args(plain, mol)
+    assert mod.gwbse_numerics(plain, mol).qp == Numerics().qp
+
+
+def test_driver_ao_product_fit_reaches_the_numerics(tmp_path):
+    """--isdf-test-set and --pivot-points reach the one Numerics on the level's
+    counts and name the record's method; ADC(2) takes neither, and a pivot
+    without the AO-product test set is refused."""
+    mod = driver()
+    mol = molecule(ATOMS, basis='cc-pvdz')
+    args = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz',
+                 isdf_test_set='ao_products', pivot_points=150)
+    mod._check_args(args, mol)
+    num = mod.gwbse_numerics(args, mol)
+    assert (num.isdf.test_set, num.isdf.pivot_points) == ('ao_products', 150)
+    plain = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz')
+    mod._check_args(plain, mol)
+    assert num.isdf.counts == mod.gwbse_numerics(plain, mol).isdf.counts
+    assert 'ao_products fit on 150 pivoted points' in mod._start_record(args)['method']
+    with pytest.raises(SystemExit, match='takes no --pivot-points'):
+        mod._check_args(_args(tmp_path, pivot_points=150), None)
+    alone = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz', pivot_points=150)
+    mod._check_args(alone, mol)
+    with pytest.raises(ValueError, match="needs it"):
+        mod.gwbse_numerics(alone, mol)
+
+
+def test_an_older_record_resumes_without_the_later_settings(tmp_path):
+    """A record written before the later settings existed resumes when this
+    run leaves them unset; a Kohn-Sham one is refused, its grid was not the
+    one this run integrates on."""
+    mod = driver()
+    for xc, refused in (('hf', False), ('pbe0', True)):
+        args = _args(tmp_path, **GWBSE_ARGS, xc=xc, out=str(tmp_path / f'{xc}.json'))
+        mod._check_args(args, None)
+        rec = mod._start_record(args)
+        for key in mod.LATER_SETTINGS:
+            rec.pop(key)
+        mod._save(rec, args.out)
+        if refused:
+            with pytest.raises(SystemExit, match='other settings'):
+                mod._start_record(args)
+        else:
+            assert mod._start_record(args)['xc'] == 'hf'
+
+
+def test_walk_restarts_from_its_checkpoint(tmp_path, monkeypatch):
+    """The first walk writes its checkpoint after an accepted step; a rerun
+    starts there, not nudged, on the stored Hessian, and records
+    restarted_from; another state's checkpoint is refused."""
+    mod = driver()
+    monkeypatch.setattr(mod, '_geom', lambda m: m.atom_coords().tolist())
+    args = _args(tmp_path, **GWBSE_ARGS, saddle_check=False)
+    mod._check_args(args, None)
+    start = molecule(ATOMS)
+    path = mod._walk_path(args, 'toluene', 'T1')
+    moved = start.atom_coords() + 0.01
+    hessian = np.eye(9)
+
+    def interrupted(surf, at, **kw):
+        kw['checkpoint']({'pass': 0, 'coords': moved, 'energy': -1.5,
+                            'hessian': hessian, 'history': [1, 2]})
+        raise KeyboardInterrupt
+    monkeypatch.setattr(mod, 'relax', interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet', checkpoint=path)
+    assert os.path.isfile(path)
+    seen = {}
+
+    def resumed(surf, at, **kw):
+        seen.update(kw, at=at.atom_coords())
+        return at, dict(converged=True, cycles=1, opt_grad_max=0.0, refreeze='measured')
+    monkeypatch.setattr(mod, 'relax', resumed)
+    out = mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet', checkpoint=path)[1]
+    assert np.allclose(seen['at'], moved) and seen['nudge'] == 0
+    assert np.array_equal(seen['hess_init'], hessian)
+    assert out['restarted_from'] == dict(walk_pass=0, accepted_steps=2, G=-1.5)
+    with pytest.raises(SystemExit, match='checkpoint of another walk'):
+        mod._minimum(args, _Surface(-1.0), start, 0.02, 'singlet', checkpoint=path)
+    mod._drop_checkpoint(path)
+    assert not os.path.exists(path)

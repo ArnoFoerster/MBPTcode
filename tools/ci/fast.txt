@@ -5,12 +5,15 @@ pytest test_adaptive_partition_carried.py
 pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
+pytest test_adc2_spectrum.py
 pytest test_adc3_restricted.py
 pytest test_adc_lanczos_handwritten.py
 pytest test_adc_numerical_flags.py
 pytest test_allocation_memory.py
 script test_amplitudes_consistency.py
 script test_analytical_continuation.py
+pytest test_ao_product_fit.py
+pytest test_ao_product_fit_adjoint.py
 pytest test_auxiliary_bosons.py
 pytest test_auxiliary_bosons_move.py
 script test_base.py
@@ -54,6 +57,7 @@ pytest test_declaration.py
 script test_density_matrix_small.py
 pytest test_docs_parallel_example.py
 pytest test_df_check.py
+pytest test_df_ladder.py
 pytest test_downfolded_seeds.py
 pytest test_ee_adc_davidson_max_memory.py
 pytest test_ee_adc_driver.py
@@ -73,6 +77,7 @@ script test_exciton_descriptors.py
 pytest test_faddeev_adc3.py
 pytest test_fit_adjoint_stability.py
 pytest test_followed_root_after_rejection.py
+pytest test_fragment_checkpoint_ranks.py
 script test_frame_sign_convention.py
 pytest test_frequency_rows_serial_shaped.py
 pytest test_frozen_factorization.py
@@ -131,6 +136,7 @@ pytest test_pbc_symmetry.py
 script test_pbc_w.py
 pytest test_pcm_cavity_blocks.py
 pytest test_photoluminescence.py
+pytest test_photophysics_ao_product_fit.py
 pytest test_photophysics_package.py
 pytest test_photophysics_span.py
 pytest test_polarizable_sites.py
@@ -187,6 +193,7 @@ pytest test_selfenergy_block_backward.py
 pytest test_shared_fit_cache.py
 pytest test_shell_blocks.py
 pytest test_sigma2.py
+pytest test_soc_from_densities.py
 pytest test_soc_spin_factors.py
 pytest test_soc_transition_density.py
 pytest test_solvated_outside_scissor.py
@@ -197,6 +204,7 @@ pytest test_sop_fits_over_ranks.py
 pytest test_space_time_shared_kernel.py
 pytest test_spin_adapt.py
 pytest test_spin_orbit.py
+pytest test_spin_orbit_ranks.py
 pytest test_spin_vibronic_model.py
 pytest test_state_manifold.py
 pytest test_state_pair_saddle_check.py

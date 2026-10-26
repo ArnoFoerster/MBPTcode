@@ -35,7 +35,8 @@ from src.Base.utils.grids.matsubara import IRBasis
 from src.Base.numerics.constants import ROOT_FOLLOW_MARGIN_MIN
 from src.gradients import state_identity
 from src.Base.numerical_flags import collecting
-from src.gradients.gwbse import fragment_bse, fragment_diabatic
+from src.fragments import partition
+from src.gradients import fragment_diabatic
 from src.SingleReference.CC import eom
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.sum_over_poles import sigma_sop
@@ -170,11 +171,11 @@ def test_an_ill_conditioned_ir_fit_is_kept_on_the_basis(monkeypatch):
 
 
 def test_the_pole_guard_flags_an_unconverged_decision(monkeypatch):
-    monkeypatch.setattr(fragment_bse, '_guard_lowest',
+    monkeypatch.setattr(partition, '_guard_lowest',
                         lambda *a, **k: (0.5, None, 1e-4, False))
     flags = {}
     with pytest.warns(RuntimeWarning, match='pole guard'):
-        q = fragment_bse.FragmentPartition._q_lowest(
+        q = partition.FragmentPartition._q_lowest(
             None, lambda x, om: x, None, np.ones(3), np.zeros((3, 1)),
             np.ones(3), 3, True, 0.1, 0.01, 1e-8, dense_max=0, flags=flags)
     assert q == 0.5
@@ -185,29 +186,33 @@ def test_the_partition_flags_reach_a_diabat_gradient(monkeypatch):
     """A partition solve that stopped short (here the pole guard) names its
     flag in the diagnostics of every element gradient taken through it, and
     in the `collecting` block it was raised in; they reached neither."""
-    monkeypatch.setattr(fragment_bse, '_guard_lowest',
+    monkeypatch.setattr(partition, '_guard_lowest',
                         lambda *a, **k: (0.5, None, 1e-4, False))
     raised, guard = [], {}
     with collecting(raised), pytest.warns(RuntimeWarning, match='pole guard'):
-        fragment_bse.FragmentPartition._q_lowest(
+        partition.FragmentPartition._q_lowest(
             None, lambda x, om: x, None, np.ones(3), np.zeros((3, 1)),
             np.ones(3), 3, True, 0.1, 0.01, 1e-8, dense_max=0, flags=guard)
     assert [e['flag'] for e in raised] == ['q_lowest_unconverged']
 
     g = object.__new__(fragment_diabatic.DiabaticGradient)
-    g.partition = fragment_bse.FragmentPartition(
+    g.partition = partition.FragmentPartition(
         operator=None, orbitals=None, omega0=0.1, labels=['site 0.0'],
         p_local=None, y_local=None, a_pp=np.eye(1), sigma=np.zeros((1, 1)),
         dsigma=np.zeros((1, 1)), q_lowest=0.5, guard_flags=guard)
     g.flags = {'diabat_response_not_converged': {'tol': 1e-8}}
     g.timings, g.progress, g.dressed = {}, None, True
+    # the method's reverse pass (`SinglesResponse.flags`): a short Z-vector
+    g.response = type('Response', (), {})()
+    g.response.flags = {'orbital_response_not_converged': {'message': 'short'}}
     zero = np.zeros((2, 3))
     g._pairs = lambda w: None
     g._chain_term = lambda pairs: zero
     g._rotation_terms = lambda pairs: (zero, zero)
     grad, diags = g.element(0, 0)
     assert set(diags['flags']) == {'q_lowest_unconverged',
-                                   'diabat_response_not_converged'}
+                                   'diabat_response_not_converged',
+                                   'orbital_response_not_converged'}
     assert diags['flags']['q_lowest_unconverged']['residual'] == 1e-4
 
 
@@ -217,7 +222,7 @@ def test_a_short_resolvent_solve_keeps_its_iterate_and_is_flagged():
     a = np.diag([1.0, 2.0, 3.0]) + 0.1
     flags = {}
     with pytest.warns(RuntimeWarning, match='resolvent solve did not'):
-        x = fragment_bse._batched_cg(lambda v: a @ v, np.ones((3, 1)),
+        x = partition._batched_cg(lambda v: a @ v, np.ones((3, 1)),
                                      lambda v: v, 1e-14, maxiter=1,
                                      flags=flags)
     assert x.shape == (3, 1) and np.abs(x).max() > 0.0
@@ -230,7 +235,7 @@ def test_a_short_feshbach_root_is_flagged():
     rng = np.random.default_rng(3)
     k = rng.normal(size=(6, 6))
     k = k @ k.T + 6.0 * np.eye(6)
-    oracle = fragment_bse.FeshbachOracle(k, np.eye(6)[:, :2])
+    oracle = partition.FeshbachOracle(k, np.eye(6)[:, :2])
     flags = {}
     with pytest.warns(RuntimeWarning, match='Feshbach root'):
         om, c, z = oracle.root(float(np.diag(k)[0]), maxiter=1, flags=flags)

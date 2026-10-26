@@ -13,7 +13,7 @@ MPI, which a sandboxed test runner cannot, and exits with a status.
 The system is tests/test_fragment_diabatic.py's offset ethylene dimer
 (cc-pVDZ, RHF, BSE@G0W0 on the ISDF/space-time chain, singlet, one site state
 per monomer), Tamm-Dancoff and full. Both dense limits of
-`fragment_bse.dense_limit` are set below the smallest block, so every solve is
+`partition.dense_limit` are set below the smallest block, so every solve is
 iterative: the Davidson diabats (Casida Davidson for the full kernel), the
 pole guard's Newton on Q, the batched conjugate-gradient resolvent and the
 MINRES diabat response. The BSE action and the reverse chain are divided
@@ -35,7 +35,7 @@ Checks, per kernel:
     realization tests/test_fragment_diabatic.py gates against finite
     differences
 and once, over both kernels: every `lockstep(...)` and `root_driven_solve(...)`
-call in fragment_bse, fragment_diabatic and fragment_localization ran on this
+call in partition, fragment_bse, fragment_diabatic and fragment_localization ran on this
 rank (the call sites are read off the source, so a new one is covered or the
 check fails; the guard Newton's and the Casida Davidson's are the full
 kernel's alone).
@@ -112,10 +112,12 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,
                                               grid_comm, lockstep_mean_field,
                                               lockstep_stats)
-from src.gradients.gwbse import fragment_diabatic
+from src.fragments import partition as fragment_partition
+from src.gradients import fragment_diabatic
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.gwbse.fragment_diabatic import DiabaticGradient
+from src.gradients.fragment_diabatic import DiabaticGradient
 from src.gradients.gwbse import fragment_bse
+from src.gradients.gwbse.fragment_diabatic import BSEFragmentMethod
 from src.gradients.gwbse.surface_factory import potential_energy_surface
 from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1
@@ -146,7 +148,8 @@ ELEMENTS = ((0, 0), (1, 1), (0, 1))
 #: ranks fall out of step waits in a collective forever.
 WATCHDOG_SECONDS = (int(sys.argv[sys.argv.index('--watchdog') + 1])
                     if '--watchdog' in sys.argv else 3 * 3600)
-MODULES = (fragment_bse, fragment_diabatic, fragment_localization)
+MODULES = (fragment_partition, fragment_bse, fragment_diabatic,
+           fragment_localization)
 #: What keeps the ranks in agreement: rank 0's data (`lockstep`), rank 0's
 #: iterations and refusals (`root_driven_solve`).
 RANK_AGREEMENT = ('lockstep', 'root_driven_solve')
@@ -282,9 +285,9 @@ class SolverProbe:
     (module, name, the tolerance's keyword, its position): the keyword when
     the call site passes it by name, the position otherwise.
     """
-    SOLVERS = ((fragment_bse, 'solve_symmetric', 'tol_residual', None),
-               (fragment_bse, '_casida_davidson', 'tol', 4),
-               (fragment_bse, '_batched_cg', 'tol', 3),
+    SOLVERS = ((fragment_partition, 'solve_symmetric', 'tol_residual', None),
+               (fragment_partition, '_casida_davidson', 'tol', 4),
+               (fragment_partition, '_batched_cg', 'tol', 3),
                (fragment_diabatic, 'minres', 'rtol', None),
                (fragment_localization, '_localize', 'conv_tol', None))
     #: the diabat and localization responses both call `minres`
@@ -313,9 +316,9 @@ class SolverProbe:
                 return _real(*args, **kwargs)
             setattr(module, name, wrapped)
         if self.loosen:
-            self._saved.append((fragment_bse, 'FRAGMENT_GUARD_NEWTON_TOL',
-                                fragment_bse.FRAGMENT_GUARD_NEWTON_TOL))
-            fragment_bse.FRAGMENT_GUARD_NEWTON_TOL = DISAGREE_NEWTON_TOL
+            self._saved.append((fragment_partition, 'FRAGMENT_GUARD_NEWTON_TOL',
+                                fragment_partition.FRAGMENT_GUARD_NEWTON_TOL))
+            fragment_partition.FRAGMENT_GUARD_NEWTON_TOL = DISAGREE_NEWTON_TOL
         return self
 
     def __exit__(self, *exc):
@@ -357,7 +360,7 @@ def own_mean_field(gate, mf0):
 def evaluate(mol, mf, tda, adjoint, sliced):
     """The partition and the ELEMENTS' gradients of one run."""
     chain = ExcitedStateChain(mol, factory, bse_tda=tda, mf=mf, numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol), 'sliced': sliced, 'bse_adjoint': adjoint}))
-    return measure(DiabaticGradient(chain, FRAGMENTS, SITES, mf=mf,
+    return measure(DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, mf=mf,
                                     route='isdf', omega0=OMEGA0))
 
 
@@ -390,7 +393,7 @@ def isdf_evaluate(mol):
         numerics=numerics_of({'grid_accuracy': 'G1', 'nroots': 5,
                               'sliced': True, 'fit': 'rows',
                               'bse_adjoint': 'grid'}))
-    g = DiabaticGradient(chain, FRAGMENTS, SITES, route='isdf')
+    g = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, route='isdf')
     return measure(g), g
 
 
@@ -566,8 +569,8 @@ def main(comm, kernels=None):
     gate = Gate(comm)
     watchdog(comm, WATCHDOG_SECONDS)
     warnings.simplefilter('ignore')
-    fragment_bse.FRAGMENT_DENSE_MAX = ITERATIVE_LIMIT
-    fragment_bse.FRAGMENT_MATRIX_FREE_DENSE_MAX = ITERATIVE_LIMIT
+    fragment_partition.FRAGMENT_DENSE_MAX = ITERATIVE_LIMIT
+    fragment_partition.FRAGMENT_MATRIX_FREE_DENSE_MAX = ITERATIVE_LIMIT
     gate.say(f'fragment-diabatic BSE over {gate.size} rank(s), '
              f'{lib.num_threads()} OpenMP thread(s) per rank'
              + (', a mean field per rank' if SKEW else ''))

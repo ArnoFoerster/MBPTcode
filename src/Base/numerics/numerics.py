@@ -54,6 +54,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DAVIDSON_PRECONDITIONERS,
                                          FIT_REALIZATIONS, ISDF_FIT_L_MAX_SECOND,
                                          ISDF_FIT_PAIR_TOL, ISDF_FIT_REGULARIZATION,
+                                         ISDF_TEST_SETS,
                                          NUCLEAR_FD_STEP,
                                          OUTSIDE_SCISSOR_MODES,
                                          QP_DEGENERACY_TOL, ROOT_FOLLOWING,
@@ -92,6 +93,19 @@ class IsdfNumerics:
         'replicated' (`FrozenFactorization`). Its tile edge and the layout
         over ranks are `LayoutNumerics`; the bound on the factors' orbital
         residual is a bar (ISDF_ORBITAL_RESIDUAL_TOL), not a choice.
+    test_set: what the fit is trained on, one of ISDF_TEST_SETS:
+        'duchemin_blase' (every AO times the low-l AOs plus the auxiliary
+        functions) or 'ao_products' (every AO product in the Coulomb metric,
+        `ao_product_fit`), which also represents the near-null AO
+        combinations of an augmented basis; None takes a given
+        factorization's, else 'duchemin_blase'. Only the 'replicated' fit
+        realizes 'ao_products'.
+    pivot_points: None places the level's (or counts') atomic grid as it is;
+        a count hard-pivots that many points from that grid with every
+        sub-shell's radii ISDF_PIVOT_PARENT_FACTOR times as dense, by the
+        pivoted Cholesky factorization of the 'ao_products' Gram matrix
+        (`ao_product_fit.pivoted_points`); it needs test_set='ao_products'.
+        Both fields leave the identity what it was while at their defaults.
     runtime_radii: True declares a grid the shipped radii table holds no
         row for, re-optimized at run time (`runtime_atomic_radii`); False
         refuses one (`UntabulatedISDFGrid`). Not part of `identity`: where a
@@ -110,10 +124,30 @@ class IsdfNumerics:
     regularization: float = ISDF_FIT_REGULARIZATION
     fit: Optional[str] = None
     runtime_radii: bool = False
+    test_set: Optional[str] = None
+    pivot_points: Optional[int] = None
 
     def __post_init__(self):
         if self.fit is not None and self.fit not in FIT_REALIZATIONS:
             raise ValueError(f'fit={self.fit!r} not in {FIT_REALIZATIONS}')
+        if self.test_set is not None and self.test_set not in ISDF_TEST_SETS:
+            raise ValueError(f'test_set={self.test_set!r} not in '
+                             f'{ISDF_TEST_SETS}')
+        if self.test_set == 'ao_products' and self.fit == 'rows':
+            raise ValueError(
+                "test_set='ao_products' is fitted whole (fit='replicated'); "
+                "the row-distributed fit realizes the 'duchemin_blase' test "
+                'set only')
+        if self.pivot_points is not None:
+            if int(self.pivot_points) != self.pivot_points or self.pivot_points < 1:
+                raise ValueError(f'pivot_points={self.pivot_points!r}: a '
+                                 'positive point count')
+            if self.test_set != 'ao_products':
+                raise ValueError(
+                    "pivot_points selects points for test_set='ao_products' "
+                    "and needs it: the 'duchemin_blase' fit on pivoted points "
+                    'binds the same spurious BSE root as on the tabulated '
+                    'grid on augmented bases')
 
 
 @dataclass(frozen=True)
@@ -401,6 +435,7 @@ FLAT_FIELDS = {
     'basis': 'isdf.basis', 'auxbasis': 'isdf.auxbasis',
     'counts': 'isdf.counts', 'n_start': 'isdf.n_start',
     'radii': 'isdf.radii', 'fit': 'isdf.fit',
+    'test_set': 'isdf.test_set', 'pivot_points': 'isdf.pivot_points',
     'sliced': 'layout.sliced', 'fit_block': 'layout.fit_block',
     'tile_gb': 'layout.tile_gb',
     'ntau_gw': 'quadrature.ntau_gw', 'ntau_w': 'quadrature.ntau_w',
@@ -609,6 +644,9 @@ IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
 # declarations that permit a calculation without changing any (the reason is
 # at each field)
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
+# fields added after identities were first written: at their default they are
+# left out, so every identity written before them stays what it was
+IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'))
 
 
 @dataclass(frozen=True)
@@ -675,6 +713,10 @@ class Numerics:
         values = self.values()
         for section, name in IDENTITY_EXCLUDED:
             values[section].pop(name)
+        for section, name in IDENTITY_AT_DEFAULT_OMITTED:
+            default = getattr(SECTIONS[section](), name)
+            if values[section][name] == default:
+                values[section].pop(name)
         return record_hash({name: values[name] for name in IDENTITY_FIELDS
                             if name not in LATER_SECTIONS
                             or values[name] != asdict(SECTIONS[name]())})

@@ -78,8 +78,9 @@ def root_driven_solve(solve, apply=None, rows=0, comm=None):
            other ranks' broadcasts: the shared Casida Davidson's
            pair-row loop locksteps its subspace solution on the current comm,
            and under the ranks its first cycle's lockstep met the workers'
-           wait for a block (fragment_bse's full-BSE block solve, real MPI:
-           hung past 2.5 h; simulated ranks: a worker unpacked None).
+           wait for a block (the fragment partition's full-BSE block
+           solve, real MPI: hung past 2.5 h; simulated ranks: a worker
+           unpacked None).
     Serially, and on a world of one, this is `solve(apply)`.
     """
     comm = current_comm() if comm is None else comm

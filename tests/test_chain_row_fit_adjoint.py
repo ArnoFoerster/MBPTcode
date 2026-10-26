@@ -85,9 +85,12 @@ from tests.isdf_test_grid import g1, g1_kw
 from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
 
 SIZES = [1, 2, 3, 8]
-#: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ at 148
-#: points per atom drops two pairs 2.8e-5 Bohr further on.
-CROSSING_SHIFT = 0.05484
+#: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ on G1
+#: drops two pairs, (0, 41) and (0, 46), at 0.0190232 Bohr, 3.2e-5 Bohr further
+#: on (found by scanning the shift in steps of 4e-3 Bohr and bisecting the
+#: changes of the screen; the neighbouring changes are at 0.0057668 and
+#: 0.0205918 Bohr, the stencil reaches 2e-4).
+CROSSING_SHIFT = 0.018993
 
 
 # ------------------------------------------------------------------- (a)
@@ -283,8 +286,6 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
 
 
 # ------------------------------------------------------------------- (d)
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: CROSSING_SHIFT puts no screen change inside the FD stencil on G1; the premise is to be re-tuned on G1'))
 def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     """The dRPA force of the row fit against a five-point difference of its
     own energy, beside the whole assembly of the same estimator and that of

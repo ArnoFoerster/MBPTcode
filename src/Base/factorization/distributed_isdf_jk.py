@@ -88,6 +88,7 @@ from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
                                                    lockstep_density,
                                                    reduce_parts, add_seconds,
                                                    distributed_handles)
+from src.Base.factorization.ao_product_fit import ao_product_fit
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  fit_M_streaming, screened_layout)
@@ -286,17 +287,28 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
             self.mine = [int(t) for t in partition(len(self.tiles), rank,
                                                    size)]
             t_fit = time.time()
-            fit = fit_M_streaming(mol, self.auxmol, coords,
-                                  numerics=source.numerics,
-                                  progress=source.progress, comm=comm,
-                                  fit='rows', block=self.tile,
-                                  layout=source.fit_layout())
+            if source.test_set == 'ao_products':
+                # the AO-product fit: its projection divided over the ranks,
+                # its solve by every rank; this rank keeps its tiles' rows
+                _, M, _ = ao_product_fit(mol, self.auxmol, coords,
+                                         source.numerics, comm)
+                fit = None
+                self.MT = {t: np.ascontiguousarray(M[:, slice(*self.tiles[t])].T)
+                           for t in self.mine}
+                del M
+            else:
+                fit = fit_M_streaming(mol, self.auxmol, coords,
+                                      numerics=source.numerics,
+                                      progress=source.progress, comm=comm,
+                                      fit='rows', block=self.tile,
+                                      layout=source.fit_layout())
             add_seconds(self.timings, 'scf_isdf_fit', t_fit)
         _ran_on(self.timings, 'scf_isdf_blas_fit', pool)
-        self.MT = fit.mt
-        self.fit_held = dict(fit.held)
-        self.fit_kept = fit.kept
-        del fit
+        if fit is not None:
+            self.MT = fit.mt
+            self.fit_held = dict(fit.held)
+            self.fit_kept = fit.kept
+            del fit
         self.X = {t: self._collocation(t) for t in self.mine}
         self._hold('X_tiles', self.X.values())
         self._hold('MT_tiles', self.MT.values())
@@ -582,8 +594,9 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
         """This rank's M^T tiles and the fit they are, read-only views
         (`separable_ri.FitTiles`), or None before the build: the settings
         are the ones `build` hands the row fit, so a later stage asking for
-        the same fit reads these instead of making it again."""
-        if self.MT is None:
+        the same fit reads these instead of making it again. None too on the
+        AO-product fit, which is not the row fit."""
+        if self.MT is None or self.source.test_set == 'ao_products':
             return None
         source = self.source
         return FitTiles(self.mol, self.auxmol, self.coords, self.tile,

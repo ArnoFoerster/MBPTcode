@@ -17,7 +17,7 @@ failed or timed out.
 Several tiers run one after the other. --generated keeps only the files that
 read the generated ADC runtime or run the pdaggerq generators
 (GENERATED_MARKERS), for a machine that has pdaggerq and has written the
-runtime with GenerateRuntime (src.SingleReference.ADC.generated_modules).
+runtime with GenerateRuntime (src.CodeGeneration.generate_adc).
 """
 import argparse
 import os
