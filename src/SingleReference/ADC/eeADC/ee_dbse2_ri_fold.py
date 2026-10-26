@@ -951,13 +951,16 @@ class RIFoldDBSE2(RIFoldADC2):
         sums; span is the set's own (min D, max D), eq 71's (d71_min, d_max) by default
         and the mode set's (dm_min, dm_max) for _mode_laplace, since each set's split is
         against its own extremes and not the level's; None where a frequency is at or
-        above the set's min D (no Laplace transform) or no tabulated grid reaches the
-        target: kernel_laplace's rule."""
+        above the set's min D (no Laplace transform), on a one-point span, or where no
+        tabulated grid reaches the target: kernel_laplace's rule."""
         d_lo, d_hi = (self.d71_min, self.d_max) if span is None else span
         omegas = (omega,) if omega2 is None else (omega, omega2)
         if max(omegas) >= d_lo:
             return None
         lo, hi = d_lo - max(omegas), d_hi - min(omegas)
+        # a one-point span has no minimax grid; the exact tile divides it
+        if hi <= lo:
+            return None
         ntau, err = minimax_points_for_accuracy(lo, hi, EE_GW_LAPLACE_TARGET,
                                                 relative=True)
         if ntau is None or err > EE_GW_LAPLACE_TARGET:
