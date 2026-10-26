@@ -65,7 +65,7 @@ eq71-ss'ss' (no^2 nv^2 each), one flat D shared by both keys.
      folded_operator.
   6. fold_step, H2O/cc-pVDZ at QuAcK's G0W0 energies, printed kernel: static, step,
      correction (eV) and zeta equal QuAcK's TDA dBSE2 singlet and (QuAcK's triplet
-     carries the singlet's Theta) the 2026-10-18 triplet record to 1e-5; control: eq
+     carries the singlet's Theta) the recorded triplet to 1e-5; control: eq
      71's step is not QuAcK's; identities in static and |x|; stationary at the root;
      on hand-built signed pieces with 1 + dmatvec(x) < 0 one RuntimeWarning, no raise.
 
@@ -108,8 +108,8 @@ M0_ROOTS = {
     ('6-31g', 'printed', 'singlet'): (0.313226018723, 0.392848106734),
     ('6-31g', 'printed', 'triplet'): (0.286815570557, 0.347614467992),
 }
-# QuAcK mol/H2O.xyz, Angstrom; QuAcK's G0W0@RHF e_QP, eV, all 24 orbitals, full_bse.log
-# of 2026-09-25_quack-xcheck-h2o (the constant of test_bse2_static_kernel.py)
+# QuAcK mol/H2O.xyz, Angstrom; QuAcK's G0W0@RHF e_QP, eV, all 24 orbitals, its
+# full_bse output (the constant of test_bse2_static_kernel.py)
 QUACK_H2O = 'O 0.0000 0.0000 0.0000; H 0.7571 0.0000 0.5861; H -0.7571 0.0000 0.5861'
 QUACK_QP_EV = np.array([
     -547.096903359, -33.376695376, -18.558315280, -14.436803319, -12.158825764,
@@ -118,13 +118,11 @@ QUACK_QP_EV = np.array([
     49.498548274, 50.876928601, 65.959485567, 67.738625861, 88.744413957,
     90.503059309, 95.157864951, 103.217832913, 112.841177294])
 # QuAcK's TDA dBSE2 on those energies (tda T, tda_w F, bse2 T, dbse T, dynamical TDA),
-# singlet row 1 of 'First-order dynamical correction' in
-# 2026-10-17_quack-xcheck-h2o-bse2dyn/tda_fullw_bse2_dyn.log: static, dynamic,
+# singlet row 1 of its 'First-order dynamical correction': static, dynamic,
 # correction (eV), renormalisation factor
 QUACK_STEP_S1 = (8.759333, 8.616588, -0.142745, 1.012870)
-# the triplet with its own kernel, the inline formula's record of 2026-10-18
-# (2026-10-18_dbse2dyn-vs-quack-h2o-ccpvdz-eq61eq71-printed/result.json; QuAcK's triplet
-# carries the singlet's Theta, the recorded convention mismatch): the same four
+# the triplet with its own kernel, recorded from the inline formula (QuAcK's triplet
+# carries the singlet's Theta, a convention mismatch): the same four
 RECORD_STEP_T1 = (8.131480, 7.927939, -0.203541, 1.015818)
 # the mode sets: the ones that take the 'block' solver in check 2 and have no M0 row
 MODE_SETS = (('eq61',), ('eq61', 'eq71'))
@@ -809,8 +807,8 @@ def check_fold_vs_unfolded(basis):
 
 def check_step():
     """fold_step on H2O/cc-pVDZ at QuAcK's G0W0 energies, eqs 61 and 71 with the bare
-    singles: the printed kernel's step against QuAcK's singlet and the 2026-10-18
-    triplet record; the eq 71 kernel's step as the control; the identities in static
+    singles: the printed kernel's step against QuAcK's singlet and the recorded
+    triplet; the eq 71 kernel's step as the control; the identities in static
     and in the norm of x; stationarity at the fold's root; the refusals."""
     ev = HARTREE_TO_EV
     mol = gto.M(atom=QUACK_H2O, basis='cc-pvdz', verbose=0)

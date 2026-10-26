@@ -125,8 +125,7 @@ SPINS = ('singlet', 'triplet')
 # the sets of the pieces route, the operator's SETS without eq 66's level
 SETS = (('eq71',), ('eq61',), ('eq61', 'eq71'))
 # Ha: check 2's control, |delta(omega0) - delta(omega0 + 0.05)| at static=omega0, one
-# decade below the smallest row with doubles, 7.59e-5 on eq71 eq71 singlet (WSL,
-# 2026-10-21)
+# decade below the smallest row with doubles, 7.59e-5 on eq71 eq71 singlet
 DELTA_MOVE = 7.5e-6
 
 
