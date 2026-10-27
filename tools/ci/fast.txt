@@ -173,6 +173,7 @@ script test_rpa_correlation_energy.py
 pytest test_rpa_qp_surface.py
 pytest test_run_tadf_resume.py
 pytest test_runtime_radii.py
+pytest test_scgw_hf_dft.py
 pytest test_scissor_tier.py
 script test_screened_adc2x.py
 pytest test_screening_frequency_grid.py

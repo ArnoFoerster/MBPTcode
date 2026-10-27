@@ -19,6 +19,7 @@ import sys
 from contextlib import contextmanager
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,7 +55,7 @@ def sigma_switched_off():
         scgw.calc_new_sigma_ir = original
 
 
-def test_sigma_zero_gives_hf(mol, mf_start, e_hf, name):
+def check_sigma_zero_gives_hf(mol, mf_start, e_hf, name):
     """With Sigma = 0 the cycle is self-consistent HF, so E_GM must be e_hf.
 
     E_GM then reduces to E_nuc + Tr[gamma (h + F)], the HF total energy of
@@ -119,7 +120,7 @@ def converged_gm_energy(mol, mf_start, **grid):
     return E_gm
 
 
-def test_start_independence(mol, mf_hf, mf_dft, name):
+def check_start_independence(mol, mf_hf, mf_dft, name):
     """scGW is self-consistent, so its result must not depend on the start.
 
     Compares the Galitskii-Migdal energy from an HF and a DFT start.
@@ -165,11 +166,11 @@ if __name__ == '__main__':
     mf_dft.run()
 
     results = {
-        'Sigma=0, HF start': test_sigma_zero_gives_hf(
+        'Sigma=0, HF start': check_sigma_zero_gives_hf(
             mol, mf_hf, mf_hf.e_tot, 'Sigma=0, HF start'),
-        'Sigma=0, DFT start': test_sigma_zero_gives_hf(
+        'Sigma=0, DFT start': check_sigma_zero_gives_hf(
             mol, mf_dft, mf_hf.e_tot, 'Sigma=0, DFT start'),
-        'scGW, HF vs DFT start': test_start_independence(
+        'scGW, HF vs DFT start': check_start_independence(
             mol, mf_hf, mf_dft, 'scGW, HF vs DFT start'),
     }
 
@@ -177,3 +178,35 @@ if __name__ == '__main__':
     for name, ok in results.items():
         print(f'{name}: {"PASS" if ok else "FAIL"}')
     sys.exit(0 if all(results.values()) else 1)
+
+
+@pytest.fixture(scope='module')
+def mol():
+    return gto.M(atom='H 0 0 0; H 0 0 0.74', basis='cc-pvdz', verbose=0)
+
+
+@pytest.fixture(scope='module')
+def mf_hf(mol):
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-10
+    return mf.run()
+
+
+@pytest.fixture(scope='module')
+def mf_dft(mol):
+    mf = scf.RKS(mol)
+    mf.xc = 'pbe'
+    mf.conv_tol = 1e-10
+    return mf.run()
+
+
+def test_sigma_zero_hf_start(mol, mf_hf):
+    assert check_sigma_zero_gives_hf(mol, mf_hf, mf_hf.e_tot, 'Sigma=0, HF start')
+
+
+def test_sigma_zero_dft_start(mol, mf_hf, mf_dft):
+    assert check_sigma_zero_gives_hf(mol, mf_dft, mf_hf.e_tot, 'Sigma=0, DFT start')
+
+
+def test_start_independence(mol, mf_hf, mf_dft):
+    assert check_start_independence(mol, mf_hf, mf_dft, 'scGW, HF vs DFT start')
