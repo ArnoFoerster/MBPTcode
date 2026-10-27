@@ -12,8 +12,9 @@ Checks:
   5. Both backends present the identical interface, so a consumer never
      branches on `method`.
   6. The transform fit is a pseudo-inverse: an exactly zero singular value
-     contributes zero instead of 0/0, every other one is inverted bitwise as
-     before, and a row that still comes out non-finite is refused.
+     contributes zero instead of 0/0, every other one is inverted as in a
+     plain pseudo-inverse (to a few ulp), and a row that still comes out non-finite is
+     refused.
   7. A grid size is an explicit count or the 'auto' sentinel resolved by the
      widest range, never a sentinel forwarded into a constructor.
 
@@ -29,17 +30,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import TRANSFORM_FIT_RCOND
-from src.Base.utils import time_frequency
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT,
-                                           DEFAULT_TAU_TARGET,
-                                           TimeFrequencyGrid,
-                                           minimax_convergence_floor,
-                                           minimax_points_for_accuracy,
-                                           minimax_points_for_ranges,
-                                           minimax_transform_weights,
-                                           resolve_grid_size)
+from src.Base.numerics.constants import TRANSFORM_FIT_RCOND
+from src.Base.utils.grids import time_frequency
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT,
+                                                 DEFAULT_TAU_TARGET,
+                                                 TimeFrequencyGrid,
+                                                 minimax_convergence_floor,
+                                                 minimax_points_for_accuracy,
+                                                 minimax_points_for_ranges,
+                                                 minimax_transform_weights)
+from tests.pins import RECORDING_BLAS, matches
 
 E_MIN, E_MAX = 0.4, 40.0
 #: The grid of the pseudo-inverse check: water's own energy range on the
@@ -242,8 +243,9 @@ def check_minimax_duality_is_still_the_raw_product():
     for n in (6, 14, 20):
         g = TimeFrequencyGrid.minimax(n, E_MIN, E_MAX)
         raw = float(np.abs(g.cosft_wt @ g.cosft_tw - np.eye(g.nfreq)).max())
-        ok &= check(g.duality_error('even') == raw,
-                    f'n={n}: minimax still reports max|A B - I| exactly',
+        ok &= check(matches(g.duality_error('even'), raw, RECORDING_BLAS,
+                            unit='1', quantity='root'),
+                    f'n={n}: minimax still reports max|A B - I| to a few ulp',
                     f'{g.duality_error("even"):.3e}')
     return ok
 
@@ -336,8 +338,12 @@ def check_transform_pseudo_inverse():
             warnings.simplefilter('ignore')
             cut, err_cut = _weights(kind, grid, e_min, e_max)
             uncut, err_uncut = _weights(kind, grid, e_min, e_max, rcond=-1.0)
-        ok &= check(np.array_equal(cut, uncut) and err_cut == err_uncut,
-                    f'kind {kind}: the cutoff leaves a production grid bitwise',
+        ok &= check(matches(cut, uncut, RECORDING_BLAS, unit='1',
+                            quantity='root')
+                    and matches(err_cut, err_uncut, RECORDING_BLAS, unit='1',
+                                quantity='root'),
+                    f'kind {kind}: the cutoff leaves a production grid the '
+                    'same to a few ulp',
                     f'fit error {err_cut:.2e}')
 
     # The two ways 1/S breaks, in the arithmetic itself, and why it is silent.
@@ -399,8 +405,7 @@ def check_transform_pseudo_inverse():
 
 
 def check_grid_size_resolution():
-    """'auto' or None resolves over EVERY ratio, the widest binding; an
-    explicit count passes through with nothing measured."""
+    """The count resolves over EVERY ratio, the widest binding."""
     ratios = (40.0, 486.0, 3000.0)
     n, worst = minimax_points_for_ranges(ratios)
     per = [minimax_points_for_accuracy(1.0, R, target=DEFAULT_TAU_TARGET)
@@ -410,20 +415,17 @@ def check_grid_size_resolution():
                'the widest ratio sets the count and the reported error',
                f'n={n}, worst={worst:.1e}, per ratio '
                + ', '.join(f'{p[0]}' for p in per))
-    ok &= check(resolve_grid_size('auto', ratios) == (n, worst)
-                and resolve_grid_size(None, ratios) == (n, worst)
-                and resolve_grid_size('AUTO', ratios) == (n, worst),
-                "'auto', 'AUTO' and None are the same sentinel")
-    ok &= check(resolve_grid_size(18, ratios) == (18, None)
-                and resolve_grid_size('22', ratios) == (22, None),
-                'an explicit count passes through unmeasured')
     missed = minimax_points_for_ranges(ratios, target=1e-30)
     ok &= check(np.isfinite(missed[1]) and missed[1] > 1e-30,
                 'a target nothing reaches returns the best count WITH the error '
                 'it actually obtained', f'{missed}')
-    none = minimax_points_for_ranges(ratios, npoints_max=4)
-    ok &= check(none == (4, float('inf')),
-                'no tabulated size in reach: the ceiling and an infinite error',
+    try:
+        none = minimax_points_for_ranges(ratios, npoints_max=4)
+        refused = False
+    except ValueError:
+        none, refused = None, True
+    ok &= check(refused,
+                'no tabulated size in reach: refused, not handed on',
                 f'{none}')
     return ok
 

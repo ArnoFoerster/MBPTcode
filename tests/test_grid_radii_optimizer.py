@@ -37,12 +37,12 @@ import numpy as np
 from pyscf import df, gto
 from threadpoolctl import threadpool_limits
 
-from src.Base.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
-                                   _shipped_key, _start_radii, atomic_points,
-                                   fit_error_coulomb, lebedev_subshells,
-                                   optimize_atomic_radii, published_grids,
-                                   search_r_max, shipped_radii,
-                                   shipped_radii_lookup)
+from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
+                                                 _shipped_key, _start_radii, atomic_points,
+                                                 fit_error_coulomb, lebedev_subshells,
+                                                 optimize_atomic_radii, published_grids,
+                                                 search_r_max, shipped_radii,
+                                                 shipped_radii_lookup)
 
 #: The production grid: 148 points/atom, which is where the collapse showed up.
 COUNTS_148 = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
@@ -88,7 +88,7 @@ if __name__ == '__main__':
     all_ok &= ok1
     print(f'   smallest gain {worst_gain:.1f}x   {"OK" if ok1 else "FAIL"}')
 
-    # 2. n_start=1 must BE the old single geometric descent, or every cached and
+    # 2. n_start=1 must BE the single geometric descent, or every cached and
     #    shipped grid silently changes meaning.
     print('\n2. n_start=1 is the plain geometric ladder:')
     s0 = _start_radii(COUNTS_148, 0.05, 5.0, 0)
@@ -110,7 +110,7 @@ if __name__ == '__main__':
     #    documented bypass of both, since a caller that wants the runners-up
     #    has to run the search. The table holds ONE grid per physical request,
     #    so a lookup answers n_start=1 and n_start=4 with the same row and the
-    #    comparison measures nothing (it reported 1.0x before the bypass); a
+    #    comparison measures nothing (it reports 1.0x); a
     #    stale cache silently reports its own thread count's minimum (see
     #    optimize_atomic_radii). One BLAS thread, since the objective is a
     #    numerically differentiated descent under threaded BLAS and a

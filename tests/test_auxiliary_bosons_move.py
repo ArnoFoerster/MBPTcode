@@ -1,15 +1,17 @@
 """The auxiliary-boson route must be the same numbers as the quasi-boson closed form.
 
-`src.SingleReference.GW.auxiliary_bosons` replaced the quasi-boson closed form
-of the dRPA class (`gradients.quasi_boson_adjoint.RPAAdjoint`, a subclass of
-`SingleReference.GW.quasi_boson.RPA`) -- e^t and the eigenvectors of
-Abar = [e^t (A+B) e^t + e^-t (A-B) e^-t]/2 -- by the production Casida solve.
-The two are the same object: with Abar = (P^1/2 e^t)^T (P^1/2 e^t), P = A+B,
+`src.SingleReference.GW.auxiliary_bosons` solves the dRPA bosons with the
+Casida solver (`CasidaSolver`); the quasi-boson closed form
+(`src.gradients.gwbse.quasi_boson_adjoint.RPAAdjoint`, a subclass of
+`src.SingleReference.LinearResponse.quasi_boson_rpa.RPA`) -- e^t and the
+eigenvectors of Abar = [e^t (A+B) e^t + e^-t (A-B) e^-t]/2 -- is the
+reference. The two are the same object: with Abar = (P^1/2 e^t)^T (P^1/2 e^t),
+P = A+B,
 
   e^t U = (A+B)^-1/2 V Om^1/2 = X + Y,   (A+B)^1/2 (A-B) (A+B)^1/2 V = V Om^2,
 
 which is Casida's X+Y in the standard RPA normalization (X+Y)^T(A+B)(X+Y) = Om.
-So the move is exact in algebra, and the gates below measure only the LAPACK
+So the route is exact in algebra, and the gates below measure only the LAPACK
 path: numpy `eigh` of Abar versus scipy `eigh` of the whitened Casida matrix
 after a Cholesky (or a diagonal A-B) factorization. Nothing is bitwise, and the
 gate is 1e-12; the measured worst cases are quoted at each assertion.
@@ -19,10 +21,10 @@ ones (3 of 15 columns flip here, 40 of 95 on water), so the boson gates compare
 sign-aligned columns. Every physical consumer squares the coupling, and those
 -- poles and amplitudes -- are compared with no gauge handling at all.
 
-Each gate is shown once to fail:
-  * the boson gate (Om and X+Y), on d shifted by 1e-9
-  * the gauge-invariant pole/amplitude gate, on bp shifted by 1e-9
-  * the "production does not import src.gradients" gate, on a module of
+What breaks each gate:
+  * the boson gate (Om and X+Y): d shifted by 1e-9
+  * the gauge-invariant pole/amplitude gate: bp shifted by 1e-9
+  * the "production does not import src.gradients" gate: a module of
     src.gradients, which does
 """
 import os
@@ -32,7 +34,7 @@ import sys
 import numpy as np
 import pytest
 
-from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
+from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.SingleReference.GW import auxiliary_bosons as prod
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -53,12 +55,13 @@ def ph_energies():
 
 
 def inputs():
-    """(bp, c_ov, d) -- the full-rank case every test in the old file uses."""
+    """(bp, c_ov, d) -- the full-rank case every test here uses."""
     return factors(N_OV + 6, seed=9)[:, :len(EPS)], factors(N_OV + 6), ph_energies()
 
 
 def old_exact_bosons(c_ov, d):
-    """Verbatim pre-move body: the dRPA bosons from the quasi-boson closed form."""
+    """Verbatim reference body: the dRPA bosons from the quasi-boson closed
+    form."""
     v = np.asarray(c_ov, float).T @ np.asarray(c_ov, float)
     rpa = RPA(np.diag(np.asarray(d, float)) + 2.0 * v, 2.0 * v)
     om, u = rpa.eigAbar
@@ -66,7 +69,8 @@ def old_exact_bosons(c_ov, d):
 
 
 def old_ab_bosons(c_ov, d, c_ab):
-    """Verbatim pre-move body: the dRPA re-solved inside the AB basis, closed form."""
+    """Verbatim reference body: the dRPA re-solved inside the AB basis, closed
+    form."""
     cc = np.asarray(c_ov, float) @ c_ab
     v = cc.T @ cc
     a = (c_ab * np.asarray(d, float)[:, None]).T @ c_ab + 2.0 * v
@@ -76,14 +80,14 @@ def old_ab_bosons(c_ov, d, c_ab):
 
 
 def old_exact_from_factors(bp, c_ov, d):
-    """Verbatim pre-move body, on top of the closed-form bosons."""
+    """Verbatim reference body, on top of the closed-form bosons."""
     om, xy = old_exact_bosons(c_ov, d)
     w = np.sqrt(2.0) * ((np.asarray(bp, float).T @ c_ov) @ xy)
     return om, (w ** 2).T
 
 
 def old_ab_from_factors(bp, c_ov, d, c_ab):
-    """Verbatim pre-move body; ab_basis and ab_couplings never used RPA."""
+    """Verbatim reference body; ab_basis and ab_couplings never used RPA."""
     om, xy = old_ab_bosons(c_ov, d, c_ab)
     w = prod.ab_couplings(bp, c_ov, c_ab, xy)
     return om, (w ** 2).T
@@ -163,8 +167,8 @@ def test_a_real_molecule_agrees_on_the_physical_output():
     """
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
-    from src.SingleReference.base import get_occ_virt_indices
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.orbital_spaces import get_occ_virt_indices
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -210,4 +214,4 @@ def test_production_does_not_reach_into_the_gradients_package():
 def test_the_sys_modules_gate_can_fail():
     """A module of src.gradients -- the one the closed form above comes from --
     must report True under the same probe."""
-    assert imports_gradients('src.gradients.quasi_boson_adjoint')
+    assert imports_gradients('src.gradients.gwbse.quasi_boson_adjoint')

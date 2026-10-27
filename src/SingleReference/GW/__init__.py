@@ -1,10 +1,10 @@
 """GW and vertex-corrected (PSD) self-energies and quasiparticle energies.
 
+    qp_energy.py              calc_qp_energy: the front door
+    self_energy.py            Lehmann self-energy from a Casida solution
     transition_amplitudes.py  chi / vertex transition amplitudes (named apart
                               from CC/amplitudes.py, the generated CCSDT
                               equations)
-    self_energy.py            Lehmann self-energy from a Casida solution
-    qp_energy.py              calc_qp_energy: the front door, real axis
     qp_solve.py               shared QP machinery for the imaginary-axis
                               routes -- Pade continuation, Sigma_x - v_xc
     imaginary_axis.py         Sigma by quadrature on an imaginary frequency
@@ -13,6 +13,14 @@
                               imaginary time, and W(i tau) itself
     space_time.py             solve_qp_energy_space_time: the O(N^3) route,
                               imaginary time on separable (ISDF) factors
+    contour_deformation.py    quasiparticle energies by contour deformation,
+                              no analytic continuation
+    sum_over_poles.py         the self-energy as a sum over auxiliary poles
+    real_screening.py         the screened interaction at a real frequency
+    quasi_boson.py            the quasi-boson dRPA ground state and its EOM
+                              G0W0 quasiparticle energies
+    auxiliary_bosons.py       AB-G0W0: the dRPA bosons compressed into an RI
+                              basis
     cc_polarizability.py      G0W@CC -- the RPA polarizability replaced by an
                               EOM-CC one, through CC/eom.py
     reaction_field.py         Duchemin et al. Eq. (18): the continuum's shift
@@ -20,19 +28,23 @@
                               transform that reaches the bare screening
     evGW.py                   the eigenvalue-self-consistent loop over any of
                               the routes above
+    qsGW.py                   quasiparticle self-consistent GW
+    qp_states.py              which orbitals carry an explicitly solved
+                              quasiparticle energy
+    qp_selection.py           which orbitals of the admitted window a surface
+                              solves explicitly
 
-Davidson note, and it is a RULE: every iterative eigensolver in this tree
-delegates its core to pyscf, and there are three of them because there are
-three eigenproblems, not three tastes --
-  Solvers/davidson.py         real symmetric (pyscf davidson1). BOTH ADC
-                              routes: charged IP/EA root-following and
-                              neutral ee lowest-k go through the one
-                              solve_symmetric call.
-  LinearResponse/davidson.py  non-Hermitian paired Casida (pyscf real_eig)
-  CC/eom.py                   non-Hermitian biorthogonal (davidson_nosym1)
-Neither of the last two reduces to the first: the Casida form needs the
-(A-B) Cholesky reduction and X^2-Y^2 normalization, EOM-CC needs left/right
-biorthogonalization. A fourth symmetric solver would duplicate the first:
-both ADC routes solve the same problem, and one call keeps one meaning of
-conv_tol and one answer to whether an unconverged root is reported.
+Every quasiparticle equation is solved by the one root finder,
+`Solvers.qp_equation.find_qp_root`. Every symmetric eigenproblem goes through
+the one symmetric Davidson, `Solvers.davidson.solve_symmetric` (ADC, the
+Tamm-Dancoff BSE, the (A - B) probe). The exceptions, each because its problem
+is not one a symmetric Davidson can take:
+  LinearResponse/davidson.py  the full Casida/BSE problem (B != 0): paired, and
+                              its symmetric forms need (A - B)^1/2, which a
+                              matrix-free action does not give; its trial
+                              space is split by pair rows over the ranks
+  BSE/bse_upfolded.py         the upfolded BSE: non-symmetric, its roots
+                              possibly complex
+  CC/eom.py                   EOM-CC: non-Hermitian biorthogonal (pyscf
+                              davidson_nosym1)
 """

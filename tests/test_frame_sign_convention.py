@@ -6,20 +6,20 @@ grid rows without moving a point. What the sign does control is ROW ORDER, and
 anything indexed by a fixed grid row -- a gradient, a frozen adjoint, a
 regression pin on the factors -- sees a row permutation as a discontinuity.
 
-`atomic_frames` used to read the sign off the environment, as an odd moment
-sum_j w_j (dhat_j . e_k)^3 with the first moment as fallback. Both vanish
-identically for an axis with no neighbour projection, i.e. the out-of-plane axis
-of ANY planar environment, so every atom of water fell through to eigh's
-arbitrary sign. That is two defects at once: not reproducible across LAPACK
-builds, and discontinuous exactly at the reflection-symmetric geometries.
+A sign read off the environment as an odd moment sum_j w_j (dhat_j . e_k)^3,
+with the first moment as fallback, vanishes identically for an axis with no
+neighbour projection, i.e. the out-of-plane axis of ANY planar environment, so
+every atom of water would fall through to eigh's arbitrary sign. That is two
+defects at once: not reproducible across LAPACK builds, and discontinuous
+exactly at the reflection-symmetric geometries; `atomic_frames` avoids both.
 
 No convention can be continuous everywhere -- equivariance at a symmetric
 geometry would force an axis to equal its own negative -- so the test of the
-replacement is not continuity everywhere but: total, deterministic, continuous
+convention is not continuity everywhere but: total, deterministic, continuous
 THROUGH planarity, covariant, and leaving both the energy and the grid itself
 untouched. The last is exact rather than approximate: the two conventions
-produce the SAME point set in a different row order, which is what keeps an SCF
-checkpoint written under the retired rule consistent with a fit built now.
+produce the SAME point set in a different row order, which keeps an SCF
+checkpoint written under one rule consistent with a fit built under the other.
 """
 import os
 import sys
@@ -31,12 +31,12 @@ from pyscf import df as pyscf_df
 from pyscf import dft, gto
 from scipy.spatial.transform import Rotation
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.separable_ri import (_FRAME_DECAY, _FRAME_SIGN_REFS,
-                                   atomic_frames, atomic_points,
-                                   build_separable_ri,
-                                   molecular_points_covariant,
-                                   optimize_atomic_radii)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.factorization.separable_ri import (FRAME_DECAY, _FRAME_SIGN_REFS,
+                                                 atomic_frames, atomic_points,
+                                                 build_separable_ri,
+                                                 molecular_points_covariant,
+                                                 optimize_atomic_radii)
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 
 COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
@@ -45,7 +45,8 @@ COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
 def _water(theta=0.0):
     """Water with one H rotated out of the molecular plane by `theta` radians.
 
-    theta = 0 is planar, which is where the old sign rule was undetermined;
+    theta = 0 is planar, which is where the environment-moment sign rule is
+    undetermined;
     theta of either sign moves through it.
     """
     y, z = 0.7572, -0.4692
@@ -54,11 +55,11 @@ def _water(theta=0.0):
                  basis='cc-pvdz', unit='Angstrom', verbose=0)
 
 
-def _old_sign_rule(mol, axes_by_atom, decay=_FRAME_DECAY):
-    """The retired environment-moment rule, for comparison only.
+def _old_sign_rule(mol, axes_by_atom, decay=FRAME_DECAY):
+    """The environment-moment sign rule, for comparison only.
 
-    Takes the axes as LINES (which the replacement does not change) and applies
-    the old sign choice, so the two conventions can be swept side by side.
+    Takes the axes as LINES (which the convention does not change) and applies
+    the moment sign choice, so the two conventions can be swept side by side.
     """
     coords = np.asarray(mol.atom_coords())
     out = np.array(axes_by_atom, dtype=float, copy=True)
@@ -122,7 +123,7 @@ if __name__ == '__main__':
           f'{worst_det:.2e}   {"OK" if ok1 else "FAIL"}')
 
     # 2. Continuity THROUGH planarity, which is the defect. Sweep one H through
-    #    the molecular plane and watch the frame; the retired rule is swept
+    #    the molecular plane and watch the frame; the moment rule is swept
     #    alongside on the same axes, so the comparison isolates the sign.
     print('\n2. frame continuity through the planar geometry (theta = 0):')
     thetas = np.linspace(-0.02, 0.02, 21)
@@ -211,8 +212,8 @@ if __name__ == '__main__':
     #    row order. Only the axes as lines place a point, and those are
     #    sign-independent (including through the degenerate-subspace branch,
     #    where e_a depends on `fixed` only via the sign-invariant
-    #    (ref.fixed)*fixed). So an SCF checkpoint converged under the retired
-    #    convention stays consistent with a fit built under this one.
+    #    (ref.fixed)*fixed). So an SCF checkpoint converged under one
+    #    convention stays consistent with a fit built under the other.
     print('\n5. retired and reference conventions give the SAME grid as a set:')
     ok5, worst_same = True, 0.0
     for theta in (0.0, 0.05, -0.05):

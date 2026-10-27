@@ -42,22 +42,14 @@ from pyscf import dft, gto
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,         # noqa: E402
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,         # noqa: E402
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates   # noqa: E402
-from src.Base.isdf_jk import isdf_jk                                 # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force                                 # noqa: E402
+from src.Base.numerics.numerics import numerics_of
 from src.properties.excitations import SurfaceSpec, surface_of       # noqa: E402
-import src.gradients.qp_space_time as qp_space_time                  # noqa: E402
-
-#: The test molecules' geometries, Angstrom.
-SYSTEMS = {
-    'water': 'O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692',
-    'formaldehyde': ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
-                     'H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123'),
-    'ethylene': ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
-                 'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; '
-                 'H 0.0 -0.923 -1.238'),
-}
+import src.gradients.gwbse.qp_space_time as qp_space_time                  # noqa: E402
+from tests.isdf_test_grid import g1
 
 #: The seeded distortion of formaldehyde and ethylene, Bohr: no symmetry is
 #: left to zero a force component or the force sum.
@@ -83,6 +75,15 @@ HF_TRANSLATION_BAR = 1e-9
 KS_TRANSLATION_BAR = 1e-9
 
 
+SYSTEMS = {
+    'water': 'O 0.0 0.0 0.1173; H 0.0 0.7572 -0.4692; H 0.0 -0.7572 -0.4692',
+    'formaldehyde': ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
+                     'H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123'),
+    'ethylene': ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
+                 'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; '
+                 'H 0.0 -0.923 -1.238'),
+}
+
 def molecule(name):
     mol = gto.M(atom=SYSTEMS[name], basis='cc-pvdz', verbose=0)
     if name == 'water':
@@ -94,7 +95,7 @@ def molecule(name):
 
 def factory(xc, reference='df'):
     def scf_factory(mol):
-        mf = (isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri')
+        mf = (isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
               if reference == 'isdf-k' else dft.RKS(mol, xc=xc).density_fit())
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
@@ -109,8 +110,8 @@ def sop_chain(mol, xc, reference='df'):
     spec = SurfaceSpec(GroundState('dft', xc), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics={'sliced': True, 'fit': 'rows',
-                                 'bse_adjoint': 'grid'})
+                       numerics=numerics_of({'sliced': True, 'fit': 'rows',
+                                 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       factory(xc, reference))
 
@@ -132,7 +133,7 @@ def fd_residuals(chain, mol, grad, components, h, refit=False):
         om = {}
         for k in (2, 1, -1, -2):
             if refit:
-                chain.sop_poles.clear()
+                chain.conventions.sop_poles.clear()
             om[k] = chain.excitation(at(mol, atom, axis, k * h))
         fd = (8.0 * (om[1] - om[-1]) - (om[2] - om[-2])) / (12.0 * h)
         out.append(float(grad[atom, axis] - fd))
@@ -152,16 +153,16 @@ def test_the_pole_set_is_fitted_once_and_held(water_pbe0, monkeypatch):
     """Every pole-model state has a frozen set after the reference solve, and
     no displaced energy fits another or changes the one on file."""
     mol, chain, _, _ = water_pbe0
-    assert sorted(chain.sop_poles) == sorted(int(p) for p in chain.qp_set), \
+    assert sorted(chain.resolved.sop_poles) == sorted(int(p) for p in chain.resolved.qp_set), \
         'every frontier state is on the pole model at water'
-    frozen = {p: v.copy() for p, v in chain.sop_poles.items()}
+    frozen = {p: v.copy() for p, v in chain.resolved.sop_poles.items()}
     fits = []
     real_fit = qp_space_time.sop_from_wc
     monkeypatch.setattr(qp_space_time, 'sop_from_wc',
                         lambda *a, **k: fits.append(1) or real_fit(*a, **k))
     chain.excitation(at(mol, 0, 2, 1e-2))
     assert not fits, 'a displaced geometry re-fitted its poles'
-    for p, poles in chain.sop_poles.items():
+    for p, poles in chain.resolved.sop_poles.items():
         assert np.array_equal(poles, frozen[p]), p
 
 
@@ -170,11 +171,11 @@ def test_refreeze_fits_the_poles_at_the_new_reference(water_pbe0):
     mol, chain, _, _ = water_pbe0
     moved = at(mol, 0, 2, 5e-2)
     fresh = chain.refreeze(moved)
-    assert fresh.sop_poles == {}, 'the reference pole set was carried over'
+    assert fresh.resolved.sop_poles == {}, 'the reference pole set was carried over'
     fresh.excitation(moved)
-    assert sorted(fresh.sop_poles) == sorted(chain.sop_poles)
-    assert any(not np.array_equal(fresh.sop_poles[p], chain.sop_poles[p])
-               for p in chain.sop_poles), 'the new reference fitted nothing'
+    assert sorted(fresh.resolved.sop_poles) == sorted(chain.resolved.sop_poles)
+    assert any(not np.array_equal(fresh.resolved.sop_poles[p], chain.resolved.sop_poles[p])
+               for p in chain.resolved.sop_poles), 'the new reference fitted nothing'
 
 
 # ---------------------------------- (b) Hartree-Fock: the chain's own floor
@@ -184,7 +185,7 @@ def test_the_hartree_fock_sop_force_follows_its_energy(name, components, h, bar)
     mol = molecule(name)
     chain = sop_chain(mol, 'hf')
     grad, _ = chain.excitation_gradient()
-    assert chain.sop_poles, 'no state took the pole model'
+    assert chain.resolved.sop_poles, 'no state took the pole model'
     translation = np.abs(grad.sum(axis=0)).max()
     assert translation < HF_TRANSLATION_BAR, translation
     diff = fd_residuals(chain, mol, grad, components, h)
@@ -223,13 +224,13 @@ def test_the_range_separated_sop_force_follows_its_energy(reference):
 def test_poles_refit_per_geometry_fail_the_gate(water_pbe0):
     """The gate can fail: the per-geometry fit is 2.6e-5 off on water."""
     mol, chain, grad, _ = water_pbe0
-    frozen = {p: v.copy() for p, v in chain.sop_poles.items()}
+    frozen = {p: v.copy() for p, v in chain.resolved.sop_poles.items()}
     try:
         diff = fd_residuals(chain, mol, grad, KS_COMPONENTS[:2], KS_STEP,
                             refit=True)
     finally:
-        chain.sop_poles.clear()
-        chain.sop_poles.update(frozen)
+        chain.conventions.sop_poles.clear()
+        chain.conventions.sop_poles.update(frozen)
     assert np.abs(diff).max() > 10 * KS_BAR, diff
 
 

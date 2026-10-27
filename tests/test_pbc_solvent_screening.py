@@ -48,7 +48,7 @@ from src.SingleReference.Periodic.pbc_solvent_screening import (
     SlabDielectricEnvironment, build_dfintegrals_screened, solvent_cohsex_kpts,
     reaction_kernel_mixed, reaction_field_form, _planar_grid)
 
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 
 def check(ok, label, detail=''):

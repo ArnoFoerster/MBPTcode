@@ -1,5 +1,5 @@
 """Gates for src/properties/band_shape.py and the line-shape branch of
-`rates.fc_weighted_dos`.
+`franck_condon.fc_weighted_dos`.
 
 Every reference is independent of the generating function: the Poisson
 progression convolved with scipy's Voigt profile, the displaced-oscillator
@@ -17,12 +17,13 @@ from scipy.stats import norm, poisson
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
-                                GAUSSIAN_FWHM_PER_SIGMA, HARTREE_TO_CM,
-                                HARTREE_TO_EV, HARTREE_WAVELENGTH_NM)
+from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+                                         GAUSSIAN_FWHM_PER_SIGMA, HARTREE_TO_CM,
+                                         HARTREE_TO_EV, HARTREE_WAVELENGTH_NM)
 from src.properties.band_shape import (band_grid, band_shape, fwhm,
                                        gaussian_limit_fwhm, peak)
-from src.properties.rates import TRAPEZOID, fc_weighted_dos
+from src.properties.franck_condon import TRAPEZOID, fc_weighted_dos
+from tests.pins import assert_same
 
 EV = 1.0 / HARTREE_TO_EV
 CM = 1.0 / HARTREE_TO_CM
@@ -134,7 +135,7 @@ def test_many_soft_modes_reach_the_gaussian_limit():
     is what removes the third cumulant; the error must fall with them
     (measured 9.7e-3, 7.5e-4, 4.9e-5 in the width and 3.3e-2, 2.2e-3, 1.5e-4
     in the separation). Stiffer than 300 cm^-1 the band is a progression and
-    its FWHM no longer tracks the second cumulant.
+    its FWHM does not track the second cumulant.
     """
     lam = 0.2 * EV
     errors = []
@@ -186,10 +187,13 @@ def test_band_shape_reads_the_rate_density_at_the_photon_gaps():
     r = spectrum(S_MODES, MODES, ROOM, g, l, points_per_width=2)
     e = r['energies']
     kw = dict(broadening=g / GAUSSIAN_FWHM_PER_SIGMA, lorentzian=0.5 * l)
-    assert np.array_equal(r['fc_emission'],
-                          fc_weighted_dos(e - E00, S_MODES, MODES, ROOM, **kw))
-    assert np.array_equal(r['fc_absorption'],
-                          fc_weighted_dos(E00 - e, S_MODES, MODES, ROOM, **kw))
+    # the test evaluates the density again: to a few ulp
+    assert_same(r['fc_emission'],
+                fc_weighted_dos(e - E00, S_MODES, MODES, ROOM, **kw),
+                unit='1', quantity='root', label='emission')
+    assert_same(r['fc_absorption'],
+                fc_weighted_dos(E00 - e, S_MODES, MODES, ROOM, **kw),
+                unit='1', quantity='root', label='absorption')
     # the two are different functions: the band is not symmetric about E00
     assert np.abs(r['fc_emission'] - r['fc_absorption']).max() > \
         0.1 * r['fc_emission'].max()

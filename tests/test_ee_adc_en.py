@@ -5,25 +5,31 @@ What has to hold:
     unchanged, and so is the supermatrix's MP zeroth order;
   * the spin-orbital, spin-free and density-fitted routes agree to machine
     precision under dressing, for every channel combination. That is the real
-    check on ee_en's spin-resolved denominators: <pq||pq> = J - delta K is the
-    only rule they encode, and a slip in it would move the same-spin and
+    check on the spin-resolved denominators (EpsteinNesbet.dressed_doubles_block):
+    <pq||pq> = J - delta K is the only rule they encode, and a slip in it would
+    move the same-spin and
     opposite-spin configurations differently -- invisible in the spin-orbital
     route (where the spin bookkeeping sits inside g) but not in the spin-free
     one;
-  * ADC(1) refuses the option, since it carries no amplitudes to dress.
+  * ADC(1) refuses the option, since it carries no amplitudes to dress;
+  * en_dress=True means hole-hole + particle-particle in every ADC.
 """
 import numpy as np
 import pytest
 
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (
+from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
-    get_antisymmetrized_spin_eri)
+    get_antisymmetrized_spin_eri, get_coulomb_exchange_diagonals)
 from src.SingleReference.ADC.eeADC import (ee_utils, ee_en, ee_spin_blocks as psb,
                                      ee_u_sigma_full as pus,
                                      ee_r_sigma as prs, ee_r_sigma_df as pdf)
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+from src.SingleReference.ADC.base import (ADCSolverRestricted,
+                                          ADCSolverUnrestricted)
+from src.SingleReference.EpsteinNesbet import (epstein_nesbet_shift,
+                                               validate_en_dress)
 
 ATOMS = ['H 0 0 0; F 0 0 0.917', 'Li 0 0 0; H 0 0 1.6',
          'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587']
@@ -47,12 +53,46 @@ def _exact_B(eri, norb):
 
 
 def test_default_channels_are_hh_pp():
-    assert ee_en.validate_dress(True) == {'hh': True, 'pp': True, 'hp': False}
-    assert ee_en.validate_dress(None) is None
-    with pytest.raises(ValueError):
-        ee_en.validate_dress({'hh': False, 'pp': False})
-    with pytest.raises(ValueError):
-        ee_en.validate_dress({'nonsense': True})
+    """EE-ADC checks en_dress with the one EpsteinNesbet validator, on its
+    own keys: the doubles channels. The IP/EA keys it does not implement are
+    refused by name, as is a dict that switches nothing on."""
+    keys = ee_en.DRESS_KEYS
+    assert validate_en_dress(True, keys=keys) == {'hh': True, 'pp': True}
+    assert validate_en_dress(None, keys=keys) is None
+    assert validate_en_dress(False, keys=keys) is None
+    with pytest.raises(ValueError, match='switches no channel on'):
+        validate_en_dress({'hh': False, 'pp': False}, keys=keys)
+    for key in ('nonsense', 'singles', 'shift', 'spin_adapted'):
+        with pytest.raises(ValueError, match=key):
+            validate_en_dress({'hh': True, key: True}, keys=keys)
+
+
+@pytest.mark.parametrize('nocc', [2, 4])
+def test_hhpp_layout_places_the_cross_pairs(nocc):
+    """epstein_nesbet_shift in the [i,j,a,b] layout is the [a,b,i,j] one
+    transposed, hole-particle cross pairs included (EE-ADC's spin-orbital
+    route reads it in that layout)."""
+    norb = 10
+    rng = np.random.default_rng(3)
+    g = rng.normal(size=(norb,) * 4)
+    for hp in (False, True):
+        pphh = epstein_nesbet_shift(g, nocc, layout='pphh', hh=True, pp=True, hp=hp)
+        hhpp = epstein_nesbet_shift(g, nocc, layout='hhpp', hh=True, pp=True, hp=hp)
+        assert np.array_equal(hhpp, pphh.transpose(2, 3, 0, 1)), hp
+
+
+def test_true_means_hh_pp_in_every_adc():
+    """en_dress=True dresses the hole-hole and particle-particle channels in
+    the charged (IP/EA) solvers exactly as in EE-ADC."""
+    hh_pp = {'hh': True, 'pp': True}
+    assert validate_en_dress(True) == hh_pp
+    assert validate_en_dress(True, keys=ee_en.DRESS_KEYS) == hh_pp
+    mol = gto.M(atom=ATOMS[0], basis='sto-3g', verbose=0)
+    assert ADCSolverRestricted(scf.RHF(mol).run(), level='adc3',
+                               en_dress=True).en_dress == hh_pp
+    assert ADCSolverUnrestricted(scf.UHF(mol).run(), level='adc3',
+                                 matrix_free=True,
+                                 en_dress=True).en_dress == hh_pp
 
 
 @pytest.mark.parametrize('atom', ATOMS)
@@ -73,7 +113,7 @@ def test_only_the_doubles_denominator_is_dressed(atom, dress):
     assert np.abs(d_ia_mp - d_ia_en).max() < 1e-14      # singles untouched
     assert np.abs(d_mp - d_en).max() > 1e-8             # doubles dressed
 
-    J, K = ee_en.jk_from_V(eri.transpose(0, 2, 1, 3))
+    J, K = get_coulomb_exchange_diagonals(eri.transpose(0, 2, 1, 3))
     sb_mp = ee_en.en_denominators_spin_free(eps_sp, J, K, no, nv, None)[1]
     sb_en = ee_en.en_denominators_spin_free(eps_sp, J, K, no, nv, dress)[1]
     for key in ('aa', 'bb'):
@@ -91,7 +131,7 @@ def test_spin_free_denominator_matches_spin_orbital(atom, dress):
     nocc, norb = mol.nelectron, len(eps)
     no, nv = nocc // 2, (norb - nocc) // 2
     d_so = ee_en.en_denominators_spin_orbital(eps, g, nocc, dress)[0]
-    J, K = ee_en.jk_from_V(eri.transpose(0, 2, 1, 3))
+    J, K = get_coulomb_exchange_diagonals(eri.transpose(0, 2, 1, 3))
     d_sf = ee_en.en_denominators_spin_free(eps_sp, J, K, no, nv, dress)[0]
     ref = psb.from_spin_orbital(d_so, 'oovv', nocc, norb)
     # ee_en defines the six blocks an antisymmetric doubles tensor actually

@@ -25,6 +25,14 @@ DIRECT-RPA polarizability, the response W is built from; with the CPHF value a
 finite field gives, 1.3923 times larger here, the classical side over-screens
 by exactly that factor and the compensation fails at 39 % of the swing.
 
+THE TWO SIDES ENTER THE QUASIPARTICLE EQUATION DIFFERENTLY. A partner in the
+QM region polarizes through Sigma_c, which the G0W0 Newton realizes at each
+level's Z; a classical site enters through Duchemin's Eq. (18), which G0W0 adds
+to the root whole, after the solve (`reaction_field.shift_after_solve`). The
+site leaves Z unchanged (the Casida route's W carries no site), so the
+partition statement is MM x Z = QM, level by level: for the gap,
+Z_LUMO dE_LUMO^MM - Z_HOMO dE_HOMO^MM = dGap^QM.
+
 BASIS-SET SUPERPOSITION SETS A LONGER RANGE THAN THE CLEARANCE GUARD. The two
 partitions do not share a basis -- the QM one has the partner's functions and
 the MM one does not -- so the comparison only means something where that
@@ -39,16 +47,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto
 
-from src.Base.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV,
-                                MIN_SITE_TO_QM_DISTANCE)
-from src.Base.environment import attached_environment
-from src.Base.polarizable_sites import (PolarizableSites,
-                                        calibrated_site_alphas,
-                                        finite_field_polarizability,
-                                        sites_for_molecule)
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV,
+                                         MIN_SITE_TO_QM_DISTANCE)
+from src.Base.environment_seam import attached_environment
+from src.environments.polarizable_sites import (PolarizableSites,
+                                                calibrated_site_alphas,
+                                                finite_field_polarizability,
+                                                sites_for_molecule)
+from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from tests.reference_scf import rhf_conv_1e12
 
 BASIS = 'cc-pvdz'
 Z_OXYGEN = 0.117
@@ -62,22 +72,52 @@ DIMER_SEPARATION = 9.0
 #: the papers' compensation is 0.01 eV on a 0.32 eV swing; anything under this
 #: fraction of the swing is a gap that did not notice the partition moving
 COMPENSATION = 0.2
-
-
-def rhf(mol):
-    mf = scf.RHF(mol)
-    mf.conv_tol = 1e-12
-    mf.kernel()
-    assert mf.converged
-    return mf
+#: MM x Z against QM, relative: the compensation the two partitions reached
+#: when both sides were Z-renormalized (0.12 % measured at 10 Bohr).
+PARTITION_TOL = 1.3e-3
+#: Hartree, the central-difference step of the quasiparticle equation's slope.
+SLOPE_STEP = 1e-5
 
 
 def gw_levels(mf, nocc, environment=None, extra=0):
     """Quasiparticle energies in eV, from HOMO - extra to LUMO + extra."""
+    return gw_levels_and_weights(mf, nocc, environment, extra)[0]
+
+
+def gw_levels_and_weights(mf, nocc, environment=None, extra=0):
+    """(quasiparticle energies in eV, their Z), from HOMO - extra to LUMO +
+    extra. Z = 1 / f'(w) of the equation f(w) = w - eps - <Sigma_x - v_xc> -
+    Sigma_c(w) the run itself solved, at its root, by a central difference:
+    the Casida route returns the root alone. Each Z is filed under the level
+    its equation starts from, eps_p, since the states may be solved in a
+    thread pool."""
     states = list(range(nocc - 1 - extra, nocc + 1 + extra))
-    with attached_environment(mf, environment):
-        out = calc_qp_energy(mf, mode='casida', state=states)
-    return np.array([out[p]['GW'] for p in states])
+    weights = {}
+    solve = qp_energy.solve_qp_equation_pole_strength
+
+    def slope_recorded(func, e_start, **kwargs):
+        root = solve(func, e_start, **kwargs)
+        w = float(np.ravel(root)[0])
+        df = (np.ravel(func(np.array([w + SLOPE_STEP])))[0]
+              - np.ravel(func(np.array([w - SLOPE_STEP])))[0]) / (2 * SLOPE_STEP)
+        weights[float(e_start)] = 1.0 / df
+        return root
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(qp_energy, 'solve_qp_equation_pole_strength', slope_recorded)
+        with attached_environment(mf, environment):
+            out = calc_qp_energy(mf, mode='casida', state=states)
+    assert len(weights) == len(states)
+    return (np.array([out[p]['GW'] for p in states]),
+            np.array([weights[float(mf.mo_energy[p])] for p in states]))
+
+
+def renormalized_gap_move(mf, nocc, environment, levels):
+    """The gap move of a classical environment with each frontier level's
+    move taken at its own Z, Z_LUMO dE_LUMO - Z_HOMO dE_HOMO (eV): what a
+    partner inside Sigma_c moves the gap by."""
+    moved, z = gw_levels_and_weights(mf, nocc, environment)
+    return float(np.diff(z * (moved - levels))[0])
 
 
 def mean_field_gap(mf, nocc):
@@ -98,10 +138,11 @@ def solute():
     """Water on its own: the gas-phase reference both partitions are measured
     against, and the QM molecule of the MM partition."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    mf = rhf(mol)
+    mf = rhf_conv_1e12(mol)
     nocc = mol.nelectron // 2
     levels = gw_levels(mf, nocc)
-    return mol, mf, nocc, levels[1] - levels[0], mean_field_gap(mf, nocc)
+    return (mol, mf, nocc, levels[1] - levels[0], mean_field_gap(mf, nocc),
+            levels)
 
 
 @pytest.fixture(scope='module')
@@ -113,14 +154,14 @@ def argon(solute):
     from a ghost partner, the mean-field gap change, and how much of the
     frontier orbitals sits on the partner.
     """
-    mol_a, mf_a, nocc, gap, hf_gap = solute
+    mol_a, mf_a, nocc, gap, hf_gap, levels = solute
     out = {}
     for r in (NEAR, FAR):
         z = Z_OXYGEN + r * BOHR_TO_ANGSTROM
         partner = gto.M(atom=f'Ar 0 0 {z}', basis=BASIS, verbose=0)
         together = gto.M(atom=f'{WATER}; Ar 0 0 {z}', basis=BASIS, verbose=0)
         ghost = gto.M(atom=f'{WATER}; ghost-Ar 0 0 {z}', basis=BASIS, verbose=0)
-        mf_d, mf_g = rhf(together), rhf(ghost)
+        mf_d, mf_g = rhf_conv_1e12(together), rhf_conv_1e12(ghost)
         nd, ng = together.nelectron // 2, ghost.nelectron // 2
 
         coords, alphas = sites_for_molecule(partner)
@@ -136,6 +177,8 @@ def argon(solute):
             'qm': np.diff(gw_levels(mf_d, nd))[0] - gap,
             'mm': np.diff(gw_levels(mf_a, nocc, environment=sites))[0] - gap,
             'mm_cphf': np.diff(gw_levels(mf_a, nocc, environment=over))[0] - gap,
+            'mm_z': renormalized_gap_move(mf_a, nocc, sites, levels),
+            'mm_cphf_z': renormalized_gap_move(mf_a, nocc, over, levels),
             'basis': np.diff(gw_levels(mf_g, ng))[0] - gap,
             'mean_field': mean_field_gap(mf_d, nd) - hf_gap,
             'weight': partner_weight(together, mf_d, {3}, (nd - 1, nd)),
@@ -159,7 +202,7 @@ def symmetric_dimer():
     mol_a = gto.M(atom='; '.join(first), basis=BASIS, verbose=0)
     mol_b = gto.M(atom='; '.join(second), basis=BASIS, verbose=0)
     mol_d = gto.M(atom='; '.join(first + second), basis=BASIS, verbose=0)
-    mf_a, mf_d = rhf(mol_a), rhf(mol_d)
+    mf_a, mf_d = rhf_conv_1e12(mol_a), rhf_conv_1e12(mol_d)
     na, nd = mol_a.nelectron // 2, mol_d.nelectron // 2
     coords, alphas = sites_for_molecule(mol_b)
     sites = PolarizableSites(coords, alphas, unit='Bohr', mol=mol_a)
@@ -179,14 +222,19 @@ def symmetric_dimer():
 def test_the_gap_does_not_notice_the_partition_moving(argon):
     """Argon at 10 Bohr, as one calibrated site or as part of the QM region.
     Water's quasiparticle gap closes by 5.327 meV when argon joins the QM
-    region and by 5.334 meV when argon is a classical site instead: the swing
-    is compensated to 0.007 meV, 0.12 % of it, where the papers' own figure is
-    0.01 eV on 0.32, i.e. 3 %. The gap closes either way -- both a hole and an
-    added electron are stabilised by the polarization they induce."""
+    region. As a classical site argon moves the HOMO by +3.402 and the LUMO by
+    -2.123 meV, exactly their Eq. (18) shifts (5.525 meV on the gap); taken at
+    the levels' own Z (HOMO 0.9507, LUMO 0.9893, from the slope of the
+    equation the MM run solved) that is 5.334 meV, and the swing is
+    compensated to 0.0065 meV, 0.12 % of it, where the papers' own figure is
+    0.01 eV on 0.32, i.e. 3 %. Without Z the two partitions differ by 3.7 %,
+    so the whole-shift placement is what this test sees. The gap closes either
+    way -- both a hole and an added electron are stabilised by the
+    polarization they induce."""
     far = argon[FAR]
     assert far['qm'] < 0.0 and far['mm'] < 0.0
-    assert abs(far['qm'] - far['mm']) < COMPENSATION * abs(far['qm'])
-    assert abs(far['qm'] - far['mm']) * 1e3 < 0.05
+    assert abs(far['qm'] - far['mm_z']) < PARTITION_TOL * abs(far['qm'])
+    assert abs(far['qm'] - far['mm']) > 10 * PARTITION_TOL * abs(far['qm'])
     assert abs(far['qm']) * 1e3 == pytest.approx(5.327, abs=0.05)
 
 
@@ -243,13 +291,14 @@ def test_the_two_partitions_have_to_share_a_basis(argon):
     The clearance guard does not protect against this. 7 Bohr is outside
     MIN_SITE_TO_QM_DISTANCE, where the induced-dipole model is defined; the
     basis overlap that ruins the COMPARISON reaches further out than the
-    orbital overlap that ruins the MODEL."""
+    orbital overlap that ruins the MODEL. (Both partitions at the levels'
+    own Z, as in the test above: 27.260 meV for the CPHF site against 27.053.)"""
     near, far = argon[NEAR], argon[FAR]
     assert near['clearance'] == pytest.approx(NEAR, abs=1e-6)
     assert near['clearance'] > MIN_SITE_TO_QM_DISTANCE
     assert abs(far['basis']) < 0.05 * abs(far['qm'])
     assert abs(near['basis']) > 0.9 * abs(near['qm'])
-    assert abs(near['qm'] - near['mm_cphf']) < 0.02 * abs(near['qm'])
+    assert abs(near['qm'] - near['mm_cphf_z']) < 0.02 * abs(near['qm'])
 
 
 def test_a_symmetric_dimer_does_not_carry_the_statement(symmetric_dimer):

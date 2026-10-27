@@ -2,7 +2,7 @@
 point, q-resolved k-point sampling, and the symmetry-adapted variant.
 
 This is the Lu-Ying / Yeh-Morales line of ISDF, NOT the Duchemin-Blase
-separable RI of `Base/separable_ri.py`. The two produce the same
+separable RI of `Base/factorization/separable_ri.py`. The two produce the same
 factorization and share nothing else: there are no atom-centred grids, no
 auxiliary basis, and no RI-V fit here.
 
@@ -47,11 +47,12 @@ import scipy.linalg
 from pyscf.pbc import tools
 from pyscf.pbc.dft import numint
 
-#: Ridge on the ISDF normal equations. The Gram matrix Z is Hermitian PSD by
-#: construction but is deliberately driven towards rank deficiency -- more
-#: interpolation points means a better fit AND a worse-conditioned Z -- so the
-#: solve is regularized rather than assumed safe. Relative to trace(Z)/n.
-DEFAULT_REGULARIZATION = 1e-10
+from src.Base.numerics.constants import (PBC_ISDF_CHOLESKY_STOP,
+                                         PBC_ISDF_REGULARIZATION,
+                                         PBC_KERNEL_NEGATIVE_TOL)
+from src.SingleReference.Periodic.pbc_integrals import (get_momentum_transfer_map,
+                                                        kpoint_matches)
+from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
 
 
 def uniform_grid(cell, mesh=None):
@@ -140,8 +141,6 @@ def check_isdf_low_dim(cell, kpts, coulG_fn=None):
        `check_low_dim_support`, which the four DF builders call and this route
        -- a fifth consumer of the same `coulG_fn` seam -- did not.
     """
-    from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
-
     if getattr(cell, 'low_dim_ft_type', None) == 'inf_vacuum':
         raise ValueError(
             "cell.low_dim_ft_type='inf_vacuum' is not usable with the ISDF "
@@ -182,7 +181,36 @@ def _gram_column(Phi_a, Phi_b, p):
     return _density_matrix_column(Phi_a, p) * _density_matrix_column(Phi_b, p).conj()
 
 
-def select_points_cholesky(Phi_a, Phi_b=None, npoints=None, tol=1e-10):
+def pivoted_cholesky(d, column, npoints, stop, dtype):
+    """(points, residuals) of a pivoted Cholesky on a PSD matrix S that is
+    never formed: `d` is its diagonal, `column(p)` its column p.
+
+    residuals[k] is the Schur-complement diagonal at the moment pivot k was
+    taken; the loop stops early once it falls to `stop` times the first. `dtype`
+    is that of the Cholesky rows (real for a real S).
+    """
+    ngrid = d.shape[0]
+    R = np.zeros((npoints, ngrid), dtype=dtype)
+    points = np.empty(npoints, dtype=int)
+    residuals = np.empty(npoints)
+    dmax0 = d.max()
+    for k in range(npoints):
+        p = int(np.argmax(d))
+        residuals[k] = d[p]
+        if d[p] <= stop * dmax0:
+            points, residuals = points[:k], residuals[:k]
+            break
+        points[k] = p
+        col = column(p)
+        if k:
+            col = col - R[:k].conj().T @ R[:k, p]
+        R[k] = col / np.sqrt(d[p])
+        d = np.maximum(d - (R[k].real ** 2 + R[k].imag ** 2), 0.0)
+    return points, residuals
+
+
+def select_points_cholesky(Phi_a, Phi_b=None, npoints=None,
+                           tol=PBC_ISDF_CHOLESKY_STOP):
     """Interpolation points as the first `npoints` pivots of a pivoted Cholesky
     on the pair-density Gram matrix S.
 
@@ -200,33 +228,16 @@ def select_points_cholesky(Phi_a, Phi_b=None, npoints=None, tol=1e-10):
     if npoints is None or npoints > ngrid:
         npoints = ngrid
 
-    d = _gram_diagonal(Phi_a, Phi_b)
-    R = np.zeros((npoints, ngrid), dtype=np.complex128)
-    points = np.empty(npoints, dtype=int)
-    residuals = np.empty(npoints)
-
-    dmax0 = d.max()
-    for k in range(npoints):
-        p = int(np.argmax(d))
-        residuals[k] = d[p]
-        if d[p] <= tol * dmax0:
-            points, residuals, R = points[:k], residuals[:k], R[:k]
-            break
-        points[k] = p
-        col = _gram_column(Phi_a, Phi_b, p)
-        if k:
-            col = col - R[:k].conj().T @ R[:k, p]
-        R[k] = col / np.sqrt(d[p])
-        d = d - (R[k].real ** 2 + R[k].imag ** 2)
-        np.maximum(d, 0.0, out=d)
-    return points, residuals
+    return pivoted_cholesky(_gram_diagonal(Phi_a, Phi_b),
+                            lambda p: _gram_column(Phi_a, Phi_b, p),
+                            npoints, tol, np.complex128)
 
 
-def interpolating_vectors(Phi_a, Phi_b, points, regularization=DEFAULT_REGULARIZATION):
+def interpolating_vectors(Phi_a, Phi_b, points, regularization=PBC_ISDF_REGULARIZATION):
     """zeta, shape (npoints, ngrid): the least-squares solution of Z zeta = C.
 
     C = S[points, :], Z = S[points, points]. Hermitian PSD, solved by Cholesky
-    with a relative ridge (see DEFAULT_REGULARIZATION).
+    with a relative ridge (see PBC_ISDF_REGULARIZATION).
     """
     Phi_b = Phi_a if Phi_b is None else Phi_b
     A_a = Phi_a[points] @ Phi_a.conj().T          # (npts, ngrid)
@@ -279,7 +290,7 @@ def coulomb_matrix(cell, zeta, weight, coulG_fn=None, kpt=None, mesh=None,
 
 
 def build_isdf_gamma(cell, mo_coeff, npoints=None, mesh=None, coulG_fn=None,
-                     regularization=DEFAULT_REGULARIZATION, nmo_a=None,
+                     regularization=PBC_ISDF_REGULARIZATION, nmo_a=None,
                      ke_cutoff=None, check_kernel=True, alpha=None):
     """(X, V, info) for the Gamma-point THC factorization.
 
@@ -362,7 +373,6 @@ def kpoint_minus_map(cell, kpts, tol=1e-8):
 
     The inverse permutation of `get_momentum_transfer_map`'s rows.
     """
-    from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
     kplus = get_momentum_transfer_map(cell, kpts, tol=tol)
     kminus = np.empty_like(kplus)
     for q in range(len(kpts)):
@@ -376,7 +386,8 @@ def collocation_kpts(cell, coords, mo_coeff, kpts):
             for k, c in zip(np.asarray(kpts), mo_coeff)]
 
 
-def select_points_cholesky_kpts(Phi_list, npoints=None, tol=1e-10):
+def select_points_cholesky_kpts(Phi_list, npoints=None,
+                                tol=PBC_ISDF_CHOLESKY_STOP):
     """Interpolation points from the q=0 Gram matrix summed over k.
 
     S^0[r, r'] = sum_k |A^k(r, r')|^2, real and PSD. Same pivoted Cholesky as
@@ -396,30 +407,18 @@ def select_points_cholesky_kpts(Phi_list, npoints=None, tol=1e-10):
     for Phi in Phi_list:
         d += np.einsum('ri,ri->r', Phi, Phi.conj(), optimize=True).real ** 2
 
-    R = np.zeros((npoints, ngrid))
-    points = np.empty(npoints, dtype=int)
-    residuals = np.empty(npoints)
-    dmax0 = d.max()
-    for k in range(npoints):
-        p = int(np.argmax(d))
-        residuals[k] = d[p]
-        if d[p] <= tol * dmax0:
-            points, residuals, R = points[:k], residuals[:k], R[:k]
-            break
-        points[k] = p
+    def column(p):
         col = np.zeros(ngrid)
         for Phi in Phi_list:
             a = Phi @ Phi[p].conj()
             col += a.real ** 2 + a.imag ** 2
-        if k:
-            col = col - R[:k].T @ R[:k, p]
-        R[k] = col / np.sqrt(d[p])
-        d = np.maximum(d - R[k] ** 2, 0.0)
-    return points, residuals
+        return col
+
+    return pivoted_cholesky(d, column, npoints, tol, np.float64)
 
 
 def interpolating_vectors_q(Phi_list, kminus, q, points,
-                            regularization=DEFAULT_REGULARIZATION):
+                            regularization=PBC_ISDF_REGULARIZATION):
     """zeta^q on the grid, shape (npoints, ngrid), complex.
 
     Solves Z^q zeta = C^q with C^q[mu, r] = sum_k A^{k-q}(r_mu, r) conj(A^k(r_mu, r)).
@@ -435,7 +434,7 @@ def interpolating_vectors_q(Phi_list, kminus, q, points,
     return scipy.linalg.solve(Z, C, assume_a='her')
 
 
-def assert_kernel_admissible(coulG, q=None, tol=1e-10):
+def assert_kernel_admissible(coulG, q=None, tol=PBC_KERNEL_NEGATIVE_TOL):
     """A negative Coulomb kernel makes V^q indefinite. Refuse it here.
 
     V^q = sum_G v(q+G) ahat_mu(G) conj(ahat_nu(G)) is a nonnegative combination
@@ -502,7 +501,7 @@ def coulomb_matrix_q(cell, zeta, coords, weight, q, coulG_fn=None, mesh=None,
 
 
 def build_isdf_kpts(cell, mo_coeff, kpts, npoints=None, mesh=None,
-                    coulG_fn=None, regularization=DEFAULT_REGULARIZATION,
+                    coulG_fn=None, regularization=PBC_ISDF_REGULARIZATION,
                     ke_cutoff=None, check_kernel=True, alpha=None):
     """(X, V, info) for the k-point THC factorization.
 
@@ -559,7 +558,7 @@ def isdf_prepare(cell, mo_coeff, kpts, npoints=None, alpha=None, mesh=None,
             'X': [P[points] for P in Phi], 'info': info}
 
 
-def isdf_vq(ctx, q, coulG_fn=None, regularization=DEFAULT_REGULARIZATION,
+def isdf_vq(ctx, q, coulG_fn=None, regularization=PBC_ISDF_REGULARIZATION,
             check_kernel=True):
     """V^q for ONE transfer, from an `isdf_prepare` context. (npoints, npoints)."""
     zeta = interpolating_vectors_q(ctx['Phi'], ctx['kminus'], q, ctx['points'],
@@ -567,69 +566,6 @@ def isdf_vq(ctx, q, coulG_fn=None, regularization=DEFAULT_REGULARIZATION,
     return coulomb_matrix_q(ctx['cell'], zeta, ctx['coords'], ctx['weight'],
                             ctx['kpts'][q], coulG_fn=coulG_fn, mesh=ctx['mesh'],
                             check_kernel=check_kernel)
-
-
-def build_isdf_kpts_per_q(cell, mo_coeff, kpts, npoints, mesh=None,
-                          coulG_fn=None, regularization=DEFAULT_REGULARIZATION,
-                          ke_cutoff=None, check_kernel=True):
-    """DIAGNOSTIC ONLY: the same factorization with q-DEPENDENT points.
-
-    Returns (X_by_q, V, info) where X_by_q[q][k] is (npoints_q, nmo). The
-    extra q index on X is the whole reason this cannot be used in production:
-    it is exactly the separability that the q=0-points assumption buys, and
-    losing it would put back the O(N_k^2) the method exists to remove. This
-    exists so the cost of that assumption can be MEASURED rather than
-    believed.
-
-    Note the per-q point counts need not agree with each other or with q=0:
-    the pair densities at different transfers have different numerical ranks,
-    which is itself worth seeing.
-    """
-    cell, mesh = resolve_grid(cell, mesh, ke_cutoff)
-    check_isdf_low_dim(cell, kpts, coulG_fn)
-    coords, weight = uniform_grid(cell, mesh)
-    Phi = collocation_kpts(cell, coords, mo_coeff, kpts)
-    kminus = kpoint_minus_map(cell, kpts)
-
-    X_by_q, V, counts = [], [], []
-    for q in range(len(kpts)):
-        pts = (select_points_cholesky_kpts(Phi, npoints)[0] if q == 0
-               else _select_points_q(Phi, kminus, q, npoints))
-        zeta = interpolating_vectors_q(Phi, kminus, q, pts, regularization)
-        X_by_q.append([P[pts] for P in Phi])
-        V.append(coulomb_matrix_q(cell, zeta, coords, weight, kpts[q],
-                                  coulG_fn=coulG_fn, mesh=mesh))
-        counts.append(len(pts))
-    return X_by_q, V, {'kminus': kminus, 'counts': counts, 'coords': coords,
-                       'weight': weight,
-                       'mesh': cell.mesh if mesh is None else mesh}
-
-
-def _select_points_q(Phi_list, kminus, q, npoints, tol=1e-10):
-    """Pivoted Cholesky on S^q for q != 0 -- diagnostic only (per_q_points)."""
-    ngrid = Phi_list[0].shape[0]
-    rho = [np.einsum('ri,ri->r', P, P.conj(), optimize=True).real for P in Phi_list]
-    d = np.zeros(ngrid)
-    for k in range(len(Phi_list)):
-        d += rho[kminus[q, k]] * rho[k]
-    R = np.zeros((npoints, ngrid), dtype=np.complex128)
-    points = np.empty(npoints, dtype=int)
-    dmax0 = d.max()
-    for j in range(npoints):
-        p = int(np.argmax(d))
-        if d[p] <= tol * dmax0:
-            points = points[:j]
-            break
-        points[j] = p
-        col = np.zeros(ngrid, dtype=np.complex128)
-        for k, Phi_k in enumerate(Phi_list):
-            Phi_kq = Phi_list[kminus[q, k]]
-            col += (Phi_kq @ Phi_kq[p].conj()) * (Phi_k @ Phi_k[p].conj()).conj()
-        if j:
-            col = col - R[:j].conj().T @ R[:j, p]
-        R[j] = col / np.sqrt(d[p])
-        d = np.maximum(d - (R[j].real ** 2 + R[j].imag ** 2), 0.0)
-    return points
 
 
 def thc_eri_kpts(X, V, kminus, k1, k2, k3, k4):
@@ -645,18 +581,11 @@ def thc_eri_kpts(X, V, kminus, k1, k2, k3, k4):
     return np.einsum('mij,mn,nkl->ijkl', P12, V[q], P34, optimize=True)
 
 
-def thc_eri_kpts_per_q(X_by_q, V, kminus, k1, k2, k3, k4):
-    """`thc_eri_kpts` for the q-dependent-points diagnostic."""
-    q = kminus[k1, k2]
-    Xq = X_by_q[q]
-    P12 = np.einsum('mi,mj->mij', Xq[k1].conj(), Xq[k2], optimize=True)
-    P34 = np.einsum('mk,ml->mkl', Xq[k3].conj(), Xq[k4], optimize=True)
-    return np.einsum('mij,mn,nkl->ijkl', P12, V[q], P34, optimize=True)
-
-
 # ---------------------------------------------------------------------------
 # Symmetry-adapted ISDF (Yeh & Morales, JCTC 2024, 20, 3184, Sec. 4)
 # ---------------------------------------------------------------------------
+#
+# No driver calls this section yet; its tests are its only users.
 #
 # The interpolating vectors zeta^q are fitted only for q in the IRREDUCIBLE
 # wedge. For a general q, pick S with qbar = S q inside the wedge; then
@@ -738,9 +667,9 @@ def mesh_invariant_operations(cell, kpts, R_cart, tol=1e-8):
     1.7e-2 relative while the plain route reaches 3.8e-7. Restricted to the
     invariant subgroup it tracks the plain route instead.
 
-    Checking that each q maps INTO the mesh is not sufficient and was the
-    original bug here: individual momenta can land on mesh points while the
-    mesh as a whole is not invariant.
+    Checking that each q maps INTO the mesh is not sufficient: individual
+    momenta can land on mesh points while the mesh as a whole is not
+    invariant.
     """
     scaled = cell.get_scaled_kpts(kpts)
     scaled = scaled - scaled[0]
@@ -750,8 +679,7 @@ def mesh_invariant_operations(cell, kpts, R_cart, tol=1e-8):
         rot = (kpts @ R.T) @ binv
         hit = np.zeros(len(kpts), dtype=bool)
         for i, r in enumerate(rot):
-            d = scaled - r
-            m = np.where(np.linalg.norm(np.round(d) - d, axis=1) < tol)[0]
+            m = kpoint_matches(scaled, r, tol)
             if len(m) == 1:
                 hit[m[0]] = True
         if hit.all():
@@ -783,8 +711,7 @@ def q_star_map(cell, kpts, R_cart, tol=1e-8):
         rep[q], op[q] = here, 0
         for s, R in enumerate(R_cart):
             rot = (R @ kpts[q]) @ binv                  # scaled coordinates
-            d = scaled - rot
-            hit = np.where(np.linalg.norm(np.round(d) - d, axis=1) < tol)[0]
+            hit = kpoint_matches(scaled, rot, tol)
             if len(hit) == 1 and rep[hit[0]] < 0:
                 rep[hit[0]], op[hit[0]] = here, s
     if (rep < 0).any():
@@ -815,19 +742,16 @@ def check_degenerate_blocks_intact(mo_energy, nmo_kept=None, tol=1e-6):
 
 
 def build_isdf_kpts_symm(cell, mo_coeff, kpts, npoints, mesh=None,
-                         coulG_fn=None, regularization=DEFAULT_REGULARIZATION,
+                         coulG_fn=None, regularization=PBC_ISDF_REGULARIZATION,
                          ke_cutoff=None, check_kernel=True):
     """(X_by_op, V_ibz, info) -- the factorization with the IBZ reduction.
 
     X_by_op[s][k] is (npoints, nmo) with entries phi^k_i(R_s r_mu).
     V_ibz[j] is the Coulomb matrix at the j-th irreducible transfer.
     """
-    cell, mesh = resolve_grid(cell, mesh, ke_cutoff)
-    check_isdf_low_dim(cell, kpts, coulG_fn)
-    coords, weight = uniform_grid(cell, mesh)
-    Phi = collocation_kpts(cell, coords, mo_coeff, kpts)
-    kminus = kpoint_minus_map(cell, kpts)
-    points, residuals = select_points_cholesky_kpts(Phi, npoints)
+    ctx = isdf_prepare(cell, mo_coeff, kpts, npoints=npoints, mesh=mesh,
+                       ke_cutoff=ke_cutoff, coulG_fn=coulG_fn)
+    cell, coords, points = ctx['cell'], ctx['coords'], ctx['points']
     r_mu = coords[points]
 
     R_all = cartesian_rotations(cell)
@@ -835,23 +759,20 @@ def build_isdf_kpts_symm(cell, mo_coeff, kpts, npoints, mesh=None,
     R_cart = R_all[keep]
     ibz, rep, op = q_star_map(cell, kpts, R_cart)
 
-    V_ibz = []
-    for q in ibz:
-        zeta = interpolating_vectors_q(Phi, kminus, q, points, regularization)
-        V_ibz.append(coulomb_matrix_q(cell, zeta, coords, weight, kpts[q],
-                                      coulG_fn=coulG_fn, mesh=mesh))
+    V_ibz = [isdf_vq(ctx, q, coulG_fn=coulG_fn, regularization=regularization,
+                     check_kernel=check_kernel) for q in ibz]
 
     X_by_op = []
     for R in R_cart:
         rot = r_mu @ R.T
         X_by_op.append(collocation_kpts(cell, rot, mo_coeff, kpts))
 
-    info = {'points': points, 'residuals': residuals, 'kminus': kminus,
-            'ibz': ibz, 'rep': rep, 'op': op, 'R_cart': R_cart,
-            'ngrid': len(coords), 'weight': weight, 'coords': coords,
-            'nq_solved': len(ibz), 'nq_total': len(kpts),
+    info = {'points': points, 'residuals': ctx['info']['residuals'],
+            'kminus': ctx['kminus'], 'ibz': ibz, 'rep': rep, 'op': op,
+            'R_cart': R_cart, 'ngrid': len(coords), 'weight': ctx['weight'],
+            'coords': coords, 'nq_solved': len(ibz), 'nq_total': len(kpts),
             'nop_group': len(R_all), 'nop_mesh_invariant': len(keep),
-            'mesh': cell.mesh if mesh is None else mesh}
+            'mesh': ctx['mesh']}
     return X_by_op, V_ibz, info
 
 

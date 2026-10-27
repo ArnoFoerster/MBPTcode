@@ -1,7 +1,8 @@
 """Derivative couplings d_IJ = <Psi_I | d/dR Psi_J> between BSE states, and
 between the ground state and one of them.
 
-The second of the two electronic couplings `rates.py` is written around. The
+The second of the two electronic couplings `photophysics/rates.py` is written
+around. The
 spin-orbit one is a matrix element of a GIVEN operator over the Casida vectors
 and costs nothing beyond them. This one differentiates the WAVEFUNCTION, so it
 sees the geometry dependence of the orbitals and of the amplitudes -- the same
@@ -88,17 +89,17 @@ neglected quantity, and whose known failure is the behaviour at a conical
 intersection.
 """
 import numpy as np
-from pyscf import gto
 
-from src.Base.constants import NUCLEAR_FD_STEP
+from src.Base.numerics.constants import (EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR,
+                                         NUCLEAR_FD_STEP)
+from src.Base.geometry.geometry import displaced
+from src.Base.pyscf.pyscf_interface import occupied_count
 from src.SingleReference.LinearResponse.linear_response import check_normalization
-from src.properties.spin_orbit import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
-from src.properties.surface import driven_chain
+from src.gradients.state_identity import (aligned_overlap, mo_overlap,
+                                          state_overlap)
+from src.gradients.surface import driven_chain, provides, require
 
-#: Bohr displacement of one Cartesian component. The central difference has an
-#: O(h^2) truncation error and an O(eps/h) noise floor from the Casida vectors'
-#: own convergence, the same trade `FiniteDifferenceGradient` makes for an
-#: energy; a mean field converged to 1e-13 and a dense Casida support 1e-3.
+
 class DerivativeCouplings:
     """d_IJ over the ground state and a set of BSE roots, in 1/Bohr.
 
@@ -130,129 +131,6 @@ class DerivativeCouplings:
         return (f'derivative couplings over the ground state and roots '
                 f'{list(self.states)} [overlap finite difference, '
                 f'h = {self.step} Bohr]')
-
-
-def mo_overlap(mol_a, mo_a, mol_b, mo_b):
-    """T_pq = <phi_p^A | phi_q^B>, the MO overlap between two geometries.
-
-    The atomic-orbital cross overlap is exact for any separation; the basis
-    functions of the two geometries sit on different centres and `intor_cross`
-    integrates them against each other.
-    """
-    s_ao = gto.mole.intor_cross('int1e_ovlp', mol_a, mol_b)
-    return np.asarray(mo_a).T @ s_ao @ np.asarray(mo_b)
-
-
-def state_overlap(t, nocc, x_a, y_a, x_b, y_b):
-    """(1 + n_A, 1 + n_B) overlaps <Psi_I(A)|Psi_J(B)>, ground state at 0.
-
-    The transported RPA metric of the module docstring. Row and column 0 are
-    the reference determinant, whose ground-to-excited block carries the
-    sqrt(2) of the singlet spin adaptation -- the same factor
-    `oscillator_strengths` and `spin_orbit.ground_state_element` carry for
-    <X|X> - <Y|Y> = 1.
-
-    Exact to O(h^2) in the displacement: the dropped pieces are the alpha-beta
-    spin cross term of the determinant overlap and the T^vo (T^oo)^-1 T^ov
-    screening of T^vv, both quadratic in the occupied-virtual block of T, which
-    is itself O(h). That is the order of the central difference taken of it.
-    """
-    t = np.asarray(t, float)
-    nvir = t.shape[0] - nocc
-    x_a, y_a = check_normalization(x_a, y_a)
-    x_b, y_b = check_normalization(x_b, y_b)
-    n_a, n_b = x_a.shape[1], x_b.shape[1]
-    xa = x_a.reshape(nocc, nvir, n_a)
-    ya = y_a.reshape(nocc, nvir, n_a)
-    xb = x_b.reshape(nocc, nvir, n_b)
-    yb = y_b.reshape(nocc, nvir, n_b)
-    t_oo, t_ov = t[:nocc, :nocc], t[:nocc, nocc:]
-    t_vo, t_vv = t[nocc:, :nocc], t[nocc:, nocc:]
-    # (T^oo)^-1 runs ket-occupied by bra-occupied; the closed-shell reference
-    # overlap is det(T^oo) once per spin string.
-    inv_oo = np.linalg.inv(t_oo)
-    det2 = np.linalg.det(t_oo) ** 2
-
-    out = np.zeros((n_a + 1, n_b + 1))
-    out[0, 0] = det2
-    out[0, 1:] = GROUND_SPIN_FACTOR * det2 * np.einsum(
-        'jbJ,jb->J', xb - yb, inv_oo @ t_ov, optimize=True)
-    out[1:, 0] = GROUND_SPIN_FACTOR * det2 * np.einsum(
-        'iaI,ai->I', xa - ya, t_vo @ inv_oo, optimize=True)
-    for u, v in ((xa, xb), (ya, yb)):
-        moved = np.einsum('iaI,ji,ab->jbI', u, inv_oo, t_vv, optimize=True)
-        block = det2 * np.einsum('jbI,jbJ->IJ', moved, v, optimize=True)
-        out[1:, 1:] += EXCITED_SPIN_FACTOR * (block if u is xa else -block)
-    return out
-
-
-def align_roots(s, nstates):
-    """(order, sign, weight) matching displaced roots to the first `nstates`.
-
-    The displaced solve returns its roots in its own energy order and with an
-    arbitrary overall sign, and both are fixed against the reference by the
-    overlap matrix the coupling is built from: each reference root takes the
-    unused displaced root of largest |S|, then the sign that makes S positive.
-
-    `weight` is the smallest |S| any assignment had to accept. A value far
-    below one is a root the reference cannot identify -- a near-degenerate pair
-    or a genuine crossing inside the displacement -- and the coupling built
-    from it is a number about two states that are not the two asked for.
-    """
-    s = np.asarray(s, float)
-    block = np.abs(s[1:, 1:])
-    order, sign = np.zeros(nstates, int), np.ones(nstates)
-    # Largest element first, so an unambiguous root is never left with whatever
-    # column the scan order hands an ambiguous one.
-    rows, columns, weight = set(range(nstates)), set(range(block.shape[1])), 1.0
-    while rows:
-        i, j = max(((i, j) for i in rows for j in columns),
-                   key=lambda p: block[p])
-        order[i], sign[i] = j, (1.0 if s[1 + i, 1 + j] >= 0.0 else -1.0)
-        weight = min(weight, block[i, j])
-        rows.discard(i)
-        columns.discard(j)
-    return order, sign, float(weight)
-
-
-def follow_state(s, state):
-    """(index, weight, margin) of the displaced root that IS `state`.
-
-    `align_roots` assigns a whole manifold; this follows ONE state, which is
-    what a geometry optimization needs. The displaced root of largest |S| with
-    the reference state is the same state, whatever energy order it came back
-    in.
-
-    weight: |S| with the chosen root. Near 1 the identification is certain;
-            far below it the reference state has no counterpart in the
-            displaced manifold -- it left the solved window, or `nroots` is
-            too small to contain it.
-    margin: |S| of the best minus the runner-up. SMALL MARGIN IS THE DANGEROUS
-            CASE, and it is not the same as small weight: two roots that have
-            mixed share the reference character between them, so both overlaps
-            are moderate and neither is the state. Following the larger one
-            then picks a state by a coin toss the size of the margin.
-    """
-    row = np.abs(np.asarray(s, float)[1 + state, 1:])
-    if row.size == 0:
-        raise ValueError('no displaced roots to follow into')
-    order = np.argsort(row)[::-1]
-    best = int(order[0])
-    runner = float(row[order[1]]) if row.size > 1 else 0.0
-    return best, float(row[best]), float(row[best] - runner)
-
-
-def aligned_overlap(s, nstates):
-    """`s` with its displaced columns permuted and signed onto the reference.
-
-    Linear in the displaced vectors, so signing the columns of the overlap is
-    the same as signing the vectors and rebuilding it.
-    """
-    order, sign, weight = align_roots(s, nstates)
-    out = np.zeros((nstates + 1, nstates + 1))
-    out[:, 0] = s[:nstates + 1, 0]
-    out[:, 1:] = s[:nstates + 1, 1 + order] * sign[None, :]
-    return out, order, weight
 
 
 def nabla_mo(mol, mo):
@@ -305,10 +183,8 @@ def translational_sum(mol, mo, nocc, x, y, states=None):
 def spectrum_solve(source):
     """`solve(mol) -> (mf, omega, X, Y)` for a chain, composed surface or manifold.
 
-    Reaching for `_forward` is the deliberate cost of leaving the BSE and GW
-    code untouched, the same trade `spin_orbit.chain_manifolds` makes: the
-    forward pass returns the whole Casida spectrum and its eigenvectors, and
-    nothing in it depends on which root is selected.
+    The chain's `forward` returns the whole Casida spectrum and its
+    eigenvectors, and nothing in it depends on which root is selected.
 
     The mean field comes from the object's own accessor, never from
     `scf_factory`, so a surface standing in an environment is displaced inside
@@ -320,24 +196,16 @@ def spectrum_solve(source):
     """
     owner = getattr(source, 'chain', source)
     chain = driven_chain(owner)
-    holder = owner if hasattr(owner, 'mean_field') else chain
+    holder = owner if provides(owner, 'mean_field') else chain
+    mean_field = require(holder, 'mean_field', 'derivative_couplings')
+    states = require(chain, 'excited_states', 'derivative_couplings')
 
     def solve(mol):
-        mol, mf = holder.mean_field(mol)
-        omega, pieces = chain._forward(mol, mf)
-        return mf, omega, pieces[10], pieces[11]
+        mol, mf = mean_field(mol)
+        omega, x, y, _ = states(mol, mf)
+        return mf, omega, x, y
 
     return solve
-
-
-def displaced(mol, coords, atom, axis, step):
-    """`mol` with one Cartesian component moved by `step` Bohr."""
-    shift = np.zeros((mol.natm, 3))
-    shift[atom, axis] = step
-    out = mol.copy()
-    out.set_geom_(coords + shift, unit='Bohr')
-    out.build(False, False)
-    return out
 
 
 def derivative_couplings(source, mol=None, states=(0, 1), step=NUCLEAR_FD_STEP,
@@ -366,7 +234,7 @@ def derivative_couplings(source, mol=None, states=(0, 1), step=NUCLEAR_FD_STEP,
     states = tuple(sorted({int(n) for n in states}))
     mf0, omega0, x0, y0 = solve(mol)
     mol = mf0.mol if mol is None else mol
-    nocc = int(np.count_nonzero(np.asarray(mf0.mo_occ) > 0))
+    nocc = occupied_count(mf0)
     if states[-1] >= x0.shape[1]:
         raise ValueError(f'root {states[-1]} was asked for but the solve '
                          f'returned {x0.shape[1]} roots')
@@ -384,7 +252,9 @@ def derivative_couplings(source, mol=None, states=(0, 1), step=NUCLEAR_FD_STEP,
         carries from one displacement to the next, so the 6 natm of them are
         independent and `map_fn` may spread them over a process pool."""
         atom, axis, sign = job
-        mfd, om, xd, yd = solve(displaced(mol, crd, atom, axis, sign * step))
+        delta = np.zeros((mol.natm, 3))
+        delta[atom, axis] = sign * step
+        mfd, om, xd, yd = solve(displaced(mol, delta, crd))
         t = mo_overlap(mol, mf0.mo_coeff, mfd.mol, mfd.mo_coeff)
         s = state_overlap(t, nocc, x_ref, y_ref, xd, yd)
         s, order, w = aligned_overlap(s, nstates)

@@ -1,10 +1,6 @@
-# GENERATED CODE -- DF/RI variant of t2_1/t1_2/t2_2/t3_2/t1_3 numerators:
-# takes B_aa/B_bb (3-index RI
-# factors) instead of g_aaaa/g_abab/g_bbbb, never forming a norb^4-scale
-# integral block. Every OTHER density piece (overlap2, m2_*/m3_* cross-
-# terms) has no bracket integral factor at all and is reused UNCHANGED from
-# mpn_density_pieces_unrestricted.py.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_mpn_density_spin.py (generate_unrestricted).
+# DF/RI twins of the t2_1/t1_2/t2_2/t3_2/t1_3 numerators (UHF).
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

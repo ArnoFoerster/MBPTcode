@@ -1,4 +1,4 @@
-"""Gates for src/gradients/rpa_ground_state.py -- the cubic dRPA ground-state gradient.
+"""Gates for src/gradients/rpa/ground_state.py -- the cubic dRPA ground-state gradient.
 
 The analytic gradient is differenced against E_HF + E_c of the chain's own
 function (SCF, factors and energy redone at each displacement), on a distorted
@@ -12,15 +12,18 @@ import numpy as np
 import pytest
 from pyscf import df as pyscf_df, gto, scf
 
-from src.Base.separable_ri import shipped_radii_lookup
-from src.SingleReference.GW.quasi_boson import build_rpa_AB
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import shipped_radii_lookup
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.SingleReference.LinearResponse.space_time import (
     rpa_correlation_energy_space_time)
-from src.gradients.df_assembly import df_eri_mo
+from src.SingleReference.common.eri_blocks import df_eri_mo
 from src.gradients.grad_engine import correlation_gradient
-from src.gradients.quasi_boson_adjoint import RPAAdjoint as RPA
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.targets import rpa_partials
+from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.gwbse.targets import rpa_partials
+from tests.isdf_test_grid import g1
 
 BASIS = 'cc-pvdz'
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
@@ -28,7 +31,9 @@ H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
 
 def _converge(mf):
     """conv_tol_grad 1e-11: the Lagrangian assumes F_ia = 0."""
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -46,7 +51,7 @@ def scf_direct(mol):
 def water_df():
     mol = gto.M(atom=H2O_C1, basis=BASIS, verbose=0)
     mf = scf_df(mol)
-    return mol, mf, RPAGroundStateChain(mol, scf_df, mf=mf)
+    return mol, mf, RPAGroundStateChain(mol, scf_df, mf=mf, numerics=Numerics(isdf={'counts': g1(mol)}))
 
 
 def finite_difference(chain, mol, h=1e-4):
@@ -71,7 +76,7 @@ def finite_difference(chain, mol, h=1e-4):
 def test_total_gradient_vs_finite_difference(scf_factory):
     """dE/dR = dE_HF/dR + dE_c/dR against a finite difference of the SUM."""
     mol = gto.M(atom=H2O_C1, basis=BASIS, verbose=0)
-    chain = RPAGroundStateChain(mol, scf_factory)
+    chain = RPAGroundStateChain(mol, scf_factory, numerics=Numerics(isdf={'counts': g1(mol)}))
     g, e, diags = chain.total_gradient()
     assert e == pytest.approx(chain.energy()[0], abs=1e-12)
     assert diags['stationarity'] < 1e-9
@@ -129,7 +134,7 @@ def test_grid_error_against_the_dense_rpa_gradient_shrinks_with_the_grid(water_d
     mol, mf, chain = water_df
     e_dense, g_dense = _dense_df_reference(mol, mf)
     fine = RPAGroundStateChain(mol, scf_df, mf=mf,
-                               counts={'A1': 32, 'A2': 20, 'A3': 12, 'B1': 4})
+                               numerics=Numerics(isdf={'counts': {'A1': 32, 'A2': 20, 'A3': 12, 'B1': 4}}))
     for rung in (chain, fine):
         for el in ('O', 'H'):
             assert shipped_radii_lookup(el, BASIS, BASIS + '-ri',

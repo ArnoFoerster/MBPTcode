@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from pyscf import gto, scf
 from pyscf import solvent as pyscf_solvent
 
-from src.Base.solvent_screening import SolventScreening
+from src.environments.solvent_screening import SolventScreening
 
 
 def check(ok, label, detail=''):

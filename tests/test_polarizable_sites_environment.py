@@ -7,8 +7,8 @@ the chain calls through -- plus the one property that distinguishes it: the
 sites do NOT ride the molecule, so B carries no nuclear derivative and the
 whole geometry dependence sits in the field integrals.
 
-The field integral conventions underneath were pinned numerically before
-anything was built on them: `site_field` against a finite difference of the
+The field integral conventions underneath are pinned numerically:
+`site_field` against a finite difference of the
 potential with respect to a site (4e-11), and `site_field_aux_gradient`
 against a finite difference of `site_field` under a nuclear displacement
 (1e-11). Those are the two signs a reverse pass cannot recover from.
@@ -29,12 +29,12 @@ import numpy as np
 import pytest
 from pyscf import df, gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM, MIN_SITE_TO_QM_DISTANCE
-from src.Base.environment import Environment
-from src.Base.polarizable_sites import (PolarizableSites, response_matrix,
-                                        site_field)
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import SolventScreening
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, MIN_SITE_TO_QM_DISTANCE
+from src.Base.environment_seam import Environment
+from src.environments.polarizable_sites import (PolarizableSites, response_matrix,
+                                                site_field)
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import SolventScreening
 
 #: Bohr, on the auxiliary centres. Central, so the residual is O(h^2).
 H = 1e-4

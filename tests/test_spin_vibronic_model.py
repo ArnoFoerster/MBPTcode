@@ -30,8 +30,9 @@ import numpy as np
 import pytest
 import scipy.linalg
 
-from src.Base.constants import BOLTZMANN_HARTREE_PER_KELVIN
-from src.properties import rates
+from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
+from src.photophysics import rates
+from src.properties import franck_condon
 from src.properties.spin_vibronic import (mode_derivatives,
                                           second_order_derivative)
 
@@ -133,7 +134,7 @@ def golden_rule_explicit(delta_e, v_of_q, n=40):
 
 
 def rho(delta_e):
-    return rates.fc_weighted_dos(delta_e, [S_A], [OMEGA_A], TEMPERATURE,
+    return franck_condon.fc_weighted_dos(delta_e, [S_A], [OMEGA_A], TEMPERATURE,
                                  broadening=SIGMA)
 
 

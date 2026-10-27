@@ -20,8 +20,10 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import pytest
 from pyscf import ao2mo, gto, mcscf, scf
 
+from src.Solvers.active_space import solve
 from src.Solvers.active_space_solver import (ExactDiagonalizationSolver,
                                              PyscfFCISolver)
 
@@ -133,6 +135,15 @@ def run():
 
 def test_active_space_solvers():
     assert run()
+
+
+@pytest.mark.parametrize('name', ['pyscf-fci', 'fci', 'ccsdt', None])
+def test_an_unknown_backend_is_refused_by_name(name):
+    """A name `solve` does not dispatch on (a typo, a backend it does not have)
+    is refused, never handed to the default exact diagonalization."""
+    with pytest.raises(ValueError, match='not a backend of this driver'):
+        solve(name, {1: np.zeros((2, 2)), 2: np.zeros((2, 2, 2, 2))}, 2, 2,
+              None, None, None)
 
 
 if __name__ == '__main__':

@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import CASIDA_NORM_TOL
-from src.SingleReference.LinearResponse.davidson import oscillator_strengths
+from src.Base.numerics.constants import CASIDA_NORM_TOL
+from src.SingleReference.BSE.solve import oscillator_strengths
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization, from_pyscf)
 

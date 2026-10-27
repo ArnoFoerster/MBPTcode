@@ -22,15 +22,20 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
-                                HESSIAN_FD_STEP_RATIO, ISDF_GRID_ACCURACY,
-                                ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import _SHELL_ORDER
+from src.Base.numerics.constants import (HARTREE_TO_CM, HESSIAN_FD_ASYMMETRY_TOL,
+                                         HESSIAN_FD_NOISE_REL, HESSIAN_FD_STEP_RATIO,
+                                         ISDF_GRID_ACCURACY,
+                                         ISDF_HESSIAN_MIN_GRID, NUCLEAR_FD_STEP)
+from src.Base.factorization.isdf_jk import FrozenFrames, frozen_frames, isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import (SHELL_ORDER, atomic_points,
+                                                 resolve_isdf_grid)
 from src.properties.hessian import (check_step_scaling, displacement_list,
                                     gradient_at, hessian_from_gradients,
                                     numerical_hessian, translation_residual)
+from src.gradients.mean_field_surface import mean_field_force
 from src.properties.vibronic import normal_modes
+from tests.pins import assert_same
 
 ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
 #: Its carbon's frame turns fastest of the four atoms (2.8 rad/Bohr), which is
@@ -40,14 +45,14 @@ FORMALDEHYDE = ('C 0.0 0.0 -0.6035; O 0.0 0.0 0.7349; '
 
 
 def factory(route, xc='b3lyp', level=None):
-    """Converged mean fields: `level` names an ISDF_GRID_ACCURACY row, None
-    the 148-point default grid."""
+    """Converged mean fields: `level` names an ISDF_GRID_ACCURACY row (the
+    interpolated route has no default grid)."""
     counts = (None if level is None else
-              dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz'][level])))
+              dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz'][level])))
 
     def build(m):
         mf = dft.RKS(m, xc=xc) if xc else scf.RHF(m)
-        mf = (isdf_jk(mf, auxbasis='cc-pvdz-ri', counts=counts)
+        mf = (isdf_jk_with_force(mf, auxbasis='cc-pvdz-ri', counts=counts)
               if route == 'isdf'
               else mf.density_fit(auxbasis='cc-pvdz-jkfit'))
         if xc:
@@ -57,6 +62,11 @@ def factory(route, xc='b3lyp', level=None):
         mf.kernel()
         return mf
     return build
+
+
+def _at(mol, coords):
+    """`mol` moved to `coords` (Bohr)."""
+    return mol.set_geom_(coords, unit='Bohr', inplace=False)
 
 
 @pytest.fixture(scope='module')
@@ -90,8 +100,8 @@ def test_it_satisfies_the_sum_rule_better_than_the_analytic_route(both):
     identically -- it is d(sum_i g_i)/dR_j and sum_i g_i vanishes at every
     geometry -- so that sum measures nothing. The sum over the DISPLACED index
     is the check, and symmetrizing averages the two and reports half the real
-    violation as if it were the answer. An earlier version of this test read
-    the returned matrix and was measuring its own symmetrization.
+    violation as if it were the answer. Reading the returned matrix
+    measures its own symmetrization.
 
     Against pyscf's analytic Hessian on water/cc-pVDZ/B3LYP the honest
     comparison is 5.6e-08 to 5.1e-04, which is why the bound below is loose
@@ -149,34 +159,35 @@ def test_the_interpolated_route_is_refused_below_the_floor_grid(water):
     turn the clouds as the atoms move, so a coarse grid's surface is rough on
     the step's scale. On formaldehyde at 148 points per atom the asymmetry is
     7.6e-02 and the h -> 0 force constants are themselves wrong (a 1421 cm^-1
-    mode at 2646); at G2 the largest frequency error is 405 cm^-1.
+    mode at 2646); at the 16-point-per-shell G1 grid it is 405 cm^-1.
 
     The refusal comes at the first displaced mean field, before any force,
     and on water too, whose own asymmetry would pass: the floor is a property
     of the grid, not of the molecule it happens to be tried on.
     """
-    build = factory('isdf')
+    build = factory('isdf', level='G1')
     with pytest.raises(NotImplementedError, match='ISDF factors'):
         normal_modes(build(water))
     with pytest.raises(NotImplementedError, match=ISDF_HESSIAN_MIN_GRID):
         numerical_hessian(water, build)
     ch2o = gto.M(atom=FORMALDEHYDE, basis='cc-pvdz', verbose=0)
     with pytest.raises(NotImplementedError, match=r'\(16, 10, 6, 2\)'):
-        numerical_hessian(ch2o, factory('isdf', level='G2'))
+        numerical_hessian(ch2o, factory('isdf', level='G1'))
 
 
-@pytest.mark.parametrize('xc, bound', [('b3lyp', 15.0), (None, 40.0)])
+@pytest.mark.parametrize('xc, bound', [('b3lyp', 5.0), (None, 10.0)])
 def test_the_floor_grid_reproduces_the_fitted_frequencies(xc, bound):
     """On the floor grid formaldehyde's Hessian is smooth on the step's scale
     and its frequencies follow the density-fitted route's.
 
-    The bound is the floor grid's own curvature error, not finite-difference
-    noise: the largest difference is 11.2 cm^-1 on B3LYP and 34.5 on
-    Hartree-Fock (five times the exact exchange), and it is the same at
-    h = 4e-3 to 0.1 cm^-1. The 1421 cm^-1 mode the 148-point grid puts at
-    2646 sits at 1419.7. The asymmetry is 7.1e-06 (B3LYP) and 3.3e-05 (HF) of
-    the largest force constant; the HF one is above the noise floor, so the
-    forces are repeated at 2h and must grow it fourfold (measured 3.85).
+    With the frames frozen at the reference (`numerical_hessian`'s default)
+    the largest difference is 1.6 cm^-1 on B3LYP and 4.6 on Hartree-Fock, and
+    the asymmetry 4.5e-07 and 5.8e-07 of the largest force constant, below
+    the noise floor. On frames turning with each geometry it is 11.2 and
+    34.5 cm^-1 and 7.1e-06 and 3.3e-05: the orientation dependence of the
+    ISDF energy turned into curvature, five times larger on Hartree-Fock
+    with its five times the exact exchange. If the asymmetry is above the
+    noise floor the forces are repeated at 2h and must grow it fourfold.
     """
     ch2o = gto.M(atom=FORMALDEHYDE, basis='cc-pvdz', verbose=0)
     info = {}
@@ -204,3 +215,104 @@ def test_the_step_check_refuses_a_surface_rough_on_the_step_scale():
     floor = {'step': 1e-3, 'asymmetry': 2.493e-5, 'asymmetry_2h': 9.600e-5}
     check_step_scaling(floor)
     assert abs(floor['step_ratio'] - 3.85) < 0.01
+
+
+#: The force ladder's formaldehyde. Its carbon's two in-plane neighbour-tensor
+#: eigenvalues lie 3.2e-2 apart (relative), so the covariant frame turns its
+#: cloud at 18.9 rad/Bohr under an in-plane carbon displacement, against 2.8
+#: on `FORMALDEHYDE`: the same situation as DMABN's planar amine nitrogen
+#: (1.0e-2, 16.2 rad/Bohr).
+FORMALDEHYDE_LADDER = ('C 0 0 -0.5296; O 0 0 0.6742; '
+                       'H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123')
+
+
+def test_frozen_frames_are_the_reference_points_turned_with_the_molecule():
+    """At the reference the frozen frames place the covariant frames' points
+    to a few ulp; under a rigid motion the cloud moves with the molecule; under
+    an in-plane carbon step of 1e-3 Bohr the carbon cloud only translates
+    (and turns with the body frame: 2.1e-5 Bohr at most), where the
+    covariant frame swings its outer points by 0.30 Bohr."""
+    mol = gto.M(atom=FORMALDEHYDE_LADDER, basis='cc-pvdz', verbose=0)
+    counts, n_start = resolve_isdf_grid(ISDF_HESSIAN_MIN_GRID, 'cc-pvdz',
+                                        ['C', 'H', 'O'],
+                                        auxbasis='cc-pvdz-ri')
+    frames = FrozenFrames(mol)
+
+    def grid(m, f):
+        return isdf_grid(m, counts=counts, auxbasis='cc-pvdz-ri',
+                         n_start=n_start, frames=f)
+
+    turning = grid(mol, None)
+    assert_same(grid(mol, frames), turning, unit='1', quantity='root',
+                label='frozen frames at the reference')
+
+    c = mol.atom_coords()
+    t = np.array([0.3, -0.2, 0.1])
+    u = np.linalg.qr(np.array([[1.0, 0.2, 0.1], [0.3, 1.0, -0.2],
+                               [0.1, 0.4, 1.0]]))[0]
+    u *= np.sign(np.linalg.det(u))
+    moved = grid(_at(mol, c @ u + t), frames)
+    assert np.abs(moved - (turning @ u + t)).max() < 1e-10
+
+    c[0, 1] += NUCLEAR_FD_STEP
+    step = _at(mol, c)
+    _, radii, origins = isdf_grid(mol, counts=counts, auxbasis='cc-pvdz-ri',
+                                  n_start=n_start, return_info=True)
+    carbon = slice(0, len(atomic_points(radii['C'], origin=origins['C'])))
+    shift = np.array([0.0, NUCLEAR_FD_STEP, 0.0])
+    frozen_move = np.abs(grid(step, frames)[carbon] - turning[carbon]
+                         - shift).max()
+    turning_move = np.abs(grid(step, None)[carbon] - turning[carbon]
+                          - shift).max()
+    assert frozen_move < 1e-4
+    assert turning_move > 0.1
+
+
+def test_the_force_on_frozen_frames_is_the_slope_of_their_energy():
+    """The point chain of a mean field on frozen frames turns its clouds with
+    the body frame alone (`mean_field_point_chain`), and its force is then the
+    derivative of the energy those frames give. Frames frozen at the ladder
+    geometry, the force taken 0.01 Bohr away along the carbon's in-plane axis
+    (where the body frame is not the identity and the force is not zero by
+    symmetry), its carbon in-plane and oxygen axial components against a
+    central difference of the energy at h = 1e-4."""
+    mol = gto.M(atom=FORMALDEHYDE_LADDER, basis='cc-pvdz', verbose=0)
+    build = factory('isdf', level='G1')
+    frames = FrozenFrames(mol)
+    away = mol.atom_coords().copy()
+    away[0, 1] += 1e-2
+    h = 1e-4
+    with frozen_frames(frames):
+        force = np.asarray(mean_field_force(build(_at(mol, away))))
+        for ia, x in ((0, 1), (1, 2)):
+            energy = []
+            for sign in (+1, -1):
+                c = away.copy()
+                c[ia, x] += sign * h
+                energy.append(build(_at(mol, c)).e_tot)
+            slope = (energy[0] - energy[1]) / (2 * h)
+            assert abs(force[ia, x]) > 1e-3
+            assert abs(force[ia, x] - slope) < 1e-7
+
+
+def test_the_floor_grid_hessian_is_symmetric_where_a_frame_turns_fast():
+    """With every displaced mean field on the reference's frames the floor
+    grid's Hessian of the ladder formaldehyde is symmetric to the force noise
+    (2.2e-07 of the largest force constant) and its frequencies follow the
+    density-fitted route's (1.3 cm^-1). On turning frames the
+    same Hessian is refused, asymmetric by 2.0e-02, all of it in the carbon's
+    in-plane rows, whose force constant came out -0.088 Ha/Bohr^2 against
+    density fitting's 0.619 on LRC-wPBEh: an imaginary 1610 cm^-1 mode at a
+    geometry density fitting puts no saddle at. 0.02 Bohr off the symmetric
+    geometry it is the same (2.2e-02): the cause is the near-degenerate
+    neighbour tensor, not the symmetry."""
+    ch2o = gto.M(atom=FORMALDEHYDE_LADDER, basis='cc-pvdz', verbose=0)
+    info = {}
+    h_isdf = numerical_hessian(ch2o, factory('isdf', 'b3lyp',
+                                             ISDF_HESSIAN_MIN_GRID), info=info)
+    assert info['frozen_frames']['convention'] == 'reference-body-fixed'
+    assert info['asymmetry_rel'] < HESSIAN_FD_NOISE_REL
+    mf = factory('df', 'b3lyp')(ch2o)
+    w_df = normal_modes(mf, ch2o, hess=np.asarray(mf.Hessian().kernel()))[0]
+    w_isdf = normal_modes(mf, ch2o, hess=h_isdf)[0]
+    assert np.abs(w_isdf - w_df).max() * HARTREE_TO_CM < 5.0

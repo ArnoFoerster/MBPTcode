@@ -3,12 +3,14 @@ write without a memset, move no bit.
 
 `isdf_block_action` runs three numpy passes that no BLAS call covers: the
 Hadamard product of each row tile of Zt with P, the write of X_o^T (Zt * P)
-into owner order, and the batch's d z and reduced-slab updates. Each now runs
+into owner order, and the batch's d z and reduced-slab updates. Each runs
 on `row_map`'s threads, cut over rows, and a row block's first tile is
 copied into the buffer instead of added to a zeroed one, 0 + x = x but for
 the sign of an exact zero, which reaches no sum; later tiles add in as
-before. Every element is the one operation it was, so the action is gated
-BITWISE:
+usual. Every element is the one operation; against the baseline tree's run
+(another process, another computation) the action is gated to a few ulp
+(`assert_archive_same` of tests/pins.py), and the
+ranks of one run hold one set of bits:
 
   * against the baseline tree's action (BASELINE_COMMIT, unpacked and run
     in its own process on this process's inputs), Az and Bz of two batches,
@@ -23,9 +25,8 @@ BITWISE:
   * every rank returns rank 0's output bitwise;
   * at 1, 2 and 3 threads alike (`openmp_threads` patched), serially and at
     three ranks;
-  * and the gate is shown to fail: a first tile added into the buffer the
-    last vector left, instead of written, moves the bits, with one tile per
-    rank and with several.
+  * a first tile added into the buffer the last vector left, instead of
+    written, moves the bits, with one tile per rank and with several.
 
 The per-piece timers (`davidson_action_<piece>`) that ride the same loop are
 gated in tests/test_davidson_timings.py; the roots at the default tile stay
@@ -34,7 +35,6 @@ the baseline's by tests/test_probe_after_davidson.py.
 import os
 import subprocess
 import sys
-import tarfile
 import warnings
 from pathlib import Path
 
@@ -44,12 +44,16 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.utils.mpi_grid import run_simulated
+from tests.archived_tree import require_commit, unpack_commit
+from tests.archive_radii import install_current_radii
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse import davidson
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_block_action)
+from src.SingleReference.LinearResponse import block_actions
+from src.SingleReference.BSE.solve import isdf_bse_factors
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.isdf_test_grid import counts_at
+from tests.pins import THREAD_CAPS, assert_archive_same, bitwise
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -79,9 +83,6 @@ BATCHES = (3, 1)
 REPO = Path(__file__).resolve().parents[1]
 #: A commit before the threaded passes and the first-tile write.
 BASELINE_COMMIT = '8b5d2820f5ecb5920440048cbe307382c9040aa4'
-THREAD_CAPS = {name: '2' for name in
-               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
 #: The same actions on the unpacked baseline, on the inputs this process
 #: saved, in their own process.
 BASELINE_ACTIONS = '''
@@ -92,7 +93,16 @@ sys.path.insert(0, {archive!r})
 
 import numpy as np
 
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 from src.SingleReference.LinearResponse.davidson import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
@@ -129,7 +139,9 @@ def _system(geometry):
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+    # G1 leaves orbital densities unrepresented here (UnrepresentedOrbitals)
+    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
+                                counts=counts_at(mol, 'G2'))
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     eps = np.asarray(mf.mo_energy, float)
     rng = np.random.default_rng(nocc)
@@ -183,12 +195,9 @@ def parent(systems, tmp_path_factory):
     """The parent tree's Az and Bz of every case, keyed `<case>_b<batch>_A|B`."""
     out = tmp_path_factory.mktemp('block_action_trims_parent')
     tar = out.parent / f'{BASELINE_COMMIT}.tar'
-    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
-                           '-o', str(tar), BASELINE_COMMIT],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    with tarfile.open(tar) as fh:
-        fh.extractall(out)
+    require_commit(REPO, BASELINE_COMMIT)
+    unpack_commit(REPO, BASELINE_COMMIT, tar, out)
+    install_current_radii(out)
     inputs, npz = out / 'inputs.npz', out / 'actions.npz'
     saved = {}
     for name, s in systems.items():
@@ -209,18 +218,14 @@ def parent(systems, tmp_path_factory):
     return dict(np.load(npz))
 
 
-def bitwise(a, b):
-    """True when two arrays agree bit for bit, shape and dtype included."""
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
-
-
 def assert_parents(out, parent, key):
-    """Rank 0's batches bitwise the parent's, and every rank's rank 0's."""
+    """Rank 0's batches the parent's to a few ulp (the archived tree's run:
+    two computations), and every rank's rank 0's bitwise (one lockstep)."""
     for b, (A, B) in enumerate(out[0]):
-        assert bitwise(A, parent[f'{key}_b{b}_A']), (key, b, 'A')
-        assert bitwise(B, parent[f'{key}_b{b}_B']), (key, b, 'B')
+        assert_archive_same(A, parent[f'{key}_b{b}_A'], quantity='root',
+                            label=(key, b, 'A'))
+        assert_archive_same(B, parent[f'{key}_b{b}_B'], quantity='root',
+                            label=(key, b, 'B'))
     for rank_out in out[1:]:
         for (A, B), (A0, B0) in zip(rank_out, out[0]):
             assert bitwise(A, A0) and bitwise(B, B0), key
@@ -253,7 +258,7 @@ def test_every_thread_count_gives_the_parents_bits(systems, parent,
                                                    size, tile):
     """The passes cut over 1, 2 and 3 threads: benzene's 21 occupied rows
     and its tiles split unevenly over three, and the bits do not move."""
-    monkeypatch.setattr(davidson, 'openmp_threads', lambda: threads)
+    monkeypatch.setattr(block_actions, 'openmp_threads', lambda: threads)
     assert_parents(actions(systems['benzene'], size=size, tile=tile), parent,
                    f'benzene_bse_{size}_{tile}')
 
@@ -271,12 +276,12 @@ def test_a_first_tile_added_to_a_stale_buffer_moves_the_bits(systems, parent,
                                                              tile):
     """Every tile added in, the first too, onto what the last vector left in
     the owner-order buffer: the gate sees the missing write."""
-    real = davidson._owner_write
+    real = block_actions._owner_write
 
     def stale(T_owned, owners, Tb, first, threads):
         return real(T_owned, owners, Tb, False, threads)
 
-    monkeypatch.setattr(davidson, '_owner_write', stale)
+    monkeypatch.setattr(block_actions, '_owner_write', stale)
     out = actions(systems['water'], size=2, tile=tile)
     key = f'water_bse_2_{tile}'
     assert any(not bitwise(A, parent[f'{key}_b{b}_A'])

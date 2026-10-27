@@ -22,8 +22,8 @@ channel.
      name.
   6. The space-time route over 2 and 3 simulated ranks, on the doublet in both
      channels, with and without the omega = 0 row a BSE and a continuum read:
-     every rank's quasiparticle energies and W(0) are the serial ones, bit for
-     bit -- each reduced sum is a single tile here, so the ranks add exact
+     every rank's quasiparticle energies and W(0) are the serial ones to a
+     few ulp (two computations) -- each reduced sum is a single tile here, so the ranks add exact
      zeros -- and each rank inverts exactly its round-robin frequencies.
 
 Run as a script (`python tests/test_unrestricted_imaginary_axis.py`) or under
@@ -40,14 +40,17 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.solvent_screening import (attach_solvent_screening,
-                                        detach_solvent_screening)
-from src.Base.utils.mpi_grid import partition, run_simulated
+from src.environments.solvent_screening import (attach_solvent_screening,
+                                                detach_solvent_screening)
+from src.Base.utils.parallel.mpi_grid import partition
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
+from tests.isdf_test_grid import g1, g1_route
+from tests.pins import assert_same
 
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
 OH = 'O 0 0 0; H 0 0 0.97'
@@ -83,7 +86,8 @@ def _as_unrestricted(rhf, mean_field=scf.UHF, **kw):
 
 
 def _energies(mf, states, **kw):
-    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=list(states), **kw)
+    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=list(states),
+                         **{**g1_route(mf, kw.get('mode')), **kw})
     if isinstance(out, dict):
         out = [out[p]['GW'] for p in states]
     return np.asarray(out, float)
@@ -161,11 +165,13 @@ def test_evgw_on_the_unrestricted_routes():
     uhf = _as_unrestricted(rhf)
     for mode in ('imagfrequency', 'space-time'):
         ref = calc_qp_energy(rhf, selfenergy='GW', df=True, state='homo',
-                             mode=mode, self_consistency='evGW')
+                             mode=mode, self_consistency='evGW',
+                             **g1_route(rhf, mode))
         for channel in ('alpha', 'beta'):
             got = calc_qp_energy(uhf, selfenergy='GW', df=True, state='homo',
                                  mode=mode, self_consistency='evGW',
-                                 spin_channel=channel)
+                                 spin_channel=channel,
+                                 **g1_route(uhf, mode))
             assert abs(got - ref) < 1e-6, (mode, channel, got, ref)
 
 
@@ -173,7 +179,8 @@ def test_blocked_path_is_refused():
     mol = gto.M(atom=OH, basis=BASIS, spin=1, verbose=0)
     uhf = scf.UHF(mol).density_fit(auxbasis=AUX).run(conv_tol=1e-11)
     with pytest.raises(NotImplementedError, match='built for one spin'):
-        solve_qp_energy_space_time(uhf, mol, uhf.nelec, [2], freq_block=4)
+        solve_qp_energy_space_time(uhf, mol, uhf.nelec, [2], freq_block=4,
+                                   counts=g1(mol))
 
 
 def _space_time(uhf, factors, channel, kind, comm=None):
@@ -199,12 +206,6 @@ def _space_time(uhf, factors, channel, kind, comm=None):
     return qp, extras['w_static'], timings
 
 
-def _bitwise(a, b):
-    a, b = np.asarray(a), np.asarray(b)
-    return (a.dtype == b.dtype and a.shape == b.shape
-            and a.tobytes() == b.tobytes())
-
-
 @pytest.mark.parametrize('size', RANK_SIZES)
 @pytest.mark.parametrize('continuum', [False, True])
 def test_space_time_over_ranks(continuum, size):
@@ -213,19 +214,23 @@ def test_space_time_over_ranks(continuum, size):
     if continuum:
         attach_solvent_screening(uhf, solvent='water')
     try:
-        factors = separable_factors(uhf, mol, auxbasis=AUX)
+        factors = separable_factors(uhf, mol, auxbasis=AUX,
+                                    counts=g1(mol))
         for channel in ('alpha', 'beta'):
             for kind in ('window', 'diagonal'):
                 serial = _space_time(uhf, factors, channel, kind)
                 outs = run_simulated(
                     lambda c: _space_time(uhf, factors, channel, kind, c), size)
                 nrows = serial[2]['dyson_frequencies']
-                passenger = continuum or kind == 'diagonal'
-                static = nrows - 1 if passenger else None
+                # W(0) comes from the one static build, so no omega = 0 row
+                # rides along with the Dyson frequencies
+                static = None
                 for r, (qp, ws, t) in enumerate(outs):
                     where = (continuum, size, channel, kind, r)
-                    assert _bitwise(qp, serial[0]), where
-                    assert _bitwise(ws, serial[1]), where
+                    assert np.asarray(qp).dtype == np.asarray(serial[0]).dtype
+                    assert_same(qp, serial[0], quantity='continued',
+                                label=where)
+                    assert_same(ws, serial[1], quantity='root', label=where)
                     mine = [k for k in partition(nrows, r, size)
                             if k != static]
                     assert t['dyson_frequencies'] == len(mine), where

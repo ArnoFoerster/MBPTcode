@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import cc, gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals
+from src.Base.pyscf.pyscf_interface import DFIntegrals
 from src.SingleReference.ADC import (build_density_static_correction_restricted,
                                      build_static_correction)
 from src.SingleReference.ADC.cc_amplitudes import brueckner_reference

@@ -39,11 +39,11 @@ def build_operator(eps, g, nocc, level='adc3', en_dress=None):
     if level not in LEVELS:
         raise ValueError(f"level={level!r}; expected one of {LEVELS}")
     norb = len(eps)
-    o_ss, o_sd, o_dd = _dense._BLOCK_ORDERS[level]
+    o_ss, o_sd, o_dd = ee_utils.BLOCK_ORDERS[level]
     dims = ee_utils.dimensions(nocc, norb)
-    n_s, n_d = dims['n_s'], dims['n_d']
+    n_s = dims['n_s']
 
-    amps, zint, rho = _dense._ingredients(eps, g, nocc, norb, level,
+    amps, zint, rho = _dense.ingredients(eps, g, nocc, norb, level,
                                           None, None, None, en_dress)
     gb = ee_utils.g_blocks(g, nocc, norb)
     m_ss = _dense.m_ss(eps, g, nocc, norb, o_ss, amps, zint, rho).reshape(n_s, n_s)
@@ -51,7 +51,7 @@ def build_operator(eps, g, nocc, level='adc3', en_dress=None):
     if o_sd is None:                                    # ADC(1): singles only
         return (lambda v: m_ss @ v), np.diag(m_ss), dims
 
-    d_ijab, _, _ = ee_utils._denominators(eps, nocc)
+    d_ijab, _, _ = ee_utils.orbital_denominators(eps, nocc)
     I, J, A, B = ee_utils.configs_doubles(nocc, norb)
     d_diag = eps[A] + eps[B] - eps[I] - eps[J]
     if o_dd >= 1:

@@ -1,5 +1,7 @@
 """Small-q limits of the screened interaction for a SLAB.
 
+No driver calls this module yet: `pbc_wav` and the tests are its users.
+
 The long-wavelength limit is where a two-dimensional system stops resembling a
 three-dimensional one, and it is the accuracy-limiting step for a metallic
 slab. This module owns the analytic forms and the Brillouin-zone measure that
@@ -219,23 +221,26 @@ def _wigner_seitz_2d(c1, c2, nmax):
             if i == 0 and j == 0:
                 continue
             R = i * c1 + j * c2
-            poly = _clip_halfplane(poly, R, 0.5 * float(R @ R))
+            poly = clip_halfplane(poly, R, 0.5 * float(R @ R))
             if len(poly) < 3:
                 raise RuntimeError("mini-BZ construction collapsed")
     return _sort_ccw(np.array(poly))
 
 
-def _clip_halfplane(poly, normal, offset):
-    """Sutherland-Hodgman clip of a convex polygon to {x : x . normal <= offset}."""
+def clip_halfplane(poly, normal, offset, tol=0.0):
+    """Sutherland-Hodgman clip of a convex polygon to {x : x . normal <= offset}.
+
+    A vertex within `tol` of the line counts as inside, and an edge is cut only
+    where its ends lie more than `tol` on either side."""
     out = []
     n = len(poly)
     for i in range(n):
         p, q = poly[i], poly[(i + 1) % n]
         dp = float(p @ normal) - offset
         dq = float(q @ normal) - offset
-        if dp <= 0:
+        if dp <= tol:
             out.append(p)
-        if (dp < 0 < dq) or (dq < 0 < dp):
+        if (dp < -tol and tol < dq) or (dq < -tol and tol < dp):
             out.append(p + (q - p) * (dp / (dp - dq)))
     return out
 

@@ -1,16 +1,16 @@
 """Validates the DF/RI variant of MPnDensityDriverRestricted/Unrestricted's
 compute_delta_gamma3 against the
-existing dense pipeline, at both validation tiers section 4 of that plan
-calls for -- see tests/test_mp2_density_df.py's own docstring for the
-general two-tier strategy (exact-plumbing naux=norb^2, then realistic RI).
+existing dense pipeline, at two validation tiers -- see
+tests/test_mp2_density_df.py's own docstring for the general two-tier strategy
+(exact-plumbing naux=norb^2, then realistic RI).
 
 This additionally exercises BOTH the production (laplace_ntau=8, the
 Laplace-fused T3^(2) route -- restricted's hand-written
 _laplace_aaaaaa_contribution_df plus the DF+Laplace-composed gen_lap3_df
 pieces) and the non-Laplace oracle path (laplace_ntau=None, full T3^(2)
-materialized via the DF-dressed t3_2_*_numerator_df functions), since the
-plan explicitly calls for confirming DF and Laplace fusion compose cleanly
-on the same raw term list, not just that either works alone.
+materialized via the DF-dressed t3_2_*_numerator_df functions), to confirm that
+DF and Laplace fusion compose cleanly on the same raw term list, not just
+that either works alone.
 """
 import os
 import sys
@@ -22,7 +22,7 @@ from pyscf import gto, scf, df
 
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
-from src.Base.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
 
 
 def _max_diff(blocks_a, blocks_b):

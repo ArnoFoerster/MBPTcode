@@ -23,12 +23,15 @@ import numpy as np
 from pyscf import scf as pyscf_scf
 
 from src.Base.declaration import GroundState
-from src.Base.isdf_jk import ISDFJK
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
-from src.Base.utils.mpi_grid import lockstep
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
+from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
+from src.Base.utils.parallel.mpi_grid import lockstep
+from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.GW.imaginary_axis import solve_screening_imaginary_axis
+from src.SingleReference.LinearResponse.space_time import \
+    dielectric_log_determinant
+from src.Base.pyscf.pyscf_interface import exchange_channels, xc_hybrid_coeff
 
 
 @dataclass(frozen=True)
@@ -63,27 +66,32 @@ def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):
     Restricted spin, DF only. Recovered as Z = I - W^-1 from the already-computed
     screened interaction W(iw), rather than rebuilding chi0 from scratch.
     """
-    W_grid = solve_screening_imaginary_axis(lr_solver, nocc, freq_points)
+    W_grid = lr_solver.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
     naux = W_grid.shape[-1]
     eye = np.eye(naux)
     return np.array([eye - np.linalg.inv(W) for W in W_grid])
 
 
-def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, nfreq=20, grid='minimax', w0=None):
+def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='minimax',
+                                          w0=None, flags=None):
     """dRPA correlation energy via imaginary-frequency-axis integration (eqs 26-28, Spadetto et al., JCTC 2023, 19, 1499).
 
     E_c = (1/2pi) int dw Tr{log(1-Z(iw)) + Z(iw)} = sum_k w_k Tr{log(1-Z(i*wk)) + Z(i*wk)},
-    with Tr[log(1-Z)] via slogdet. Restricted spin, DF only. Should agree with
-    rpa_correlation_energy_casida to grid precision.
+    with Tr[log(1-Z)] from `space_time.dielectric_log_determinant`, which
+    warns about a frequency whose det(1 - Z) is not positive and names it in
+    flags['nonpositive_det'] when `flags` is a dict. Restricted spin, DF
+    only. Should agree with rpa_correlation_energy_casida to grid precision.
 
     grid: 'minimax' (default) or 'gauss_legendre' (uses w0, default gap_scaled_w0).
+    numerics: the run's `Numerics`; the frequency count is `rpa_quadrature`'s
+    for `grid`, the one every dRPA energy of the run reads.
     """
+    nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
     eps = lr_solver.eps
     occ, virt = get_occ_virt_indices(eps, nocc)
 
     if grid == 'minimax':
-        e_min = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
         freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
     elif grid == 'gauss_legendre':
         if w0 is None:
@@ -93,62 +101,13 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, nfreq=20, grid='minim
         raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
 
     Z_grid = solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points)
-    naux = Z_grid.shape[-1]
-    eye = np.eye(naux)
 
     e_c = 0.0
     for k, Z in enumerate(Z_grid):
-        _, logdet = np.linalg.slogdet(eye - Z)
-        e_c += freq_weights[k] * (logdet + np.trace(Z))
+        e_c += freq_weights[k] * (dielectric_log_determinant(np.eye(Z.shape[-1]) - Z, k,
+                                                             flags)
+                                  + np.trace(Z))
     return e_c / (2.0 * np.pi)
-
-
-def xc_hybrid_coeff(mf):
-    """(is_ks, a_x): the exact-exchange fraction the reference's Fock carries.
-
-    ONE scalar, so this describes a GLOBAL hybrid and nothing else. On a
-    range-separated hybrid it returns alpha, the long-range fraction, and says
-    nothing about the erf-screened term that carries beta -- see `rsh_split`,
-    and `require_no_range_separation` for the refusal that keeps that silence
-    from reaching a gradient.
-    """
-    if not hasattr(mf, 'xc'):
-        return False, 1.0
-    return True, float(mf._numint.hybrid_coeff(mf.xc, spin=mf.mol.spin))
-
-
-def rsh_split(mf):
-    """(omega, alpha, beta) of the reference's exchange; omega = 0 if global.
-
-    pyscf's convention is K = alpha K_full + beta K_lr(omega), so the
-    short-range fraction is alpha + beta: CAM-B3LYP is
-    (0.33, 0.65, -0.46) and wB97X (0.30, 1.00, -0.842).
-    """
-    if not hasattr(mf, 'xc'):
-        return 0.0, 1.0, 0.0
-    omega, alpha, beta = mf._numint.rsh_coeff(mf.xc)
-    return float(omega), float(alpha), float(beta)
-
-
-def exchange_channels(mf):
-    """[(omega, weight)] with the reference's exact exchange = sum w K(omega).
-
-    pyscf builds K_eff = hyb K_full + (alpha - hyb) K_lr(omega) and its
-    `rsh_coeff` reports (omega, alpha, beta) with hyb = alpha + beta, so the
-    channels are (0, alpha + beta) and (omega, -beta). Checked against
-    `get_veff`'s own operator to machine precision on B3LYP, PBE0, CAM-B3LYP,
-    wB97X and LRC-wPBEh.
-
-    `xc_hybrid_coeff` IS NOT THIS and must not be used for a skeleton on a
-    range-separated hybrid: it returns alpha, which for a global hybrid happens
-    to be the full-range weight and for an RSH is the LONG-range one. On
-    LRC-wPBEh it gives 1.0 where the full-range weight is 0.2, so a skeleton
-    built on it is wrong in the term it keeps as well as in the one it drops.
-    """
-    omega, alpha, beta = rsh_split(mf)
-    if omega == 0.0 or beta == 0.0:
-        return [(0.0, alpha)]
-    return [(0.0, alpha + beta), (float(omega), -beta)]
 
 
 def exx_double_counting(mf, mol=None):
@@ -179,9 +138,9 @@ def exx_double_counting(mf, mol=None):
                 mf.get_k(mol, dm, hermi=1)
         return -0.25 * float(np.einsum('ij,ji->', dm, k))
 
-    e_x = e_x_at(0.0)
     if not is_ks:
         return 0.0
+    e_x = e_x_at(0.0)
     e_xc = float(mf._numint.nr_rks(mol, mf.grids, mf.xc, dm)[1])
     e_xc += sum(w * e_x_at(o) for o, w in exchange_channels(mf))
     return e_x - e_xc

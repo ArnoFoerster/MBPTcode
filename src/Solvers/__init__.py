@@ -1,28 +1,16 @@
 """Solver layer: root finders for the quasiparticle equation, a matrix-free
 symmetric eigensolver, and the active-space many-body solvers.
 
-Self-energies live in src/SingleReference/. qp_equation.py holds every root
-search in the codebase, shared by the GW and ADC front ends, including the
-pole-guarded Newton solve the contour-deformation continuation uses and the
-fixed-point driver. davidson.py holds the one matrix-free symmetric
-eigensolver both ADC routes -- charged (IP/EA) and neutral (ee) -- iterate on.
+Self-energies live in src/SingleReference/. qp_equation.py holds the one
+quasiparticle root finder of the code base (`find_qp_root`: bracket, refine,
+keep the largest valid pole strength, or along a walk the root continuing
+the previous geometry's), shared by every GW and ADC front end. davidson.py
+holds the one matrix-free symmetric eigensolver (`solve_symmetric`): both ADC
+routes, the Tamm-Dancoff BSE and the (A - B) probe iterate on it. The full
+Casida/BSE problem (paired, row-distributed) and the upfolded BSE
+(non-symmetric) keep loops of their own; davidson.py says why.
 active_space_solver.py holds the ActiveSpaceSolver interface and its FCI,
 determinant-basis and DMRG adapters; exact_diagonalization.py builds the
 determinant-basis matrix ExactDiagonalizationSolver diagonalizes. active_space.py
-dispatches a downfolded effective Hamiltonian (as built by
-src/MultiReference/QDPT/perturbative.py) over those same adapters by name.
+dispatches a downfolded effective Hamiltonian over those same adapters by name.
 """
-from src.Solvers.qp_equation import (
-    solve_qp_equation, solve_qp_equation_graphical, solve_qp_equation_newton,
-    solve_qp_equation_newton_batch, solve_qp_equation_newton_guarded,
-    solve_qp_equation_bisection, solve_fixed_point, calculate_z_factor,
-    spectral_function)
-from src.Solvers.davidson import (solve_symmetric, overlap_pick,
-                                  jacobi_davidson_precond, diagonal_seeds)
-from src.Solvers.active_space_solver import (ActiveSpaceSolver,
-                                             Block2DMRGSolver,
-                                             ExactDiagonalizationSolver,
-                                             PyscfFCISolver, spin_sector)
-from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
-                                               spatial_to_spin_orbitals)
-from src.Solvers.active_space import solve

@@ -26,11 +26,12 @@ from pyscf.pbc import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.utils.mpi_grid import run_simulated
-from src.Base.utils.time_frequency import TimeFrequencyGrid
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.Periodic import pbc_isdf_rpa as thcrpa
 from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
 from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts
+from src.SingleReference.Periodic.pbc_occupations import transition_window
 
 KMESH = [2, 2, 1]
 
@@ -69,10 +70,10 @@ def test_kspace_fft_matches_direct_ksum(thc):
     machine precision is a mesh-indexing bug.
     """
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    mu = thcrpa.chemical_potential(mo_energy, nocc)
+    mu = thcrpa.chemical_potential(mo_energy, mo_occ)
     worst = 0.0
     for tau in (0.05, 0.5, 2.0):
-        Go, Gv = thcrpa.green_functions_tau(X, mo_energy, nocc, tau, mu)
+        Go, Gv = thcrpa.green_functions_tau(X, mo_energy, mo_occ, tau, mu)
         fft = thcrpa.polarizability_tau_all_q_fft(Go, Gv, KMESH)
         for q in range(len(kpts)):
             direct = thcrpa.polarizability_tau(Go, Gv, kplus, q)
@@ -84,8 +85,8 @@ def test_fft_route_rejects_a_mismatched_mesh(thc):
     """The FFT route silently gives nonsense if handed k-points that are not
     the full regular mesh in make_kpts order, so it refuses instead."""
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    mu = thcrpa.chemical_potential(mo_energy, nocc)
-    Go, Gv = thcrpa.green_functions_tau(X, mo_energy, nocc, 0.5, mu)
+    mu = thcrpa.chemical_potential(mo_energy, mo_occ)
+    Go, Gv = thcrpa.green_functions_tau(X, mo_energy, mo_occ, 0.5, mu)
     with pytest.raises(ValueError, match='regular mesh'):
         thcrpa.polarizability_tau_all_q_fft(Go, Gv, [2, 2, 2])
 
@@ -97,11 +98,11 @@ def test_imaginary_time_route_matches_the_definition(thc):
     e_min = mo_energy[:, nocc:].min() - mo_energy[:, :nocc].max()
     e_max = mo_energy[:, nocc:].max() - mo_energy[:, :nocc].min()
     grid = TimeFrequencyGrid.minimax(18, e_min, e_max)
-    Pi_t = thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, nocc, grid,
+    Pi_t = thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, mo_occ, grid,
                                                       KMESH)
     worst = 0.0
     for q in range(len(kpts)):
-        Pi_f = thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q,
+        Pi_f = thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q,
                                                  grid.omega_points)
         worst = max(worst, abs(Pi_t[q] - Pi_f).max() / abs(Pi_f).max())
     assert worst < 1e-7, f"tau route vs definition: {worst:.3e}"
@@ -114,7 +115,7 @@ def test_polarizability_is_hermitian(thc):
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
     freqs = np.array([0.1, 1.0])
     for q in range(len(kpts)):
-        Pi = thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q, freqs)
+        Pi = thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q, freqs)
         for P in Pi:
             assert abs(P - P.conj().T).max() < 1e-10 * abs(P).max()
 
@@ -125,10 +126,27 @@ def test_polarizability_is_negative_semidefinite(thc):
     not automatic."""
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
     for q in range(len(kpts)):
-        Pi = thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q,
+        Pi = thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q,
                                                np.array([0.5]))
         w = np.linalg.eigvalsh(Pi[0])
         assert w.max() < 1e-10 * max(1.0, abs(w).max())
+
+
+def test_a_nonpositive_determinant_is_warned_and_flagged():
+    """det(1 - V Pi) <= 0 is a numerical outcome (a broken Pi), not an input:
+    the block energy is still returned, from log|det|, with a RuntimeWarning
+    and the (q, w) recorded under flags['nonpositive_det'] (a
+    numerical event warns and is flagged, it never raises). Synthetic, so no SCF is needed:
+    V = 1 and Pi = diag(2, -1) give 1 - V Pi = diag(-1, 2)."""
+    Vq = np.eye(2)
+    Pi = np.array([np.diag([-0.5, -1.0]), np.diag([2.0, -1.0])])
+    flags = {}
+    with pytest.warns(RuntimeWarning, match='not positive'):
+        acc = thcrpa.ecorr_q_from_pi(Pi, Vq, np.array([1.0, 1.0]), q=3,
+                                     flags=flags)
+    assert flags == {'nonpositive_det': [(3, 1)]}
+    expected = (np.log(1.5 * 2.0) - 1.5 + np.log(2.0) + 1.0) / (2.0 * np.pi)
+    assert abs(acc - expected) < 1e-14
 
 
 #: `pbc_rpa.ri_rpa_ecorr(mf, nw=32)` on the KMESH fixture above. Pinned
@@ -151,7 +169,7 @@ def test_ecorr_matches_ri_v(thc):
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
     from src.SingleReference.Periodic.pbc_rpa import build_freq_grid
     freqs, wts = build_freq_grid(mo_energy, nocc, 32)
-    Pi = [thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q, freqs)
+    Pi = [thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ, kplus, q, freqs)
           for q in range(len(kpts))]
     e_c, per_q = thcrpa.rpa_ecorr_from_pi(Pi, V, wts)
     assert abs(e_c - RI_V_ECORR) < 1e-4, f"E_c(THC) {e_c:.8f} vs {RI_V_ECORR}"
@@ -338,7 +356,7 @@ def test_ecorr_improves_with_rank(thc):
     from src.SingleReference.Periodic.pbc_rpa import build_freq_grid
     freqs, wts = build_freq_grid(mo_energy, nocc, 32)
     X4, V4, _ = build_isdf_kpts(cell, mo, kpts, 4 * mo[0].shape[1])
-    Pi4 = [thcrpa.polarizability_q_frequency(X4, mo_energy, nocc, kplus, q, freqs)
+    Pi4 = [thcrpa.polarizability_q_frequency(X4, mo_energy, mo_occ, kplus, q, freqs)
            for q in range(len(kpts))]
     e4, _ = thcrpa.rpa_ecorr_from_pi(Pi4, V4, wts)
     assert abs(e4 - RI_V_ECORR) > 1e-3
@@ -347,8 +365,8 @@ def test_ecorr_improves_with_rank(thc):
 def test_metallic_occupations_are_refused():
     """The metallic case must fail LOUDLY, because it cannot fail visibly.
 
-    Every route in pbc_isdf_rpa slices occ/virt with one integer nocc at every
-    k-point. That is exact for a gap and wrong for a metal, and the wrongness
+    The T = 0 route sizes its grid with one integer nocc at every k-point.
+    That is exact for a gap and wrong for a metal, and the wrongness
     is a continuity failure across a parameter -- an equation of state jumping
     when a per-k occupied count steps -- not a pointwise one. No test in this
     file, including all of the ones above, would notice it, because at any
@@ -379,10 +397,26 @@ def test_metallic_occupations_are_refused():
 
 # --- occupation-weighted response ------------------------------------------
 
-def test_weighted_response_reduces_to_the_integer_one_exactly(thc):
+def _pi_ov(X, mo_energy, nocc, kplus, q, freqs):
+    """Pi^q(i.omega) of a gap by the occupied-virtual definition,
+    (2/Nk) sum_k sum_ia conj(B_ia) chi_ia B_ia^T with chi_ia = 2 e_ia/(w^2 + e_ia^2)."""
+    nkpts, npts = len(X), X[0].shape[0]
+    e = np.asarray(mo_energy)
+    Pi = np.zeros((len(freqs), npts, npts), dtype=np.complex128)
+    for k in range(nkpts):
+        kq = kplus[q, k]
+        B = np.einsum('mi,ma->mia', X[k][:, :nocc].conj(), X[kq][:, nocc:],
+                      optimize=True).reshape(npts, -1)
+        eia = (e[k][:nocc, None] - e[kq][None, nocc:]).ravel()
+        for w, omega in enumerate(freqs):
+            Pi[w] += (2.0 / nkpts) * (B.conj() * (2.0 * eia / (omega ** 2 + eia ** 2))) @ B.T
+    return Pi
+
+
+def test_weighted_response_is_the_occupied_virtual_one_on_a_gap(thc):
     """THE GATE. A gapped system is the T -> 0 limit of the weighted
-    expression, so the two must agree to machine precision -- not to a
-    tolerance.
+    expression, so it must equal the occupied-virtual definition to machine
+    precision -- not to a tolerance.
 
     This is what fixes the CONSTANTS, and it is precisely what a continuity
     test cannot see: folding sqrt(f_m - f_n) into the pair factor moves a
@@ -396,20 +430,11 @@ def test_weighted_response_reduces_to_the_integer_one_exactly(thc):
 
     worst = 0.0
     for q in range(len(kpts)):
-        Pi_i = thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q, freqs)
-        Pi_w = thcrpa.polarizability_q_frequency_occ(X, mo_energy, mo_occ,
-                                                     kplus, q, freqs)
+        Pi_i = _pi_ov(X, mo_energy, nocc, kplus, q, freqs)
+        Pi_w = thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ,
+                                                 kplus, q, freqs)
         worst = max(worst, abs(Pi_i - Pi_w).max() / abs(Pi_i).max())
-    assert worst < 1e-13, f"weighted vs integer Pi: {worst:.3e}"
-
-    Pi_i = [thcrpa.polarizability_q_frequency(X, mo_energy, nocc, kplus, q, freqs)
-            for q in range(len(kpts))]
-    Pi_w = [thcrpa.polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus, q, freqs)
-            for q in range(len(kpts))]
-    e_i, _ = thcrpa.rpa_ecorr_from_pi(Pi_i, V, wts)
-    e_w, _ = thcrpa.rpa_ecorr_from_pi(Pi_w, V, wts)
-    assert abs(e_w - e_i) < 1e-12, f"E_c weighted {e_w} vs integer {e_i}"
-    assert abs(e_w - RI_V_ECORR) < 1e-4
+    assert worst < 1e-13, f"weighted vs occupied-virtual Pi: {worst:.3e}"
 
 
 def test_weighted_tau_route_matches_weighted_frequency(thc):
@@ -419,13 +444,13 @@ def test_weighted_tau_route_matches_weighted_frequency(thc):
     T -> 0 limit stresses the IR representation, which is the right trade.
     """
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    _, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
+    _, e_max = transition_window(mo_energy, mo_occ)
     grid = TimeFrequencyGrid.ir(100.0, 1.5 * e_max, statistics='boson')
-    Pi_t = thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
+    Pi_t = thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, mo_occ,
                                                           grid, KMESH)
     worst = 0.0
     for q in range(len(kpts)):
-        Pi_f = thcrpa.polarizability_q_frequency_occ(X, mo_energy, mo_occ,
+        Pi_f = thcrpa.polarizability_q_frequency(X, mo_energy, mo_occ,
                                                      kplus, q, grid.omega_points)
         worst = max(worst, abs(Pi_t[q] - Pi_f).max() / abs(Pi_f).max())
     assert worst < 1e-5, f"weighted tau vs weighted frequency: {worst:.3e}"
@@ -441,27 +466,29 @@ def test_symmetrizing_tau_is_the_same_object(thc):
     deviation from the frequency route was exactly 0.500 at every beta.
     """
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    _, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
+    _, e_max = transition_window(mo_energy, mo_occ)
     grid = TimeFrequencyGrid.ir(100.0, 1.5 * e_max, statistics='boson')
-    A = thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
+    A = thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, mo_occ,
                                                        grid, KMESH)
-    S = thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
+    S = thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, mo_occ,
                                                        grid, KMESH,
                                                        symmetrize=True)
     assert abs(S - A).max() / abs(A).max() < 1e-5
 
 
-def test_weighted_tau_refuses_a_t0_grid(thc):
-    """A T = 0 half-line grid is wrong here for three independent reasons --
-    unbounded summand past tau = beta, wrong weight without the finite-interval
-    (1 - e^{-beta Delta}) factor, and the two fail separately. So it is
-    refused rather than silently used."""
+def test_weighted_tau_refuses_a_t0_grid_for_fractional_occupations(thc):
+    """A T = 0 half-line grid is wrong for a metal for three independent
+    reasons -- unbounded summand past tau = beta, wrong weight without the
+    finite-interval (1 - e^{-beta Delta}) factor, and the two fail separately.
+    So it is refused rather than silently used; integer occupations take it
+    (rung 2)."""
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    e_min, e_max = thcrpa.transition_window_occ(mo_energy, mo_occ, kplus)
-    minimax = TimeFrequencyGrid.minimax(18, e_min, e_max)
+    smeared = np.array(mo_occ, dtype=float)
+    smeared[:, nocc - 1], smeared[:, nocc] = 1.5, 0.5
+    minimax = TimeFrequencyGrid.minimax(18, *transition_window(mo_energy, mo_occ))
     with pytest.raises(ValueError, match='bosonic IR grid'):
-        thcrpa.polarizability_all_q_imaginary_time_occ(X, mo_energy, mo_occ,
-                                                       minimax, KMESH)
+        thcrpa.polarizability_all_q_imaginary_time(X, mo_energy, smeared,
+                                                   minimax, KMESH)
 
 
 def test_green_functions_do_not_overflow_at_large_beta(thc):
@@ -469,9 +496,9 @@ def test_green_functions_do_not_overflow_at_large_beta(thc):
     Formed naively it is 0 * inf = NaN at any beta large enough to matter
     (measured: NaN at beta = 100 on this system), so it is formed in logs."""
     cell, kpts, mo, mo_energy, mo_occ, nocc, kplus, X, V = thc
-    mu = thcrpa.chemical_potential_occ(mo_energy, mo_occ)
+    mu = thcrpa.chemical_potential(mo_energy, mo_occ)
     for tau in (1.0, 100.0, 1000.0):
-        Go, Gv = thcrpa.green_functions_tau_occ(X, mo_energy, mo_occ, tau, mu)
+        Go, Gv = thcrpa.green_functions_tau(X, mo_energy, mo_occ, tau, mu)
         assert np.isfinite(Go).all(), f"Go not finite at tau={tau}"
         assert np.isfinite(Gv).all(), f"Gv not finite at tau={tau}"
 

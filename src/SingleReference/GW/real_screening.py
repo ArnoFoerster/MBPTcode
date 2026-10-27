@@ -22,11 +22,11 @@ This is what a contour-deformation residue evaluates: `GW.contour_deformation`
 sweeps a pole of G at eps_q and asks for W(|eps_q - omega|) there. A residue
 frequency landing on a particle-hole transition d makes W and its frequency
 derivative arbitrarily large -- that is a real pole of chi0, not a numerical
-accident, and `residue_pole_distance` reports the distance to the nearest one.
+accident.
 
 Both classes serve one protocol -- apply(freq, b) = W(freq) b and
 slope(freq, y) = y^T [dchi0/dfreq] y -- and neither records anything;
-`gradients.contour_deformation_adjoint` subclasses each with the reverse half,
+`gradients.gwbse.contour_deformation_adjoint` subclasses each with the reverse half,
 push/adjoints.
 
 The spin factor 2 is the restricted-singlet convention of
@@ -37,12 +37,21 @@ otherwise a second route to a different number.
 """
 import numpy as np
 
-from src.Base.constants import LAPLACE_SCREENING_TOL
+from src.Base.numerics.constants import LAPLACE_SCREENING_TOL, RESIDUE_ON_CONTOUR_TOL
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
-from src.SingleReference.LinearResponse.space_time import \
-    laplace_representation_error
-from src.SingleReference.base import get_occ_virt_indices
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_aux, dyson_screening, laplace_representation_error)
+from src.Base.orbital_spaces import particle_hole_window
+from src.Base.orbital_spaces import ov_energies
+
+
+class ResidueRefused(ValueError):
+    """A residue of the contour asks W at a real frequency its backend cannot
+    give: the tau grid does not carry it, or no particle-hole block was
+    supplied. The quasiparticle root search counts that frequency as
+    unknown and raises this only if no quasiparticle is found where Sigma is
+    known (`Solvers.qp_equation.SampledEquation`)."""
 
 
 class ExplicitRealScreening:
@@ -54,7 +63,7 @@ class ExplicitRealScreening:
     the particle-hole gap. eta broadens the particle-hole poles -- biased, off
     by default, see `imaginary_frequency.frequency_factor`.
 
-    `gradients.contour_deformation_adjoint.ExplicitRealScreeningAdjoint` adds
+    `gradients.gwbse.contour_deformation_adjoint.ExplicitRealScreeningAdjoint` adds
     the reverse half of the protocol, push/adjoints; nothing here records
     anything.
 
@@ -95,7 +104,7 @@ class LaplaceRealScreening:
     imaginary-time form: that regime belongs to the explicit backend, and this
     one REFUSES rather than integrate a fit it has failed.
 
-    `gradients.contour_deformation_adjoint.LaplaceRealScreeningAdjoint` adds
+    `gradients.gwbse.contour_deformation_adjoint.LaplaceRealScreeningAdjoint` adds
     the reverse half, push/adjoints, which lands the residues' adjoint on
     proj(tau) so they ride the same `polarizability_backward` sweep as the
     integral term.
@@ -124,11 +133,10 @@ class LaplaceRealScreening:
         err = self.representation_error(freq)
         if not err < self.tol:
             if self.pair_energies is None:
-                occ, virt = get_occ_virt_indices(self.eps, self.nocc)
-                gap = self.eps[virt].min() - self.eps[occ].max()
+                gap = particle_hole_window(self.eps, self.nocc)[0]
             else:
                 gap = float(self.pair_energies.min())
-            raise ValueError(
+            raise ResidueRefused(
                 f"real frequency {freq:.4f} Ha is not carried by the tau grid: "
                 f"bare-quadrature error {err:.1e} against tol {self.tol:.0e}; "
                 f"gap - freq = {gap - freq:.4f} Ha, the grid's e_min is "
@@ -146,10 +154,18 @@ class LaplaceRealScreening:
         return float(y @ np.tensordot(dc, self.proj_tau, axes=(0, 0)) @ y)
 
 
-def ov_energies(eps, nocc):
-    """d_(i,a) = eps_a - eps_i on the flattened pair index of C_ov."""
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    return (eps[virt][None, :] - eps[occ][:, None]).ravel()
+def residue_set(eps, nocc, omega, tol=RESIDUE_ON_CONTOUR_TOL):
+    """[(q, weight)] for the poles of G the deformation sweeps over."""
+    out = []
+    for q in range(len(eps)):
+        gap = eps[q] - omega
+        if abs(gap) < tol:
+            out.append((q, -0.5 if q < nocc else 0.5))
+        elif q < nocc and gap > 0.0:
+            out.append((q, -1.0))
+        elif q >= nocc and gap < 0.0:
+            out.append((q, 1.0))
+    return out
 
 
 def screening_aux(C_ov, d, omega, imaginary, eta=0.0):
@@ -160,9 +176,8 @@ def screening_aux(C_ov, d, omega, imaginary, eta=0.0):
     lives here and nowhere else. Serves both axes, since only the frequency
     factor knows which one it is on.
     """
-    f = frequency_factor(d, omega, imaginary, eta)
-    chi0 = 2.0 * (C_ov * f) @ C_ov.T
-    W = np.linalg.inv(np.eye(C_ov.shape[0]) - chi0)
+    W = dyson_screening(chi0_aux(
+        [(C_ov, frequency_factor(d, omega, imaginary, eta))], 2.0))
     return W - np.eye(C_ov.shape[0]), W
 
 

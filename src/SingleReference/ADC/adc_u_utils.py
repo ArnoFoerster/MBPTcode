@@ -7,19 +7,16 @@ from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.DensityMatrix.generated_mpn import (
     mpn_density_pieces as mpn_gen)
 from src.SingleReference.DensityMatrix.mpn_density_driver import (
-    MPnDensityDriver, _denom, g_vvoo_df, t1_2_numerator_df)
+    MPnDensityDriver, g_vvoo_df, t1_2_numerator_df)
+from src.SingleReference.common.mp_amplitudes import orbital_denominator
 from src.SingleReference.EpsteinNesbet.shifts import epstein_nesbet_denominator
 
 
 def u2_denominators(eps, nocc):
     """(D_hhpp, D_pphh): the two bare MP1 doubles denominators the U^(2)
     blocks divide by."""
-    eps_o, eps_v = eps[:nocc], eps[nocc:]
-    d_hhpp = (eps_o[:, None, None, None] + eps_o[None, :, None, None]
-              - eps_v[None, None, :, None] - eps_v[None, None, None, :])
-    d_pphh = (eps_v[:, None, None, None] + eps_v[None, :, None, None]
-              - eps_o[None, None, :, None] - eps_o[None, None, None, :])
-    return d_hhpp, d_pphh
+    d = orbital_denominator(eps[:nocc], eps[nocc:], 2)      # [a,b,i,j]
+    return d.transpose(2, 3, 0, 1), -d
 
 
 def u1_dressing_shift(s, nocc, t2_ijcd):
@@ -36,7 +33,7 @@ def u1_dressing_shift(s, nocc, t2_ijcd):
             g=s.g, kd=np.eye(norb), o=o, v=v,
             nv=norb - nocc, no=nocc, t2_1=(t2_bare_native - t2_fed_native))
     else:
-        t2_bare_native = g_vvoo_df(s.B_spin, nocc) / _denom(s.eps[o], s.eps[v], 2)
+        t2_bare_native = g_vvoo_df(s.B_spin, nocc) / orbital_denominator(s.eps[o], s.eps[v], 2)
         num_delta = t1_2_numerator_df(s.B_spin, nocc,
                                       t2_bare_native - t2_fed_native)
     return num_delta.T                                      # w[j,a]
@@ -55,7 +52,7 @@ def dressed_t2_amplitudes(s, nocc, u2_denom_dress):
     o, v = slice(0, nocc), slice(nocc, s.norb)
     channels = {k: val for k, val in u2_denom_dress.items()
                 if k in ('hh', 'pp', 'hp')}
-    D_bare = _denom(s.eps[o], s.eps[v], 2)
+    D_bare = orbital_denominator(s.eps[o], s.eps[v], 2)
     if s.g is not None:
         D_dressed = epstein_nesbet_denominator(D_bare, s.g, nocc, layout='pphh',
                                                bare_sign=1.0, **channels)
@@ -103,18 +100,59 @@ def u1_shift_terms_2p1h(norb, nocc, z_p, Vfull, u1_shift):
     return dy_shift, dy_p_shift
 
 
+def assemble_operator(s, nocc, static_correction, t2_ijcd, u1_shift, apply_C_2h1p,
+                      apply_C_2p1h, apply_U_2h1p, apply_U_2p1h):
+    """(aop, diag, dims): the matrix-free spin-orbital ADC(3) operator from a
+    route's C and U block applications (adc_u_sigma_full, dense integrals;
+    adc_u_sigma_df, DF), with the amplitude t2_ijcd and its u1 shift."""
+    ing = s.matrix_free_ingredients(nocc)
+    norb = s.norb
+    eps = s.eps
+    d = ing['d']
+    nH = d['nH']
+    npair_o, npair_v = ing['npair_o'], ing['npair_v']
+    off_2h1p, off_2p1h = ing['off_2h1p'], ing['off_2p1h']
+    K_2h1p, K_2p1h = ing['K_2h1p'], ing['K_2p1h']
+    iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
+
+    if static_correction is None:
+        F = np.diag(eps)
+    else:
+        F = np.diag(eps) + static_correction
+
+    def aop(z):
+        z_p = z[:norb]
+        z_2h1p = z[off_2h1p:off_2p1h].reshape(npair_o, -1)
+        z_2p1h = z[off_2p1h:nH].reshape(nocc, npair_v)
+
+        Vfull_2h1p, c_2h1p = apply_C_2h1p(s, nocc, z_2h1p)
+        Vfull_2p1h, c_2p1h = apply_C_2p1h(s, nocc, z_2p1h)
+        u2h1p_full, u_from_2h1p = apply_U_2h1p(s, nocc, z_p, Vfull_2h1p, t2_ijcd,
+                                               u1_shift=u1_shift)
+        u2p1h_full, u_from_2p1h = apply_U_2p1h(s, nocc, z_p, Vfull_2p1h, t2_ijcd,
+                                               u1_shift=u1_shift)
+
+        y_p = F @ z_p + u_from_2h1p + u_from_2p1h
+        y_2h1p = u2h1p_full[iu, ju, :].reshape(-1) + K_2h1p * z_2h1p.reshape(-1) + c_2h1p.reshape(-1)
+        y_2p1h = u2p1h_full[:, au, bu].reshape(-1) + K_2p1h * z_2p1h.reshape(-1) + c_2p1h.reshape(-1)
+        return np.concatenate([y_p, y_2h1p, y_2p1h])
+
+    diag = np.concatenate([np.diag(F), K_2h1p, K_2p1h])
+    return aop, diag, d
+
+
 def build_matrix_free_ingredients(s, nocc):
     """Uncached ingredient set (dims/config indices/K diagonals + the
     B-factor slices in DF mode, dense g slices otherwise); rank<=3 only
-    in DF mode. Cache through s._build_matrix_free_ingredients."""
+    in DF mode. Cache through s.matrix_free_ingredients."""
     eps = s.eps
     norb = s.norb
     occ, virt = slice(0, nocc), slice(nocc, norb)
     nvirt = norb - nocc
 
     d = s.dimensions(nocc)
-    i_2h, j_2h, a_2h = s._configs_2h1p(nocc)
-    i_2p, a_2p, b_2p = s._configs_2p1h(nocc)
+    i_2h, j_2h, a_2h = s.configs_2h1p(nocc)
+    i_2p, a_2p, b_2p = s.configs_2p1h(nocc)
     iu, ju = np.triu_indices(nocc, k=1)
     au, bu = np.triu_indices(nvirt, k=1)
     npair_o, npair_v = len(iu), len(au)

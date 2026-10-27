@@ -1,0 +1,2540 @@
+"""Hand-written runtime layer wiring the generated ADC(n) block functions
+(src/SingleReference/ADC/generatedADC/, produced by
+src/CodeGeneration/generate_adcn.py -- superoperator
+anticommutator elements, see that module's docstring) into config-space
+matrices and the dense ADC(2) supermatrix. Mirrors mpn_density_driver.py's
+split: generated pieces are pdaggerq output (never hand-edited), this
+module is plain Python and safe to edit.
+
+Sign convention: the generator's sector-dependent commutator direction
+([C_J, H] for IP-sector classes -- Dyson hole-propagator convention, see
+generate_adcn.superop_element_terms) makes every generated block match
+the hand-written spin-orbital ADCSolverUnrestricted's convention at +1
+exactly, so nothing is sign-adjusted here (pinned by tests/test_adcn_generated_adc2.py).
+"""
+import functools
+import inspect
+import math
+from itertools import combinations
+
+import numpy as np
+
+from src.SingleReference.ADC.cc_adc_amplitudes import InjectedAmplitudePool
+from src.SingleReference.ADC.generated_modules import generated, lazy
+from src.SingleReference.ADC.isr_engine import lowdin_sqrt_inv_series, assemble_kplusc
+from src.SingleReference.ADC.precursor_classes import (class_configs, class_dimension,
+                                                       cross_module_name, nh_np)
+from src.SingleReference.ADC.adc_order_rule import (
+    u_order_terms, s_order_terms, mp_min_order, struct_ungenerated,
+    cross_block_leading_order)
+from src.SingleReference.DensityMatrix.mpn_density_driver import MPnDensityDriver
+from src.SingleReference.common.mp_amplitudes import orbital_denominator, to_l
+from src.SingleReference.common.mp_amplitudes import to_l as tl
+from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
+    MPnDensityDriverRestricted,
+)
+from src.SingleReference.EpsteinNesbet import (
+    epstein_nesbet_denominator,
+    EpsteinNesbetDenominators,
+    restricted_channel_shifts,
+)
+
+# Generated modules (never committed; src.SingleReference.ADC.generated_modules
+# names the producer of each): imported at first use, so this file imports on a
+# machine that has generated nothing and only the route that needs a missing
+# order raises, naming the call that writes it.
+gen = lazy('adc2_blocks')
+genr = lazy('adc2_blocks_restricted')
+genr_df = lazy('adc2_blocks_restricted_df')
+gen3 = lazy('adc3_u_blocks')
+genr3 = lazy('adc3_u_blocks_restricted')
+genr3_df = lazy('adc3_u_blocks_restricted_df')
+genc2r = lazy('adc4_c2_blocks_restricted')
+genk2r = lazy('adc4_k2_blocks_restricted')
+genu3r = lazy('adc4_u3_blocks_restricted')
+genc2 = lazy('adc4_c2_blocks')
+genk2 = lazy('adc4_k2_blocks')
+genu3 = lazy('adc4_u3_blocks')
+genc3 = lazy('adc5_c3_blocks')
+genc3r = lazy('adc5_c3_blocks_restricted')
+genk2k2 = lazy('adc5_k2k2_blocks')
+genc12 = lazy('adc5_c12_blocks')
+gens12 = lazy('adc5_s_k1k2_blocks')
+genu3k2 = lazy('adc5_u3_k2_blocks')
+
+
+def cross_block_module(order, pair='k1k1', restricted=False, df=False, apply=False):
+    """The generated D x C cross-block module at `order` (dense spin-orbital,
+    dense restricted[/DF], or sigma-vector apply restricted[/DF]). Absence
+    raises, naming the generator call; the union and diagrammatic
+    constructions must never fall back to an all-zero block."""
+    return generated(cross_module_name(order, pair, restricted=restricted, df=df,
+                                       apply=apply)[:-3])
+
+
+# The uniform sector phase of every k=1<->k=2 coupling (and the restricted
+# orbital<->k=2 U^(2)) relative to the generated class bases; one value for
+# the dense builders and the matrix-free operators (sigma_driver).
+K2_CLASS_SIGN = {'IP': -1.0, 'EA': +1.0}
+
+
+def amplitude_leaves(A, j, a, k, b):
+    """{leafname: array} of the amplitudes l_j^(a) and t_k^(b) (rank 0 = none)
+    from an amplitude map A keyed 'L{rank}_{order}' / 'T{rank}_{order}' (the
+    amps_order providers); None when one of them is not in A."""
+    ds = {}
+    for lead, rank, order in (('L', j, a), ('T', k, b)):
+        if not rank:
+            continue
+        key = f'{lead}{rank}_{order}'
+        if key not in A:
+            return None
+        ds.update(A[key])
+    return ds
+
+
+def _contract_term_table(terms, out, letter, idx):
+    """sum_terms coef * einsum(term) of a generated term table
+    (pdaggerq_interface.raw_terms_to_term_list) over the output letters `out`,
+    restricted to the positions idx of the output letter `letter`: every
+    operand carrying that letter is sliced to idx first, so the full output
+    is never formed."""
+    res = None
+    for coef, pieces in terms:
+        subs = [sub for sub, _ in pieces]
+        ops = [np.take(arr, idx, axis=sub.find(letter)) if letter in sub else arr
+               for sub, arr in pieces]
+        val = coef * np.einsum(f"{','.join(subs)}->{out}", *ops, optimize=True)
+        res = val if res is None else res + val
+    return res
+
+
+class BuildSuperMatrixADCn:
+    """Strict Dyson-ADC(2) from generated blocks: F = diag(eps), U^(1)
+    couplings, K diagonals (all pdaggerq-derived; the Loewdin layer is
+    exactly trivial at this order since S^(1)=0 by particle counting --
+    see generate_adcn.py). eps/g are spin-orbital, ADCSolver's convention
+    (antisymmetrized <pq||rs>)."""
+
+    def __init__(self, eps, g, nocc, g_c1=None, u2_denom_dress=None,
+                 amplitudes=None):
+        """g_c1: optional pre-screened spin-orbital interaction tensor for the
+        first-order 2h1p/2p1h C^(1) block only (screened MCDE / screened ADC(2)-x
+        of Romaniello & Berger, arXiv:2603.27329; built by
+        screened_coulomb.screened_c1_tensor). Defaults to the bare g.
+
+        u2_denom_dress: optional dict of {'hh','pp','hp'} booleans (see
+        EpsteinNesbet.epstein_nesbet_denominator), dressing the ground-state
+        T2^(1) amplitude's OWN energy denominator with the (sign-definite)
+        hole-hole Epstein-Nesbet shift -<ij||ij> (Jiang & Engel, JCP 125,
+        184108 (2006)), or the full Epstein-Nesbet diagonal if pp/hp are also
+        enabled. None (default) leaves U^(2) on the bare T2^(1) amplitude.
+        See _u2_amplitude_pool.
+
+        amplitudes: optional {'t1','t2','l1','l2'} dict REPLACING the MBPT
+        amplitude pool outright (cc_adc_amplitudes.cc_amplitudes_spinorbital --
+        the CC-ADC(3) substitution). Mutually exclusive with u2_denom_dress:
+        both renormalize the same two amplitudes, one by dressing their
+        denominator, the other by swapping them for a CC solution."""
+        if amplitudes is not None and u2_denom_dress:
+            raise ValueError(
+                "amplitudes= and u2_denom_dress= are two different "
+                "renormalizations of the SAME T2^(1)/T1^(2) pair -- pass one")
+        self.eps = np.asarray(eps, dtype=float)
+        self.g = g
+        self.g_c1 = g if g_c1 is None else g_c1
+        self.u2_denom_dress = u2_denom_dress
+        self.amplitudes = amplitudes
+        self.nocc = nocc
+        self.norb = len(eps)
+        self.no, self.nv = nocc, self.norb - nocc
+        self.f = np.diag(self.eps)
+        self.kd = np.eye(self.norb)
+        self.o, self.v = slice(0, nocc), slice(nocc, self.norb)
+
+    def kernel_args(self):
+        return dict(f=self.f, g=self.g, kd=self.kd, o=self.o, v=self.v,
+                    no=self.no, nv=self.nv)
+
+    def _args_c1(self):
+        """_args() but with g replaced by g_c1 (the screened C^(1) interaction
+        when screening is active; identical to _args() otherwise)."""
+        return dict(f=self.f, g=self.g_c1, kd=self.kd, o=self.o, v=self.v,
+                    no=self.no, nv=self.nv)
+
+    def class_idx(self, sector):
+        """Ordered-config index arrays with virtual axes localized (0-based
+        within the vir block), in the class's own axis order (holes asc,
+        particles asc -- class_configs' convention)."""
+        cols = class_configs(self.nocc, self.norb, 1, sector)
+        return tuple(c - self.nocc if c.min() >= self.nocc else c for c in cols)
+
+    def u_2h1p(self):
+        """(n2h1p, norb) generated U^(1), 2h1p rows x all orbital columns."""
+        occ_rows = gen.u1_2h1p_occ(**self.kernel_args())   # axes (i,j,a_loc, p_occ)
+        vir_rows = gen.u1_2h1p_vir(**self.kernel_args())   # axes (i,j,a_loc, p_vir)
+        i_, j_, al = self.class_idx('IP')
+        U = np.empty((len(i_), self.norb))
+        U[:, :self.nocc] = occ_rows[i_, j_, al, :]
+        U[:, self.nocc:] = vir_rows[i_, j_, al, :]
+        return U
+
+    def u_2p1h(self):
+        """(n2p1h, norb) generated U^(1), 2p1h rows x all orbital columns."""
+        occ_rows = gen.u1_2p1h_occ(**self.kernel_args())   # axes (i, a_loc, b_loc, p_occ)
+        vir_rows = gen.u1_2p1h_vir(**self.kernel_args())
+        i_, al, bl = self.class_idx('EA')
+        U = np.empty((len(i_), self.norb))
+        U[:, :self.nocc] = occ_rows[i_, al, bl, :]
+        U[:, self.nocc:] = vir_rows[i_, al, bl, :]
+        return U
+
+    def _gather_class_block(self, tensor6, sector):
+        """(ncfg, ncfg) gather of a bra-class x ket-class 6-index tensor at
+        the ordered configs (both sides same class/ordering)."""
+        idx = self.class_idx(sector)
+        bra = tuple(x[:, None] for x in idx)
+        ket = tuple(x[None, :] for x in idx)
+        return tensor6[bra + ket]
+
+    def k_block(self, sector):
+        fn = gen.k0_2h1p if sector == 'IP' else gen.k0_2p1h
+        return self._gather_class_block(fn(**self.kernel_args()), sector)
+
+    def c1_block(self, sector):
+        fn = gen.c1_2h1p if sector == 'IP' else gen.c1_2p1h
+        return self._gather_class_block(fn(**self._args_c1()), sector)
+
+    def s0_block(self, sector):
+        fn = gen.s0_2h1p if sector == 'IP' else gen.s0_2p1h
+        return self._gather_class_block(fn(**self.kernel_args()), sector)
+
+    def build_supermatrix_adc2(self):
+        """Dense strict-ADC(2) supermatrix [[diag(eps), U^T],[U, K]] over
+        {orbitals} + {2h1p} + {2p1h} (K from the generated f-part blocks;
+        C^(1) deliberately NOT added -- strict ADC(2))."""
+        n1 = class_dimension(self.no, self.nv, 1, 'IP')
+        n2 = class_dimension(self.no, self.nv, 1, 'EA')
+        norb = self.norb
+        nH = norb + n1 + n2
+        off1, off2 = norb, norb + n1
+        H = np.zeros((nH, nH))
+        H[:norb, :norb] = np.diag(self.eps)
+        U1, U2 = self.u_2h1p(), self.u_2p1h()
+        H[off1:off2, :norb] = U1
+        H[:norb, off1:off2] = U1.T
+        H[off2:nH, :norb] = U2
+        H[:norb, off2:nH] = U2.T
+        H[off1:off2, off1:off2] = self.k_block('IP')
+        H[off2:nH, off2:nH] = self.k_block('EA')
+        return H
+
+    def build_supermatrix_adc2x(self):
+        """Dense ADC(2)-x supermatrix: build_supermatrix_adc2 plus the
+        first-order C^(1) coupling ON the 2h1p/2p1h diagonal blocks (the only
+        difference from strict ADC(2)). The overlap S is the identity at this
+        level (S^(1)=0 by particle counting), so this is a plain symmetric
+        eigenproblem.
+
+        When this solver was constructed with a screened g_c1 (see __init__),
+        the C^(1) block carries the static-RPA W substitution and the result
+        is the "screened MCDE" / screened ADC(2)-x of Romaniello & Berger
+        (arXiv:2603.27329). With g_c1 == g (default) it is the ordinary
+        ADC(2)-x supermatrix."""
+        H = self.build_supermatrix_adc2()
+        norb = self.norb
+        n1 = class_dimension(self.no, self.nv, 1, 'IP')
+        off1, off2 = norb, norb + n1
+        nH = H.shape[0]
+        H[off1:off2, off1:off2] += self.c1_block('IP')
+        H[off2:nH, off2:nH] += self.c1_block('EA')
+        return H
+
+    # ------------------------------------------------------------------
+    # Order-2 U (ADC(3)-level coupling corrections)
+    # ------------------------------------------------------------------
+    def amplitude_pool(self):
+        """First- and second-order MBPT amplitudes for the generated u2
+        splits (see generate_adcn.generate_adc3_u's docstring: vt2/l2v/
+        l2ft2 consume FIRST-order t2/l2, ft{r}/l{r}f SECOND-order arrays),
+        keyed by the pdaggerq tag names the generated functions take.
+        Cached (omega-independent).
+
+        With self.amplitudes set, that dict IS the pool (CC-ADC: foreign
+        amplitudes in every consumer, U^(2) and S^(2) alike -- the ISR
+        precursor states are built from one ground state, so a substitution
+        confined to U^(2) would leave the two halves inconsistent)."""
+        if self.amplitudes is not None:
+            return InjectedAmplitudePool(self.amplitudes, 'spin-orbital CC')
+        if not hasattr(self, '_amp_pool'):
+            mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
+            t2_1 = mpn.compute_t2_1()
+            t1_2, t2_2, t3_2, _ = mpn.compute_order2_amplitudes(t2_1, max_rank=3)
+            self._amp_pool = {
+                't2': t2_1, 'l2': to_l(t2_1, 2),
+                't1': t1_2, 'l1': to_l(t1_2, 1),
+                't3': t3_2, 'l3': to_l(t3_2, 3),
+            }
+        return self._amp_pool
+
+    def _u2_amplitude_pool(self):
+        """Amplitude pool for _u2_sum: identical to amplitude_pool() unless
+        self.u2_denom_dress is set, in which case ONLY t2/l2 (the T2^(1)
+        amplitude that U^(2) contracts against the vertex) are rebuilt with
+        the Epstein-Nesbet-dressed denominator
+        (EpsteinNesbet.epstein_nesbet_denominator) -- t1/l1/t3/l3 (used
+        elsewhere, e.g. C^(2)) are untouched and stay bare, and the shared
+        amplitude_pool() cache is never mutated (other consumers -- C^(2),
+        S^(2), ADC(4) -- still see the bare amplitudes).
+
+        This is the Epstein-Nesbet denominator dressing:
+        it: dresses the amplitude's own energy denominator instead of
+        replacing the interaction vertex. See
+        u2_denom_dress's docstring on __init__."""
+        pool = dict(self.amplitude_pool())
+        if not self.u2_denom_dress:
+            return pool
+        mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
+        D_bare = orbital_denominator(self.eps[self.o], self.eps[self.v], 2)
+        # orbital_denominator's AXIS order is vir-first ('pphh' layout) but its SIGN
+        # convention is eps_o-eps_v (holes-minus-particles, negative --
+        # Jiang & Engel's OWN convention, bare_sign=+1); layout and sign are
+        # independent, see epstein_nesbet_shift's docstring.
+        # u2_denom_dress may also carry 'singles' (a static-correction-only
+        # toggle) and 'spin_adapted' (a restricted/CSF concept). This is a
+        # SPIN-ORBITAL solver: it works in the determinant basis, where EN is
+        # determinant-wise by definition, so spin_adapted=True has no meaning
+        # here -- refuse it rather than silently returning determinant-wise
+        # numbers under a spin-adapted label.
+        if self.u2_denom_dress.get('spin_adapted', False):
+            raise NotImplementedError(
+                "u2_denom_dress={'spin_adapted': True} is a restricted/CSF concept "
+                "(one spin-averaged shift per spatial configuration) and is not "
+                "defined for the spin-orbital BuildSuperMatrixADCn, which works in "
+                "the determinant basis. Use ADCSolverRestricted / "
+                "BuildSuperMatrixADCnRestricted for the spin-adapted method.")
+        channels = {k: v for k, v in self.u2_denom_dress.items()
+                    if k in ('hh', 'pp', 'hp')}
+        D_dressed = epstein_nesbet_denominator(D_bare, self.g, self.no, layout='pphh',
+                                               bare_sign=1.0, **channels)
+        t2_dressed = mpn.compute_t2_1_custom_denom(D_dressed)
+        pool['t2'] = t2_dressed
+        pool['l2'] = to_l(t2_dressed, 2)
+        return pool
+
+    def _u2_sum(self, tag, row):
+        """Sum of every surviving generated u2_{tag}_{row}_* split, each fed
+        the amplitude arrays its signature asks for (introspected -- the
+        set of surviving splits is pdaggerq's pruning decision, not
+        hard-coded here).
+
+        Amplitudes come from _u2_amplitude_pool (bare g unless u2_denom_dress
+        dresses t2/l2); the interaction vertex is always the bare g."""
+        pool = dict(self.kernel_args())
+        pool.update(self._u2_amplitude_pool())
+        total = None
+        prefix = f'u2_{tag}_{row}_'
+        for name in dir(gen3):
+            if not name.startswith(prefix):
+                continue
+            fn = getattr(gen3, name)
+            kwargs = {p: pool[p] for p in inspect.signature(fn).parameters}
+            val = fn(**kwargs)
+            total = val if total is None else total + val
+        return total
+
+    def _s2_block(self, tag, sector):
+        """(ncfg, norb) gathered cross-block overlap S^(2)_{Jp} from the
+        surviving generated s2 splits (pdaggerq pruning left exactly one
+        t1^(2)-shaped structure per sector)."""
+        idx = self.class_idx(sector)
+        pool = dict(self.kernel_args())
+        pool.update(self.amplitude_pool())
+        S = np.zeros((len(idx[0]), self.norb))
+        for row, sl in (('occ', slice(0, self.nocc)),
+                        ('vir', slice(self.nocc, self.norb))):
+            prefix = f's2_{tag}_{row}_'
+            for name in dir(gen3):
+                if not name.startswith(prefix):
+                    continue
+                fn = getattr(gen3, name)
+                kwargs = {p: pool[p] for p in inspect.signature(fn).parameters}
+                S[:, sl] += fn(**kwargs)[idx]
+        return S
+
+    def _u_adc3(self, tag, sector, u1, gather):
+        """U through order 2 in the DYSON-ADC representation:
+        U = U^(1) + U^(2)_raw - eps_p * S^(2)_{Jp}.
+
+        The -eps_p S^(2) term is the excitation-class Gram-Schmidt
+        orthogonalization against the lower (orbital, 1h/1p) space,
+        |J~> = |J> - sum_p |p> S_pJ -- Schirmer's ISR class-GS
+        construction, NOT pure symmetric Loewdin across blocks. Identified
+        NUMERICALLY (H2O/sto-3g):
+        the residual U_adc3 - U_raw equals -eps_p*S2 at 1e-16 on both
+        sectors, while the Loewdin candidate -1/2*S2*(eps_p+K_J) and the
+        opposite-GS candidate -K_J*S2 are off at 3e-3/6e-3. Within-class
+        orthogonalization stays Loewdin (S^(1)=0 keeps it inert here)."""
+        U = u1()
+        occ2, vir2 = self._u2_sum(tag, 'occ'), self._u2_sum(tag, 'vir')
+        idx = self.class_idx(sector)
+        U[:, :self.nocc] += gather(occ2, idx)
+        U[:, self.nocc:] += gather(vir2, idx)
+        U -= self.eps[None, :] * self._s2_block(tag, sector)
+        return U
+
+    def u_2h1p_adc3(self):
+        """(n2h1p, norb) U through order 2 (Dyson-ADC representation)."""
+        return self._u_adc3('2h1p', 'IP', self.u_2h1p, lambda t, idx: t[idx])
+
+    def u_2p1h_adc3(self):
+        """(n2p1h, norb) U through order 2 (Dyson-ADC representation)."""
+        return self._u_adc3('2p1h', 'EA', self.u_2p1h, lambda t, idx: t[idx])
+
+    # ------------------------------------------------------------------
+    # Order-2 class-class blocks (C^(2)), arbiter for the
+    # disputed ADC(4) C^(2) (lambda-oracle rejected SCW83 B7)
+    # ------------------------------------------------------------------
+    def _sum_gathered(self, module, prefix, sector):
+        """Gathered (ncfg, ncfg) sum of every surviving generated 6-index
+        class-class split matching `prefix` in `module`, amplitude args
+        introspected from the pool."""
+        pool = dict(self.kernel_args())
+        pool.update(self.amplitude_pool())
+        total = None
+        for name in dir(module):
+            if not name.startswith(prefix):
+                continue
+            fn = getattr(module, name)
+            kwargs = {p: pool[p] for p in inspect.signature(fn).parameters}
+            block = self._gather_class_block(fn(**kwargs), sector)
+            total = block if total is None else total + block
+        return total
+
+    def n2_norm(self):
+        """N^(2) = <Psi^(1)|Psi^(1)> = 1/4 sum |t2^(1)|^2 -- the order-2
+        piece of <Psi0|Psi0>, needed to normalize both-side-dressed raw
+        elements (their disconnected <l2 t2><X> pieces survive pdaggerq's
+        simplify, same as in the MPn density c^(n) machinery)."""
+        t2 = self.amplitude_pool()['t2']
+        return 0.25 * float(np.sum(t2 * t2))
+
+    def c2_block_generated(self, sector):
+        """Generated C^(2) class-class block (ISR/class-GS representation):
+
+            C^(2) = raw_dressed_sum - N^(2) K            (normalization)
+                    - 1/2 (S^(2) K + K S^(2))            (within-class Loewdin,
+                                                          via isr_engine)
+
+        with S^(2) itself normalization-corrected (raw within-class overlap
+        minus N^(2) * identity). Cross-class GS-vs-orbital corrections are
+        O(lambda^3) here (S^(2)_pJ * U^(1)) and do not enter. This is the
+        generator's candidate for the disputed block -- Hermiticity is a
+        nontrivial CHECK on it (see tests), not imposed."""
+        tag = '2h1p' if sector == 'IP' else '2p1h'
+        K = self.k_block(sector)
+        raw = self._sum_gathered(genc2, f'c2_{tag}_', sector)
+        s2_raw = self._sum_gathered(genc2, f's2c_{tag}_', sector)
+        n2 = self.n2_norm()
+        s2 = s2_raw - n2 * np.eye(K.shape[0])
+        raw = raw - n2 * K
+        y = lowdin_sqrt_inv_series({2: s2}, 2)
+        return assemble_kplusc({0: K, 2: raw}, y, 2)
+
+    # ------------------------------------------------------------------
+    # ORDER-GENERAL class-class C^(n) -- the ADC(5) C^(3) path
+    # ------------------------------------------------------------------
+    def amp_at(self, rank, order):
+        """MP amplitude array of excitation `rank` at MP `order`, or None.
+
+        The class-class analogue of the restricted `amps_order` map that
+        sigma_driver's order-general U^(n) assembly indexes; spin-orbital here
+        because this solver is the oracle reference path. Returns the t-
+        convention array -- callers wrap with to_l for the pdaggerq 'l' tag.
+
+        Computed on demand in tiers: orders <= 3 at ranks <= max(rank, 4),
+        order 4 at rank <= 3, and beyond. The generated order-4 numerators
+        carry no V.t5_3 rung, so on a quintuple-capable system (>= 5 occupied
+        and >= 5 virtual spin orbitals) the recursion refuses order 4 above
+        rank 2; no ADC(5) accessor asks for it (tests/test_rank_truncation_guard.py).
+
+        MEMORY: materializes t3/t4 (O(no^3 nv^3) / O(no^4 nv^4)); fine for the
+        small-system validation this exists for, not for production."""
+        cache = self.__dict__.setdefault('_amp_by_order', {})
+        levels = self.__dict__.setdefault('_amp_levels', set())
+        if order <= 3:
+            level = (3, max(rank, 4))
+        elif order == 4 and rank <= 3:
+            level = (4, rank if rank > 2 else 2)
+        else:
+            level = (order, None)
+        if level not in levels:
+            mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
+            cache.update(mpn.compute_order_amplitudes_general(
+                level[0], max_rank_top=level[1]))
+            levels.add(level)
+        return cache.get((rank, order))
+
+    @staticmethod
+    def resolve_class_struct(name, tag, kind):
+        """(module, module_order) holding class-class tag structure `name`,
+        or None. `kind` is 'c' (the K+C element) or 's' (within-class overlap,
+        spelled `s{order}c_`).
+
+        None is AMBIGUOUS in the same way sigma_driver._resolve_struct
+        documents: either pdaggerq pruned the structure (legitimately null) or
+        its module has not been generated. `class_struct_ungenerated`
+        separates the two -- silently treating an ungenerated structure as null
+        would UNDER-COMPUTE the block."""
+        for order, mod in ((2, genc2), (3, genc3)):
+            prefix = f'c{order}_{tag}_' if kind == 'c' else f's{order}c_{tag}_'
+            if hasattr(mod, f'{prefix}{name}'):
+                return mod, order
+        return None
+
+    @staticmethod
+    def class_struct_ungenerated(name, kind, max_generated=3):
+        """adc_order_rule.struct_ungenerated for the class-class modules:
+        max_generated is 3, the highest class-class order an ADC(5) block
+        needs (adc5_c3_blocks; order 4 belongs to ADC(6), which is not implemented)."""
+        return struct_ungenerated(name, kind, max_generated)
+
+    def class_raw_S(self, sector, n, strict=True):
+        """(raw^(n), S^(n)) class-class blocks in the PRECURSOR basis, before
+        any normalization or ISR correction.
+
+        Order bookkeeping comes from adc_order_rule -- every (tag structure x
+        amplitude-order assignment) with a + b + [ham == 'v'] == n -- exactly
+        as sigma_driver._assemble_raw_S does for the orbital<->k1 coupling. The
+        physics selection (which structures survive) stays pdaggerq's.
+
+        A structure whose module lacks it is skipped ONLY when pdaggerq pruned
+        it. One whose amplitude at the required order is unavailable would
+        silently UNDER-COMPUTE, so it raises under `strict`."""
+        tag = '2h1p' if sector == 'IP' else '2p1h'
+        base = dict(self.kernel_args())
+        missing_amp, ungenerated = [], []
+
+        def amps(j, a, k, b):
+            """{tagname: array} for l_j^(a) / t_k^(b); None if unavailable."""
+            out = {}
+            for lead, rank, order in (('l', j, a), ('t', k, b)):
+                if not rank:
+                    continue
+                arr = self.amp_at(rank, order)
+                if arr is None:
+                    return None
+                out[f'{lead}{rank}'] = (to_l(arr, rank) if lead == 'l'
+                                        else arr)
+            return out
+
+        def accumulate(terms, kind):
+            acc = None
+            for t in terms:
+                name = t[0]
+                j, a, k, b = ((t[1], t[4], t[3], t[5]) if kind == 'c'
+                              else (t[1], t[3], t[2], t[4]))
+                res = self.resolve_class_struct(name, tag, kind)
+                if res is None:
+                    if self.class_struct_ungenerated(name, kind):
+                        ungenerated.append(name)
+                    continue
+                ds = amps(j, a, k, b)
+                if ds is None:
+                    missing_amp.append(f"{kind}:{name}(l{j}^{a},t{k}^{b})")
+                    continue
+                mod, order = res
+                prefix = (f'c{order}_{tag}_' if kind == 'c'
+                          else f's{order}c_{tag}_')
+                fn = getattr(mod, f'{prefix}{name}')
+                pool = dict(base)
+                pool.update(ds)
+                kwargs = {p: pool[p]
+                          for p in inspect.signature(fn).parameters}
+                blk = self._gather_class_block(fn(**kwargs), sector)
+                acc = blk if acc is None else acc + blk
+            return acc
+
+        raw = accumulate(u_order_terms(n), 'c')
+        S = accumulate(s_order_terms(n), 's')
+        if strict and (missing_amp or ungenerated):
+            raise RuntimeError(
+                f"class-class order {n} ({sector}) incomplete -- "
+                f"missing amplitudes {sorted(set(missing_amp))}, "
+                f"ungenerated structures {sorted(set(ungenerated))}")
+        return raw, S
+
+    def c_block_generated(self, sector, n):
+        """ORDER-GENERAL class-class (K+C)^(n) block in the ISR/class-GS
+        representation -- the assembly that generalizes c2_block_generated and
+        supplies ADC(5)'s C^(3) (nothing consumed adc5_c3_blocks before this).
+
+            raw^(m) <- raw_sum^(m) - sum_{j>=2} N^(j) raw^(m-j)
+            S^(m)   <- S_sum^(m)   - sum_{j>=2} N^(j) S^(m-j),  S^(0) = I
+            (K+C)^(n) = sum_{p+q+r=n} Y^(p).T (K+C)^(q) Y^(r),
+                        Y = S^(-1/2) order series (isr_engine)
+
+        raw^(0) = K and raw^(1) = C^(1); S^(1) = 0 by particle counting, so at
+        n=3 the normalization reduces to raw3 - N^(2) C^(1) - N^(3) K and
+        S^(3) - N^(3) I.
+
+        VALIDATED at n=2: reproduces c2_block_generated bit-for-bit
+        (tests/test_adcn_generated_c3.py), which is what certifies the
+        resolver, the gathering, the normalization and the ISR convolution
+        before n=3 is trusted.
+
+        At n=3 this consumes N^(3) (n_norm_order(3)), directly validated
+        against the exact norm series at 6.6e-11."""
+        K = self.k_block(sector)
+        dim = K.shape[0]
+        raws = {0: K}
+        Ss = {0: np.eye(dim)}
+        if n >= 1:
+            raws[1] = self.c1_block(sector)
+            Ss[1] = np.zeros((dim, dim))      # S^(1) = 0 (particle counting)
+        for m in range(2, n + 1):
+            raw_m, S_m = self.class_raw_S(sector, m)
+            raw_m = np.zeros((dim, dim)) if raw_m is None else raw_m
+            S_m = np.zeros((dim, dim)) if S_m is None else S_m
+            for j in range(2, m + 1):
+                nj = self.n_norm_order(j)
+                raw_m = raw_m - nj * raws[m - j]
+                S_m = S_m - nj * Ss[m - j]
+            raws[m], Ss[m] = raw_m, S_m
+        y = lowdin_sqrt_inv_series({m: s for m, s in Ss.items() if m >= 2}, n)
+        block = assemble_kplusc(raws, y, n)
+        if n >= 3:
+            block = block + self._orbital_gs_cross(sector, n)
+        return block
+
+    def _orbital_gs_cross(self, sector, n):
+        """Orbital-class Gram-Schmidt cross correction to the (k1,k1) block.
+
+        The class-class assembly orthonormalizes k1 WITHIN its class but not
+        against the orbital block. The sequential ISR Gram-Schmidt of k1
+        against the orbital space adds -(S^(orb,k1)^T U^(1) + h.c.) to the
+        (k1,k1) block, first nonzero at order 3 (S^(orb,k1) = _s2_block starts
+        at order 2, U^(1) = u_* at order 1). Without it, c_block_generated(3)
+        differs from the exact effective block by up to 23% (LiH); adding it
+        closes the gap to the SCF floor. VALIDATED against the determinant-
+        space exact-ISR (k1,k1) order-3 block (tests/test_adcn_generated_c3.py,
+        the exact-ISR order-5 reference) on H4 and LiH, both
+        sectors. The H2 lambda^5 pole-order gate was
+        structurally blind to this term because S^(orb,k1) vanishes on H2.
+
+        Order 3 is the only one an ADC(5) block needs; other orders are
+        refused rather than silently under-computed."""
+        if n != 3:
+            raise NotImplementedError(
+                f"orbital-GS cross term is implemented only at order 3 "
+                f"(the ADC(5) requirement); (k1,k1) at order {n} needs the "
+                f"order-general orbital-GS series -- not yet derived.")
+        tag = '2h1p' if sector == 'IP' else '2p1h'
+        u1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()  # (n_k1, norb)
+        s2 = self._s2_block(tag, sector)                         # (n_k1, norb)
+        M = s2 @ u1.T
+        return -(M + M.T)
+
+    def n_norm_order(self, m):
+        """N^(m), the order-m coefficient of the ground-state norm <Psi|Psi>,
+        spin-orbital twin of BuildSuperMatrixADCnRestricted.n_norm_order.
+
+        N^(m) = sum_{a+b=m, a,b>=1} <Psi^(a)|Psi^(b)>, and
+        <Psi^(a)|Psi^(b)> = sum_r (1/(r!)^2) sum t_r^(a) . t_r^(b).
+        N^(2) = 1/4 sum |t2^(1)|^2 == n2_norm() (the N^(2) the oracle-validated
+        u3_generated uses); N^(3) = 2<Psi^(1)|Psi^(2)>, and since Psi^(1)
+        carries only rank 2 that is 1/2 sum t2^(1) t2^(2).
+
+        N^(3) is not exercised by the n=3 orbital<->k1 ISR gate, but is
+        directly validated against the exact norm series at 6.6e-11."""
+        if m < 2:
+            return 0.0
+        total = 0.0
+        for a in range(1, m):
+            b = m - a
+            for rank in range(1, 5):
+                # an amplitude of this rank first exists at mp_min_order(rank):
+                # pairs with a nonexistent partner are zero and never fetched
+                if a < mp_min_order(rank) or b < mp_min_order(rank):
+                    continue
+                ta, tb = self.amp_at(rank, a), self.amp_at(rank, b)
+                if ta is None or tb is None:
+                    continue
+                total += float(np.sum(ta * tb)) / math.factorial(rank) ** 2
+        return total
+
+    # ------------------------------------------------------------------
+    # k=2 class blocks (3h2p/3p2h)
+    # ------------------------------------------------------------------
+    def class_idx_k2(self, sector):
+        cols = class_configs(self.nocc, self.norb, 2, sector)
+        return tuple(c - self.nocc if len(c) and c.min() >= self.nocc else c
+                     for c in cols)
+
+    def k2_self_block_generated(self, sector, ham='v'):
+        """(n_k2, n_k2) k=2 class-class self-coupling, gathered at ordered
+        3h2p/3p2h configs on both sides.
+
+        ham='v' -> C^(1)_k2, **the ADC(5) block**: `block_order(n,2,2)` is 0 at
+        ADC(4) (K only, diagonal -- which is what makes the downfold's
+        closed-form Schur exact there, and at every even order) and 1 at
+        ADC(5). ham='f' -> the zeroth-order piece, whose diagonal must equal
+        sigma_driver.diag_K(..., k=2); that agreement is a free end-to-end
+        check on the class enumeration, letter offsets and sector sign.
+
+        DENSE, 10-index: (no^3 nv^2)^2 for IP. Validation scale only -- see
+        generate_adcn.generate_adc5_k2k2's SIZE note. Production needs the
+        matrix-free sigma form.
+        """
+        fn = getattr(genk2k2, f"{'k0' if ham == 'f' else 'c1'}_"
+                              f"{'3h2p' if sector == 'IP' else '3p2h'}")
+        tensor = fn(**self.kernel_args())
+        bra = tuple(x[:, None] for x in self.class_idx_k2(sector))
+        ket = tuple(x[None, :] for x in self.class_idx_k2(sector))
+        return tensor[bra + ket]
+
+    def c12_o2_generated(self, sector):
+        """(n_k1, n_k2) EFFECTIVE k1<->k2 coupling at ORDER 2 -- the ADC(5)
+        (1,2) increment (block_order(5,1,2)=2; the block generateADC(5)'s
+        coverage scan found missing).
+
+            eff = K2_CLASS_SIGN * [ raw^(2)
+                                     - U^(1) @ S^(1)_orb,k2^T
+                                     - K_k1[:,None] * S_{k1,k2}^(2) ]
+
+        raw^(2) = l1f(l1^2) + l2v(l2^1) + l2ft2(l2^1,t2^1) (adc5_c12_blocks;
+        order-rule assignments, pdaggerq-pruned census). The two subtractions
+        are the sequential class-GS of the k2 precursor against the orbital
+        block (via its order-1 gauge overlap S^(1)_orb,k2 = k2_raw_S(.,1))
+        and against the k1 class (via the cross-class overlap S12^(2)).
+        VALIDATED against the exact-ISR (k1,k2)^[2] block at 6e-10 (H4) /
+        6e-9 (LiH), both sectors, k2 column orientation pinned at order 1
+        (tests/test_adcn_generated_c12.py). In the ADC(4) fold this block is
+        lambda^5-only (measured: c4 bit-identical with/without), which is why
+        it was never emitted before ADC(5) needed it."""
+        raw2 = self.c12_raw2(sector)
+        U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
+        _, S1k2 = self.k2_raw_S(sector, 1)
+        S12 = self.cross_class_overlap(sector, 2)
+        K1 = np.diag(self.k_block(sector))
+        return self.K2_CLASS_SIGN[sector] * (
+            raw2 - U1 @ S1k2.T - K1[:, None] * S12)
+
+
+    def cross_block_generated(self, order=2, strict=True):
+        """(n_2h1p, n_2p1h) union-space cross block X^(order) = (D|H^|C)
+        between the 2h1p-dagger-type (IP) and the 2p1h (EA) class, the
+        Hamiltonian block the two-sector supermatrix deletes (Tarantelli
+        and Cederbaum, PRA 45, 2790 (1992), Eq. 4.5d), in this solver's own
+        config bases (class_configs of each sector, virtual axes local). It
+        enters the two-sector supermatrix at the (2h1p rows, 2p1h columns)
+        position and its transpose; the metric partner vanishes identically.
+        Orders 0 and 1 are zero; at order 2 raw == effective (X^(0) = 0
+        leaves nothing to normalize, and the class-GS cross terms start at
+        order 3). Every module of orders 2..order must be generated
+        (structures live at their home order, re-evaluated at the order-n
+        amplitude assignments); absence raises."""
+        lead = cross_block_leading_order(1, 1)
+        mods = []
+        for o in range(order, lead - 1, -1):
+            mods.append((o, cross_block_module(o, 'k1k1')))
+        idx_b, idx_k = self.class_idx('IP'), self.class_idx('EA')
+        bra = tuple(x[:, None] for x in idx_b)
+        ket = tuple(x[None, :] for x in idx_k)
+        base = dict(self.kernel_args())
+        X = np.zeros((len(idx_b[0]), len(idx_k[0])))
+        missing = []
+        for nm, j, ham, k, a, b in u_order_terms(order):
+            fn = None
+            for o, mod in mods:
+                fn = getattr(mod, f'x{o}_2h1p_2p1h_{nm}', None)
+                if fn is not None:
+                    break
+            if fn is None:
+                continue
+            ds = self.amp_pair(j, a, k, b)
+            if ds is None:
+                missing.append(f"{nm}(l{j}^{a},t{k}^{b})")
+                continue
+            pool = dict(base)
+            pool.update(ds)
+            X += fn(**{p: pool[p] for p in inspect.signature(fn).parameters})[bra + ket]
+        if strict and missing:
+            raise RuntimeError(f"2h1p x 2p1h cross block order {order} incomplete -- "
+                               f"no amplitude for {sorted(set(missing))}")
+        return X
+
+    def c12_raw2(self, sector):
+        """(n_k1, n_k2) RAW order-2 k1<->k2 coupling (precursor basis, no
+        class-GS, no K2_CLASS_SIGN): the l1f/l2v/l2ft2 order-rule splits of
+        adc5_c12_blocks -- the raw layer both c12_o2_generated and the
+        order-general ISR assembly (isr_assembly) consume."""
+        tag1 = '2h1p' if sector == 'IP' else '2p1h'
+        tag2 = '3h2p' if sector == 'IP' else '3p2h'
+        p1 = self.amplitude_pool()
+        amp = {'l1f': dict(l1=p1['l1']),
+               'l2v': dict(l2=p1['l2']),
+               'l2ft2': dict(l2=p1['l2'], t2=p1['t2'])}
+        b = tuple(x[:, None] for x in self.class_idx(sector))
+        k = tuple(x[None, :] for x in self.class_idx_k2(sector))
+        raw2 = None
+        for split, extra in amp.items():
+            fn = getattr(genc12, f'c2_{tag1}_{tag2}_{split}', None)
+            if fn is None:
+                continue
+            kwargs = dict(self.kernel_args())
+            kwargs.update(extra)
+            kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
+            blk = fn(**kwargs)[b + k]
+            raw2 = blk if raw2 is None else raw2 + blk
+        return raw2
+
+    def coupling_k1_k2_generated(self, sector):
+        """(n_k1, n_k2) first-order 2h1p<->3h2p (IP) / 2p1h<->3p2h (EA)
+        coupling from the generated 8-index element, gathered at ordered
+        configs on both sides (the k=2 phase convention of
+        K2_CLASS_SIGN)."""
+        fn = genk2.c1_2h1p_3h2p if sector == 'IP' else genk2.c1_2p1h_3p2h
+        tensor = fn(**self.kernel_args())
+        bra = tuple(x[:, None] for x in self.class_idx(sector))
+        ket = tuple(x[None, :] for x in self.class_idx_k2(sector))
+        return self.K2_CLASS_SIGN[sector] * tensor[bra + ket]
+
+    def _amplitude_pool_order2(self):
+        """Second-order l2 (in addition to amplitude_pool's first-order
+        one) -- the k=2 U splits need the SAME generated function evaluated
+        at different amplitude orders (l2f at l2^(1) is the pure-gauge
+        order-1 layer, at l2^(2) an order-2 contribution; see
+        u2_k2_generated)."""
+        if not hasattr(self, '_amp_pool2'):
+            mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
+            t2_1 = mpn.compute_t2_1()
+            _, t2_2, _, _ = mpn.compute_order2_amplitudes(t2_1, max_rank=2)
+            self._amp_pool2 = {'l2_2': to_l(t2_2, 2)}
+        return self._amp_pool2
+
+    def _stitch_k2(self, sector, occ_name, vir_name, **amp_kwargs):
+        """(n_k2, norb) stitch of an occ-rows/vir-rows generated pair
+        (either may be absent -- pdaggerq pruning is row-asymmetric for
+        k=2), gathered at ordered configs."""
+        idx = self.class_idx_k2(sector)
+        U = np.zeros((len(idx[0]), self.norb))
+        for name, sl in ((occ_name, slice(0, self.nocc)),
+                         (vir_name, slice(self.nocc, self.norb))):
+            fn = getattr(genk2, name, None)
+            if fn is None:
+                continue
+            kwargs = dict(self.kernel_args())
+            kwargs.update(amp_kwargs)
+            kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
+            U[:, sl] = fn(**kwargs)[idx]
+        return U
+
+    # The k=2 config phase convention of the Dyson supermatrix differs from
+    # precursor_ket_string's by one per-class sign (IP: -1, EA: +1), the same
+    # sign for the coupling block and for U^(2) (pure basis gauge; applied
+    # uniformly here so every k=2 block shares one orientation).
+    K2_CLASS_SIGN = K2_CLASS_SIGN
+
+    def u2_k2_generated(self, sector):
+        """(n_k2, norb) U^(2) orbital<->3h2p/3p2h coupling in the Dyson
+        class-GS representation, with explicit per-split amplitude-ORDER
+        assignment (the k=2 l2f/s2_l2 functions are nonzero at BOTH l2^(1)
+        and l2^(2); the l2^(1) evaluations form a pure-gauge order-1 layer
+        that satisfies l2f(l2_1) == K_J * S^(1) identically (verified
+        7e-16) and is removed wholesale by the orthogonalization -- only
+        the order-2 layer survives):
+
+            U^(2) = sign * [ l2v(l2^(1)) + l1f(l1^(2)) + l2f(l2^(2))
+                             - eps_p * S^(2)(l2^(2)) ]
+
+        Same -eps_p*S^(2) class-GS rule as the U^(2)_2h1p; a fit
+        of alpha * eps_p-term + beta * K_J-term against independently built
+        orbital<->k2 U^(2) blocks gave alpha=+1.0000, beta=0.0000, leftover
+        8e-17."""
+        tag2 = '3h2p' if sector == 'IP' else '3p2h'
+        pool1 = self.amplitude_pool()
+        l2_2 = self._amplitude_pool_order2()['l2_2']
+
+        U = self._stitch_k2(sector, f'u2_{tag2}_occ_l2v', f'u2_{tag2}_vir_l2v',
+                            l2=pool1['l2'])
+        U += self._stitch_k2(sector, f'u2_{tag2}_occ_l1f', f'u2_{tag2}_vir_l1f',
+                             l1=pool1['l1'])
+        U += self._stitch_k2(sector, f'u2_{tag2}_occ_l2f', f'u2_{tag2}_vir_l2f',
+                             l2=l2_2)
+        S2 = self._stitch_k2(sector, f's2_{tag2}_occ_l2', f's2_{tag2}_vir_l2',
+                             l2=l2_2)
+        return self.K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
+
+    # ------------------------------------------------------------------
+    # ORDER-GENERAL orbital<->k=2 coupling + cross-class overlap -- the
+    # ADC(5) U^(3)_k2 path (block_order(5, 0, 2) == 3)
+    # ------------------------------------------------------------------
+    def amp_pair(self, j, a, k, b):
+        """{tagname: array} for the (l_j^(a), t_k^(b)) dressing assignment, or
+        None when an amplitude at the required order is unavailable -- the
+        method twin of the closure inside class_raw_S (which cannot be
+        reused), for the k=2 and cross-class assemblies."""
+        out = {}
+        for lead, rank, order in (('l', j, a), ('t', k, b)):
+            if not rank:
+                continue
+            arr = self.amp_at(rank, order)
+            if arr is None:
+                return None
+            out[f'{lead}{rank}'] = to_l(arr, rank) if lead == 'l' else arr
+        return out
+
+    @staticmethod
+    def _resolve_k2_struct(name, tag2, row, kind):
+        """Generated function for orbital<->k2 tag structure `name` (`kind`
+        'u' or 's', `row` 'occ'/'vir'), or None. Searches the ADC(5) module
+        (adc5_u3_k2_blocks: u1_/u3_/s3_ home-order prefixes), then the
+        order-2 module (adc4_k2_blocks: u2_/s2_). None is AMBIGUOUS exactly
+        as resolve_class_struct documents (pruned vs ungenerated) --
+        class_struct_ungenerated separates the two."""
+        for mod in (genu3k2, genk2):
+            for o in (1, 2, 3):
+                fn = getattr(mod, f'{kind}{o}_{tag2}_{row}_{name}', None)
+                if fn is not None:
+                    return fn
+        return None
+
+    def k2_raw_S(self, sector, n, strict=True):
+        """(raw^(n), S^(n)) orbital<->k=2 coupling/overlap sums, (n_k2, norb),
+        in the PRECURSOR basis, UNNORMALIZED (no N^(j) subtraction, no
+        class-GS, no K2_CLASS_SIGN). Order bookkeeping from adc_order_rule
+        (every tag structure x amplitude-order assignment with
+        a + b + [ham == 'v'] == n), physics selection pdaggerq's -- the k=2
+        twin of what class_raw_S does for the k=1 class-class block.
+
+        Unlike k=1, the k=2 element has a NONZERO order-1 layer:
+        raw^(1) = u1_v + l2f(l2^(1)) == eps_p * S^(1) with
+        S^(1) = s2_l2(l2^(1)) (the pure-gauge layer the class-GS removes
+        wholesale -- the identity is the 'gauge' gate in
+        tests/test_adcn_generated_u3_k2.py). The order-3 normalization needs
+        raw^(1)/S^(1) explicitly, which is why u1_v exists at all."""
+        tag2 = '3h2p' if sector == 'IP' else '3p2h'
+        idx = self.class_idx_k2(sector)
+        nk2 = len(idx[0])
+        base = dict(self.kernel_args())
+        missing_amp, ungenerated = [], []
+
+        def accumulate(terms, kind):
+            acc = np.zeros((nk2, self.norb))
+            for t in terms:
+                name = t[0]
+                j, a, k, b = ((t[1], t[4], t[3], t[5]) if kind == 'u'
+                              else (t[1], t[3], t[2], t[4]))
+                fns = {row: self._resolve_k2_struct(name, tag2, row, kind)
+                       for row in ('occ', 'vir')}
+                if fns['occ'] is None and fns['vir'] is None:
+                    if self.class_struct_ungenerated(
+                            name, 'c' if kind == 'u' else 's'):
+                        ungenerated.append(name)
+                    continue
+                ds = self.amp_pair(j, a, k, b)
+                if ds is None:
+                    missing_amp.append(f"{kind}:{name}(l{j}^{a},t{k}^{b})")
+                    continue
+                pool = dict(base)
+                pool.update(ds)
+                for row, sl in (('occ', slice(0, self.nocc)),
+                                ('vir', slice(self.nocc, self.norb))):
+                    fn = fns[row]
+                    if fn is None:      # row-asymmetric pruning (usual at k=2)
+                        continue
+                    kwargs = {p: pool[p]
+                              for p in inspect.signature(fn).parameters}
+                    acc[:, sl] += fn(**kwargs)[idx]
+            return acc
+
+        raw = accumulate(u_order_terms(n), 'u')
+        S = accumulate(s_order_terms(n), 's')
+        if strict and (missing_amp or ungenerated):
+            raise RuntimeError(
+                f"orbital<->k2 order {n} ({sector}) incomplete -- "
+                f"missing amplitudes {sorted(set(missing_amp))}, "
+                f"ungenerated structures {sorted(set(ungenerated))}")
+        return raw, S
+
+    def cross_class_overlap(self, sector, n, strict=True):
+        """(n_k1, n_k2) cross-class precursor overlap S^(n)_{k1,k2}
+        (2h1p<->3h2p for IP, 2p1h<->3p2h for EA), gathered at ordered configs
+        on both sides -- the object the per-class ISR assembly NEVER forms
+        (it builds within-class Delta S and orbital<->class S_pJ only; see the
+        the cross-class-overlap gap). Nonzero
+        from order 2 (l1^(2)-dressed, |S|~9.77e-04 on H4/sto-3g); at order 3
+        the survivors are l1(l1^3), l2t1(l2^1,t1^2), l3t2(l3^2,t2^1).
+
+        RAW precursor-basis orientation on BOTH classes == the exact-ISR
+        metric block Smet[n][k1,k2] (gate: tests/test_adcn_generated_u3_k2).
+        NO K2_CLASS_SIGN -- that phase belongs to consumers mixing this with
+        k=2 objects in the K2_CLASS_SIGN convention (u3_k2_generated applies it to the whole
+        bracket, this factor included).
+
+        Normalization S^(n) -= sum_{j>=2} N^(j) S^(n-j) vanishes identically
+        through n = 3 (S^(0) = S^(1) = 0, orders 0/1 pruned by pdaggerq and
+        ~1.8e-09 in the exact metric); the recursion below keeps it honest
+        at n >= 4, where strict mode will anyway flag ungenerated structures
+        first."""
+        tag1, tag2 = (('2h1p', '3h2p') if sector == 'IP'
+                      else ('2p1h', '3p2h'))
+        bra_idx = self.class_idx(sector)
+        ket_idx = self.class_idx_k2(sector)
+        bra = tuple(x[:, None] for x in bra_idx)
+        ket = tuple(x[None, :] for x in ket_idx)
+        missing_amp, ungenerated = [], []
+        S = np.zeros((len(bra_idx[0]), len(ket_idx[0])))
+        base = dict(self.kernel_args())
+        for name, j, k, a, b in s_order_terms(n):
+            fn = getattr(gens12, f's_{tag1}_{tag2}_{name}', None)
+            if fn is None:
+                if self.class_struct_ungenerated(name, 's'):
+                    ungenerated.append(name)
+                continue
+            ds = self.amp_pair(j, a, k, b)
+            if ds is None:
+                missing_amp.append(f"{name}(l{j}^{a},t{k}^{b})")
+                continue
+            pool = dict(base)
+            pool.update(ds)
+            kwargs = {p: pool[p] for p in inspect.signature(fn).parameters}
+            S += fn(**kwargs)[bra + ket]
+        if strict and (missing_amp or ungenerated):
+            raise RuntimeError(
+                f"cross-class overlap order {n} ({sector}) incomplete -- "
+                f"missing amplitudes {sorted(set(missing_amp))}, "
+                f"ungenerated structures {sorted(set(ungenerated))}")
+        for j in range(2, n - 1):       # N^(j) * S^(n-j), nonzero needs n-j >= 2
+            S = S - self.n_norm_order(j) * self.cross_class_overlap(
+                sector, n - j, strict=strict)
+        return S
+
+    def u3_k2_generated(self, sector):
+        """(n_k2, norb) U^(3) orbital<->3h2p/3p2h coupling in the Dyson
+        class-GS representation -- the ADC(5) twin of u2_k2_generated
+        (block_order(5, 0, 2) == 3; only the order-2 twin existed):
+
+            U^(3) = sign * [ (raw^(3) - N^(2) raw^(1))
+                             - eps_p (S^(3) - N^(2) S^(1))
+                             - S12^(2).T @ U^(1)_k1 ]
+
+        raw/S from k2_raw_S (order rule x pdaggerq survivors; raw^(3) =
+        l2v(l2^2) + l1f(l1^3) + l2f(l2^3) + l1v(l1^2) + l3v(l3^2) +
+        l2vt2(l2^1,t2^1) + l2ft1(l2^1,t1^2) + l3ft2(l3^2,t2^1) +
+        l4ft2(l4^2,t2^1); S^(3) = s2_l2(l2^3) + s3_l4t2(l4^2,t2^1)).
+        The N^(2) subtraction is the ground-state normalization hitting the
+        NONZERO order-1 layer (unlike k=1, where raw^(1) = U^(1), S^(1) = 0):
+        it is what the exact machinery's 1/<Psi0|Psi0> division produces at
+        order 3. -eps_p S is the class-GS vs the orbital block (the Phase-3
+        rule, validated at k=1 order 2/3 and k=2 order 2). -S12^(2).T U^(1)
+        is the class-GS vs the k=1 class through the SEQUENTIAL
+        orthogonalization: k=2 is Gram-Schmidted against the k=1 effective
+        states too, and the cross-class overlap (cross_class_overlap, TASK B
+        object) is nonzero from order 2 -- a term no per-class assembly ever
+        contained. The within-class Loewdin contributes nothing at this order
+        because the effective order-1 coupling vanishes identically
+        (raw^(1) == eps_p S^(1), the gauge gate). K2_CLASS_SIGN multiplies
+        the WHOLE bracket (every factor with one k=2 index), exactly as
+        u2_k2_generated.
+
+        Gate (tests/test_adcn_generated_u3_k2.py): the exact-ISR (orb,k2)
+        order-3 block from the determinant-space machinery of
+        exact_isr_full_fold (H4, both sectors), plus the order-2 control
+        re-derived through THIS pipeline == u2_k2_generated at 0.0."""
+        raw3, S3 = self.k2_raw_S(sector, 3)
+        raw1, S1 = self.k2_raw_S(sector, 1)
+        n2 = self.n2_norm()
+        U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
+        S12 = self.cross_class_overlap(sector, 2)
+        return self.K2_CLASS_SIGN[sector] * (
+            (raw3 - n2 * raw1)
+            - self.eps[None, :] * (S3 - n2 * S1)
+            - S12.T @ U1)
+
+    # ------------------------------------------------------------------
+    # U^(3) orbital<->2p1h (lambda-oracle
+    # rejected the printed SCW83 B3 23-term form)
+    # ------------------------------------------------------------------
+    def _amplitudes_order3(self):
+        if not hasattr(self, '_amp3'):
+            mpn = MPnDensityDriver(self.eps, self.g, self.nocc)
+            t2_1 = mpn.compute_t2_1()
+            t1_2, t2_2, t3_2, t4_2 = mpn.compute_order2_amplitudes(t2_1)
+            t1_3, t2_3, t3_3 = mpn.compute_order3_amplitudes(t1_2, t2_2, t3_2, t4_2, t2_1)
+            self._amp3 = {
+                'l1_3': to_l(t1_3, 1), 'l2_2': to_l(t2_2, 2),
+                'l3_2': to_l(t3_2, 3), 't1_2': t1_2, 't2_2': t2_2,
+            }
+        return self._amp3
+
+    def _stitch_k1(self, module, sector, occ_name, vir_name, **amp_kwargs):
+        """(n_k1, norb) stitch of an occ/vir generated pair from `module`
+        at explicit amplitude arrays (missing functions contribute 0)."""
+        idx = self.class_idx(sector)
+        U = np.zeros((len(idx[0]), self.norb))
+        for name, sl in ((occ_name, slice(0, self.nocc)),
+                         (vir_name, slice(self.nocc, self.norb))):
+            fn = getattr(module, name, None)
+            if fn is None:
+                continue
+            kwargs = dict(self.kernel_args())
+            kwargs.update(amp_kwargs)
+            kwargs = {p: kwargs[p] for p in inspect.signature(fn).parameters}
+            U[:, sl] = fn(**kwargs)[idx]
+        return U
+
+    def k1_raw_S(self, sector, n):
+        """(raw^(n), S^(n)) orbital<->k1 coupling/overlap, (n_k1, norb),
+        PRECURSOR basis, UNNORMALIZED (no N^(j), no class-GS, no Loewdin) --
+        the k=1 twin of k2_raw_S, extracted from u3_generated's stitch list
+        so the order-general ISR assembly (isr_assembly) can consume the raw
+        layer directly. n=1 is the bare U^(1) (S^(1) = 0 by particle
+        counting); n=2/3 enumerate the surviving tag-structure evaluations
+        (pdaggerq census; the SAME lists u3_generated always used)."""
+        tag = '2h1p' if sector == 'IP' else '2p1h'
+        if n == 1:
+            u1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
+            return u1, np.zeros_like(u1)
+        if n == 2:
+            idx = self.class_idx(sector)
+            raw = np.zeros((len(idx[0]), self.norb))
+            raw[:, :self.nocc] = self._u2_sum(tag, 'occ')[idx]
+            raw[:, self.nocc:] = self._u2_sum(tag, 'vir')[idx]
+            return raw, self._s2_block(tag, sector)
+        if n != 3:
+            raise NotImplementedError(
+                f"k1 raw coupling at order {n}: only 1..3 are stitched here "
+                f"(the restricted path has the order-general u_raw_series).")
+        p1 = self.amplitude_pool()
+        a3 = self._amplitudes_order3()
+
+        raw = self._stitch_k1(genu3, sector, f'u3_{tag}_occ_l2vt2', f'u3_{tag}_vir_l2vt2',
+                              l2=p1['l2'], t2=p1['t2'])
+        raw += self._stitch_k1(genu3, sector, f'u3_{tag}_occ_vt1', f'u3_{tag}_vir_vt1',
+                               t1=a3['t1_2'])
+        raw += self._stitch_k1(genu3, sector, f'u3_{tag}_occ_l1v', f'u3_{tag}_vir_l1v',
+                               l1=p1['l1'])
+        raw += self._stitch_k1(gen3, sector, f'u2_{tag}_occ_l2v', f'u2_{tag}_vir_l2v',
+                               l2=a3['l2_2'])
+        raw += self._stitch_k1(gen3, sector, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+                               l2=p1['l2'], t2=a3['t2_2'])
+        raw += self._stitch_k1(gen3, sector, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+                               l2=a3['l2_2'], t2=p1['t2'])
+        raw += self._stitch_k1(genu3, sector, f'u3_{tag}_occ_l2ft1', f'u3_{tag}_vir_l2ft1',
+                               l2=p1['l2'], t1=a3['t1_2'])
+        raw += self._stitch_k1(genu3, sector, f'u3_{tag}_occ_l3ft2', f'u3_{tag}_vir_l3ft2',
+                               l3=a3['l3_2'], t2=p1['t2'])
+        raw += self._stitch_k1(gen3, sector, f'u2_{tag}_occ_l1f', f'u2_{tag}_vir_l1f',
+                               l1=a3['l1_3'])
+
+        S3 = self._stitch_k1(genu3, sector, f's3_{tag}_occ_l2t1', f's3_{tag}_vir_l2t1',
+                             l2=p1['l2'], t1=a3['t1_2'])
+        S3 += self._stitch_k1(genu3, sector, f's3_{tag}_occ_l3t2', f's3_{tag}_vir_l3t2',
+                              l3=a3['l3_2'], t2=p1['t2'])
+        S3 += self._stitch_k1(gen3, sector, f's2_{tag}_occ_l1', f's2_{tag}_vir_l1',
+                              l1=a3['l1_3'])
+        return raw, S3
+
+    def u3_generated(self, sector):
+        """(n_k1, norb) U^(3) coupling in the Dyson class-GS representation:
+
+            U^(3) = raw^(3) - N^(2) U^(1) - eps_p S^(3)_pJ
+                    - 1/2 U^(1) S^(2)_class
+
+        raw^(3)/S^(3) from k1_raw_S (v-family l2vt2(l2^1,t2^1), vt1(t1^2),
+        l1v(l1^2), l2v(l2^2); f-family l2ft2 at (l2^1,t2^2)+(l2^2,t2^1),
+        l2ft1(l2^1,t1^2), l3ft2(l3^2,t2^1), l1f(l1^3)). Corrections:
+        N^(2) U^(1) removes l2vt2's disconnected piece; -eps_p S^(3) is
+        the SAME class-GS rule validated at orders 2 (k=1) and 2 (k=2);
+        -1/2 U^(1) S^(2)_class is the within-class Loewdin (Y^(2)) first
+        becoming active. tests/test_isr_assembly.py checks it against the
+        ISR assembly's (0,1) block at order 3."""
+        raw, S3 = self.k1_raw_S(sector, 3)
+
+        U1 = self.u_2h1p() if sector == 'IP' else self.u_2p1h()
+        n2 = self.n2_norm()
+        tag_c2 = '2h1p' if sector == 'IP' else '2p1h'
+        s2c_raw = self._sum_gathered(genc2, f's2c_{tag_c2}_', sector)
+        s2c = s2c_raw - n2 * np.eye(s2c_raw.shape[0])
+
+        return (raw - n2 * U1 - self.eps[None, :] * S3
+                - 0.5 * (s2c @ U1))
+
+    def build_supermatrix_adc3(self, static_correction=None):
+        """Dense Dyson-ADC(3) supermatrix assembled ENTIRELY from generated
+        blocks: F = diag(eps) [+ static_correction], U through order 2
+        (u_2h1p_adc3/u_2p1h_adc3, Dyson class-GS representation), class
+        blocks K + C^(1). Must equal ADCSolverUnrestricted.build_supermatrix
+        exactly (tests/test_adcn_generated_u2.py)."""
+        n1 = class_dimension(self.no, self.nv, 1, 'IP')
+        n2 = class_dimension(self.no, self.nv, 1, 'EA')
+        norb = self.norb
+        nH = norb + n1 + n2
+        off1, off2 = norb, norb + n1
+        H = np.zeros((nH, nH))
+        H[:norb, :norb] = np.diag(self.eps)
+        if static_correction is not None:
+            H[:norb, :norb] += static_correction
+        U1, U2 = self.u_2h1p_adc3(), self.u_2p1h_adc3()
+        H[off1:off2, :norb] = U1
+        H[:norb, off1:off2] = U1.T
+        H[off2:nH, :norb] = U2
+        H[:norb, off2:nH] = U2.T
+        H[off1:off2, off1:off2] = self.k_block('IP') + self.c1_block('IP')
+        H[off2:nH, off2:nH] = self.k_block('EA') + self.c1_block('EA')
+        return H
+
+    def sigma_dynamic(self, omega):
+        """(norb, norb) dynamic ADC(2) self-energy
+        Sigma(omega) = U^T (omega - K)^{-1} U summed over both sectors
+        (K taken as the generated blocks' diagonals; they are verified
+        diagonal in the tests). Must equal the textbook MP2 self-energy --
+        the ADC(2) = MP2 self-energy oracle."""
+        sigma = np.zeros((self.norb, self.norb))
+        for sector, u in (('IP', self.u_2h1p()), ('EA', self.u_2p1h())):
+            k_diag = np.diag(self.k_block(sector))
+            sigma += u.T @ (u / (omega - k_diag)[:, None])
+        return sigma
+
+
+# =====================================================================
+# Restricted (spin-blocked, RHF) Dyson-ADC(2). Assembles a single Ms-Dyson
+# sector from the
+# spatial spin-block functions of adc2_blocks_restricted.py.
+# =====================================================================
+
+# alpha=0, beta=1 (interleaved spin orbitals, alpha=even -- the convention
+# spin_adapt.py locks in). sval maps a spin-orbital index to its Sz.
+def _sval(idx):
+    return np.where(idx % 2 == 0, 0.5, -0.5)
+
+
+class BuildSuperMatrixADCnRestricted:
+    """Spin-blocked (RHF/closed-shell) Dyson-ADC(2) from the generated
+    restricted blocks (adc2_blocks_restricted.py). Builds the single
+    alpha-Dyson sector -- states reachable by removing/adding one ALPHA
+    electron: 2h1p at Sz=-1/2, 2p1h at Sz=+1/2, orbital rows are the alpha
+    spatial orbitals -- entirely from SPATIAL spin-block tensors.
+
+    That sector is exactly one of the two identical spin blocks the
+    spin-orbital BuildSuperMatrixADCn supermatrix factors into for a
+    closed-shell reference (the other, beta-Dyson, block is its mirror; the
+    remaining spin-orbital eigenvalues are decoupled Sz=+-3/2 quartet
+    configs). Validation (tests/test_adcn_generated_adc2_restricted_driver.py):
+    the spatial self-energy equals the alpha-spatial block of the spin-orbital
+    MP2 self-energy, and every alpha-sector supermatrix eigenvalue is a
+    spin-orbital ADC(2) pole.
+
+    Inputs are RHF SPATIAL quantities: eps (norb,), spin-block physicist
+    ERIs g_aaaa/g_abab/g_bbbb (get_antisymmetrized_spin_block_eri; g_aaaa/
+    g_bbbb antisymmetrized-within-spin, g_abab bare). nocc = occupied
+    SPATIAL orbital count.
+    """
+
+    # class-axis roles and target Sz per sector (holes then particles, in the
+    # blocked functions' axis order: 2h1p (i,j | a); 2p1h (i | a,b)).
+    _SECTOR = {
+        'IP': dict(tag='2h1p', target_sz=-0.5, nh=2, npart=1),
+        'EA': dict(tag='2p1h', target_sz=+0.5, nh=1, npart=2),
+    }
+
+    def __init__(self, eps, g_aaaa, g_abab, g_bbbb, nocc, u2_denom_dress=None,
+                 amplitudes=None, B_aa=None, quadruples_ntau=None):
+        """quadruples_ntau: the third-order quadruples T4^(3), read by the order-4
+        ground state (non-Dyson ADC(5), amps_order(5)), Laplace-fused at this many
+        minimax points and never formed; None materializes them (O(no^4 nv^4) per
+        spin block).
+
+        u2_denom_dress: optional dict of {'hh','pp','hp'} booleans -- the
+        Epstein-Nesbet dressing of the U^(2) T2^(1) denominator, same flag and
+        same scope as the spin-orbital BuildSuperMatrixADCn's (only t2/l2 are
+        rebuilt; t1/l1 stay bare). See _u2_amplitude_pool.
+
+        THIS is the guess-free restricted EN route. The hand-written CSF solver
+        (restricted.ADCSolverRestricted) merges the two spin blocks into
+        single quotients like (g - g^T)/D, which is only valid undressed
+        (t_aaaa == t_abab - t_abab^T holds only for a common denominator); the
+        merge destroys the information about which block each piece came from,
+        leaving a one-parameter ambiguity that cannot be resolved from the bare
+        code. The generated restricted blocks never merge -- l2_aaaa and
+        l2_abab are separate arguments produced by pdaggerq's own symbolic
+        spin-summation of the spin-orbital expression -- so giving each its own
+        denominator is forced rather than chosen.
+
+        amplitudes: optional spin-block amplitude dict REPLACING the MBPT pool
+        (cc_adc_amplitudes.cc_amplitudes_restricted -- the CC-ADC(3)
+        substitution); mutually exclusive with u2_denom_dress, same reason as
+        on the spin-orbital twin.
+
+        B_aa: (naux, norb, norb) DF/RI factor. Given it, every block is built
+        from the *_df generated twins (3-index B leaves) instead of the
+        4-index g_ssss, and g_aaaa/g_abab/g_bbbb may be None -- the ONLY way
+        past the norb^4 wall (aug-cc-pVQZ: 15 GB for CO, 115 GB for SiH4).
+        A g-free solver builds its MBPT amplitude pool from the DF numerators
+        (the rank <= 2 and Laplace-fused providers; the materialized rank >= 3
+        ones refuse) or takes `amplitudes`; the EN dressing needs dense g."""
+        if amplitudes is not None and u2_denom_dress:
+            raise ValueError(
+                "amplitudes= and u2_denom_dress= are two different "
+                "renormalizations of the SAME T2^(1)/T1^(2) pair -- pass one")
+        self.eps = np.asarray(eps, float)
+        self.norb = len(self.eps)
+        self.nocc = nocc
+        self.nvir = self.norb - nocc
+        self.o, self.v = slice(0, nocc), slice(nocc, self.norb)
+        f = np.diag(self.eps)
+        d = np.eye(self.norb)
+        if g_aaaa is None and B_aa is None:
+            raise ValueError("give either dense spin-block g or a DF factor B_aa")
+        if g_aaaa is None and u2_denom_dress:
+            raise ValueError(
+                "g-free (B_aa-only) construction has no EN hook -- the EN "
+                "shifts read dense g slices; supply g_aaaa/g_abab/g_bbbb as well "
+                "(for DF EN-ADC(3) use the hand-written route, "
+                "ADCSolverRestricted(..., df=True, en_dress=...))")
+        self.g_aaaa, self.g_abab, self.g_bbbb = g_aaaa, g_abab, g_bbbb
+        self.B_aa = B_aa
+        self.df = B_aa is not None
+        self._u_adc3_cache = {}
+        self._genr = genr_df if self.df else genr
+        self._genr3 = genr3_df if self.df else genr3
+        self.u2_denom_dress = u2_denom_dress
+        self.amplitudes = amplitudes
+        self.quadruples_ntau = quadruples_ntau
+        self.rargs = dict(f_aa=f, f_bb=f, g_aaaa=g_aaaa, g_abab=g_abab,
+                           g_bbbb=g_bbbb, d_aa=d, d_bb=d,
+                           o=self.o, v=self.v, no=nocc, nv=self.nvir)
+        if self.df:
+            # closed shell: the beta factor IS the alpha one (aliased, not copied)
+            self.rargs.update(B_aa=B_aa, B_bb=B_aa)
+
+    # ------------------------------------------------------------------
+    # Restricted MBPT amplitude pool (spin-blocked) for the order-2 U^(2)
+    # dressed splits -- same amplitude-ORDER assignment as the spin-orbital
+    # BuildSuperMatrixADCn.amplitude_pool (vt2/l2v/l2ft2 first-order t2/l2,
+    # l1f second-order t1; the surviving restricted splits use only l1/l2/t2).
+    # Closed-shell twins (_bbbb/_bb == _aaaa/_aa) aliased here.
+    # ------------------------------------------------------------------
+    def _mpn(self):
+        """The restricted MPn driver of the MBPT amplitude pool: on the dense
+        spin-block g, or with g None (g-free) on its DF twins from B_aa."""
+        return MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc,
+            B_aa=self.B_aa, B_bb=self.B_aa)
+
+    def require_dense_g(self, what):
+        if self.g_aaaa is None:
+            raise NotImplementedError(
+                f"{what} materializes rank >= 3 MBPT amplitudes from dense g (validation "
+                f"scale); the g-free (B_aa-only) solver serves the rank <= 2 and "
+                f"Laplace-fused providers only -- pass laplace_ntau")
+
+    def amplitude_pool(self):
+        """See BuildSuperMatrixADCn.amplitude_pool; self.amplitudes
+        overrides it wholesale (CC-ADC). g-free: the same amplitudes from the
+        DF numerators (MPnDensityDriverRestricted's *_df twins)."""
+        if self.amplitudes is not None:
+            return InjectedAmplitudePool(self.amplitudes, 'restricted CC')
+        if not hasattr(self, '_amp_pool'):
+            mpn = self._mpn()
+            t2_aaaa, t2_abab = mpn.amplitudes_t2_1()
+            if self.g_aaaa is None:
+                t1_2_aa = mpn.compute_t1_2_aa_df(t2_aaaa, t2_abab)
+            else:
+                t1_2_aa = mpn.compute_order2_amplitudes(t2_aaaa, t2_abab, max_rank=1)[0]
+            # Lambda (bra-dressing) amplitudes: the pdaggerq 'l{rank}' tag's
+            # own axis convention, block-dependent (pure blocks reverse the
+            # vir side + sign; mixed blocks plain occ<->vir transpose) -- the
+            # restricted to_l, the exact form the l1/l2 dressed
+            # splits index. A plain transpose is WRONG for abab (no vir
+            # antisymmetry to absorb the reversal).
+            l1_aa = to_l(t1_2_aa, 1, 'aa')
+            l2_aaaa = to_l(t2_aaaa, 2, 'aaaa')
+            l2_abab = to_l(t2_abab, 2, 'abab')
+            self._amp_pool = {
+                't2_aaaa': t2_aaaa, 't2_abab': t2_abab, 't2_bbbb': t2_aaaa,
+                'l2_aaaa': l2_aaaa, 'l2_abab': l2_abab, 'l2_bbbb': l2_aaaa,
+                'l1_aa': l1_aa, 'l1_bb': l1_aa,
+                # raw second-order T1 (ket-dressing 't1' tag, (nv, no) order),
+                # used by the C^(2) ft1 split
+                't1_aa': t1_2_aa, 't1_bb': t1_2_aa,
+            }
+        return self._amp_pool
+
+    def _u2_amplitude_pool(self):
+        """Amplitude pool for the order-2 U^(2)/S^(2) splits: identical to
+        amplitude_pool() unless self.u2_denom_dress is set, in which case ONLY
+        t2/l2 are rebuilt with Epstein-Nesbet-dressed denominators -- t1/l1
+        stay bare and the shared amplitude_pool() cache is never mutated, so
+        C^(2)/S^(2)'s other consumers still see the bare amplitudes. Exactly
+        the scope of the spin-orbital BuildSuperMatrixADCn._u2_amplitude_pool.
+
+        The two spin blocks get SEPARATE denominators (see __init__): the EN
+        shift is a diagonal element of a determinant, so it differs between the
+        same-spin and opposite-spin amplitude. A consequence worth stating:
+        t_aaaa is then no longer t_abab - t_abab^T, i.e. the EN-dressed
+        first-order wavefunction is not a spin eigenfunction. That spin
+        contamination is a genuine property of Epstein-Nesbet partitioning,
+        present identically in the spin-orbital formulation -- it is not an
+        artifact of working in spin blocks."""
+        pool = dict(self.amplitude_pool())
+        if not self.u2_denom_dress:
+            return pool
+        o, v = self.o, self.v
+        O, V = self.nocc, self.nvir
+        # g_abab is the PLAIN (non-antisymmetrized) physicist tensor, which is
+        # what get_coulomb_exchange_diagonals' <pq|pq> / <pq|qp> gathers expect.
+        gab = self.g_abab
+        d_h, d_p, d_hp = restricted_channel_shifts(
+            self.u2_denom_dress, None, gab[o, o, o, o], gab[v, v, v, v],
+            O, np.arange(O, self.norb),
+            g_vovo=gab[v, o, v, o], g_voov=gab[v, o, o, v])
+        dens = EpsteinNesbetDenominators(self.eps[:O], self.eps[O:], d_h, d_p, d_hp)
+        # orbital_denominator's [a,b,i,j] order == EpsteinNesbetDenominators' 'abkl'
+        # layout (particles @ (0,1), holes @ (2,3), bare_sign = +1).
+        D_bare = orbital_denominator(self.eps[:O], self.eps[O:O + V], 2)
+        e_pair = (1.0 / (D_bare - dens.shift('abkl', 'same')),
+                  1.0 / (D_bare - dens.shift('abkl', 'opp')))
+        mpn = MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb,
+            self.nocc, e_abij=e_pair)
+        t2_aaaa, t2_abab = mpn.compute_t2_1()
+        pool.update({
+            't2_aaaa': t2_aaaa, 't2_abab': t2_abab, 't2_bbbb': t2_aaaa,
+            'l2_aaaa': to_l(t2_aaaa, 2, 'aaaa'),
+            'l2_abab': to_l(t2_abab, 2, 'abab'),
+            'l2_bbbb': to_l(t2_aaaa, 2, 'aaaa'),
+        })
+        return pool
+
+    def n2_norm(self):
+        """N^(2) = <Psi^(1)|Psi^(1)> = 0.25 sum_spinorbital |t2^(1)|^2, in
+        spin blocks (RHF): 0.5 sum |t2_aaaa|^2 + sum |t2_abab|^2 -- verified
+        == the spin-orbital BuildSuperMatrixADCn.n2_norm."""
+        p = self.amplitude_pool()
+        return 0.5 * float(np.sum(p['t2_aaaa'] ** 2)) + float(np.sum(p['t2_abab'] ** 2))
+
+    # ------------------------------------------------------------------
+    # Order-2 class-class C^(2) block (ISR/class-GS)
+    # ------------------------------------------------------------------
+    def _class_block_sum(self, module, prefix, sector, amps=None):
+        """(ncfg, ncfg) alpha-sector class-class sum of every surviving
+        generated dressed split matching `prefix` in `module`, per (bra
+        pattern, ket pattern), amplitude args introspected from the pool --
+        the restricted analogue of BuildSuperMatrixADCn._sum_gathered.
+
+        amps: explicit {leafname: array} overriding the default minimum-order
+        `amplitude_pool()`. Needed by the order-general assembly, where the
+        SAME tag structure is evaluated at several amplitude-order assignments
+        (e.g. s2c_l2t2 at (l2^1,t2^2) and (l2^2,t2^1) for S^(3)). Passing a
+        `prefix` that ends in '_' isolates a single structure -- without the
+        trailing underscore 'l2v' would also match 'l2vt2'."""
+        s = self._SECTOR[sector]
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        spins = cfg['spins']
+        cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
+               [cfg['part_sp'][:, k] for k in range(s['npart'])]
+        pool = dict(self.rargs)
+        pool.update(self.amplitude_pool() if amps is None else amps)
+        C = np.zeros((ncfg, ncfg))
+        uniq, inv = np.unique(spins, axis=0, return_inverse=True)
+        for gi, bp in enumerate(uniq):
+            brows = np.where(inv == gi)[0]
+            for gj, kp in enumerate(uniq):
+                krows = np.where(inv == gj)[0]
+                tail = '_' + self._suffix(bp) + self._suffix(kp)
+                acc = None
+                for name in dir(module):
+                    if not (name.startswith(prefix) and name.endswith(tail)):
+                        continue
+                    fn = getattr(module, name)
+                    val = fn(*[pool[p] for p in _sig(fn)])
+                    bra_idx = tuple(c[brows][:, None] for c in cols)
+                    ket_idx = tuple(c[krows][None, :] for c in cols)
+                    blk = val[bra_idx + ket_idx]
+                    acc = blk if acc is None else acc + blk
+                if acc is not None:
+                    C[np.ix_(brows, krows)] += acc
+        return C
+
+    def c2_block_generated(self, sector):
+        """Generated restricted C^(2) class-class block (ISR/class-GS
+        representation), the spatial counterpart of
+        BuildSuperMatrixADCn.c2_block_generated:
+
+            C^(2) = raw_dressed_sum - N^(2) K
+                    - 1/2 (S^(2) K + K S^(2))   (within-class Loewdin)
+
+        with S^(2) normalization-corrected (raw - N^(2) I). K is the
+        alpha-sector diagonal; the ISR assembly (lowdin_sqrt_inv_series /
+        assemble_kplusc) runs on the alpha-sector-gathered blocks -- valid
+        because C^(2) is spin-conserving (block-diagonal in Sz)."""
+        tag = self._SECTOR[sector]['tag']
+        K = np.diag(self.sector_configs(sector)['K'])
+        raw = self._class_block_sum(genc2r, f'c2_{tag}_', sector)
+        s2_raw = self._class_block_sum(genc2r, f's2c_{tag}_', sector)
+        n2 = self.n2_norm()
+        s2 = s2_raw - n2 * np.eye(K.shape[0])
+        raw = raw - n2 * K
+        y = lowdin_sqrt_inv_series({2: s2}, 2)
+        return assemble_kplusc({0: K, 2: raw}, y, 2)
+
+    # ------------------------------------------------------------------
+    # ORDER-GENERAL class-class C^(n) / Delta S^(n) -- restricted twin
+    # ------------------------------------------------------------------
+    @staticmethod
+    def resolve_class_struct(name, tag, kind):
+        """(module, module_order) holding restricted class-class structure
+        `name`, or None. Twin of BuildSuperMatrixADCn.resolve_class_struct;
+        None is AMBIGUOUS (pruned vs ungenerated) -- see that docstring."""
+        for order, mod in ((2, genc2r), (3, genc3r)):
+            prefix = (f'c{order}_{tag}_{name}_' if kind == 'c'
+                      else f's{order}c_{tag}_{name}_')
+            if any(a.startswith(prefix) for a in dir(mod)):
+                return mod, order
+        return None
+
+    def class_raw_S(self, sector, n, strict=True, laplace_ntau=None):
+        """(raw^(n), Delta S^(n)) restricted class-class blocks in the
+        PRECURSOR basis, before normalization/ISR -- the spatial twin of
+        BuildSuperMatrixADCn.class_raw_S.
+
+        Delta S^(n) is the object the dense oracle `u_dot_orb_isr` (tests/u_isr_oracle.py) needs at orders
+        2..n-1 and currently refuses to run without beyond order 2 (it raises
+        rather than silently TRUNCATE the Loewdin series), which is what blocks
+        the order-general U^(n) ISR at n=4.
+
+        laplace_ntau (int): the amps come from amps_order_lowrank_laplace (NO
+        t3_2/t4_2/t3_3 materialized) -- what lets the dense oracle's ISR Delta S
+        (class_overlap_series) stop materializing rank>=3 (wall #2's amplitude
+        side). BIT-EXACT: Delta S^(n) is built entirely from the l2t2 structure
+        at rank<=2 order<=2 (identical in both providers); the class-class RAW's
+        only rank>=3 structure (l2ft3->t3_2) has its Fock factor in f[o,v] and
+        VANISHES by Brillouin, so skipping it
+        (the low-rank provider omits t3_2) drops nothing. The dense (n_k1)^2
+        Delta S matrix itself is a separate matrix-free-ISR item."""
+        tag = self._SECTOR[sector]['tag']
+        A = (self.amps_order_lowrank_laplace(laplace_ntau)
+             if laplace_ntau is not None else self.amps_order(max_order=n))
+        missing_amp, ungenerated = [], []
+
+        amps = functools.partial(amplitude_leaves, A)
+
+        def accumulate(terms, kind):
+            acc = None
+            for t in terms:
+                name = t[0]
+                j, a, k, b = ((t[1], t[4], t[3], t[5]) if kind == 'c'
+                              else (t[1], t[3], t[2], t[4]))
+                res = self.resolve_class_struct(name, tag, kind)
+                if res is None:
+                    if BuildSuperMatrixADCn.class_struct_ungenerated(name, kind):
+                        ungenerated.append(name)
+                    continue
+                ds = amps(j, a, k, b)
+                if ds is None:
+                    # In laplace mode the low-rank provider omits t3/t4, so a
+                    # rank>=3 class-class structure has no amp -- but on the
+                    # class blocks its Fock factor is f[o,v]=0 (Brillouin), so it
+                    # contributes nothing: skip it rather than falsely flag a
+                    # missing amp. A missing rank<=2 amp is still a real gap.
+                    if laplace_ntau is not None and (j >= 3 or k >= 3):
+                        continue
+                    missing_amp.append(f"{kind}:{name}(l{j}^{a},t{k}^{b})")
+                    continue
+                mod, order = res
+                prefix = (f'c{order}_{tag}_{name}_' if kind == 'c'
+                          else f's{order}c_{tag}_{name}_')
+                blk = self._class_block_sum(mod, prefix, sector, amps=ds)
+                acc = blk if acc is None else acc + blk
+            return acc
+
+        raw = accumulate(u_order_terms(n), 'c')
+        S = accumulate(s_order_terms(n), 's')
+        if strict and (missing_amp or ungenerated):
+            raise RuntimeError(
+                f"restricted class-class order {n} ({sector}) incomplete -- "
+                f"missing amplitudes {sorted(set(missing_amp))}, "
+                f"ungenerated structures {sorted(set(ungenerated))}")
+        return raw, S
+
+    def class_overlap_series(self, sector, n, strict=True, laplace_ntau=None):
+        """{m: Delta S^(m)} for m = 2..n, normalization-corrected
+        (Delta S^(m) -= sum_{j>=2} N^(j) Delta S^(m-j), Delta S^(0) = I,
+        Delta S^(1) = 0).
+
+        This is what the dense oracle `u_dot_orb_isr` (tests/u_isr_oracle.py) assembles inline for m=2 only
+        and then hard-fails on for m>=3; feeding it this series is what lets the
+        order-general U^(n) ISR run at n>=4. laplace_ntau routes class_raw_S
+        through the low-rank Laplace provider so the ISR Delta S stops
+        materializing t3_2/t4_2/t3_3 (BIT-EXACT -- Delta S is rank<=2 only);
+        N^(j) is n_norm_order (rank<=2), so the whole series is rank>=3-free."""
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        Ss = {0: np.eye(ncfg), 1: np.zeros((ncfg, ncfg))}
+        for m in range(2, n + 1):
+            _, S_m = self.class_raw_S(sector, m, strict=strict,
+                                       laplace_ntau=laplace_ntau)
+            S_m = np.zeros((ncfg, ncfg)) if S_m is None else S_m
+            for j in range(2, m + 1):
+                S_m = S_m - self.n_norm_order(j) * Ss[m - j]
+            Ss[m] = S_m
+        return {m: s for m, s in Ss.items() if m >= 2}
+
+    def c_block_generated(self, sector, n):
+        """ORDER-GENERAL restricted class-class (K+C)^(n) -- spatial twin of
+        BuildSuperMatrixADCn.c_block_generated (see it for the assembly and for
+        why N^(n) cancels identically here).
+
+        VALIDATED at n=2 against c2_block_generated (bit-exact) and at n=3
+        against the spin-orbital twin (tests/test_adcn_generated_c3.py)."""
+        K = np.diag(self.sector_configs(sector)['K'])
+        dim = K.shape[0]
+        raws = {0: K}
+        Ss = {0: np.eye(dim), 1: np.zeros((dim, dim))}
+        if n >= 1:
+            raws[1] = self._c1_block(sector)
+        for m in range(2, n + 1):
+            raw_m, S_m = self.class_raw_S(sector, m)
+            raw_m = np.zeros((dim, dim)) if raw_m is None else raw_m
+            S_m = np.zeros((dim, dim)) if S_m is None else S_m
+            for j in range(2, m + 1):
+                nj = self.n_norm_order(j)
+                raw_m = raw_m - nj * raws[m - j]
+                S_m = S_m - nj * Ss[m - j]
+            raws[m], Ss[m] = raw_m, S_m
+        y = lowdin_sqrt_inv_series({m: s for m, s in Ss.items() if m >= 2}, n)
+        block = assemble_kplusc(raws, y, n)
+        if n >= 3:
+            block = block + self._orbital_gs_cross(sector, n)
+        return block
+
+    def _orbital_gs_cross(self, sector, n):
+        """Orbital-class Gram-Schmidt cross correction to the (k1,k1) block --
+        restricted twin of BuildSuperMatrixADCn._orbital_gs_cross. Adds
+        -(S^(orb,k1)^T U^(1) + h.c.) at order 3 (the sequential ISR GS of k1
+        against the orbital block, omitted by the within-class assembly).
+        S^(orb,k1) = the S^(2) returned by u2_and_s2; U^(1) = u_block."""
+        if n != 3:
+            raise NotImplementedError(
+                f"orbital-GS cross term is implemented only at order 3 "
+                f"(the ADC(5) requirement); order {n} needs the general series.")
+        u1 = self.u_block(sector)                 # (ncfg, norb)
+        _, s2 = self.u2_and_s2(sector)            # (ncfg, norb)
+        M = s2 @ u1.T
+        return -(M + M.T)
+
+    # ------------------------------------------------------------------
+    # U^(3) orbital<->k=1
+    # ------------------------------------------------------------------
+    def u3_amps(self):
+        """Restricted amplitude block-dicts at the specific orders the U^(3)
+        assembly consumes, keyed by role+order (L2_1, T2_1, L1_2, T1_2,
+        L2_2, T2_2, L3_2, L1_3). Each is {leafname: array} with closed-shell
+        twins aliased; lambda blocks via to_l (the pdaggerq 'l'
+        tag layout). Mirrors the spin-orbital amplitude_pool/_amplitudes_
+        order3 order assignment."""
+        if hasattr(self, 'u3a'):
+            return self.u3a
+        self.require_dense_g('u3_amps (T3^(2) materialized)')
+        mpn = MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
+        t2_1a, t2_1b = mpn.compute_t2_1()
+        o2 = mpn.compute_order2_amplitudes(t2_1a, t2_1b, max_rank=3)
+        t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
+        t3_2aaa, t3_2aab, t3_2abb = o2[3], o2[4], o2[5]
+        del o2  # drop the tuple's t3 refs so the per-block frees below take hold
+        t1_3a = mpn.compute_t1_3(t1_2a, t2_2a, t2_2b, t3_2aaa, t3_2aab, t3_2abb)
+
+        def L2(ta, tb):
+            return {'l2_aaaa': tl(ta, 2, 'aaaa'), 'l2_abab': tl(tb, 2, 'abab'),
+                    'l2_bbbb': tl(ta, 2, 'aaaa')}
+
+        def T2(ta, tb):
+            return {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
+
+        def L1(t1a):
+            return {'l1_aa': tl(t1a, 1, 'aa'), 'l1_bb': tl(t1a, 1, 'aa')}
+
+        # Build l3 blocks and release each t3 block as soon as its l3 twin is
+        # formed: caps the peak at ~(remaining t3 + built l3) rather than the
+        # full t3+l3 co-residency -- the ~N^6 build transient. l3_bbbbbb aliases
+        # l3_aaaaaa (closed-shell twin). Exact (identical arrays as before).
+        l3aaa = tl(t3_2aaa, 3, 'aaaaaa'); del t3_2aaa
+        l3aab = tl(t3_2aab, 3, 'aabaab'); del t3_2aab
+        l3abb = tl(t3_2abb, 3, 'abbabb'); del t3_2abb
+        L3_2 = {'l3_aaaaaa': l3aaa, 'l3_aabaab': l3aab,
+                'l3_abbabb': l3abb, 'l3_bbbbbb': l3aaa}
+
+        self.u3a = dict(
+            L2_1=L2(t2_1a, t2_1b), T2_1=T2(t2_1a, t2_1b),
+            L1_2=L1(t1_2a), T1_2={'t1_aa': t1_2a, 't1_bb': t1_2a},
+            L2_2=L2(t2_2a, t2_2b), T2_2=T2(t2_2a, t2_2b),
+            L3_2=L3_2, L1_3=L1(t1_3a))
+        return self.u3a
+
+    def n_norm_order(self, m):
+        """N^(m): the order-m coefficient of the ground-state norm <Psi|Psi>,
+        needed by the order-general ISR's GS-normalization term
+        (- sum_{m>=2} N^(m) raw^(n-m)).
+
+        N^(2) = <Psi^(1)|Psi^(1)> = n2_norm() (validated: it is the N^(2) the
+        oracle-validated u3_generated uses).
+
+        N^(3) = 2<Psi^(1)|Psi^(2)>. Psi^(1) carries only rank 2, so only the
+        rank-2 part of Psi^(2) overlaps -> the same spin-weighted contraction as
+        n2_norm but pairing T2^(1) with T2^(2).
+
+        N^(3) is not exercised by the n=3 ISR gate (which only needs N^(2)),
+        but is directly validated against the exact norm series at 6.6e-11."""
+        if m == 2:
+            return self.n2_norm()
+        if m == 3:
+            A = self.amps_order(max_order=2)
+            t1a, t1b = A['T2_1']['t2_aaaa'], A['T2_1']['t2_abab']
+            t2a, t2b = A['T2_2']['t2_aaaa'], A['T2_2']['t2_abab']
+            return 2.0 * (0.5 * float(np.sum(t1a * t2a)) + float(np.sum(t1b * t2b)))
+        raise NotImplementedError(
+            f"N^({m}) of the restricted solver: the spin-weighted norm is written "
+            f"through order 3, which ADC(5) needs; U^(n>={m + 1}) on the restricted "
+            f"route (sigma_driver._un_pieces) needs N^({m}) as well.")
+
+    def amps_order(self, max_order=4):
+        """ORDER-GENERAL amplitude map {L{rank}_{order}: leafdict, T{rank}_{order}: ...}
+        -- the provider the order-general assembly (sigma_driver.u_dot_orb_order)
+        indexes. Superset of u3_amps (which stops at what order 3 needs).
+
+        Covers, through max_order=4: T/L at (2,1) (1,2) (2,2) (3,2) (1,3) (2,3)
+        (3,3) (1,4) -- which is exactly what adc_order_rule demands for n<=4
+        once pruned structures are dropped (verified: n=3 needs 8, n=4 needs 12).
+        max_order=5 adds the order-4 ground state non-Dyson ADC(5) reads: T4^(3)
+        (materialized, or Laplace-fused at quadruples_ntau), T2^(4), T3^(4) and
+        T1^(5).
+
+        MEMORY: this materializes T3^(2)/T3^(3) (O(no^3 nv^3)) and, via
+        compute_order3_amplitudes' signature, T4^(2) (O(no^4 nv^4)). That is
+        fine for the small-system validation this provider exists for, but NOT
+        for production at scale -- there the Laplace-fused routes
+        (generate_mpn_laplace's t2_3/t3_3 t4-laplace variants, and
+        the l3 stitch fusion) must be used instead. Cached; a map built to a
+        higher order serves every lower one."""
+        if getattr(self, '_amps_ord', None) is not None and self._amps_ord_max >= max_order:
+            return self._amps_ord
+        self.require_dense_g('amps_order')
+        mpn = MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
+
+        L2 = lambda ta, tb: {'l2_aaaa': tl(ta, 2, 'aaaa'), 'l2_abab': tl(tb, 2, 'abab'),
+                             'l2_bbbb': tl(ta, 2, 'aaaa')}
+        T2 = lambda ta, tb: {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
+        L1 = lambda t: {'l1_aa': tl(t, 1, 'aa'), 'l1_bb': tl(t, 1, 'aa')}
+        T1 = lambda t: {'t1_aa': t, 't1_bb': t}
+        L3 = lambda a, b, c: {'l3_aaaaaa': tl(a, 3, 'aaaaaa'), 'l3_aabaab': tl(b, 3, 'aabaab'),
+                              'l3_abbabb': tl(c, 3, 'abbabb'), 'l3_bbbbbb': tl(a, 3, 'aaaaaa')}
+        T3 = lambda a, b, c: {'t3_aaaaaa': a, 't3_aabaab': b, 't3_abbabb': c, 't3_bbbbbb': a}
+        # rank 4 -- needed by the U^(4)/S^(4) structures pdaggerq kept for ADC(5)
+        # (l4vt2, l4ft3, l4ft4, l4t3). O(no^4 nv^4): validation-scale only.
+        L4 = lambda a, b, c, d: {'l4_aaaaaaaa': tl(a, 4, 'aaaaaaaa'),
+                                 'l4_aaabaaab': tl(b, 4, 'aaabaaab'),
+                                 'l4_aabbaabb': tl(c, 4, 'aabbaabb'),
+                                 'l4_abbbabbb': tl(d, 4, 'abbbabbb'),
+                                 'l4_bbbbbbbb': tl(a, 4, 'aaaaaaaa')}
+        T4 = lambda a, b, c, d: {'t4_aaaaaaaa': a, 't4_aaabaaab': b, 't4_aabbaabb': c,
+                                 't4_abbbabbb': d, 't4_bbbbbbbb': a}
+
+        t2_1a, t2_1b = mpn.compute_t2_1()
+        A = {'L2_1': L2(t2_1a, t2_1b), 'T2_1': T2(t2_1a, t2_1b)}
+        if max_order >= 2:
+            o2 = mpn.compute_order2_amplitudes(t2_1a, t2_1b, max_rank=4)
+            t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
+            t3_2 = (o2[3], o2[4], o2[5]); t4_2 = (o2[6], o2[7], o2[8], o2[9])
+            A.update({'L1_2': L1(t1_2a), 'T1_2': T1(t1_2a),
+                      'L2_2': L2(t2_2a, t2_2b), 'T2_2': T2(t2_2a, t2_2b),
+                      'L3_2': L3(*t3_2), 'T3_2': T3(*t3_2),
+                      'L4_2': L4(*t4_2), 'T4_2': T4(*t4_2)})
+        if max_order >= 3:
+            E2 = mpn.compute_E(t2_1a, t2_1b)
+            t1_3a, t2_3a, t2_3b, t3_3a, t3_3b, t3_3c = mpn.compute_order3_amplitudes(
+                t1_2a, t2_2a, t2_2b, *t3_2, *t4_2, t2_1a, t2_1b, E2)
+            A.update({'L1_3': L1(t1_3a), 'T1_3': T1(t1_3a),
+                      'L2_3': L2(t2_3a, t2_3b), 'T2_3': T2(t2_3a, t2_3b),
+                      'L3_3': L3(t3_3a, t3_3b, t3_3c), 'T3_3': T3(t3_3a, t3_3b, t3_3c)})
+        if max_order >= 4:
+            t1_4a = mpn.compute_t1_4(t1_3a, t2_3a, t2_3b, t3_3a, t3_3b, t3_3c, t1_2a, E2)
+            A.update({'L1_4': L1(t1_4a), 'T1_4': T1(t1_4a)})
+        if max_order >= 5:
+            E3 = mpn.compute_E(t2_2a, t2_2b)
+            t4_3 = mpn.compute_t4_3(t2_2a, t2_2b, t3_2, t4_2, laplace_ntau=self.quadruples_ntau)
+            o3 = (t1_3a, t2_3a, t2_3b, t3_3a, t3_3b, t3_3c)
+            t2_4a, t2_4b, *t3_4 = mpn.compute_order4_amplitudes(o2, o3, t4_3, t2_1a, t2_1b, E2, E3)
+            t1_5a = mpn.compute_t1_5(t1_4a, t2_4a, t2_4b, t3_4, t1_3a, t1_2a, E2, E3)
+            A.update({'L4_3': L4(*t4_3), 'T4_3': T4(*t4_3),
+                      'L2_4': L2(t2_4a, t2_4b), 'T2_4': T2(t2_4a, t2_4b),
+                      'L3_4': L3(*t3_4), 'T3_4': T3(*t3_4),
+                      'L1_5': L1(t1_5a), 'T1_5': T1(t1_5a)})
+        self._amps_ord = A
+        self._amps_ord_max = max_order
+        return A
+
+    def _amps_order_lowrank(self):
+        """RANK<=2, ORDER<=2 amplitude map {L2_1,T2_1,L1_2,T1_2,L2_2,T2_2} for
+        the Laplace U^(4) route -- the PRODUCTION twin of amps_order that NEVER
+        materializes t3_2/t4_2 (O(no^3 nv^3)/O(no^4 nv^4)); compute_order2_
+        amplitudes(max_rank=2) returns them as None. Complete for the
+        non-Laplace part of raw^(<=4): every SURVIVING rank<=2 U/S structure at
+        n<=4 consumes only order<=2 amplitudes (adc_order_rule -- the higher-
+        order rank<=2 structures are all pdaggerq-pruned), while the rank>=3
+        structures are routed to the Laplace stitches (t2_1/l2_1 only). A
+        surviving structure that needed order>=3 rank<=2 amps would RAISE in
+        _assemble_raw_S (missing_amp), never silently under-compute. Cached."""
+        if getattr(self, '_amps_lowrank', None) is not None:
+            return self._amps_lowrank
+        mpn = self._mpn()
+        L2 = lambda ta, tb: {'l2_aaaa': tl(ta, 2, 'aaaa'),
+                             'l2_abab': tl(tb, 2, 'abab'),
+                             'l2_bbbb': tl(ta, 2, 'aaaa')}
+        T2 = lambda ta, tb: {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
+        L1 = lambda t: {'l1_aa': tl(t, 1, 'aa'), 'l1_bb': tl(t, 1, 'aa')}
+        T1 = lambda t: {'t1_aa': t, 't1_bb': t}
+        t2_1a, t2_1b = mpn.amplitudes_t2_1()
+        t1_2a, t2_2a, t2_2b = mpn.amplitudes_order2(t2_1a, t2_1b)  # no t3/t4
+        A = {'L2_1': L2(t2_1a, t2_1b), 'T2_1': T2(t2_1a, t2_1b),
+             'L1_2': L1(t1_2a), 'T1_2': T1(t1_2a),
+             'L2_2': L2(t2_2a, t2_2b), 'T2_2': T2(t2_2a, t2_2b)}
+        self._amps_lowrank = A
+        return A
+
+    def u3_amps_laplace(self, ntau):
+        """t3/l3-FREE twin of u3_amps for the Laplace-fused U^(3) downfold
+        path (u3_dot_orb(..., laplace_ntau=ntau)). Identical L2_1/T2_1/L1_2/
+        T1_2/L2_2/T2_2/L1_3 blocks, but T1^(3) is built through the driver's
+        existing minimax-quadrature route (compute_order2_amplitudes(
+        laplace_ntau=...) + laplace_aaaaaa_contribution + gen_lap3 cross-spin)
+        so the O(no^3 nv^3) T3^(2) is never materialized, and NO L3_2 is
+        returned -- the l3-consuming stitches are supplied instead by the
+        Laplace-fused adc4_u3_l3_laplace_restricted blocks. Cached per ntau.
+
+        Also the order-<=3 rank-<=2 amplitude provider for the C^(3) (1,1)
+        matvec (sigma_driver.assembled_c3_matvec_restricted(laplace_ntau=...)):
+        C^(3)'s only surviving structures are rank<=2, so its whole rank>=3
+        materialization is amps_order(3) building t3_2/t4_2 as RSPT
+        intermediates for the order-3 singles T1^(3). Every key C^(3) consumes
+        -- {L1_2,T1_2,T1_3,L2_1,T2_1,L2_2,T2_2} -- is served here WITHOUT ever
+        forming a rank>=3 array (compute_order2_amplitudes(max_rank=2) returns
+        t3_2/t4_2 as None), with T1^(3) the same Laplace-fused t1_3a. T1_3 is a
+        harmless superset for the U^(3) caller (which reads only L1_3)."""
+        if getattr(self, '_u3a_lap', None) is not None and self._u3a_lap_ntau == ntau:
+            return self._u3a_lap
+        mpn = self._mpn()
+        t2_1a, t2_1b = mpn.amplitudes_t2_1()
+        t1_2a, t2_2a, t2_2b = mpn.amplitudes_order2(t2_1a, t2_1b, laplace_ntau=ntau)
+        t1_3a = mpn.laplace_t1_3(t1_2a, t2_2a, t2_2b, t2_1a, t2_1b, ntau)
+
+        def L2(ta, tb):
+            return {'l2_aaaa': tl(ta, 2, 'aaaa'), 'l2_abab': tl(tb, 2, 'abab'),
+                    'l2_bbbb': tl(ta, 2, 'aaaa')}
+
+        def T2(ta, tb):
+            return {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
+
+        def L1(t1a):
+            return {'l1_aa': tl(t1a, 1, 'aa'), 'l1_bb': tl(t1a, 1, 'aa')}
+
+        self._u3a_lap = dict(
+            L2_1=L2(t2_1a, t2_1b), T2_1=T2(t2_1a, t2_1b),
+            L1_2=L1(t1_2a), T1_2={'t1_aa': t1_2a, 't1_bb': t1_2a},
+            L2_2=L2(t2_2a, t2_2b), T2_2=T2(t2_2a, t2_2b),
+            L1_3=L1(t1_3a), T1_3={'t1_aa': t1_3a, 't1_bb': t1_3a})
+        self._u3a_lap_ntau = ntau
+        return self._u3a_lap
+
+    def amps_order_lowrank_laplace(self, ntau):
+        """Order-<=4 rank-<=2 amplitude map, Laplace-fused so NO rank>=3 tensor
+        (t3_2/t4_2/t3_3) is ever materialized -- the PRODUCTION twin of
+        amps_order for the U^(4) raw/S orbital<->k1 coupling (the low-rank
+        structures it feeds; the rank>=3 STRUCTURES are routed to fused blocks
+        by sigma_driver._lap_rank3_stitch instead).
+
+        Superset of u3_amps_laplace (L2_1/T2_1/L1_2/T1_2/L2_2/T2_2/L1_3/T1_3),
+        adding every order-<=4 rank-<=2 amplitude the U^(4) raw/S structures
+        consume, all Laplace-fused (NO t3_2/t4_2/t3_3 formed):
+          * T2_3/L2_3 -- compute_t2_3_laplace (the t3_2/t4_2 CONTRIBUTIONS
+            minimax-fused, direct part from the numerator with t3/t4 zeroed);
+          * T1_4/L1_4 -- compute_t1_4_laplace, the NESTED case (t1_4 -> t3_3 ->
+            t3_2/t4_2, depth-qualified taus).
+        Both == the materialized amplitude to the quadrature accuracy (T2_3
+        ~1-3e-9, T1_4 ~6e-10 at ntau=6 NH3). This is a DROP-IN for
+        amps_order(4) over the low-rank structures of the U^(4) raw/S coupling:
+        every amplitude those consume -- {T1_3,L1_3,L2_3,L1_4} at order>=3 plus
+        order<=2 -- is present and rank>=3-free. Cached per ntau."""
+        if getattr(self, '_amps_lr_lap', None) is not None \
+                and self._amps_lr_lap_ntau == ntau:
+            return self._amps_lr_lap
+        self.require_dense_g('amps_order_lowrank_laplace (T2^(3), T1^(4))')
+        A = dict(self.u3_amps_laplace(ntau))          # order-<=3 rank-<=2 set
+        mpn = MPnDensityDriverRestricted(
+            np.diag(self.eps), self.g_aaaa, self.g_abab, self.g_bbbb, self.nocc)
+        t2_1a, t2_1b = mpn.compute_t2_1()
+        o2 = mpn.compute_order2_amplitudes(t2_1a, t2_1b, laplace_ntau=ntau, max_rank=2)
+        t1_2a, t2_2a, t2_2b = o2[0], o2[1], o2[2]
+        E2 = mpn.compute_E(t2_1a, t2_1b)
+        t2_3a, t2_3b = mpn.compute_t2_3_laplace(t1_2a, t2_2a, t2_2b,
+                                                t2_1a, t2_1b, E2, ntau)
+        A['T2_3'] = {'t2_aaaa': t2_3a, 't2_abab': t2_3b, 't2_bbbb': t2_3a}
+        A['L2_3'] = {'l2_aaaa': tl(t2_3a, 2, 'aaaa'), 'l2_abab': tl(t2_3b, 2, 'abab'),
+                     'l2_bbbb': tl(t2_3a, 2, 'aaaa')}
+        t1_3a = A['T1_3']['t1_aa']                      # Laplace T1^(3)
+        t1_4a = mpn.compute_t1_4_laplace(t1_3a, t2_3a, t2_3b, t2_2a, t2_2b,
+                                         t1_2a, t2_1a, t2_1b, E2, ntau)
+        A['T1_4'] = {'t1_aa': t1_4a, 't1_bb': t1_4a}
+        A['L1_4'] = {'l1_aa': tl(t1_4a, 1, 'aa'), 'l1_bb': tl(t1_4a, 1, 'aa')}
+        self._amps_lr_lap = A
+        self._amps_lr_lap_ntau = ntau
+        return A
+
+    def stitch_k1r(self, module, occ_base, vir_base, sector, pool):
+        """(ncfg, norb) sum of one occ/vir split pair (missing functions
+        contribute 0) at explicit amplitude arrays `pool`, gathered per
+        config spin pattern -- the restricted analogue of
+        BuildSuperMatrixADCn._stitch_k1."""
+        s = self._SECTOR[sector]
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        U = np.zeros((ncfg, self.norb))
+        spins = cfg['spins']
+        cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
+               [cfg['part_sp'][:, k] for k in range(s['npart'])]
+        uniq, inv = np.unique(spins, axis=0, return_inverse=True)
+        for gi, pat in enumerate(uniq):
+            rows = np.where(inv == gi)[0]
+            suffix = self._suffix(pat) + 'a'
+            idx = tuple(col[inv == gi] for col in cols)
+            for base, sl_ in ((occ_base, slice(0, self.nocc)),
+                              (vir_base, slice(self.nocc, self.norb))):
+                fn = getattr(module, base + '_' + suffix, None)
+                if fn is None:
+                    continue
+                val = fn(*[pool[p] for p in _sig(fn)])[idx]
+                U[np.ix_(rows, np.arange(self.norb)[sl_])] += val
+        return U
+
+    def u3_generated(self, sector):
+        """(ncfg, norb) restricted U^(3) coupling in the Dyson class-GS
+        representation -- the spatial counterpart of
+        BuildSuperMatrixADCn.u3_generated:
+
+            U^(3) = raw^(3) - N^(2) U^(1) - eps_p S^(3)_pJ - 1/2 U^(1) S^(2)_class
+
+        raw^(3) enumerates the same order-3 evaluations of the surviving tag
+        structures (order-agnostic generated blocks at explicit amplitude
+        orders); reused u2/s2 restricted blocks appear at higher amplitude
+        orders exactly as in the spin-orbital driver."""
+        tag = self._SECTOR[sector]['tag']
+        A = self.u3_amps()
+
+        def merge(*dicts):
+            p = dict(self.rargs)
+            for d in dicts:
+                p.update(d)
+            return p
+
+        raw = self.stitch_k1r(genu3r, f'u3_{tag}_occ_l2vt2', f'u3_{tag}_vir_l2vt2',
+                               sector, merge(A['L2_1'], A['T2_1']))
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_vt1', f'u3_{tag}_vir_vt1',
+                                sector, merge(A['T1_2']))
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l1v', f'u3_{tag}_vir_l1v',
+                                sector, merge(A['L1_2']))
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2v', f'u2_{tag}_vir_l2v',
+                                sector, merge(A['L2_2']))
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+                                sector, merge(A['L2_1'], A['T2_2']))
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l2ft2', f'u2_{tag}_vir_l2ft2',
+                                sector, merge(A['L2_2'], A['T2_1']))
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l2ft1', f'u3_{tag}_vir_l2ft1',
+                                sector, merge(A['L2_1'], A['T1_2']))
+        raw += self.stitch_k1r(genu3r, f'u3_{tag}_occ_l3ft2', f'u3_{tag}_vir_l3ft2',
+                                sector, merge(A['L3_2'], A['T2_1']))
+        raw += self.stitch_k1r(genr3, f'u2_{tag}_occ_l1f', f'u2_{tag}_vir_l1f',
+                                sector, merge(A['L1_3']))
+
+        S3 = self.stitch_k1r(genu3r, f's3_{tag}_occ_l2t1', f's3_{tag}_vir_l2t1',
+                              sector, merge(A['L2_1'], A['T1_2']))
+        S3 += self.stitch_k1r(genu3r, f's3_{tag}_occ_l3t2', f's3_{tag}_vir_l3t2',
+                               sector, merge(A['L3_2'], A['T2_1']))
+        S3 += self.stitch_k1r(genr3, f's2_{tag}_occ_l1', f's2_{tag}_vir_l1',
+                               sector, merge(A['L1_3']))
+
+        U1 = self.u_block(sector)
+        n2 = self.n2_norm()
+        s2c_raw = self._class_block_sum(genc2r, f's2c_{tag}_', sector)
+        s2c = s2c_raw - n2 * np.eye(s2c_raw.shape[0])
+        return raw - n2 * U1 - self.eps[None, :] * S3 - 0.5 * (s2c @ U1)
+
+    # ------------------------------------------------------------------
+    def sector_configs(self, sector):
+        """Alpha-Dyson-sector determinant configs of the class, enumerated
+        in spin-orbital form (the deduplicated determinant list -- 2h1p:
+        i<j occ, a virt; 2p1h: i occ, a<b virt) then decoded to spatial
+        indices + per-index spins. Returns dict with:
+          hole_sp/part_sp: (ncfg, nh)/(ncfg, npart) spatial index arrays
+            (vir indices local, 0-based in the vir block), class axis order.
+          spins: (ncfg, nh+npart) int 0/1 (alpha=0), class axis order.
+          K: (ncfg,) 0th-order eps-sum diagonal.
+        """
+        s = self._SECTOR[sector]
+        no_s, norb_s = 2 * self.nocc, 2 * self.norb
+        occ = np.arange(no_s)
+        virt = np.arange(no_s, norb_s)
+        if sector == 'IP':
+            iu, ju = np.triu_indices(no_s, 1)
+            nvv = len(virt)
+            I = np.repeat(occ[iu], nvv)
+            J = np.repeat(occ[ju], nvv)
+            A = np.tile(virt, len(iu))
+            holes = [I, J]
+            parts = [A]
+        else:
+            au, bu = np.triu_indices(len(virt), 1)
+            npair = len(au)
+            I = np.repeat(occ, npair)
+            A = np.tile(virt[au], no_s)
+            B = np.tile(virt[bu], no_s)
+            holes = [I]
+            parts = [A, B]
+        sz = sum(_sval(p) for p in parts) - sum(_sval(h) for h in holes)
+        keep = np.abs(sz - s['target_sz']) < 1e-12
+        holes = [h[keep] for h in holes]
+        parts = [p[keep] for p in parts]
+        hole_sp = np.stack([h // 2 for h in holes], axis=1)
+        part_sp = np.stack([(p - no_s) // 2 for p in parts], axis=1)
+        spins = np.stack([x % 2 for x in holes + parts], axis=1)
+        eps = self.eps
+        # K diagonal: IP (2h1p) = eps_i+eps_j-eps_a (holes-parts); EA (2p1h)
+        # = eps_a+eps_b-eps_i (parts-holes) -- matches the spin-orbital
+        # k_block diagonal per sector.
+        eh = eps[hole_sp].sum(axis=1)
+        ep = eps[self.nocc + part_sp].sum(axis=1)
+        K = (eh - ep) if sector == 'IP' else (ep - eh)
+        return dict(hole_sp=hole_sp, part_sp=part_sp, spins=spins, K=K)
+
+    @staticmethod
+    def _suffix(spin_row):
+        return ''.join('a' if s == 0 else 'b' for s in spin_row)
+
+    def _class_index_map(self, sector):
+        """(ncfg,) map from each restricted alpha-sector config to its index
+        in the spin-orbital class_configs(1, sector) ordering -- the row/
+        column T (spin_adapt.build_class_T) is built over, so the doublet-CSF
+        isometry can be sliced to the alpha sector (T's nonzero rows ARE this
+        Sz sector). Cached."""
+        key = f'_cim_{sector}'
+        if not hasattr(self, key):
+            # spin-orbital sizes -- T (spin_adapt) is built over the
+            # spin-orbital class_configs ordering.
+            cols = class_configs(2 * self.nocc, 2 * self.norb, 1, sector)
+            cols = tuple(np.asarray(c) for c in cols)
+            cfg = self.sector_configs(sector)
+            s = self._SECTOR[sector]
+            no_s = 2 * self.nocc
+            out = np.empty(len(cfg['K']), dtype=int)
+            for c in range(len(cfg['K'])):
+                hs, ps, sp = cfg['hole_sp'][c], cfg['part_sp'][c], cfg['spins'][c]
+                hso = sorted(2 * hs[k] + sp[k] for k in range(s['nh']))
+                pso = sorted(no_s + 2 * ps[k] + sp[s['nh'] + k] for k in range(s['npart']))
+                target = hso + pso
+                mask = np.ones(len(cols[0]), dtype=bool)
+                for ax, val in enumerate(target):
+                    mask &= (cols[ax] == val)
+                out[c] = np.where(mask)[0][0]
+            setattr(self, key, out)
+        return getattr(self, key)
+
+    def u_block(self, sector):
+        """(ncfg, norb) alpha-sector U^(1): couplings of each class config to
+        every spatial (alpha) orbital, gathered from the spin-blocked
+        u1_{tag}_{occ,vir}_{classpattern+a} functions (grouped by the
+        config's class spin pattern)."""
+        s = self._SECTOR[sector]
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        U = np.zeros((ncfg, self.norb))
+        spins = cfg['spins']
+        # spatial gather index tuple (holes then parts), per config
+        gather_cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
+                      [cfg['part_sp'][:, k] for k in range(s['npart'])]
+        # group configs by class spin pattern
+        uniq, inv = np.unique(spins, axis=0, return_inverse=True)
+        for gi, pat in enumerate(uniq):
+            mask = inv == gi
+            suffix = self._suffix(pat) + 'a'   # orbital is alpha
+            idx = tuple(col[mask] for col in gather_cols)
+            occ_fn = getattr(self._genr, f"u1_{s['tag']}_occ_{suffix}")
+            vir_fn = getattr(self._genr, f"u1_{s['tag']}_vir_{suffix}")
+            occ_t = occ_fn(*[self.rargs[p] for p in _sig(occ_fn)])
+            vir_t = vir_fn(*[self.rargs[p] for p in _sig(vir_fn)])
+            U[mask, :self.nocc] = occ_t[idx]
+            U[mask, self.nocc:] = vir_t[idx]
+        return U
+
+    def build_supermatrix_adc2(self):
+        """Dense strict-ADC(2) alpha-sector supermatrix
+        [[diag(eps), U^T],[U, diag(K)]] over {alpha orbitals} + {2h1p
+        Sz=-1/2} + {2p1h Sz=+1/2} -- the spatial counterpart of
+        BuildSuperMatrixADCn.build_supermatrix_adc2."""
+        cfg_ip = self.sector_configs('IP')
+        cfg_ea = self.sector_configs('EA')
+        n1, n2 = len(cfg_ip['K']), len(cfg_ea['K'])
+        norb = self.norb
+        nH = norb + n1 + n2
+        off1, off2 = norb, norb + n1
+        H = np.zeros((nH, nH))
+        H[:norb, :norb] = np.diag(self.eps)
+        U1, U2 = self.u_block('IP'), self.u_block('EA')
+        H[off1:off2, :norb] = U1
+        H[:norb, off1:off2] = U1.T
+        H[off2:nH, :norb] = U2
+        H[:norb, off2:nH] = U2.T
+        H[off1:off2, off1:off2] = np.diag(cfg_ip['K'])
+        H[off2:nH, off2:nH] = np.diag(cfg_ea['K'])
+        return H
+
+    # ------------------------------------------------------------------
+    # Order-2 U (ADC(3)-level) + first-order C^(1) class block
+    # ------------------------------------------------------------------
+    def u2_and_s2(self, sector):
+        """(U2_raw, S2) each (ncfg, norb): the raw order-2 U^(2) dressed-split
+        sum and the cross-block S^(2) overlap, gathered per config spin
+        pattern from the surviving u2_/s2_ restricted splits (amplitude arrays
+        introspected from the pool -- pdaggerq's pruning decides the surviving
+        set, same as the spin-orbital driver's _u2_sum/_s2_block)."""
+        s = self._SECTOR[sector]
+        tag = s['tag']
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        U2 = np.zeros((ncfg, self.norb))
+        S2 = np.zeros((ncfg, self.norb))
+        spins = cfg['spins']
+        gather_cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
+                      [cfg['part_sp'][:, k] for k in range(s['npart'])]
+        pool = dict(self.rargs)
+        pool.update(self._u2_amplitude_pool())   # EN-dressed t2/l2 if requested
+        uniq, inv = np.unique(spins, axis=0, return_inverse=True)
+        for gi, pat in enumerate(uniq):
+            mask = inv == gi
+            rows = np.where(mask)[0]
+            suffix = self._suffix(pat) + 'a'
+            idx = tuple(col[mask] for col in gather_cols)
+            for target, prefix in ((U2, f'u2_{tag}_'), (S2, f's2_{tag}_')):
+                for row, sl_ in (('occ', slice(0, self.nocc)),
+                                 ('vir', slice(self.nocc, self.norb))):
+                    full = f'{prefix}{row}_'
+                    tail = '_' + suffix
+                    for name in dir(self._genr3):
+                        if not (name.startswith(full) and name.endswith(tail)):
+                            continue
+                        fn = getattr(self._genr3, name)
+                        val = fn(*[pool[p] for p in _sig(fn)])[idx]
+                        target[np.ix_(rows, np.arange(self.norb)[sl_])] += val
+        return U2, S2
+
+    def u_adc3(self, sector):
+        """(ncfg, norb) alpha-sector U through order 2 in the Dyson class-GS
+        representation: U^(1) + U^(2)_raw - eps_p * S^(2)_Jp (the same
+        excitation-class Gram-Schmidt rule as the spin-orbital
+        BuildSuperMatrixADCn._u_adc3; within-class Loewdin stays inert at this
+        order since S^(1)=0).
+
+        Cached: every input (eps, integrals, amplitudes, dressing) is fixed at
+        construction, while a multi-state run calls solve() once per Davidson
+        SEED and each of those rebuilds the operator -- so without this the
+        same U is recomputed 5-7 times per molecule."""
+        cached = self._u_adc3_cache.get(sector)
+        if cached is None:
+            U1 = self.u_block(sector)
+            U2, S2 = self.u2_and_s2(sector)
+            cached = U1 + U2 - self.eps[None, :] * S2
+            self._u_adc3_cache[sector] = cached
+        return cached.copy()          # callers add U^(3) rows in place
+
+    def _c1_block(self, sector):
+        """(ncfg, ncfg) first-order C^(1) class-class block over the
+        alpha-sector configs, gathered per (bra pattern, ket pattern) from the
+        restricted c1_{tag}_{braspins+ketspins} blocks."""
+        s = self._SECTOR[sector]
+        tag = s['tag']
+        cfg = self.sector_configs(sector)
+        ncfg = len(cfg['K'])
+        spins = cfg['spins']
+        cols = [cfg['hole_sp'][:, k] for k in range(s['nh'])] + \
+               [cfg['part_sp'][:, k] for k in range(s['npart'])]
+        C = np.zeros((ncfg, ncfg))
+        uniq, inv = np.unique(spins, axis=0, return_inverse=True)
+        for gi, bp in enumerate(uniq):
+            brows = np.where(inv == gi)[0]
+            for gj, kp in enumerate(uniq):
+                fn = getattr(self._genr, f'c1_{tag}_' + self._suffix(bp)
+                             + self._suffix(kp), None)
+                if fn is None:
+                    continue
+                krows = np.where(inv == gj)[0]
+                T = fn(*[self.rargs[p] for p in _sig(fn)])
+                bra_idx = tuple(c[brows][:, None] for c in cols)
+                ket_idx = tuple(c[krows][None, :] for c in cols)
+                C[np.ix_(brows, krows)] = T[bra_idx + ket_idx]
+        return C
+
+    def build_supermatrix_adc3(self, static_correction=None):
+        """Dense Dyson-ADC(3) alpha-sector supermatrix from the restricted
+        blocks: F = diag(eps) + static_correction, U through order 2
+        (u_adc3), K diagonal + C^(1) class blocks -- the spatial counterpart
+        of BuildSuperMatrixADCn.build_supermatrix_adc3.
+
+        static_correction: (norb, norb) SPATIAL Sigma(inf), e.g. from
+        build_mp2_static_correction_restricted. It is a property of the
+        density, not of the class basis, so it enters the orbital block here
+        exactly as in ADCSolverRestricted.build_supermatrix -- including its
+        EN-dressed forms, determinant-wise or spin-adapted. Omitting it
+        (the previous behaviour, which had no parameter at all) silently gave
+        a Sigma(1)/bare-F calculation, which is NOT comparable to an
+        ADCSolverRestricted run carrying Sigma(3+)."""
+        cfg_ip = self.sector_configs('IP')
+        cfg_ea = self.sector_configs('EA')
+        n1, n2 = len(cfg_ip['K']), len(cfg_ea['K'])
+        norb = self.norb
+        nH = norb + n1 + n2
+        off1, off2 = norb, norb + n1
+        H = np.zeros((nH, nH))
+        H[:norb, :norb] = np.diag(self.eps)
+        if static_correction is not None:
+            sc = np.asarray(static_correction)
+            if sc.shape != (norb, norb):
+                raise ValueError(
+                    f'static_correction has shape {sc.shape}, expected '
+                    f'({norb}, {norb}) -- this solver is SPATIAL, so pass the '
+                    f'restricted Sigma(inf) (build_mp2_static_correction_'
+                    f'restricted), not the spin-orbital one.')
+            H[:norb, :norb] += sc
+        U1, U2 = self.u_adc3('IP'), self.u_adc3('EA')
+        H[off1:off2, :norb] = U1
+        H[:norb, off1:off2] = U1.T
+        H[off2:nH, :norb] = U2
+        H[:norb, off2:nH] = U2.T
+        H[off1:off2, off1:off2] = np.diag(cfg_ip['K']) + self._c1_block('IP')
+        H[off2:nH, off2:nH] = np.diag(cfg_ea['K']) + self._c1_block('EA')
+        return H
+
+    def sigma_dynamic(self, omega):
+        """(norb, norb) spatial dynamic ADC(2) self-energy
+        Sigma_alpha(omega) = U^T (omega - K)^{-1} U summed over both
+        alpha-sector classes -- equals the alpha-spatial block of the
+        spin-orbital MP2 self-energy."""
+        sigma = np.zeros((self.norb, self.norb))
+        for sector in ('IP', 'EA'):
+            u = self.u_block(sector)
+            k = self.sector_configs(sector)['K']
+            sigma += u.T @ (u / (omega - k)[:, None])
+        return sigma
+
+    # ------------------------------------------------------------------
+    # k=2 (3h2p/3p2h) extended-space blocks -- ADC(5) push increment A
+    # ------------------------------------------------------------------
+    K2_CLASS_SIGN = K2_CLASS_SIGN
+
+    def kconfigs(self, sector, k, block_size=2_000_000):
+        """Alpha-Dyson-sector configs of precursor class k (spatial indices +
+        spins + K), in the spin-orbital class_configs(k) ordering filtered to
+        the kept Sz (-1/2 IP / +1/2 EA). Generalizes sector_configs to any
+        k; for k=1 it reproduces sector_configs' ordering.
+
+        CHUNKED enumeration (memory foundation for the k=2 3p2h large-molecule
+        and k=3 4p3h/ADC(5) sweeps): the full spin-orbital (holes x parts)
+        outer product -- O(nv^k nocc^(k-1)) rows, the peak driver -- is built
+        one `block_size`-row block at a time and Sz-filtered before the next,
+        so the pre-filter product is never materialized whole. The returned
+        dict is bit-identical to the unchunked build (contiguous blocks in the
+        same flat order); only the transient is bounded. int16 spatial indices
+        / int8 spins keep the kept arrays 4-8x smaller than int64."""
+        cache = self.__dict__.setdefault('_kcfg_cache', {})
+        if (sector, k) in cache:
+            return cache[(sector, k)]
+        nh, np_ = nh_np(k, sector)
+        no_s, no_all = 2 * self.nocc, 2 * self.norb
+        # combination FACTORS (holes ~ C(2nocc,nh), parts ~ C(2nvir,np)); the
+        # full product n_h*n_p is what we stream, never materialize.
+        # explicit row counts: the 1h/1p class has an empty particle/hole side
+        hl = list(combinations(range(no_s), nh))
+        pl = list(combinations(range(no_s, no_all), np_))
+        holes = np.array(hl, dtype=np.int32).reshape(len(hl), nh)
+        parts = np.array(pl, dtype=np.int32).reshape(len(pl), np_)
+        n_h, n_p = len(holes), len(parts)
+        tsz = -0.5 if sector == 'IP' else 0.5
+        eps = self.eps
+        sval = lambda a: np.where(a % 2 == 0, 0.5, -0.5).sum(axis=1)
+        blocks = range(0, n_h * n_p, block_size)
+
+        def block_keep(start):
+            r = np.arange(start, min(start + block_size, n_h * n_p))
+            hrow = holes[r // n_p]        # (blk, nh) == class_configs' repeat(holes, n_p)
+            prow = parts[r % n_p]         # (blk, np) == class_configs' tile(parts, n_h)
+            keep = np.abs(sval(prow) - sval(hrow) - tsz) < 1e-12
+            return hrow[keep], prow[keep]
+
+        # Pass 1: count kept (the Sz-filtered total isn't class_dimension's
+        # convention) so we can preallocate and fill in place -- no concatenate,
+        # so peak = dict + one block, never 2x-dict.
+        ntot = sum(len(block_keep(s)[0]) for s in blocks)
+        hole_sp = np.empty((ntot, nh), np.int16); part_sp = np.empty((ntot, np_), np.int16)
+        spins = np.empty((ntot, nh + np_), np.int8); K = np.empty(ntot)
+        off = 0
+        for start in blocks:
+            hrow, prow = block_keep(start)
+            m = len(hrow)
+            hsp = (hrow // 2).astype(np.int16); psp = ((prow - no_s) // 2).astype(np.int16)
+            hole_sp[off:off + m] = hsp; part_sp[off:off + m] = psp
+            spins[off:off + m, :nh] = hrow % 2; spins[off:off + m, nh:] = prow % 2
+            eh = eps[hsp].sum(axis=1); ep = eps[self.nocc + psp].sum(axis=1)
+            K[off:off + m] = (eh - ep) if sector == 'IP' else (ep - eh)
+            off += m
+        out = dict(hole_sp=hole_sp, part_sp=part_sp, spins=spins, K=K, nh=nh, npart=np_)
+        cache[(sector, k)] = out
+        return out
+
+    def _k2_cols(self, cfg2):
+        return [cfg2['hole_sp'][:, k] for k in range(cfg2['nh'])] + \
+               [cfg2['part_sp'][:, k] for k in range(cfg2['npart'])]
+
+    def coupling_k1_k2_generated(self, sector):
+        """(n_k1, n_k2) alpha-sector first-order k=1<->k=2 coupling
+        (2h1p<->3h2p / 2p1h<->3p2h) from the restricted 8-index c1 blocks,
+        gathered per (bra pattern, ket pattern), with the k=2 phase
+        (K2_CLASS_SIGN) -- the spatial counterpart of the spin-orbital
+        coupling_k1_k2_generated."""
+        s1 = self._SECTOR[sector]
+        tag1, tag2 = s1['tag'], ('3h2p' if sector == 'IP' else '3p2h')
+        cfg1 = self.sector_configs(sector)
+        cfg2 = self.kconfigs(sector, 2)
+        cols1 = [cfg1['hole_sp'][:, k] for k in range(s1['nh'])] + \
+                [cfg1['part_sp'][:, k] for k in range(s1['npart'])]
+        cols2 = self._k2_cols(cfg2)
+        C = np.zeros((len(cfg1['K']), len(cfg2['K'])))
+        u1, i1 = np.unique(cfg1['spins'], axis=0, return_inverse=True)
+        u2, i2 = np.unique(cfg2['spins'], axis=0, return_inverse=True)
+        for gi, bp in enumerate(u1):
+            brows = np.where(i1 == gi)[0]
+            for gj, kp in enumerate(u2):
+                fn = getattr(genk2r, f'c1_{tag1}_{tag2}_' + self._suffix(bp) + self._suffix(kp), None)
+                if fn is None:
+                    continue
+                krows = np.where(i2 == gj)[0]
+                T = fn(*[self.rargs[p] for p in _sig(fn)])
+                bra_idx = tuple(c[brows][:, None] for c in cols1)
+                ket_idx = tuple(c[krows][None, :] for c in cols2)
+                C[np.ix_(brows, krows)] = T[bra_idx + ket_idx]
+        return self.K2_CLASS_SIGN[sector] * C
+
+    def cross_block_generated(self, order=2, module=None, extra_leaves=None):
+        """(n_2h1p, n_2p1h) alpha-sector union-space cross block X^(order)
+        between the 2h1p-dagger-type (IP) and the 2p1h (EA) class configs,
+        the spatial twin of BuildSuperMatrixADCn.cross_block_generated:
+        gathered per (bra spin pattern, ket spin pattern) from the
+        spin-blocked x{order}_2h1p_2p1h_{structure}_{spins} functions, each
+        structure at its order-rule amplitude assignments. `module` defaults
+        to the dense restricted module; pass its DF twin together with
+        extra_leaves={'B_aa': B, 'B_bb': B} for the density-fitted block.
+        Dense (n_2h1p x n_2p1h): validation scale; the decoupling rows at scale
+        are cross_block_decoupling_rows."""
+        if module is None:
+            module = cross_block_module(order, 'k1k1', restricted=True)
+        cfg_b, cfg_k = self.sector_configs('IP'), self.sector_configs('EA')
+        X = np.zeros((len(cfg_b['K']), len(cfg_k['K'])))
+        for fn, args, bra_idx, ket_idx, brows, krows in self._cross_groups(order, module,
+                                                                           extra_leaves):
+            T = fn(*args)
+            X[np.ix_(brows, krows)] += T[bra_idx + ket_idx]
+        return X
+
+    def _cross_groups(self, order, module, extra_leaves):
+        """Every surviving (structure, bra spin pattern, ket spin pattern)
+        function of the 2h1p x 2p1h cross block X^(order) in `module`, in
+        summation order: (fn, args, bra gather index, ket gather index,
+        bra config rows, ket config rows), each structure at its order-rule
+        amplitude assignments. Order 2 reads rank <= 2 amplitudes of order
+        <= 2 only: the low-rank provider (no T3^(2)/T4^(2), g-free capable;
+        the same arrays)."""
+        A = self._amps_order_lowrank() if order <= 2 else self.amps_order(max_order=order)
+        cfg_b, cfg_k = self.sector_configs('IP'), self.sector_configs('EA')
+        cols_b = [cfg_b['hole_sp'][:, k] for k in range(2)] + [cfg_b['part_sp'][:, 0]]
+        cols_k = [cfg_k['hole_sp'][:, 0]] + [cfg_k['part_sp'][:, k] for k in range(2)]
+        ub, ib = np.unique(cfg_b['spins'], axis=0, return_inverse=True)
+        uk, ik = np.unique(cfg_k['spins'], axis=0, return_inverse=True)
+        for nm, j, ham, k, a, b in u_order_terms(order):
+            prefix = f'x{order}_2h1p_2p1h_{nm}_'
+            if not any(n.startswith(prefix) for n in dir(module)):
+                continue
+            pool = dict(self.rargs)
+            pool.update(extra_leaves or {})
+            for lead, rank, ordr in (('L', j, a), ('T', k, b)):
+                if rank:
+                    pool.update(A[f'{lead}{rank}_{ordr}'])
+            for gi, bp in enumerate(ub):
+                brows = np.where(ib == gi)[0]
+                for gj, kp in enumerate(uk):
+                    fn = getattr(module, prefix + self._suffix(bp) + self._suffix(kp), None)
+                    if fn is None:
+                        continue
+                    krows = np.where(ik == gj)[0]
+                    bra_idx = tuple(c[brows][:, None] for c in cols_b)
+                    ket_idx = tuple(c[krows][None, :] for c in cols_k)
+                    yield fn, [pool[p] for p in _sig(fn)], bra_idx, ket_idx, brows, krows
+
+    def cross_block_decoupling_rows(self, u_ip, u_ea, k_ip, k_ea, order=2, extra_leaves=None,
+                                    hole_chunk=1):
+        """(du_ip, du_ea): the order-3 image of the cross block X^(order) on
+        the two k1 couplings, cross_block_decoupling.delta_u_rows_k1(u_ip, u_ea,
+        k_ip, k_ea, X) evaluated without forming X or its six-index tensors.
+
+        The term tables of X (cross_module_name(..., terms=True), DF twin when
+        extra_leaves carries B_aa) are contracted for `hole_chunk` ket holes at
+        a time: per slice the (n_2h1p x slice) piece of X, its division by
+        K_C - K_D, the complete du_ea rows of the slice and the slice's part of
+        du_ip. Peak memory: one six-index slice (no^2 nv^3 hole_chunk) and the
+        (n_2h1p x slice) block, instead of no^3 nv^3 and n_2h1p x n_2p1h."""
+        df = bool(extra_leaves and 'B_aa' in extra_leaves)
+        module = generated(cross_module_name(order, 'k1k1', restricted=True, df=df,
+                                             terms=True)[:-3])
+        out = module.OUT
+        hole = out[len(out) // 2]                       # the ket hole letter
+        cfg_k = self.sector_configs('EA')
+        khole = cfg_k['hole_sp'][:, 0]
+        du_ip = np.zeros_like(u_ip)
+        du_ea = np.zeros_like(u_ea)
+        groups = list(self._cross_groups(order, module, extra_leaves))
+        for k0 in range(0, self.nocc, hole_chunk):
+            ks = np.arange(k0, min(self.nocc, k0 + hole_chunk))
+            cols = np.where(np.isin(khole, ks))[0]
+            pos = -np.ones(len(khole), dtype=int)
+            pos[cols] = np.arange(len(cols))
+            X = np.zeros((len(k_ip), len(cols)))
+            for fn, args, bra_idx, ket_idx, brows, krows in groups:
+                kr = krows[np.isin(khole[krows], ks)]
+                if not len(kr):
+                    continue
+                T = _contract_term_table(fn(*args), out, hole, ks)
+                kidx = (khole[kr][None, :] - k0,) + tuple(c[:, np.isin(khole[krows], ks)]
+                                                         for c in ket_idx[1:])
+                X[np.ix_(brows, pos[kr])] += T[bra_idx + kidx]
+            w = X / (k_ea[cols][None, :] - k_ip[:, None])     # X_DC / (K_C - K_D)
+            du_ea[cols] = w.T @ u_ip
+            du_ip -= w @ u_ea[cols]
+        return du_ip, du_ea
+
+    def _stitch_k2r(self, occ_base, vir_base, sector, pool):
+        """(n_k2, norb) stitch of one occ/vir k=2 split pair at explicit
+        amplitude arrays `pool`, gathered per k=2 config spin pattern."""
+        cfg2 = self.kconfigs(sector, 2)
+        cols = self._k2_cols(cfg2)
+        U = np.zeros((len(cfg2['K']), self.norb))
+        uniq, inv = np.unique(cfg2['spins'], axis=0, return_inverse=True)
+        for gi, pat in enumerate(uniq):
+            rows = np.where(inv == gi)[0]
+            suffix = self._suffix(pat) + 'a'
+            idx = tuple(c[inv == gi] for c in cols)
+            for base, sl_ in ((occ_base, slice(0, self.nocc)),
+                              (vir_base, slice(self.nocc, self.norb))):
+                fn = getattr(genk2r, base + '_' + suffix, None)
+                if fn is None:
+                    continue
+                val = fn(*[pool[p] for p in _sig(fn)])[idx]
+                U[np.ix_(rows, np.arange(self.norb)[sl_])] += val
+        return U
+
+    def u2_k2_generated(self, sector):
+        """(n_k2, norb) alpha-sector U^(2) orbital<->3h2p/3p2h coupling
+        (Dyson class-GS), same explicit per-split amplitude-ORDER assignment
+        as the spin-orbital u2_k2_generated: l2v(l2^1) + l1f(l1^2) + l2f(l2^2)
+        - eps_p S^(2)(l2^2), times K2_CLASS_SIGN."""
+        tag2 = '3h2p' if sector == 'IP' else '3p2h'
+        A = self.u3_amps()
+
+        def merge(*dicts):
+            p = dict(self.rargs)
+            for d in dicts:
+                p.update(d)
+            return p
+
+        U = self._stitch_k2r(f'u2_{tag2}_occ_l2v', f'u2_{tag2}_vir_l2v',
+                             sector, merge(A['L2_1']))
+        U += self._stitch_k2r(f'u2_{tag2}_occ_l1f', f'u2_{tag2}_vir_l1f',
+                              sector, merge(A['L1_2']))
+        U += self._stitch_k2r(f'u2_{tag2}_occ_l2f', f'u2_{tag2}_vir_l2f',
+                              sector, merge(A['L2_2']))
+        S2 = self._stitch_k2r(f's2_{tag2}_occ_l2', f's2_{tag2}_vir_l2',
+                              sector, merge(A['L2_2']))
+        return self.K2_CLASS_SIGN[sector] * (U - self.eps[None, :] * S2)
+
+    # ------------------------------------------------------------------
+    # CSF-basis assembly: numerical doublet-CSF isometry T
+    # applied on top of the ms-blocked spatial blocks -- NO hand CSF
+    # formulas (spin_adapt.py builds T numerically).
+    # ------------------------------------------------------------------
+    def _T_alpha(self, T, sector):
+        """(ncfg, n_csf) dense slice of the class isometry T[key] restricted
+        to this driver's alpha-sector config rows (in the driver's own config
+        order). T's nonzero rows ARE the kept-Sz sector, so this loses
+        nothing; it just realigns to the spatial-block ordering."""
+        key = self._SECTOR[sector]['tag']
+        idx = self._class_index_map(sector)
+        Tc = T[key]
+        return np.asarray(Tc[idx, :].todense()) if hasattr(Tc[idx, :], 'todense') \
+            else np.asarray(Tc[idx, :])
+
+    def build_csf_supermatrix(self, T, level='adc3'):
+        """Dense CSF-basis Dyson-ADC supermatrix assembled from the RESTRICTED
+        spatial blocks sandwiched with the numerical doublet-CSF isometry T
+        (spin_adapt.build_T output): the orbital block is spatial diag(eps);
+        U/C^(1)/K/C^(2)/U^(3) come from the restricted driver, mapped with
+        T_alpha = T[sector][alpha rows]. At 'adc3' it matches ADCSolverCSF's
+        build_supermatrix; at 'adc4' it adds the generated C^(2) and U^(3),
+        equal to the spin-orbital generated blocks lifted through the same T
+        (tests/test_adcn_generated_csf_restricted.py).
+
+        level: 'adc3' | 'adc4'.
+        """
+        Ta = {sec: self._T_alpha(T, sec) for sec in ('IP', 'EA')}
+        n1, n2 = Ta['IP'].shape[1], Ta['EA'].shape[1]
+        norb = self.norb
+        nH = norb + n1 + n2
+        off1, off2 = norb, norb + n1
+        H = np.zeros((nH, nH))
+        H[:norb, :norb] = np.diag(self.eps)
+
+        # U through order 2 (Dyson class-GS) -> CSF
+        U_ip = self.u_adc3('IP').T @ Ta['IP']   # (norb, n1)
+        U_ea = self.u_adc3('EA').T @ Ta['EA']
+        H[:norb, off1:off2] = U_ip
+        H[off1:off2, :norb] = U_ip.T
+        H[:norb, off2:nH] = U_ea
+        H[off2:nH, :norb] = U_ea.T
+
+        # class blocks: K diagonal + C^(1) (+ C^(2) at adc4)
+        for sector, o0, o1 in (('IP', off1, off2), ('EA', off2, nH)):
+            K = np.diag(self.sector_configs(sector)['K'])
+            block = K + self._c1_block(sector)
+            if level == 'adc4':
+                block = block + self.c2_block_generated(sector)
+            H[o0:o1, o0:o1] = Ta[sector].T @ block @ Ta[sector]
+
+        # U^(3) orbital<->2p1h coupling (adc4 only)
+        if level == 'adc4':
+            U3 = self.u3_generated('EA').T @ Ta['EA']   # (norb, n2)
+            H[:norb, off2:nH] += U3
+            H[off2:nH, :norb] += U3.T
+        return H
+
+
+def _sig(fn):
+    return list(inspect.signature(fn).parameters)
+

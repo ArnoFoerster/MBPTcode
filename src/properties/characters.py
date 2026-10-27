@@ -35,11 +35,13 @@ whether the orbital is the lowest-energy process at all.
 import warnings
 
 import numpy as np
-from pyscf import gto, lo, scf as pyscf_scf, symm
+from pyscf import lo, scf as pyscf_scf, symm
 
-from src.Base.constants import (CHARACTER_WINDOW, LOCALIZED_ASSIGNMENT_FLOOR,
-                                PURITY_FLOOR, QP_ORDER_SEARCH, TRACKING_MARGIN)
-from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.Base.numerics.constants import (CHARACTER_WINDOW, LOCALIZED_ASSIGNMENT_FLOOR,
+                                         PURITY_FLOOR, QP_ORDER_SEARCH)
+from src.gradients.state_identity import (frontier_window, localized_window,
+                                          orbital_channel)
+from src.gradients.surface import require
 
 
 def roots(chain, mol=None, mf=None):
@@ -49,10 +51,7 @@ def roots(chain, mol=None, mf=None):
     the whole spectrum kept, and it works unchanged on the gas-phase and the
     solvated chain.
     """
-    mol, mf = chain.mean_field(mol, mf)
-    om, pieces = chain._forward(mol, mf)
-    xn, yn = pieces[10], pieces[11]
-    return om, xn, yn, chain.nocc
+    return require(chain, 'excited_states', 'characters.roots')(mol, mf)
 
 
 def ct_character(chain, mf, xn, yn, fragment_atoms):
@@ -172,20 +171,6 @@ def fragment_populations(mol, orbitals, fragments, method='meta_lowdin',
     return out
 
 
-def localized_window(mol, orbitals, pop_method='meta_lowdin'):
-    """Pipek-Mezey localized orbitals spanning the columns of `orbitals`.
-
-    pop_method is pyscf's: 'meta_lowdin' (its default, and the one whose
-    populations `fragment_populations` counts), 'mulliken', or 'iao' -- the
-    last spans the occupied space only and is meaningless for a virtual
-    window.
-    """
-    loc = lo.PM(mol, np.asarray(orbitals, float))
-    loc.pop_method = pop_method
-    loc.verbose = 0
-    return loc.kernel()
-
-
 def _named_partition(mol, fragments):
     """(names, atom lists) of `fragments`, checked to partition the atoms."""
     names, atoms = list(fragments), [list(v) for v in fragments.values()]
@@ -195,28 +180,6 @@ def _named_partition(mol, fragments):
             f'fragments must partition the {mol.natm} atoms, each exactly '
             f'once, for the weights to sum to one; got {dict(fragments)}')
     return names, atoms
-
-
-def _channel(mf, spin, mo_coeff):
-    """(orbital coefficients, occupied count) of the channel asked for."""
-    unrestricted = isinstance(mf, pyscf_scf.uhf.UHF)
-    if unrestricted and spin not in (0, 1):
-        raise ValueError(f'an unrestricted reference needs spin=0 (alpha) or '
-                         f'1 (beta), got {spin!r}')
-    if not unrestricted and spin is not None:
-        raise ValueError(f'spin={spin!r} on a restricted reference')
-    if mo_coeff is None:
-        mo_coeff = mf.mo_coeff[spin] if unrestricted else mf.mo_coeff
-    nocc = int(mf.nelec[spin]) if unrestricted else mf.mol.nelectron // 2
-    return np.asarray(mo_coeff, float), nocc
-
-
-def _window(orbital, nocc, nmo, window):
-    """[start, stop) of the canonical orbitals on the orbital's side of the gap,
-    from the frontier outwards, widened to hold the orbital itself."""
-    if orbital < nocc:
-        return max(0, min(nocc - window, orbital)), nocc
-    return nocc, min(nmo, max(nocc + window, orbital + 1))
 
 
 def quasiparticle_character(mf, orbital, fragments, window=CHARACTER_WINDOW,
@@ -244,8 +207,8 @@ def quasiparticle_character(mf, orbital, fragments, window=CHARACTER_WINDOW,
     that leans on one of those is not clean.
     """
     names, atoms = _named_partition(mf.mol, fragments)
-    coeff, nocc = _channel(mf, spin, mo_coeff)
-    start, stop = _window(int(orbital), nocc, coeff.shape[1], int(window))
+    coeff, nocc = orbital_channel(mf, spin, mo_coeff)
+    start, stop = frontier_window(int(orbital), nocc, coeff.shape[1], int(window))
     s = mf.get_ovlp()
     local = localized_window(mf.mol, coeff[:, start:stop], pop_method)
     pops = fragment_populations(mf.mol, local, atoms, 'meta_lowdin', s)
@@ -265,91 +228,32 @@ def quasiparticle_character(mf, orbital, fragments, window=CHARACTER_WINDOW,
                             if r['population'] < LOCALIZED_ASSIGNMENT_FLOOR])
 
 
-def orbital_fingerprint(mf, orbital, window=CHARACTER_WINDOW, spin=None,
-                        mo_coeff=None, pop_method='meta_lowdin'):
-    """The orbital at this geometry, as `track_orbital` follows it to another.
-
-    Its weight on each Pipek-Mezey localized orbital of the window, together
-    with the localized orbitals and the molecule they live on. A canonical
-    orbital near a near-degeneracy is an arbitrary rotation within it; the
-    localized set is not, which is what makes it the reference to follow.
-    """
-    coeff, nocc = _channel(mf, spin, mo_coeff)
-    start, stop = _window(int(orbital), nocc, coeff.shape[1], int(window))
-    local = localized_window(mf.mol, coeff[:, start:stop], pop_method)
-    weights = (local.T @ mf.get_ovlp() @ coeff[:, int(orbital)]) ** 2
-    return dict(mol=mf.mol.copy(), localized=local, weights=weights,
-                orbital=int(orbital), occupied=int(orbital) < nocc,
-                window=(start, stop), spin=spin)
-
-
-def track_orbital(fingerprint, mf, spin=None, mo_coeff=None, candidates=None):
-    """(the orbital at `mf` that continues the fingerprinted one, similarities).
-
-    Each candidate is projected on the REFERENCE geometry's localized orbitals
-    through the cross-geometry overlap <chi_mu(R0)|chi_nu(R)>, and scored by
-    the Bhattacharyya coefficient sum_k sqrt(v_k w_k) of its weights v against
-    the reference orbital's w: one for the same localized character entirely
-    inside the reference window, less as the character moves or leaks out.
-    Signs and rotations within one localized orbital's share do not enter.
-
-    candidates: the orbitals to choose among, by default the reference window
-    on the same side of the gap. Warns when the best two are closer than
-    TRACKING_MARGIN: the track is then a guess, and a displaced geometry that
-    picks the other one puts a step in the surface.
-
-    Returns (orbital index, {candidate: similarity}).
-    """
-    coeff, nocc = _channel(mf, spin, mo_coeff)
-    if candidates is None:
-        start, stop = fingerprint['window']
-        if fingerprint['occupied']:
-            candidates = range(max(0, nocc - (stop - start)), nocc)
-        else:
-            candidates = range(nocc, min(coeff.shape[1],
-                                         nocc + (stop - start)))
-    s01 = gto.intor_cross('int1e_ovlp', fingerprint['mol'], mf.mol)
-    project = fingerprint['localized'].T @ s01
-    w = fingerprint['weights']
-    score = {int(c): float(np.sqrt((project @ coeff[:, int(c)]) ** 2 * w).sum())
-             for c in candidates}
-    ranked = sorted(score, key=score.get, reverse=True)
-    if len(ranked) > 1 and score[ranked[0]] - score[ranked[1]] < TRACKING_MARGIN:
-        warnings.warn(
-            f'orbital tracking is ambiguous: candidates {ranked[0]} and '
-            f'{ranked[1]} match the reference character to '
-            f'{score[ranked[0]]:.3f} and {score[ranked[1]]:.3f}, closer than '
-            f'{TRACKING_MARGIN}', RuntimeWarning, stacklevel=2)
-    return ranked[0], score
-
-
-def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
-                        spin_channel='alpha', **route):
+def quasiparticle_order(mf, orbital, energies, window=QP_ORDER_SEARCH,
+                        spin_channel='alpha'):
     """Whether `orbital` is the lowest-energy removal or attachment, in eV.
 
-    Solves the quasiparticle energies of the `window` orbitals nearest the
-    frontier on the orbital's side of the gap (and the orbital itself) through
-    `calc_qp_energy(**route)` -- by default the space-time route -- and warns
-    when another orbital is the easier electron to remove (a higher occupied
-    quasiparticle energy) or to add (a lower virtual one). G0W0 reorders
-    states relative to the mean field, so a surface that follows a canonical
-    index can be following the second-lowest process.
+    `energies(mf, states, spin_channel) -> ({orbital: eV}, reference
+    diagnostics or None)` is the method's removal and attachment energies of
+    `states` on `mf` (`gradients.gwbse.diagnostics.gw_qp_energies` for
+    G0W0); they are asked for the `window` orbitals nearest the frontier on
+    the orbital's side of the gap and the orbital itself. Warns when another
+    orbital is the easier electron to remove (a higher occupied energy) or to
+    add (a lower virtual one): G0W0 reorders states relative to the mean
+    field, so a surface that follows a canonical index can be following the
+    second-lowest process.
 
     Returns {'orbital', 'energies' {orbital: eV}, 'lowest_process',
-    'reordered'}.
+    'reordered', 'reference_diagnostics'} -- the last what `energies` said of
+    the reference (an unrestricted one's spin contamination and stability
+    flags), None for none.
     """
     unrestricted = isinstance(mf, pyscf_scf.uhf.UHF)
     spin = (0 if spin_channel == 'alpha' else 1) if unrestricted else None
-    coeff, nocc = _channel(mf, spin, None)
-    start, stop = _window(int(orbital), nocc, coeff.shape[1], int(window))
+    coeff, nocc = orbital_channel(mf, spin, None)
+    start, stop = frontier_window(int(orbital), nocc, coeff.shape[1], int(window))
     states = sorted(set(range(start, stop)) | {int(orbital)})
-    route = dict({'mode': 'space-time'}, **route)
-    if unrestricted:
-        route['spin_channel'] = spin_channel
-    out = calc_qp_energy(mf, selfenergy='GW', df=True, state=states, **route)
-    if isinstance(out, dict):
-        out = [out[p]['GW'] for p in states]
-    energies = dict(zip(states, (float(e) for e in out)))
+    found, diagnostics = energies(mf, states, spin_channel if unrestricted else None)
+    energies = {p: float(found[p]) for p in states}
     pick = max if int(orbital) < nocc else min
     lowest = pick(energies, key=energies.get)
     if lowest != int(orbital):
@@ -361,17 +265,19 @@ def quasiparticle_order(mf, orbital, window=QP_ORDER_SEARCH,
             f'{orbital} follows the higher-energy process.', RuntimeWarning,
             stacklevel=2)
     return dict(orbital=int(orbital), energies=energies,
-                lowest_process=lowest, reordered=lowest != int(orbital))
+                lowest_process=lowest, reordered=lowest != int(orbital),
+                reference_diagnostics=diagnostics)
 
 
-def surface_order(surface, mol=None, window=QP_ORDER_SEARCH, **route):
+def surface_order(surface, energies, mol=None, window=QP_ORDER_SEARCH):
     """`quasiparticle_order` for a charged-excitation surface at `mol`.
 
     The surface's own mean field -- through its environment, so a solvated
     surface is audited in its continuum -- and the orbital its declared
-    `ChargedExcitation` names. Run it at the reference geometry before an
-    optimization or a scan follows that orbital.
+    `ChargedExcitation` names; `energies` the method's (`quasiparticle_order`).
+    Run it at the reference geometry before an optimization or a scan follows
+    that orbital.
     """
     _, mf = surface.mean_field(mol)
-    return quasiparticle_order(mf, surface.physics_excitation.orbital, window,
-                               **route)
+    return quasiparticle_order(mf, surface.physics_excitation.orbital, energies,
+                               window)

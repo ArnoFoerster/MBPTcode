@@ -1,7 +1,7 @@
-# GENERATED CODE -- unrestricted (spin-blocked, separate alpha/beta) MPn
-# amplitude-numerator, overlap, and density cross-term pieces (MP2+MP3),
-# order-generic recursion. Combined through the MPn density recursion in
-# mpn_density_driver_unrestricted.py. Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_mpn_density_spin.py (generate_unrestricted).
+# Unrestricted (separate alpha/beta) MPn amplitude-numerator, overlap and density
+# cross-term pieces (MP2+MP3) of the order-generic pdaggerq recursion.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

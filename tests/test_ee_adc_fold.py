@@ -96,10 +96,10 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       application of the operator (with solver='newton' the matvecs
       solve_symmetric received), a zero heartbeat interval prints heartbeats, and
       no trace outlives a call, one that raises included.
-  26. ee_spin_blocks._ew, the elementwise pass split over the thread pin, equals the
+  26. ee_spin_blocks.ew, the elementwise pass split over the thread pin, equals the
       plain ufunc bit for bit at a size it splits (2.1e6 elements, 4 threads): a
       difference with an (a, b)-transposed operand, an in-place sum, a scalar
-      product, a quotient, and a broadcast shape it leaves to NumPy; _ew and _ksum
+      product, a quotient, and a broadcast shape it leaves to NumPy; ew and ksum
       on two or three rows use the pin's one executor, none keyed by the row count.
   27. ee_spin_blocks.ooov_ia and ovvv_ia, their products summed over j-slabs on 4
       threads, equal the block-wise einsum on anti4's blocks for an X without a
@@ -109,7 +109,7 @@ root's own w. Checks, on water / cc-pVDZ (RHF, DF factors) unless stated:
       h = 1e-4 Ha to 1e-6 relative, on the streamed kernel and on the generic
       path; at omega None it is zeros; an optional
       pieces['K'] replaces the V, divide, Vt path of matvec and of both dmatvec
-      forms, bitwise, called once per application with powers (1,), () and (2,).
+      forms, to a few ulp, called once per application with powers (1,), () and (2,).
   29. _model_roots, the subspace model H0 + (w - w0) H1 solved per branch: with
       H1 = 0 its roots are the eigenvalues of H0, with H1 = -I they are
       (w_j + w0) / 2, a root at or above min D is dropped, and an exact crossing
@@ -138,16 +138,16 @@ The machinery of the seeds' Newton path (step budgets, a seed collapse, a seed
 level split in A_eff, the count's repairs, a cut past min D) is checked through
 solver='newton' in checks 4, 5, 8, 12, 13, 18, 19, 21 and 23, where the default meets
 the same inputs without it, as their added lines check.
-  33. ee_spin_blocks._stream runs fn once per slab of an index range, the last
+  33. ee_spin_blocks.stream runs fn once per slab of an index range, the last
       slab shorter than the width, with more workers than slabs, and sums the
-      outputs exactly; slabs that split their own _ew over as many threads as
-      there are workers return; _slab_plan gives one slab when the budget holds
+      outputs exactly; slabs that split their own ew over as many threads as
+      there are workers return; slab_plan gives one slab when the budget holds
       every index, else workers x width within it, never below one index.
   34. the slab forms ovvv_ijab_pij_slab, ovvv_ia_slab and ooov_ia_slab (no 5, nv 7,
       slabs of width 2 over the second occupied index) equal (1 - P_ij) ovvv_ijab
       restricted to the slab, ovvv_ia and ooov_ia summed over the slabs, to 1e-13
       relative; one slab over every j takes one product against <ic|ab>, both
-      spins at once; _ksum splits a product on the main thread and keeps it whole
+      spins at once; ksum splits a product on the main thread and keeps it whole
       off it.
   35. build_operator's pieces['K'] at adc2 and gf2, the kernel streamed over slabs of
       the doubles' second occupied index, equals the V, divide, Vt path at 0.3 Ha
@@ -155,7 +155,7 @@ the same inputs without it, as their added lines check.
       layout's, on one slab, on three of width 2 that the budget _STREAM_GB sets,
       and on those three with two in flight; the folded singlets with and without
       it agree to 1e-9 Ha; a singles vector with a flip parity raises
-      NotImplementedError; a slab holds at most _K_LIVE slab blocks per slab index
+      NotImplementedError; a slab holds at most EE_COUPLING_SLAB_BLOCKS slab blocks per slab index
       (the slope of tracemalloc's peak from width 1 to 2, water cc-pVTZ).
       Check 10 takes dict(P, K=None), the generic path, as its baseline; check 28
       runs its derivative test on both.
@@ -177,19 +177,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
+from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df, ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
+from tests.adc_common import check
+from tests.pins import same_bar
 
 HARTREE_TO_EV = 27.211386245988
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
-
-
-def check(ok, label, detail=''):
-    """Print one verdict line and return `ok` as a bool."""
-    tail = f'   ({detail})' if detail else ''
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
-    return bool(ok)
 
 
 def water_df(basis='cc-pvdz'):
@@ -240,7 +236,7 @@ def check_gf2(eps, B, no):
                                                     pieces=True)
     aop1, _, _ = ee_r_sigma_df.build_operator(eps, B, no, level='adc1')
     ok &= check(d_gf2 == d_adc2, 'gf2 dimensions equal adc2')
-    ok &= check(ee_r_sigma._BLOCK_ORDERS['gf2'] == (1, 1, 0),
+    ok &= check(ee_utils.BLOCK_ORDERS['gf2'] == (1, 1, 0),
                 'gf2 block order (1, 1, 0)')
     be = P2['be']
     rng = np.random.default_rng(11)
@@ -262,13 +258,13 @@ def check_gf2(eps, B, no):
 def check_folded_operator(mf, eps, B, no):
     """Check 3: A_eff(w) at the full solve's roots."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     nv = len(eps) - no
     n_s = 2 * no * nv
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
     # the full solve's lowest singlet: Davidson, since the channel (6365) is far
-    # above DENSE_LIMIT; its residual 1e-10 sits well under every tolerance here
+    # above EE_ADC_DENSE_LIMIT; its residual 1e-10 sits well under every tolerance here
     e_full, Z = solve_ee_adc(mf, level='adc2', nroots=1, df=True, spin='singlet',
                              conv_tol=1e-10)
     w = float(e_full[0])
@@ -308,7 +304,7 @@ def check_folded_operator(mf, eps, B, no):
 def check_solve_folded(mf, eps, B, no):
     """Check 4: solve_folded at adc2 against the full Davidson roots."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     nv = len(eps) - no
     n_s = 2 * no * nv
@@ -353,13 +349,13 @@ def check_solve_folded(mf, eps, B, no):
     B2 = DFIntegrals.from_scf(mol, mf2).B_aa
     _, _, _, P2 = ee_r_sigma_df.build_operator(eps2, B2, 1, level='adc2',
                                                pieces=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        res2 = ee_fold.solve_folded(P2, 3, spin='triplet')
-    fewer = any('fewer' in str(w.message) for w in caught)
-    ok &= check(res2.omega.size == 1 and fewer,
-                'short channel warns and returns what it has',
-                f'{res2.omega.size} root(s), {len(caught)} warning(s)')
+    try:
+        ee_fold.solve_folded(P2, 3, spin='triplet')
+        refused = 'no error'
+    except ValueError as exc:
+        refused = str(exc)
+    ok &= check('fewer than nroots' in refused, 'short channel refused (an input)',
+                refused)
     # nocc = nvirt = 1: every reshape of the layout is degenerate. HeH+, not H2,
     # whose g/u symmetry cuts the one single from the one double
     mol3 = gto.M(atom='He 0 0 0; H 0 0 0.77', basis='sto-3g', charge=1, verbose=0)
@@ -390,7 +386,7 @@ def check_degenerate_set():
     """CH4 / cc-pVDZ: the degenerate T2 singlet triple is followed without a
     skip, each partner its own vector."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     mol = gto.M(atom=CH4, basis='cc-pvdz', verbose=0)
@@ -458,7 +454,7 @@ def check_routes_and_channels(mf, eps, B, no):
     """The Davidson branch of the fold (dense_limit=0) against the dense one, and
     spin=None against the full solve over both channels."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
@@ -481,7 +477,7 @@ def check_gf2_solves(mf, eps, B, no):
     """gf2 end to end: the fold against the full gf2 channel solve, and the dense
     integral route against the DF route with exact factors."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='gf2', pieces=True)
@@ -536,7 +532,7 @@ def check_gf2_solves(mf, eps, B, no):
 def check_boundaries(mf, eps, B, no):
     """The refusals and the step budget; inputs left as they were handed in."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     try:
         ee_r_sigma_df.build_operator(eps, B, no, level='adc2', parity=1.0,
@@ -977,7 +973,7 @@ def check_seeding_gap():
     """CH4 / 6-31G triplet: M's lowest state folds above the T2 triple, so the
     lowest root is seeded by the count check, not by M."""
     from src.SingleReference.ADC.eeADC import ee_fold
-    from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
     ok = True
     ev = HARTREE_TO_EV
     mol = gto.M(atom=CH4, basis='6-31g', verbose=0)
@@ -1192,7 +1188,7 @@ def check_index_bracket():
         def lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols,
                       tol=None):
             return (np.array([offset + slope * omega]), np.ones((1, 1)),
-                    lambda v: dmv_value)
+                    lambda v: dmv_value, np.ones(1, bool))
         return lowest_at
 
     orig = ee_fold._lowest_at
@@ -1252,9 +1248,11 @@ def check_dense_default():
 
 
 def check_warning_paths(eps, B, no):
-    """The count's paths that warn or fall back: a surplus of unconverged roots, an
-    index solve that lands on a found root, the round limit, the index solve's
-    bisection, and a missing group re-solved per branch."""
+    """The count's paths that warn, flag and return what was found (a
+    numerical event is warned about, not refused) or fall back: a surplus of
+    unconverged roots, an index solve that lands on a found root, the round
+    limit, the index solve's bisection, and a missing group re-solved per
+    branch."""
     from src.SingleReference.ADC.eeADC import ee_fold
 
     def run(P, nroots, **kw):
@@ -1263,6 +1261,10 @@ def check_warning_paths(eps, B, no):
             res = ee_fold.solve_folded(P, nroots, spin='singlet', solver='newton',
                                        **kw)
         return res, [str(x.message) for x in caught]
+
+    def flagged(res, *names):
+        got = {f['flag'] for f in res.flags}
+        return all(n in got for n in names)
 
     def pair(eps_m):
         # check 12's pair, the second state of M raised by eps_m
@@ -1277,6 +1279,9 @@ def check_warning_paths(eps, B, no):
     ok = check(any('where A_eff has' in x for x in msgs) and not res.converged.any(),
                'one Newton step: every root unconverged, and the count warns of the '
                'surplus', f'converged {res.converged.tolist()}')
+    ok &= check(flagged(res, 'roots_missing', 'roots_not_converged'),
+                'one Newton step: flagged roots_missing and roots_not_converged',
+                str([f['flag'] for f in res.flags]))
     # split 5.9e-9 Ha, below the default tol_omega: one root at that resolution
     Pp, w = pair(1e-8)
     res, msgs = run(Pp, 2)
@@ -1286,13 +1291,17 @@ def check_warning_paths(eps, B, no):
                 'a pair closer than tol_omega: the branch solved by index lands on '
                 'the found root, and the count says its root is missing',
                 f'nout {res.omega.size}')
+    ok &= check(flagged(res, 'roots_missing'), 'the same pair: flagged roots_missing',
+                str([f['flag'] for f in res.flags]))
     Pp, w = pair(1.2e-6)
-    keep = ee_fold._COUNT_ROUNDS
-    ee_fold._COUNT_ROUNDS = 0
+    keep = ee_fold.EE_FOLD_COUNT_ROUNDS
+    ee_fold.EE_FOLD_COUNT_ROUNDS = 0
     try:
         res, msgs = run(Pp, 2, tol_omega=1e-12)
     finally:
-        ee_fold._COUNT_ROUNDS = keep
+        ee_fold.EE_FOLD_COUNT_ROUNDS = keep
+    ok &= check(flagged(res, 'roots_missing'), 'no count round left: flagged '
+                'roots_missing', str([f['flag'] for f in res.flags]))
     ok &= check(any('1 of the 2 lowest roots not found after 0 round' in x
                     for x in msgs) and res.omega.size == 1,
                 'no count round left: the missing root is named, not solved',
@@ -1301,7 +1310,8 @@ def check_warning_paths(eps, B, no):
     def lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols,
                   tol=None):
         # λ(ω) = 5 - 3ω with T1 = 1: every Newton step leaves the bracket [1, 2]
-        return np.array([5.0 - 3.0 * omega]), np.ones((1, 1)), lambda v: 0.0
+        return (np.array([5.0 - 3.0 * omega]), np.ones((1, 1)), lambda v: 0.0,
+                np.ones(1, bool))
 
     orig = ee_fold._lowest_at
     ee_fold._lowest_at = lowest_at
@@ -1521,7 +1531,7 @@ def check_trace(eps, B, no):
     out0 = io.StringIO()
     with contextlib.redirect_stdout(out0):
         res0 = ee_fold.solve_folded(P, 3, spin='singlet')
-    calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold._HEARTBEAT
+    calls, solve, beat = [0], ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT
     apps, fop = [0], ee_fold.folded_operator
 
     def counted(matvec, diag, **k):
@@ -1542,7 +1552,7 @@ def check_trace(eps, B, no):
             apps[0] += bool(vector)
             return dmatvec(u, vector=vector)
         return mv, dmv, diag_s, embed, restrict
-    ee_fold.solve_symmetric, ee_fold._HEARTBEAT = counted, 0.0
+    ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT = counted, 0.0
     ee_fold.folded_operator = applied
     out1, outn = io.StringIO(), io.StringIO()
     try:
@@ -1552,7 +1562,7 @@ def check_trace(eps, B, no):
         with contextlib.redirect_stdout(outn):
             ee_fold.solve_folded(P, 3, spin='singlet', verbose=1, solver='newton')
     finally:
-        ee_fold.solve_symmetric, ee_fold._HEARTBEAT = solve, beat
+        ee_fold.solve_symmetric, ee_fold.EE_FOLD_HEARTBEAT = solve, beat
         ee_fold.folded_operator = fop
     lines = out1.getvalue().splitlines()
     stamp = re.compile(r'\[t = \d+\.\d s, mv = (\d+)\]$')
@@ -1593,10 +1603,10 @@ def check_trace(eps, B, no):
 
 
 def check_threaded_elementwise():
-    """_ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
-    array above the size where the pass is split; _ew and _ksum over fewer rows
+    """ew against the plain ufunc, bit for bit, with the pin at 4 threads and an
+    array above the size where the pass is split; ew and ksum over fewer rows
     than the pin take the pin's executor, so one pool serves every slab width."""
-    from src.Base.utils import threads as th
+    from src.Base.utils.parallel import threads as th
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     rng = np.random.default_rng(3)
     a = rng.standard_normal((64, 32, 32, 32))
@@ -1606,19 +1616,19 @@ def check_threaded_elementwise():
     os.environ['OMP_NUM_THREADS'] = '4'
     try:
         split = a.size >= sb._EW_MIN and sb._threads() == 4
-        z = sb._ew(np.subtract, a, b.transpose(0, 1, 3, 2))
+        z = sb.ew(np.subtract, a, b.transpose(0, 1, 3, 2))
         s = a.copy()
-        sb._ew(np.add, s, b, out=s)
+        sb.ew(np.add, s, b, out=s)
         cases = {'difference, transposed operand': (z, a - b.transpose(0, 1, 3, 2)),
                  'in-place sum': (s, a + b),
-                 'scalar product': (sb._ew(np.multiply, a, -1.0), -a),
-                 'quotient': (sb._ew(np.true_divide, a, d), a / d),
-                 'broadcast, left to NumPy': (sb._ew(np.multiply, a, d[0]), a * d[0])}
+                 'scalar product': (sb.ew(np.multiply, a, -1.0), -a),
+                 'quotient': (sb.ew(np.true_divide, a, d), a / d),
+                 'broadcast, left to NumPy': (sb.ew(np.multiply, a, d[0]), a * d[0])}
         pid = os.getpid()
         before = {k for k in th._ROW_POOLS if k[0] == pid}
-        sb._ew(np.add, a.reshape(2, -1), 1.0)
-        sb._ew(np.add, rng.standard_normal((3, 400000)), 1.0)
-        sb._ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
+        sb.ew(np.add, a.reshape(2, -1), 1.0)
+        sb.ew(np.add, rng.standard_normal((3, 400000)), 1.0)
+        sb.ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
         pools = {k[1] for k in th._ROW_POOLS if k[0] == pid} - {k[1] for k in before}
     finally:
         if keep is None:
@@ -1630,13 +1640,13 @@ def check_threaded_elementwise():
                'the threaded elementwise pass equals the plain ufunc bit for bit',
                f'split {split}, differing {bad}')
     ok &= check(pools <= {4},
-                '_ew and _ksum on 2 and 3 rows take the pin\'s executor, none keyed '
+                'ew and ksum on 2 and 3 rows take the pin\'s executor, none keyed '
                 'by the row count', f'new pools keyed {sorted(pools)}')
     return ok
 
 
 def check_split_contractions():
-    """ooov_ia and ovvv_ia, summed over j-slabs by _ksum with the pin at 4 threads,
+    """ooov_ia and ovvv_ia, summed over j-slabs by ksum with the pin at 4 threads,
     against the block-wise einsum on anti4's blocks, for an X without a flip
     parity and with each one, to 1e-12 relative."""
     from src.SingleReference.ADC.eeADC import ee_equations as eq
@@ -1681,8 +1691,8 @@ def check_kernel_hook(eps, B, no):
     -dmatvec(u) to 1e-12 relative, the central difference of matvec at h = 1e-4 Ha
     to 1e-6 relative, on the streamed kernel and on the generic path, zeros at
     omega None; an optional pieces['K'] replaces the V,
-    divide, Vt path of matvec and of both dmatvec forms, bitwise, called once per
-    application with the powers (1,), () and (2,)."""
+    divide, Vt path of matvec and of both dmatvec forms, to a few ulp, called
+    once per application with the powers (1,), () and (2,)."""
     from src.SingleReference.ADC.eeADC import ee_fold
     ok = True
     nv = B.shape[1] - no
@@ -1720,8 +1730,11 @@ def check_kernel_hook(eps, B, no):
         return ws, float(Yf @ Yf)
 
     mvk, dmvk, _, _, _ = ee_fold.folded_operator(dict(P, K=K), om, spin='singlet')
-    same = (np.array_equal(mvk(u), mv(u)) and dmvk(u) == dmv(u)
-            and np.array_equal(dmvk(u, vector=True), g))
+    # two computations of one product (the hook's and the generic path's):
+    # a few ulp (tests/pins.same_bar), not bitwise
+    same = all(np.all(np.abs(np.asarray(x) - np.asarray(y)) <= same_bar(x, y))
+               for x, y in ((mvk(u), mv(u)), (dmvk(u), dmv(u)),
+                            (dmvk(u, vector=True), g)))
     ok &= check(same and calls == [(1,), (), (2,)],
                 "pieces['K'] is the kernel matvec and both dmatvec forms apply",
                 str(calls))
@@ -1915,7 +1928,7 @@ def check_solver_default(eps, B, no):
 
 def check_default_polish():
     """The default's exact polish and its duplicate check: a model root far from
-    its exact root (strong coupling, the centre never moved: _RECENTRE 10 Ha) with
+    its exact root (strong coupling, the centre never moved: EE_FOLD_RECENTRE 10 Ha) with
     one polish step comes back converged False with the solve's warning, never at
     the model's value as converged, and a 4-fold level so held comes back whole,
     every partner unconverged; two roots the Davidson hands over as copies of one
@@ -1925,15 +1938,15 @@ def check_default_polish():
     ok = True
     m, C, D = np.array([0.5, 0.9]), np.array([[0.25, 0.0]]), np.array([0.8])
     w = np.sort(_synthetic_exact(m, C, D)[0])
-    keep = ee_fold._RECENTRE
-    ee_fold._RECENTRE = 10.0
+    keep = ee_fold.EE_FOLD_RECENTRE
+    ee_fold.EE_FOLD_RECENTRE = 10.0
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
             res = ee_fold.solve_folded(_synthetic_pieces(m, C, D), 1, spin='singlet',
                                        dense_limit=0, max_newton=1, t_min=0.0)
     finally:
-        ee_fold._RECENTRE = keep
+        ee_fold.EE_FOLD_RECENTRE = keep
     warned = any('not converged' in str(x.message) for x in caught)
     off = abs(float(res.omega[0]) - w[0])
     ok &= check(warned and not res.converged[0] and off > 1e-6,
@@ -1991,8 +2004,8 @@ def check_default_polish():
     # the 4-fold level, its model root far from the exact one (the centre held at
     # M's root), and one polish step: the level comes back whole and unconverged
     m, C = kfold(4)
-    keep = ee_fold._RECENTRE
-    ee_fold._RECENTRE = 10.0
+    keep = ee_fold.EE_FOLD_RECENTRE
+    ee_fold.EE_FOLD_RECENTRE = 10.0
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
@@ -2000,7 +2013,7 @@ def check_default_polish():
                                        spin='singlet', dense_limit=0, max_newton=1,
                                        t_min=0.0)
     finally:
-        ee_fold._RECENTRE = keep
+        ee_fold.EE_FOLD_RECENTRE = keep
     lv = any('level' in str(x.message) and 'not converged' in str(x.message)
              for x in caught)
     ok &= check(lv and res.omega.size == 4 and not res.converged.any(),
@@ -2082,8 +2095,8 @@ def check_default_polish():
 
 
 def check_stream():
-    """_stream sums fn over slabs exactly once each, with a last slab shorter than
-    the width and more workers than slabs; a slab whose own _ew pass splits over
+    """stream sums fn over slabs exactly once each, with a last slab shorter than
+    the width and more workers than slabs; a slab whose own ew pass splits over
     as many threads as there are workers returns (on row_map's pool it hangs)."""
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     seen = []
@@ -2092,45 +2105,45 @@ def check_stream():
         seen.append((j0, j1))
         return [sb.SB({'aa': np.full((2, 2), float(j1 - j0))})], float(j1 - j0)
 
-    out, tot = sb._stream(fn, 5, 2, workers=24)
+    out, tot = sb.stream(fn, 5, 2, workers=24)
     ok = check(sorted(seen) == [(0, 2), (2, 4), (4, 5)] and tot == 5.0
                and np.array_equal(out[0].get('aa'), np.full((2, 2), 5.0)),
-               '_stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
+               'stream: slabs (0,2),(2,4),(4,5) once each, sums exact',
                f'{sorted(seen)}, {tot}')
     a = np.ones((3, 1 << 19))
 
     def fn_ew(j0, j1):
-        return [sb._ew(np.multiply, a, 2.0)], float(j1 - j0)
+        return [sb.ew(np.multiply, a, 2.0)], float(j1 - j0)
 
     keep = os.environ.get('OMP_NUM_THREADS')
     os.environ['OMP_NUM_THREADS'] = '3'
     try:
-        out, tot = sb._stream(fn_ew, 3, 1, workers=3)
+        out, tot = sb.stream(fn_ew, 3, 1, workers=3)
     finally:
         if keep is None:
             del os.environ['OMP_NUM_THREADS']
         else:
             os.environ['OMP_NUM_THREADS'] = keep
     ok &= check(tot == 3.0 and np.array_equal(out[0], np.full(a.shape, 6.0)),
-                '_stream: slabs that split their own _ew over 3 threads, 3 workers',
+                'stream: slabs that split their own ew over 3 threads, 3 workers',
                 f'{tot}')
-    # _slab_plan(44 indices, 1000 elements per index, 10 blocks per slab), 3 workers
+    # slab_plan(44 indices, 1000 elements per index, 10 blocks per slab), 3 workers
     keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
     sb._stream_workers = lambda: 3
     try:
         plans = {}
         for fit in (12500, 10, 4, 0):
             sb._STREAM_GB = (fit + 0.5) * 8 * 1000 * 10 / 1e9
-            plans[fit] = sb._slab_plan(44, 1000, 10)
+            plans[fit] = sb.slab_plan(44, 1000, 10)
     finally:
         sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
     ok &= check(plans == {12500: (44, 1), 10: (3, 3), 4: (1, 3), 0: (1, 1)},
-                '_slab_plan: one slab when the budget holds all, else workers x width '
+                'slab_plan: one slab when the budget holds all, else workers x width '
                 'within it, never below one index', str(plans))
     # the budget follows MBPT_STREAM_GB of the environment, read at import; the
     # child finds src through the repository root this file put on sys.path
     code = ('from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb; '
-            'print(sb._STREAM_GB, sb._slab_plan(44, 1000, 10))')
+            'print(sb._STREAM_GB, sb.slab_plan(44, 1000, 10))')
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     path = os.pathsep.join(p for p in (root, os.environ.get('PYTHONPATH', '')) if p)
     knob = dict(os.environ, MBPT_STREAM_GB='0.0001', PYTHONPATH=path)   # 0.1 MB
@@ -2156,14 +2169,14 @@ def check_stream():
                 str(silent))
     loud = {}
     for text in ('', 'abc', 'nan', 'inf', '-1', '0'):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            gb = sb._stream_gb(text)
-        loud[text] = (gb, len(caught),
-                      bool(caught) and repr(text) in str(caught[0].message))
-    ok &= check(all(v == (16.0, 1, True) for v in loud.values()),
+        try:
+            sb._stream_gb(text)
+            loud[text] = 'no error'
+        except ValueError as exc:
+            loud[text] = repr(text) in str(exc)
+    ok &= check(all(v is True for v in loud.values()),
                 '_stream_gb: an empty, non-numeric, nan, inf or non-positive value is '
-                '16 GB with one warning naming it', str(loud))
+                'refused, the error naming it', str(loud))
     return ok
 
 
@@ -2228,9 +2241,9 @@ def check_slab_contractions():
     keep = os.environ.get('OMP_NUM_THREADS')
     os.environ['OMP_NUM_THREADS'] = '4'
     try:
-        sb._ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
+        sb.ksum(lambda r0, r1: part(r0, r1, 'main'), 8, 1 << 30)
         th = threading.Thread(
-            target=lambda: sb._ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
+            target=lambda: sb.ksum(lambda r0, r1: part(r0, r1, 'pool'), 8, 1 << 30))
         th.start()
         th.join()
     finally:
@@ -2239,7 +2252,7 @@ def check_slab_contractions():
         else:
             os.environ['OMP_NUM_THREADS'] = keep
     ok &= check(len(calls['main']) == 4 and calls['pool'] == [(0, 8)],
-                '_ksum splits on the main thread, keeps a product whole off it',
+                'ksum splits on the main thread, keeps a product whole off it',
                 str(calls))
     return ok
 
@@ -2262,7 +2275,8 @@ def check_streamed_kernel(eps, B, no):
     0.3 Ha, powers (1, 2) and (), to 1e-12 relative per block, its doubles norm
     against the flat layout's; on one slab, on three of width 2 from the budget, and
     on those three two at a time; the folded roots with and without K to 1e-9 Ha; a
-    y1 with a flip parity refused; at most _K_LIVE slab blocks per slab index."""
+    y1 with a flip parity refused; at most EE_COUPLING_SLAB_BLOCKS slab blocks per
+    slab index."""
     from src.SingleReference.ADC.eeADC import ee_fold
     from src.SingleReference.ADC.eeADC import ee_spin_blocks as sb
     ok = True
@@ -2274,7 +2288,7 @@ def check_streamed_kernel(eps, B, no):
     def rel(a, b):
         return float(np.max(np.abs(a - b)) / np.max(np.abs(b)))
 
-    per, live = no * nv * nv, ee_r_sigma_df._K_LIVE
+    per, live = no * nv * nv, EE_COUPLING_SLAB_BLOCKS
 
     def budget(fit):
         # the _STREAM_GB that holds `fit` indices of the doubles in flight
@@ -2296,7 +2310,7 @@ def check_streamed_kernel(eps, B, no):
             keep_gb, keep_w = sb._STREAM_GB, sb._stream_workers
             sb._STREAM_GB, sb._stream_workers = gb, (lambda w=workers: w)
             try:
-                plan = sb._slab_plan(no, per, live)
+                plan = sb.slab_plan(no, per, live)
                 ws, n2 = P['K'](y1, om, (1, 2))
                 ws0, n20 = P['K'](y1, om, ())
             finally:
@@ -2338,7 +2352,7 @@ def check_streamed_kernel(eps, B, no):
             sb._STREAM_GB, sb._stream_workers = keep_gb, keep_w
     slope = (held[2] - held[1]) / (8 * per3)
     ok &= check(slope <= live,
-                f"adc2: a slab of pieces['K'] holds at most _K_LIVE = {live} slab "
+                f"adc2: a slab of pieces['K'] holds at most EE_COUPLING_SLAB_BLOCKS = {live} slab "
                 'blocks per slab index', f'{slope:.2f}, water cc-pVTZ')
     return ok
 

@@ -15,13 +15,14 @@ from types import SimpleNamespace
 import pytest
 
 import src.properties.excitations as excitations
-from src.properties.excitations import saddle_checked_state
+from src.Base.numerics.numerics import Numerics
+from src.properties.excitations import WalkNotRelaxed, saddle_checked_state
 from src.properties.vibronic import relax_state
-from tests.test_walk_nudge import (PLANAR, DoubleWell, molecule,
-                                   pyramidalization)
+from tests.photophysics_cases import (PLANAR, DoubleWell, molecule,
+                                      pyramidalization)
 
-WALK = {'engine': 'cartesian', 'max_cycle': 200, 'verbose': False,
-        'refreeze': 1}
+WALK = {'engine': 'cartesian', 'numerics': Numerics(walk={'max_cycle': 200}),
+        'verbose': False, 'refreeze': 1}
 
 
 class Relaxable(DoubleWell):
@@ -75,9 +76,32 @@ def test_a_true_minimum_is_kept():
     assert record['status'] == 'minimum'
     assert record['first']['lowest_curvature'] > 0
     assert record['second'] is None and 'saddle_walk' not in record
+    assert record['numerical_flags'] == {}
 
 
-def test_a_second_saddle_is_refused(at_saddle, monkeypatch):
+def test_an_asymmetric_hessian_at_a_minimum_is_flagged(monkeypatch):
+    """A minimum whose Hessian came out asymmetric is kept, and its record
+    names 'hessian_asymmetric' in 'numerical_flags', as the stage drivers'
+    records do; the minimum's record carried no flags."""
+    real = excitations.surface_hessian
+
+    def planted(surface, mol, info=None, **kw):
+        h = real(surface, mol, info=info, **kw)
+        info.update(hessian_asymmetric=True, asymmetry_rel=0.05)
+        return h
+    monkeypatch.setattr(excitations, 'surface_hessian', planted)
+    x = PLANAR.copy()
+    x[0, 2] = 0.4
+    surface = Relaxable(molecule(x))
+    relaxed = relax_state(surface, surface.mol0, nudge=0, **WALK)
+    state, record = saddle_checked_state(relaxed, **WALK)
+    assert state is relaxed and record['status'] == 'minimum'
+    assert record['numerical_flags'] == {'hessian_asymmetric': {'first': 0.05}}
+
+
+def test_a_second_saddle_is_warned_and_flagged(at_saddle, monkeypatch):
+    """A numerical event: the escape walk's state is returned, warned about
+    and flagged."""
     real = excitations.surface_hessian
     calls = []
 
@@ -87,6 +111,25 @@ def test_a_second_saddle_is_refused(at_saddle, monkeypatch):
         h = real(surface, mol, **kw)
         return h if len(calls) == 1 else -1.0 * h
     monkeypatch.setattr(excitations, 'surface_hessian', planted)
-    with pytest.raises(RuntimeError, match='second saddle'):
-        saddle_checked_state(at_saddle, **WALK)
+    with pytest.warns(WalkNotRelaxed, match='second saddle'):
+        state, record = saddle_checked_state(at_saddle, **WALK)
+    assert record['numerical_flags']['saddle_check'].startswith('second saddle')
+    assert state['mol'] is not at_saddle['mol']
 
+
+def test_an_unconverged_walk_is_flagged_before_its_hessian(monkeypatch):
+    x = PLANAR.copy()
+    x[0, 2] = 0.4
+    surface = Relaxable(molecule(x))
+    relaxed = relax_state(surface, surface.mol0, nudge=0,
+                          **dict(WALK, numerics=Numerics(walk={'max_cycle': 1})))
+    assert not relaxed['info']['converged']
+    calls = []
+    monkeypatch.setattr(excitations, 'surface_hessian',
+                        lambda *a, **kw: calls.append(a))
+    with pytest.warns(WalkNotRelaxed, match='did not relax'):
+        state, record = saddle_checked_state(relaxed, **WALK)
+    # not checked at the walk's status: none of the 6N forces were spent
+    assert calls == [] and state is relaxed
+    assert record['status'] == 'not run: the walk did not relax'
+    assert 'walk_not_converged' in record['numerical_flags']

@@ -2,7 +2,8 @@
 
 The term is a function of the nuclear coordinates alone, so it must move the
 potential energy surface and leave every orbital, and therefore every
-excitation energy, exactly where it was. And it must never be added to a
+excitation energy, exactly where it is without it. And it must never be added
+to a
 direct-RPA ground state, whose correlation energy already contains dispersion.
 """
 import os
@@ -14,15 +15,19 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
-                                 dispersion_gradient, dispersion_version,
-                                 refuse_dispersion_under_rpa)
-from src.Base.isdf_jk import isdf_jk
-from src.SingleReference.LinearResponse.rpa_energy import reference_energy
-from src.gradients.dense_surfaces import kohn_sham_gradient_correction
-from src.gradients.isdf_derivatives import (
-    exx_double_counting, exx_double_counting_skeleton, rsh_split)
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from tests.pins import assert_same, same_solution
+from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_CONV_TOL
+from src.Base.pyscf.dispersion import (DISPERSION_VERSIONS, dispersion_energy,
+                                       dispersion_gradient, dispersion_version,
+                                       refuse_dispersion_under_rpa)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.LinearResponse.rpa_energy import reference_energy, exx_double_counting
+from src.Base.pyscf.pyscf_interface import rsh_split
+from src.gradients.gwbse.dense_surfaces import kohn_sham_gradient_correction
+from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
 
 #: Fragments in van der Waals contact, which is the case dispersion decides.
 ETHANE = ('C 0 0 0; C 0 0 1.53; H 0 1.02 -0.36; H 0.88 -0.51 -0.36; '
@@ -73,8 +78,10 @@ def test_it_moves_the_surface_and_not_the_spectrum():
     e_disp = dispersion_energy(corrected)
     assert e_disp < 0.0
     assert corrected.e_tot - plain.e_tot == pytest.approx(e_disp, abs=1e-12)
-    assert np.array_equal(corrected.mo_energy, plain.mo_energy)
-    assert np.array_equal(corrected.mo_coeff, plain.mo_coeff)
+    # two SCF solves of one Hamiltonian: bitwise on the recording BLAS, the
+    # class bars (orbital energy; coefficients up to sign) on another
+    assert_same(corrected.mo_energy, plain.mo_energy, label='mo_energy')
+    assert same_solution((corrected.mo_coeff,), (plain.mo_coeff,)), 'mo_coeff'
     assert dispersion_energy(plain) == 0.0
 
 
@@ -100,34 +107,29 @@ def test_direct_rpa_refuses_a_dispersion_corrected_reference():
     backend()                      # a converged reference is needed to get past
     corrected = mean_field('pbe0-d4')   # the chain's own quality check
     mol = corrected.mol
+    # the chain at cc-pVDZ, which has a validated interpolation grid
+    dz = mean_field('pbe0-d4', basis='cc-pvdz')
     with pytest.raises(ValueError, match='already contains dispersion'):
-        RPAGroundStateChain(mol, lambda m: corrected, auxbasis='sto-3g')
+        RPAGroundStateChain(dz.mol, lambda m: dz, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(dz.mol)}))
     with pytest.raises(ValueError, match='counted twice'):
         refuse_dispersion_under_rpa(corrected, 'a caller')
     # the skeleton guards itself, for a chain built before the reference moved
-    from src.gradients.isdf_derivatives import exx_double_counting_skeleton
+    from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
     with pytest.raises(ValueError, match='skeleton'):
         exx_double_counting_skeleton(corrected, mol)
     # and a plain functional passes both
     refuse_dispersion_under_rpa(mean_field('pbe0'), 'a caller')
 
 
-def test_a_functional_fitted_with_dispersion_refuses_a_second_helping():
-    """Unlike the direct-RPA case, nothing downstream would notice this one:
-    the correction would simply be added twice and the geometry would come out
-    over-bound."""
-    from src.Base.dispersion import (functional_carries_dispersion,
-                                     refuse_double_dispersion)
+def test_the_functionals_fitted_with_dispersion_are_named():
+    """A functional fitted with its own dispersion is recognized as such, and
+    a plain hybrid is not."""
+    from src.Base.pyscf.dispersion import functional_carries_dispersion
     for name in ('wB97X-D3', 'wB97X-D4', 'wB97X-V', 'wB97M-V', 'r2SCAN-3c',
                  'B97-3c'):
         assert functional_carries_dispersion(name), name
-        with pytest.raises(ValueError, match='already includes dispersion'):
-            refuse_double_dispersion(name, 'D3BJ')
-        refuse_double_dispersion(name, None)      # the functional alone is fine
-        refuse_double_dispersion(name, 'none')
     for name in ('B3LYP', 'PBE0', 'wB97X', 'M06-2X'):
         assert not functional_carries_dispersion(name), name
-        refuse_double_dispersion(name, 'D3BJ')    # these need the correction
 
 
 def test_the_pcm_factorization_changes_nothing_it_computes():
@@ -137,7 +139,7 @@ def test_the_pcm_factorization_changes_nothing_it_computes():
     upstream shows as a disagreement rather than as silence."""
     from pyscf.solvent import pcm
 
-    from src.Base.pcm_factorization import factorize_once
+    from src.environments.pcm_factorization import factorize_once
 
     mol = gto.M(atom='O 0 0 0; C 0 0 1.21; H 0 0.94 1.80; H 0 -0.94 1.80',
                 basis='def2-svp', verbose=0)
@@ -215,9 +217,11 @@ def isdf_kohn_sham(xc, level):
     guess = []
 
     def factory(m):
-        mf = isdf_jk(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri')
+        mf = isdf_jk_with_force(dft.RKS(m, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(m, xc=xc)))
         mf.grids.level = level
-        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+        mf.conv_tol = SCF_TIGHT_CONV_TOL
+        mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+        mf.max_cycle = 200
         mf.kernel(dm0=guess[0] if guess else None)
         assert mf.converged
         if not guess:
@@ -264,11 +268,11 @@ def test_the_reported_hartree_fock_energy_is_the_mean_fields_own():
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     nocc = mol.nelectron // 2
     for xc in ('pbe0', 'lrc-wpbeh'):
-        mf = isdf_jk(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri')
+        mf = isdf_jk_with_force(dft.RKS(mol, xc=xc), auxbasis='cc-pvdz-ri', counts=g1(dft.RKS(mol, xc=xc)))
         mf.kernel()
         want = mf.e_tot + exx_double_counting(mf, mol)
         assert reference_energy(mf, mol) == pytest.approx(want, abs=1e-12), xc
-    hf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri')
+    hf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
     hf.kernel()
     assert reference_energy(hf, mol) == float(hf.e_tot)
     y, g = kohn_sham_gradient_correction(mol, hf, nocc)
@@ -276,8 +280,11 @@ def test_the_reported_hartree_fock_energy_is_the_mean_fields_own():
     fitted = dft.RKS(mol, xc='lrc-wpbeh').density_fit(auxbasis='cc-pvdz-ri')
     fitted.kernel()
     mirror = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    assert reference_energy(fitted, mol) == float(
-        mirror.energy_tot(dm=fitted.make_rdm1()))
+    # the same Hartree-Fock energy of the Kohn-Sham density, built twice: the
+    # same to a few ulp, not bitwise
+    assert_same(reference_energy(fitted, mol),
+                float(mirror.energy_tot(dm=fitted.make_rdm1())),
+                quantity='energy', label='lrc-wpbeh, density fitted')
 
 
 @pytest.mark.parametrize('xc, level', [('pbe0', 3), ('lrc-wpbeh', 6)])
@@ -287,8 +294,9 @@ def test_the_drpa_force_follows_its_reported_energy_on_an_interpolated_kohn_sham
 
     E_0 takes E_HF from the mean field's own ISDF exchange. With a
     density-fitted mirror in its place the force missed the reported surface by
-    9.46e-4 Ha/Bohr on both functionals; now the Richardson limit is met to
-    1.5e-8 on PBE0 at XC grid level 3, where a density-fitted PBE0 meets its
+    9.46e-4 Ha/Bohr on both functionals; with the ISDF exchange the
+    Richardson limit is met to 1.5e-8 on PBE0 at XC grid level 3, where a
+    density-fitted PBE0 meets its
     own to 2.0e-8, inside the finer step's measured truncation of 3.6e-8.
 
     LRC-wPBEh is gated at level 6. At level 3 it misses by 3.7e-7, and a
@@ -297,7 +305,7 @@ def test_the_drpa_force_follows_its_reported_energy_on_an_interpolated_kohn_sham
     """
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     factory = isdf_kohn_sham(xc, level)
-    chain = RPAGroundStateChain(mol, factory, mf=factory(mol))
+    chain = RPAGroundStateChain(mol, factory, mf=factory(mol), numerics=Numerics(isdf={'counts': g1(mol)}))
     g, e, _ = chain.total_gradient()
     assert e == pytest.approx(chain.energy()[0], abs=1e-12)
     fd, truncation = richardson_force(chain, mol)

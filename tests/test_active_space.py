@@ -1,4 +1,4 @@
-"""ActiveSpace (src/Base/active_space.py): the window-selection rules and the
+"""ActiveSpace (src/SingleReference/common/active_space.py): the window-selection rules and the
 index views built on top of them.
 
 Run: python tests/test_active_space.py, or under pytest.
@@ -10,6 +10,7 @@ Checks:
   3. from_population selects ethylene's pi/pi* window by Loewdin population
   4. the spin-orbital and spatial views of a window agree with each other and
      with the permuted mean field they describe
+  5. frozen_core counts the core shells of the run drivers' convention
 """
 import os
 import sys
@@ -19,7 +20,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.active_space import ActiveSpace, N2_VALENCE_66
+from src.SingleReference.common.active_space import ActiveSpace, frozen_core
+
+#: N2 valence CAS(6,6): 3sigma_g + the 1pi_u pair occupied, the 1pi_g* pair +
+#: 3sigma_u* virtual. Stable in character all the way from 0.8 to 4.0 A, unlike
+#: the energy ordering.
+N2_VALENCE_66 = ({'A1g': 1, 'E1ux': 1, 'E1uy': 1},
+                 {'E1gx': 1, 'E1gy': 1, 'A1u': 1})
+
 
 ETHYLENE = """
 C   0.0000000000   0.0000000000   0.6695000000
@@ -152,6 +160,18 @@ def run():
 
 def test_active_space_selection():
     assert run()
+
+
+def test_frozen_core_counts_the_core_shells():
+    """1s past He, 2s2p past Ne, 3s3p past Ar, 3d past Zn: H 0, Li 1, Na 5,
+    K 9, Ga 14 (atoms of the molecule summed)."""
+    def core(atoms, spin=0):
+        return frozen_core(gto.M(atom=atoms, basis='sto-3g', spin=spin, verbose=0))
+    assert core('O 0 0 0; H 0 0 1; H 0 1 0') == 1
+    assert core('Li 0 0 0; H 0 0 1.6') == 1
+    assert core('Na 0 0 0; Cl 0 0 2.4') == 10
+    assert core('K 0 0 0; Br 0 0 2.8') == 23
+    assert core('Ga 0 0 0', spin=1) == 14
 
 
 if __name__ == '__main__':

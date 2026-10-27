@@ -1,9 +1,10 @@
-"""Distributed tau loops must reproduce the serial answer exactly, and every
-collective cut into windows at an artificial count limit the bits of its one
-call (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
+"""Distributed tau loops must reproduce the serial answer, and every
+collective cut into windows at an artificial count limit its one call's
+numbers to a few ulp (tests/test_proj_rows.py gates the same on simulated ranks under pytest).
+A named flag raised on one rank reaches every rank's record.
 The reduce-scatter hands each rank its rows of the all-reduce within the
 spread of the summed partials over the orders a reduction adds them in, whole
-and in windows: bitwise over simulated ranks, which add both in rank order,
+and in windows: to a few ulp over simulated ranks, which add both in rank order,
 at that bar over MPI ranks, whose Reduce_scatter and Allreduce may add in
 different orders (tests/test_sliced_factors.py gates it under pytest).
 
@@ -16,19 +17,25 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import warnings
+from types import SimpleNamespace
+
 import numpy as np
 warnings.simplefilter('ignore')
 from pyscf import gto, scf
-import src.Base.utils.mpi_grid as mpi_grid
-from src.Base.utils.mpi_grid import (contiguous_block, grid_comm, partition,
-                                     reduce_scatter_rows, reduce_sum,
-                                     run_simulated)
+import src.Base.utils.parallel.mpi_grid as mpi_grid
+import src.SingleReference.LinearResponse.space_time as st
+from src.Base.numerical_flags import collecting, flag, gathered
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, grid_comm, partition, reduce_scatter_rows, reduce_sum)
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (solve_qp_energy_space_time,
                                                separable_factors)
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 from tests.test_proj_rows import LIMIT, collectives
 from tests.test_sliced_factors import (rank_partials, reassociation_bar,
                                        scatter_shapes)
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 comm, rank, size = grid_comm()
 
@@ -49,7 +56,7 @@ for n in (14, 18, 40):
 
 if rank == 0:
     print(f'\n-- every collective cut at MPI_COUNT_MAX = {LIMIT} gives the '
-          'bits of its one call')
+          'numbers of its one call to a few ulp')
 
 
 def windowed(run):
@@ -66,14 +73,16 @@ def windowed(run):
 
 if size > 1:
     whole, cut = windowed(lambda: collectives(comm))
-    moved = [k for k in whole if whole[k].tobytes() != cut[k].tobytes()]
+    moved = [k for k in whole if not matches(cut[k], whole[k], RECORDING_BLAS,
+                                             unit='1', quantity='root')]
     moved = [m for own in comm.allgather(moved) for m in own]
     all_ok &= check(not moved, f'over {size} MPI ranks', f'moved: {moved}')
 else:
     for s in (2, 3, 8):
         whole, cut = windowed(lambda: run_simulated(collectives, s))
         moved = [k for a, b in zip(whole, cut) for k in a
-                 if a[k].tobytes() != b[k].tobytes()]
+                 if not matches(b[k], a[k], RECORDING_BLAS, unit='1',
+                                quantity='root')]
         all_ok &= check(not moved, f'over {s} simulated ranks', f'moved: {moved}')
 
 if rank == 0:
@@ -95,8 +104,8 @@ def scattered_rows(c):
 
 def scatter_faults(s, whole, cut, exact):
     """Per rank and shape: the rows against the all-reduce's, and the windowed
-    rows against the one call's, past the summation-order bar (at all when
-    `exact`)."""
+    rows against the one call's, past the summation-order bar (past a few ulp
+    when `exact`: two runs in rank order)."""
     faults = []
     for r, (w_rank, c_rank) in enumerate(zip(whole, cut)):
         for shape, (rows, want), (cut_rows, _) in zip(scatter_shapes(s),
@@ -106,7 +115,8 @@ def scatter_faults(s, whole, cut, exact):
                                   ('windowed', cut_rows, rows)):
                 miss = (np.abs(got - ref).max(initial=0.0)
                         if got.shape == ref.shape else np.inf)
-                if miss > bar or (exact and miss):
+                if miss > bar or (exact and not matches(
+                        got, ref, RECORDING_BLAS, unit='1', quantity='root')):
                     faults.append(f'rank {r} {shape} {tag}: {miss:.2e} '
                                   f'against {bar:.2e}')
     return faults
@@ -123,14 +133,45 @@ else:
     for s in (2, 3, 8):
         whole, cut = windowed(lambda: run_simulated(scattered_rows, s))
         faults = scatter_faults(s, whole, cut, exact=True)
-        all_ok &= check(not faults, f'over {s} simulated ranks, bitwise',
+        all_ok &= check(not faults, f'over {s} simulated ranks, to a few ulp',
                         '; '.join(faults))
+
+# Named flags raised on one rank reach every rank's record: `gathered` over
+# the ranks, and the space-time dRPA's `flags` dict, whose frequencies are
+# owned by one rank each (a planted chi0 with one non-positive determinant).
+if rank == 0:
+    print(f'\n-- named flags over {size} rank(s)')
+raised = []
+with collecting(raised):
+    flag('planted', f'rank {rank}', RuntimeWarning)
+got = gathered(raised, comm)
+all_ok &= check(got == [{'flag': 'planted', 'message': f'rank {r}'}
+                        for r in range(size)],
+                'every rank gathers every rank\'s flags', f'{len(got)} entries')
+NAUX, NFREQ, BAD = 4, 6, 4
+q = np.linalg.qr(np.random.default_rng(0).standard_normal((NAUX, NAUX)))[0]
+chi0 = np.array([(q * np.r_[1.5 if k == BAD else -0.1, -np.linspace(0.2, 0.5, NAUX - 1)])
+                 @ q.T for k in range(NFREQ)])
+sweep, blocks = st.polarizability_projected_sweep, st.owned_frequency_blocks
+st.polarizability_projected_sweep = lambda *a, **k: np.zeros((2, NAUX, NAUX))
+st.owned_frequency_blocks = lambda p, c, t, mine: iter(
+    [(list(range(NFREQ) if mine is None else mine),
+      chi0[list(range(NFREQ) if mine is None else mine)])])
+grid = SimpleNamespace(ntau=2, nfreq=NFREQ, tau_points=np.ones(2),
+                       cosft_wt=np.zeros((NFREQ, 2)), omega_weights=np.ones(NFREQ))
+dets = {}
+st.rpa_correlation_energy_space_time(None, np.zeros((1, NAUX)), np.array([-1.0, 1.0]),
+                                     1, grid, comm=comm if size > 1 else None,
+                                     flags=dets)
+st.polarizability_projected_sweep, st.owned_frequency_blocks = sweep, blocks
+all_ok &= check(dets == {'nonpositive_det': [BAD]},
+                'every rank names the frequency one rank owns', str(dets))
 
 mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri'); mf.kernel()
 nocc = mol.nelectron // 2
-F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri')
+F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
 serial = solve_qp_energy_space_time(mf, mol, nocc, nocc-1, factors=F) * HARTREE_TO_EV
 if rank == 0:
     print(f'\n-- QP energy, {size} rank(s)')

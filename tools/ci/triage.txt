@@ -1,0 +1,2 @@
+# Files that fail for a known reason, one `pytest <file>` or `script <file>` per
+# line with the reason after a `#`. None at present.

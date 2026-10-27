@@ -6,10 +6,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base.constants import get_method_info
-from src.SingleReference.GW.qp_energy import _casida_spectrum
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.GW.self_energy import get_method_info
+from src.SingleReference.GW.qp_energy import casida_spectrum
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                     CasidaSolver)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.pins import same_solution
 
 
 def check(ok, label, detail=''):
@@ -20,7 +22,7 @@ def check(ok, label, detail=''):
 
 def synthetic(n, kind, rng):
     """(A, B): 'diag' has A-B exactly diagonal (the RPA branch), 'chol' takes the
-    Cholesky branch, 'fallback' has an indefinite A+B (the shifted branch). The
+    Cholesky branch, 'fallback' has an indefinite A+B (refused). The
     1/sqrt(n) scale keeps V's and W's spectral norms n-independent, so A+B stays
     positive definite for 'diag'/'chol' and indefinite for 'fallback' at any n."""
     d = np.sort(rng.uniform(0.2, 2.0, n))
@@ -60,17 +62,22 @@ if __name__ == '__main__':
         want_definite = kind != 'fallback'
         all_ok &= check(min_eig > 0 if want_definite else min_eig < 0,
                         f'{kind}: A+B definiteness as intended', f'{min_eig:.1e}')
+        if kind == 'fallback':
+            # an indefinite A+B is an unstable reference: refused, not shifted
+            try:
+                CasidaSolver(A, B).solve()
+                refused = False
+            except CasidaInstability:
+                refused = True
+            all_ok &= check(refused, f'{kind}: indefinite A+B is refused')
+            continue
         omega, X, Y = CasidaSolver(A, B).solve()
-        if kind != 'fallback':
-            r1 = np.max(np.abs(A @ X + B @ Y - X * omega[None, :]))
-            r2 = np.max(np.abs(B @ X + A @ Y + Y * omega[None, :]))
-            all_ok &= check(r1 < 1e-9 and r2 < 1e-9, f'{kind}: Casida residuals',
-                            f'{r1:.1e}, {r2:.1e}')
+        r1 = np.max(np.abs(A @ X + B @ Y - X * omega[None, :]))
+        r2 = np.max(np.abs(B @ X + A @ Y + Y * omega[None, :]))
+        all_ok &= check(r1 < 1e-9 and r2 < 1e-9, f'{kind}: Casida residuals',
+                        f'{r1:.1e}, {r2:.1e}')
         nrm = np.max(np.abs(X.T @ X - Y.T @ Y - np.eye(len(omega))))
-        # 'fallback' takes the shifted-Cholesky branch, whose normalization
-        # residual runs a few x higher than diag/chol's.
-        nrm_tol = 1e-6 if kind == 'fallback' else 1e-9
-        all_ok &= check(nrm < nrm_tol, f'{kind}: X^T X - Y^T Y = 1', f'{nrm:.1e}')
+        all_ok &= check(nrm < 1e-9, f'{kind}: X^T X - Y^T Y = 1', f'{nrm:.1e}')
 
     # --- keep_intermediates gates the instance attributes, not the result ---
     A, B = synthetic(120, 'chol', rng)
@@ -81,7 +88,9 @@ if __name__ == '__main__':
     all_ok &= check(s_default.Z is None, 'default: Z not stored')
     all_ok &= check(s_keep.Z is not None and s_keep.Z.shape == A.shape,
                     'keep_intermediates: Z stored')
-    all_ok &= check(all(np.array_equal(a, b) for a, b in zip(res_default, res_keep)),
+    # two solves of one problem: the same roots and vectors to a few ulp
+    # (tests/pins.same_solution), not bitwise
+    all_ok &= check(same_solution(res_keep, res_default),
                     'keep_intermediates does not change omega, X, Y')
     all_ok &= check(s_default.A is None and s_default.B is None,
                     'default: A, B released by solve')
@@ -128,7 +137,7 @@ if __name__ == '__main__':
             f'{kind}: peak with A, B handed to the solver <= {RATCHET_HANDOFF[kind]}',
             f'{over:.2f} arrays, A and B included')
 
-    # --- tracemalloc ratchet on _casida_spectrum's singlet solve, same
+    # --- tracemalloc ratchet on casida_spectrum's singlet solve, same
     # synthetic DF system as test_casida_build_inplace.py's build ratchet ---
     naux_s, norb_s, nocc_s = 400, 100, 30
     n_pair_s = nocc_s * (norb_s - nocc_s)
@@ -146,7 +155,7 @@ if __name__ == '__main__':
     try:
         base = tracemalloc.get_traced_memory()[0]
         tracemalloc.reset_peak()
-        spectrum = _casida_spectrum(lr_s, nocc_s, 'RPA', None, False,
+        spectrum = casida_spectrum(lr_s, nocc_s, 'RPA', None, False,
                                     method_infos_s, methods_s, False, True)
         peak = tracemalloc.get_traced_memory()[1]
     finally:
@@ -154,7 +163,7 @@ if __name__ == '__main__':
     del spectrum
     over = (peak - base) / spec_unit
     all_ok &= check(over <= RATCHET_SPECTRUM,
-                    f'_casida_spectrum RPA singlet: peak <= {RATCHET_SPECTRUM}',
+                    f'casida_spectrum RPA singlet: peak <= {RATCHET_SPECTRUM}',
                     f'{over:.2f} arrays')
 
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')

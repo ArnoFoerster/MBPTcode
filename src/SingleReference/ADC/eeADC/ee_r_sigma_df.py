@@ -26,16 +26,16 @@ shows up at machine precision rather than as a plausible small error.
 """
 import numpy as np
 
+from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
+from src.Base.pyscf.pyscf_interface import get_coulomb_exchange_diagonals_df
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_en as _en
+from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4
 
 LEVELS = _r.LEVELS
-# (no, nj, nv, nv) slab blocks one slab of coupling_kernel holds at once (traced
-# peak, check 34 of tests/test_ee_adc_fold.py), what _sb._slab_plan budgets with
-_K_LIVE = 11
 
 
 # ----------------------------------------------------------------------
@@ -91,7 +91,7 @@ class DFVvvvKernels(_eq.VvvvKernels):
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------
-    def _ldir(self, Y):
+    def ladder_direct(self, Y):
         """sum_cd (sum_Q B[Q,a,c] B[Q,b,d]) Y[i,j,c,d]."""
         no2 = Y.shape[0] * Y.shape[1]
         out = np.zeros(Y.shape[:2] + (self.nv,) * 2)
@@ -130,7 +130,7 @@ class DFVvvvKernels(_eq.VvvvKernels):
         for key, blk in X.items():
             if key in derived and derived[key][0] in X.keys():
                 continue
-            L[key] = self._ldir(blk)
+            L[key] = self.ladder_direct(blk)
         for key, (base, perm, sign) in derived.items():
             if base in L:
                 L[key] = sign * L[base].transpose(perm)
@@ -231,7 +231,7 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
     nv = norb - no
-    o_ss, o_sd, o_dd = _r._BLOCK_ORDERS[level]
+    o_ss, o_sd, o_dd = ee_utils.BLOCK_ORDERS[level]
     d = _r.dimensions(no, nv, level)
     if pieces and (o_sd is None or o_dd != 0):
         raise ValueError(f'pieces=True needs a level whose doubles block is the bare '
@@ -241,17 +241,12 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         raise ValueError('pieces=True takes parity=None; ee_fold forms the spin '
                          'channel on the singles space itself')
 
-    gb, vk, cache = _r._ingredients(cache, lambda: g_blocks_df(B, no, norb),
+    gb, vk, cache = _eq.cached_ingredients(cache, lambda: g_blocks_df(B, no, norb),
                                     lambda: DFVvvvKernels(B, no, norb))
-    eo, ev = eps[:no], eps[no:]
-    d_ijab = (ev[None, None, :, None] + ev[None, None, None, :]
-              - eo[:, None, None, None] - eo[None, :, None, None])
-    d_ia = 2.0 * (eo[:, None] - ev[None, :])
-    d_ph = np.broadcast_to((ev[None, :] - eo[:, None])[:, :, None, None],
-                           (no, nv, no, nv))
+    d_ijab, d_ia, d_ph = ee_utils.orbital_denominators(eps, no)
 
     be = _eq.SPIN_BLOCKED
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
+    order = ee_utils.AMPLITUDE_ORDER[level]
     if order == 3 and 'ovvv' not in gb:
         # the third-order ovvv terms still contract anti4's six spin blocks
         gb['ovvv'] = anti4(gb['ovvv_ajbc'].transpose(1, 0, 2, 3))
@@ -259,12 +254,12 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
         d_amp, d_ia_amp = _en.en_denominators_spin_free(
-            eps, *_en.jk_from_B(B), no, nv, en_dress)
+            eps, *get_coulomb_exchange_diagonals_df(B), no, nv, en_dress)
         # what the EN denominator has resummed, so amplitudes() can
         # take it back out of the t2^(2) numerator and not count the
         # diagonal ladder twice (see ee_equations.amplitudes)
         en_shift = _en.shift_from_denominators(d_amp, d_ijab)
-    amps, zint, rho = _r._amplitudes_cached(cache, be, gb, d_amp, d_ia_amp,
+    amps, zint, rho = _eq.cached_amplitudes(cache, be, gb, d_amp, d_ia_amp,
                                             order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph, no, nv, vk=vk)
     diag = _diagonal_df(eps, B, no, nv, M, o_dd)
@@ -302,16 +297,16 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
         if y1.parity is not None:
             raise NotImplementedError('coupling_kernel takes y1 without a flip parity')
         S, G = gb['ovvv_ajbc'], gb['ooov']
-        width, workers = _sb._slab_plan(no, no * nv * nv, _K_LIVE)
+        width, workers = _sb.slab_plan(no, no * nv * nv, EE_COUPLING_SLAB_BLOCKS)
 
         def divide(Y, den):
             # Y_K / (D_K - ω) in place; sigma_d_from_s_slab's blocks share no memory
             for v in Y.blocks.values():
-                _sb._ew(np.true_divide, v, den, out=v)
+                _sb.ew(np.true_divide, v, den, out=v)
 
         def slab(j0, j1):
             Y = _eq.sigma_d_from_s_slab(be, gb, y1, j0, j1)
-            den = _sb._ew(np.subtract, d_ijab[:, j0:j1], omega)     # D_K - ω
+            den = _sb.ew(np.subtract, d_ijab[:, j0:j1], omega)     # D_K - ω
             divide(Y, den)
             dn2 = _doubles_norm2(Y)
             # each power in ascending order, Y divided in place on the way up
@@ -324,7 +319,7 @@ def build_operator(eps, B, nocc_spatial, level='adc3', en_dress=None,
                          + _sb.ooov_ia_slab(G, Y, j0, j1))
             return [ws[p] for p in powers], dn2
 
-        return _sb._stream(slab, no, width, workers)
+        return _sb.stream(slab, no, width, workers)
 
     parts = {'M': M, 'V': coupling_v, 'Vt': coupling_vt, 'D': d_ijab,
              'level': level, 'no': no, 'nv': nv, 'be': be}

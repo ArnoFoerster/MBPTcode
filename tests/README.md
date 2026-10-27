@@ -1,8 +1,12 @@
 # Tests
 
-Every file runs both as a script and under pytest. As a script it runs its
-calculations, prints a verdict per check and exits non-zero if any of them
-failed:
+A test file is a pytest file or a script, as its line in the CI tier lists
+(`tools/ci/fast.txt`, `slow.txt`, `heavy.txt`, `triage.txt`) says; every
+`test_*.py` is in exactly one of them (`test_conventions.py` checks it). A
+script has a `__main__` block and no `test_*` function, so pytest collects
+nothing from it and `tools/ci/run_tier.py` runs it as `python tests/<file>`:
+it runs its calculations, prints a verdict per check and exits non-zero if any
+of them failed. Most pytest files run as a script too:
 
 ```bash
 python tests/test_adc3.py
@@ -24,7 +28,8 @@ optional third-party one.
 
 | area | tests |
 |---|---|
-| imports, constants, interfaces | `test_imports`, `test_constants_registry`, `test_base` |
+| imports, constants, interfaces; the gradient layer below the property layer; module paths named in comments and docstrings | `test_imports`, `test_constants_registry`, `test_base`, `test_layering`, `test_text_names_resolve` |
+| a numerical fallback warns with its own class and leaves a named flag | `test_numerical_flags` |
 | thread and memory policy | `test_blas_single_threaded`, `test_allocation_memory` |
 | basis sets read from CP2K | `test_cp2k_basis` |
 | the shared symmetric Davidson | `test_davidson_symmetric` |
@@ -33,13 +38,14 @@ optional third-party one.
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |
 | MPn densities and Laplace | `test_mp2_density_matrix`, `test_mp3_density_matrix`, `test_mp2_density_df`, `test_mp3_density_df`, `test_mpn_density_restricted`, `test_mpn_density_unrestricted`, `test_mp4_laplace_restricted`, `test_density_matrix_small` |
 | response derivatives (finite field) | `test_mp3_finite_field`, `test_uhf_mp2_relaxed_finite_field` |
-| GW self-energy and QP equation | `test_self_energy_formulas`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy`, `test_static_exchange_reuse` |
+| GW self-energy and QP equation | `test_self_energy_formulas`, `test_unrestricted_psd_triplets`, `test_unrestricted_spin_flip_open_shell`, `test_tdhf_vertex_is_bare`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy`, `test_static_exchange_reuse` |
 | eigenvalue self-consistency | `test_evgw` |
-| imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_sigma_blocking_and_screening`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
+| imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
-| ISDF factorization | `test_isdf_jk`, `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_static_exchange_routes`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_isdf_driver`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance` |
-| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks` |
+| ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
+| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_solvated_ground_surface` |
+| a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |
 | analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
 | couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
@@ -55,8 +61,9 @@ optional third-party one.
 | MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
 | MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_block_action_trims`, `test_davidson_lockstep`, `test_distributed_trial_space` |
 | MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf`, `test_distributed_scf_grid`, `test_orbital_response_distributed`, `test_state_pair_force_distributed_ks` |
+| MPI: a solvated chain on the row fit and sliced factors, the solvated SCF over ranks | `test_solvated_row_fit`, `test_solvated_sliced_energy`, `test_solvated_scf_ranks`, `test_adaptive_solvated_ranks`, `test_tadf_rank_paths` |
 | MPI: surfaces and the optimizer over ranks | `test_surface_comm`, `test_optimize_under_ranks` |
-| periodic: GDF integrals, response, W, BSE, self-energy | `test_pbc_df_integrals`, `test_pbc_casida`, `test_pbc_w`, `test_pbc_bse`, `test_pbc_amplitudes`, `test_pbc_self_energy`, `test_pbc_sigma_folding`, `test_pbc_rpa`, `test_pbc_kpath` |
+| periodic: GDF integrals, response, W, BSE, self-energy | `test_pbc_df_integrals`, `test_pbc_casida`, `test_pbc_w`, `test_pbc_bse`, `test_pbc_amplitudes`, `test_pbc_self_energy`, `test_pbc_sigma_folding`, `test_pbc_rpa`, `test_pbc_kpath`, `test_pbc_gdf_build` (factors from one open file, and built over ranks), `test_pbc_symmetry` (k-mesh point group) |
 | periodic: ISDF / THC | `test_pbc_isdf_gamma`, `test_pbc_isdf_kpts`, `test_pbc_isdf_kindex`, `test_pbc_isdf_symm`, `test_pbc_isdf_rpa`, `test_pbc_isdf_gw`, `test_pbc_isdf_2d`, `test_thc_rank_grids`, `test_thc_metallic_frequency_grid` |
 | periodic: metals | `test_pbc_occupations`, `test_metallic_grid_wiring` |
 | periodic: slabs | `test_pbc_rpa_damping`, `test_pbc_low_dim_support_wiring`, `test_pbc_2d_head`, `test_pbc_smallq`, `test_pbc_wav`, `test_pbc_solvent_screening` |
@@ -66,6 +73,12 @@ pytest-style ones hand themselves to `pytest.main` and return its exit code.
 `test_pbc_isdf_kindex`, `test_pbc_kpath`, `test_pbc_2d_head`,
 `test_thc_metallic_frequency_grid`, `test_pbc_df_integrals`, `test_pbc_casida`
 and `test_pbc_w` take seconds; the metal and slab tests take minutes.
+
+A file ending in `_quick` is the fast twin of the slow file it names in its
+docstring: the same claim at the same bar, on fewer cases. The
+force-follows-energy twins take one difference along a seeded direction over
+every coordinate (`directional_difference.py`) instead of one per component.
+The slow file still runs nightly and keeps every case.
 
 ## The ISDF and BSE tests, in the order they build on each other
 
@@ -82,10 +95,6 @@ the next one assumes:
   published tables. The objective is multi-modal, so a single descent is
   unreliable; this checks that multi-start fixes it, that `n_start=1` gives a
   single descent, and that recipes coexist in the shipped table.
-- `test_static_exchange_routes` — the QP step's static exchange. `Sigma_x` built
-  from the mean field's own K inherits the SCF route's error at first order, so
-  this pins the streamed density-fitted build against the stored-tensor one and
-  against the routing.
 
 `test_bse_screening_energies` guards the other half of the same question: not
 which basis W is expressed in, but which energies it is screened at. The BSE
@@ -132,12 +141,11 @@ builds ΔW must equal the explicit form that does.
 
 ## Reference data
 
-`reference_data.json` and `adc_refactor_pins.json` hold pinned numbers several
-tests compare against. Regenerating a pin is a deliberate act: it changes what
+`adc_refactor_pins.json` holds pinned numbers several tests compare against. Regenerating a pin is a deliberate act: it changes what
 the suite considers correct, so the reason belongs in the commit that does it.
 
-Optimized ISDF grid radii ship in `src/Base/data/optimized_radii.json`. The
-per-machine scratch cache beside it (`src/Base/data/radii_cache/`) is
+Optimized ISDF grid radii ship in `src/Base/factorization/data/optimized_radii.json`. The
+per-machine scratch cache beside it (`src/Base/factorization/data/radii_cache/`) is
 gitignored, because the radii optimizer is a numerically differentiated descent
 under threaded BLAS and does not reproduce across thread counts — the shipped
 table is what makes a clean clone reproduce the suite.
@@ -146,7 +154,7 @@ table is what makes a clean clone reproduce the suite.
 
 The MPI rows of the table above are pytest files that also run as scripts
 (`python tests/test_kernel_lockstep.py`). They run every rank as a thread of
-one process (`mpi_grid.run_simulated`), with the real collectives moving real
+one process (`simulated_comm.run_simulated`), with the real collectives moving real
 bytes, because MPI cannot initialize inside a sandboxed test runner; they gate
 the algebra of every split, not the wire. Several compare against a reference
 version of the code, extracted with `git archive` from a pinned commit and
@@ -164,7 +172,24 @@ if any check failed on any rank. Run serially it prints the serial references
 and checks the one-rank paths; `run_simulated(main, n)` from
 `tests/test_mpi_routes.py` runs the same checks over thread-ranks.
 
-`test_elpa_casida` is the other script meant for several MPI ranks:
+`test_solvated_scf_mpi` is the same kind of script for a solvent continuum:
+the solvated mean field on DF and ISDF-K (with and without the Newton
+finish) and the production S1 force in PCM, replicated and on the row fit
+with sliced factors, against the serial references:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_solvated_scf_mpi.py
+OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_solvated_scf_mpi.py
+```
+
+`test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_davidson_warm_start_mpi.py
+OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_davidson_warm_start_mpi.py
+```
+
+`test_elpa_casida` is another script meant for several MPI ranks:
 
 ```bash
 mpirun -n 4 python tests/test_elpa_casida.py

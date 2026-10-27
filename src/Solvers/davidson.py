@@ -1,8 +1,9 @@
-"""Symmetric Davidson eigensolver: the single iterative core behind both ADC
-routes -- charged (IP/EA, root-following) and neutral (ee, lowest-k).
+"""The one symmetric Davidson eigensolver: both ADC routes -- charged (IP/EA,
+root-following) and neutral (ee, lowest-k) --, the Tamm-Dancoff BSE and the
+(A - B) probe of the Casida problem.
 
 The iteration itself is pyscf's lib.davidson1. What lives here is the
-problem-agnostic setup the two routes were duplicating: the Jacobi-Davidson
+problem-agnostic setup its callers would otherwise duplicate: the Jacobi-Davidson
 preconditioner, the overlap `pick` that root-follows a reference vector, the
 lowest-diagonal seeding, and one tolerance contract.
 
@@ -15,10 +16,13 @@ them. This is deliberately NOT pyscf's own convention, where `tol` is the
 eigenvalue tolerance and the residual tolerance is its SQUARE ROOT, so
 conv_tol=1e-6 there silently means |r| <= 1e-3.
 
-Not the solver for the other two eigenproblems in this tree: the Casida form
-is non-Hermitian and paired (LinearResponse/davidson.py, pyscf real_eig) and
-EOM-CC is non-Hermitian and biorthogonal (CC/eom.py, pyscf davidson_nosym1).
-Neither reduces to this one.
+Not the solver for the eigenproblems that are not symmetric, each of which
+keeps its own loop: the full Casida/BSE problem (LinearResponse/davidson.py) is
+paired, its symmetric forms need (A - B)^1/2, which a matrix-free action does
+not give, and its trial space is split by pair rows over the ranks; the
+upfolded BSE (BSE/bse_upfolded.py) is non-symmetric with possibly complex
+roots; EOM-CC (CC/eom.py, pyscf davidson_nosym1) is non-Hermitian
+biorthogonal.
 """
 import warnings
 
@@ -26,8 +30,17 @@ import numpy as np
 from pyscf import lib as pyscf_lib
 from pyscf.lib.linalg_helper import LinearDependenceError
 
+from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
+                                         DAVIDSON_DENOMINATOR_FLOOR,
+                                         DAVIDSON_FOLLOW_OVERLAP_TIE,
+                                         DAVIDSON_LINDEP_CEILING,
+                                         DAVIDSON_LINDEP_FLOOR,
+                                         DAVIDSON_MAX_CYCLE,
+                                         DAVIDSON_NULL_DIRECTION,
+                                         DAVIDSON_TOL_RESIDUAL)
 
-def jacobi_davidson_precond(diag, floor=1e-8):
+
+def jacobi_davidson_precond(diag, floor=DAVIDSON_DENOMINATOR_FLOOR):
     """Diagonal (K) preconditioner with the Jacobi-Davidson projection:
 
         t = K^-1 r - alpha K^-1 u,   alpha = (u.K^-1 r) / (u.K^-1 u)
@@ -66,21 +79,31 @@ def jacobi_davidson_precond(diag, floor=1e-8):
 
 def overlap_pick(ref):
     """A davidson1 `pick` that root-FOLLOWS: at every step take the nroots
-    Ritz vectors with the largest |overlap| onto the fixed reference vector
-    `ref`, rather than the algebraically lowest.
+    Ritz vectors with the largest |overlap| onto the fixed reference `ref`,
+    rather than the algebraically lowest.
 
     This is how the charged-ADC route targets a specific quasiparticle (the
     Koopmans unit vector on the HOMO row, or a downfolded/satellite seed)
     instead of whatever happens to be lowest. The selected roots are returned
     sorted ascending in energy, which is the order davidson1 then reports.
+
+    An (n, m) `ref` follows the span of its columns: a Ritz vector's overlap
+    is the norm of its projection onto that span (a warm start that carries
+    the previous root beside the original seed). Overlaps within
+    DAVIDSON_FOLLOW_OVERLAP_TIE of each other are a tie, taken lowest energy
+    first: asked for more roots than the reference spans, the rest have
+    overlap ~0 (a degenerate spin partner, an uncoupled sector), and an
+    unbroken tie would re-pick them at random from one step to the next.
     """
     ref = np.asarray(ref, float)
+    span = np.linalg.qr(ref)[0] if ref.ndim == 2 else ref[:, None]
 
     def pick(w, v, nroots, envs):
         xs = envs['xs']
-        ref_coeff = np.array([np.dot(ref, x) for x in xs])
-        overlap = np.abs(ref_coeff @ v)
-        idx = np.argsort(-overlap)[:nroots]
+        ref_coeff = np.array([span.T @ x for x in xs])          # (nx, m)
+        overlap = np.linalg.norm(ref_coeff.T @ v, axis=0)
+        key = np.round(overlap / DAVIDSON_FOLLOW_OVERLAP_TIE)
+        idx = np.lexsort((w, -key))[:nroots]
         order = idx[np.argsort(w[idx])]
         return w[order], v[:, order], order
 
@@ -130,7 +153,8 @@ def _default_subspace(nroots):
     return max(10 * nroots + 30, 60)
 
 
-def _lindep_for(tol_residual, floor=1e-22, ceiling=1e-14):
+def _lindep_for(tol_residual, floor=DAVIDSON_LINDEP_FLOOR,
+                ceiling=DAVIDSON_LINDEP_CEILING):
     """davidson1's linear-dependence threshold, scaled to the residual asked
     for.
 
@@ -153,9 +177,11 @@ def _lindep_for(tol_residual, floor=1e-22, ceiling=1e-14):
 
 
 def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
-                    tol_residual=1e-6, tol_eig=None, max_cycle=200,
+                    tol_residual=DAVIDSON_TOL_RESIDUAL, tol_eig=None,
+                    max_cycle=DAVIDSON_MAX_CYCLE,
                     max_subspace=None, precond=None, lindep=None, verbose=0,
-                    warn_unconverged=True, label='Davidson', max_memory=None):
+                    warn_unconverged=True, label='Davidson', max_memory=None,
+                    complete_lowest=True):
     """The `nroots` lowest eigenpairs of a real symmetric matrix-free
     operator -- or, with `pick`, the `nroots` it selects.
 
@@ -191,6 +217,17 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     lindep: davidson1's linear-dependence threshold, on SQUARED norms. It is
         scaled with tol_residual by default and you almost certainly want
         that -- see _lindep_for.
+
+    complete_lowest: without `pick`, a converged set is certified to be the
+        LOWEST nroots, not only eigenpairs: a copy of a degenerate level the
+        subspace never reached (floating point does not leave an invariant
+        subspace the start missed) sits below the top root unseen. So the
+        lowest root of the operator on the complement of X (X lifted above
+        the top root) is solved, from the lowest-diagonal unit vectors and
+        seeded random directions off X, and merged while it lies below the
+        top root, at most nroots + 1 rounds (_complete_lowest). If that solve
+        does not converge or no round certifies the set, every conv is set
+        False. False skips it (the complement solve itself).
 
     Returns (e, X, conv): e (nroots,) ascending, X (n, nroots) columns
     matching e, conv (nroots,) bool. conv is a real flag -- check it.
@@ -268,6 +305,16 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     order = np.argsort(e)
     e, X, conv = e[order], c[order].T, conv[order]
 
+    if complete_lowest and pick is None and conv.all() and e.size < n:
+        e, X, conv = _complete_lowest(
+            matvec, block, diag, e, X, warn_unconverged, dict(
+                tol_residual=tol_residual, tol_eig=tol_eig, max_cycle=max_cycle,
+                max_subspace=max_subspace, precond=precond, lindep=lindep,
+                verbose=verbose, label=label + ' (complement)',
+                max_memory=max_memory))
+        if not conv.all():
+            return e, X, conv               # _complete_lowest said why
+
     if warn_unconverged and not conv.all():
         stuck = np.flatnonzero(~conv)
         warnings.warn(
@@ -277,3 +324,81 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
             'subspace happened to give. Raise max_cycle or max_subspace, or '
             'loosen the tolerance.', RuntimeWarning, stacklevel=3)
     return e, X, conv
+
+
+class _Deflated:
+    """A on the complement of the orthonormal columns of X, with X lifted to
+    `lift`: P A P + lift X X^T, P = 1 - X X^T. A batch goes through `block`
+    when the operator has one."""
+
+    def __init__(self, matvec, block, X, lift):
+        self.X, self.lift, self._mv, self._block = X, lift, matvec, block
+        if block is not None:
+            self.matmat = self._matmat
+
+    def _matmat(self, V):
+        X = self.X
+        C = X.T @ V
+        AV = self._block(V - X @ C)
+        return AV - X @ (X.T @ AV) + self.lift * (X @ C)
+
+    def matvec(self, v):
+        X = self.X
+        v = np.asarray(v).ravel()
+        c = X.T @ v
+        Av = np.asarray(self._mv(v - X @ c)).ravel()
+        return Av - X @ (X.T @ Av) + self.lift * (X @ c)
+
+
+def _off(V, X):
+    """The columns of V projected off X (twice) and normalized; null ones dropped."""
+    V = V - X @ (X.T @ V)
+    V = V - X @ (X.T @ V)
+    nrm = np.linalg.norm(V, axis=0)
+    keep = nrm > DAVIDSON_NULL_DIRECTION
+    return V[:, keep] / nrm[keep]
+
+
+def _complete_lowest(matvec, block, diag, e, X, warn, opts):
+    """(e, X, conv) of solve_symmetric's lowest-k set, completed: the lowest
+    root of A on the complement of X (X lifted above the top root) replaces the
+    top root when it lies below it by more than tol_residual (so an exactly
+    degenerate copy at the top is not swapped back and forth); repeated until
+    a complement solve certifies the set, at most k + 1 rounds. One root per
+    round: the decision needs only the lowest, and a many-root complement
+    solve stalls at tight tolerance when its roots span a wide range. conv all
+    False if a complement solve does not converge or no round certifies."""
+    n, k = X.shape
+    tol = opts['tol_residual']
+    rng = np.random.default_rng(DAVIDSON_COMPLETION_SEED)
+    seeds = np.zeros((n, min(n, 2 * k + 4)))
+    seeds[np.argsort(diag)[:seeds.shape[1]], np.arange(seeds.shape[1])] = 1.0
+    why = None
+    for _ in range(k + 1):
+        if n - k < 1:
+            return e, X, np.ones(k, bool)
+        lift = e[-1] + abs(e[-1]) + (e[-1] - e[0]) + 1.0
+        start = _off(np.column_stack([seeds, rng.standard_normal((n, k))]), X)
+        mu, Y, cconv = solve_symmetric(
+            _Deflated(matvec, block, X, lift), diag, nroots=1, x0=start,
+            warn_unconverged=False, complete_lowest=False, **opts)
+        if not cconv.all():
+            why = 'the solve on their complement did not converge'
+            break
+        if mu[0] >= e[-1] - tol:
+            return e, X, np.ones(k, bool)
+        y = np.asarray(Y)[:, 0]
+        y = y - X @ (X.T @ y)
+        y = y / np.linalg.norm(y)
+        w_all = np.append(e, mu[0])
+        X_all = np.column_stack([X, y])
+        order = np.argsort(w_all, kind='stable')[:k]
+        e, X = w_all[order], X_all[:, order]
+    else:
+        why = f'{k + 1} rounds of merging did not end in a certificate'
+    if warn:
+        warnings.warn(
+            f"{opts['label']}: the {k} converged roots are not certified to be "
+            f'the lowest ({why}); all reported unconverged.',
+            RuntimeWarning, stacklevel=3)
+    return e, X, np.zeros(k, bool)

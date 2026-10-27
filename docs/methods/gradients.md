@@ -1,8 +1,9 @@
 # Analytic nuclear gradients
 
 The code computes the forces on the nuclei for the states it computes the
-energy of: the dRPA ground state, BSE@GW excited states and GW quasiparticle
-energies. The forces are analytic: each is the exact derivative of the energy
+energy of: the dRPA ground state, BSE@GW excited states, GW quasiparticle
+energies, and the ADC(2) excited states with their MP2 ground state. The
+forces are analytic: each is the exact derivative of the energy
 the same calculation reports, not a finite difference. They follow the
 Lagrangian formulation of Toelle,
 [arXiv:2412.17085](https://arxiv.org/abs/2412.17085), and of Toelle, Kitsaras
@@ -17,12 +18,14 @@ built on them.
 from pyscf import dft, gto
 
 from src.Base.declaration import Excitation, GroundState
-from src.properties.surfaces import potential_energy_surface
+from src.Base.numerics.numerics import Numerics
+from src.gradients.gwbse.surface_factory import potential_energy_surface
 
 
 def pbe0(mol):
     mf = dft.RKS(mol, xc='pbe0')
-    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.grids.level = 4                      # see below
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     return mf
 
@@ -30,7 +33,8 @@ def pbe0(mol):
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis='cc-pvdz')
 s1 = potential_energy_surface(mol, pbe0, ground_state=GroundState('dft', 'pbe0'),
-                              excitation=Excitation('singlet'))
+                              excitation=Excitation('singlet'),
+                              numerics=Numerics(isdf={'level': 'G1'}))
 grad, energy, info = s1.total_gradient(mol)
 ```
 
@@ -38,7 +42,16 @@ grad, energy, info = s1.total_gradient(mol)
 of the first singlet and `info['omega']` its excitation energy. The mean field
 is passed as a function of the geometry, because every displaced geometry
 needs its own; it must be converged tightly, since the gradient assumes the
-orbitals are exactly stationary. `ground_state` says which energy the state
+orbitals are exactly stationary. A Kohn-Sham mean field should integrate its
+exchange-correlation potential on pyscf's grid level 4: on the default level
+3, range-separated hybrids such as LRC-wPBEh move the orbital energies in
+small steps between nearby geometries, which GW carries into every
+excitation energy and which spoils a force. The staged TADF run (`python -m
+src.photophysics`) builds its mean fields on level 4 (`ScfNumerics.xc_grid`,
+`--xc-grid`); the tests that check a force against finite differences use
+level 5.
+`numerics` names the ISDF interpolation grid by its accuracy level, as for
+the [BSE](bse.md). `ground_state` says which energy the state
 sits on (here the PBE0 total energy; `GroundState('rpa', 'hf')` gives the dRPA
 ground state on Hartree-Fock), `excitation` which state (omit it for the
 ground state), and `environment` an optional solvent or point charges.
@@ -73,6 +86,46 @@ can share one evaluation: the mean field, the factors, the screening and the
 quasiparticle energies are computed once, then each spin is solved and each
 force is taken from them. The numbers are the same as evaluating each state
 on its own.
+
+The same reverse pass gives the orbital-relaxed density of an excited state,
+the derivative of its excitation energy with respect to the one-electron
+Hamiltonian, which state-specific solvation reads
+([Environments](environments.md)). It stops at the orbital response and does
+not assemble the force it does not need.
+
+## Interchangeable surfaces
+
+Every surface derives from one abstract class,
+`PotentialEnergySurface` in `src/gradients/surface.py`: it gives the total
+energy and gradient at a geometry, its mean field, a label, `refreeze`
+(see [properties](properties.md)) and `identity()`, the record of what the
+surface computes, which checkpoints and force caches are stamped with. A
+surface also declares the further ingredients it provides (its excitation
+energy, every excited state solved at a geometry, ...): its class attribute
+`INGREDIENTS` names them, and `INGREDIENT_DOCS` in the same module lists
+every ingredient a surface may provide. A property
+asks for the ingredients it needs, so it works with any surface that
+provides them, whatever method is behind it, and a surface that lacks one is
+refused at the call with `MissingIngredient`, naming what is missing.
+
+The code that every method uses (the orbital response, the derivative
+integrals, the state models, the force of a density-fitted correlated
+energy) lives in `src/gradients/` itself; each method's own part lives in a
+subpackage: `rpa/` (the dRPA ground state and its screening), `gwbse/`
+(GW-BSE, built on `rpa/`) and `adc/` (ADC(2)). See
+[Source layout](../layout.md).
+
+## ADC(2) forces
+
+The ADC(2) force runs on the folded, density-fitted route
+(`src/gradients/adc/`): the MP2 ground state plus the ADC(2) excitation
+energy, with one orbital-response solve, on whole tensors or on tiles split
+over MPI ranks. It is used through the state models of state-specific
+solvation ([Environments](environments.md)), in the gas phase and in a
+continuum, and drives the geometry optimizations of `python -m
+src.photophysics solvated`.
+
+## Examples
 
 `examples/16_numerical_hessian_from_gradient.py` builds a vibrational analysis
 from the gradient by central differences, and

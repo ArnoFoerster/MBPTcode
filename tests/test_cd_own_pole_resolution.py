@@ -14,7 +14,7 @@ on the plain grid, and the root and Z are the resolved ones there:
 - the guarded Newton converges instead of cycling across eps_6;
 - the root is +9.4 meV with Z = 0.931, not a zero read off an unresolved
   slope (+9.2 meV, Z = 0.20 by quadrature alone);
-- nothing is demoted.
+- no root is flagged at a pole strength outside (0, 1].
 
 Against the dense quasi-boson route the four frontier roots differ by 1.06,
 0.80, 0.54 and 0.54 meV (orbitals 6 to 9): orbital 6 is as good as the rest.
@@ -28,20 +28,21 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (CD_NFREQ, ISDF_GRID_ACCURACY_TARGET_EV,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (CD_NFREQ, ISDF_GRID_ACCURACY_TARGET_EV,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
+from src.Base.numerics.numerics import numerics_of
 from src.SingleReference.GW.qp_states import is_quasiparticle_root
-from src.properties.excitations import (SurfaceSpec, driven_chain,
-                                        qp_bookkeeping, surface_of)
+from src.gradients.gwbse.diagnostics import qp_bookkeeping
+from src.properties.excitations import SurfaceSpec, driven_chain, surface_of
 
 FORMALDEHYDE = ('C 0.0 0.0 -0.5296; O 0.0 0.0 0.6742; '
                 'H 0.0 0.9429 -1.1123; H 0.0 -0.9429 -1.1123')
 GROUND = GroundState('rpa', 'hf')
 EXPLICIT = SurfaceSpec(GROUND, chi0='space-time', residues='explicit',
                        factorization='isdf', qp_states=QPStates('frontier'),
-                       numerics={'grid_accuracy': 'G3'})
+                       numerics=numerics_of({'grid_accuracy': 'G3'}))
 QB = SurfaceSpec(GROUND, chi0='dense-qb', factorization='four-index',
                  qp_states=QPStates('frontier'))
 #: The orbital whose root sits inside its own pole's band.
@@ -89,9 +90,9 @@ def qb(mol):
 
 def test_the_root_is_the_resolved_one_on_the_plain_grid(explicit):
     qp, chain = explicit
-    assert ORBITAL in qp['explicit'] and not qp['demoted'], qp
+    assert ORBITAL in qp['explicit'] and not qp['z_outside'], qp
     assert is_quasiparticle_root(qp['z'][ORBITAL]), qp['z']
-    assert chain.nfreq_cd == CD_NFREQ, chain.nfreq_cd
+    assert chain.conventions.nfreq_cd == CD_NFREQ, chain.conventions.nfreq_cd
     shift = 1e3 * (qp['qp_root_eV'][ORBITAL]
                    - qp['eps_mean_field_eV'][ORBITAL])
     assert abs(shift - RESOLVED_SHIFT_MEV) < 0.1, shift

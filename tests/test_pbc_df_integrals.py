@@ -67,7 +67,7 @@ if __name__ == '__main__':
     for q in range(nk):
         for ki in range(nk):
             kj = kcp[q, ki]
-            qrev = dfints._pair_to_q(kj, ki)
+            qrev = dfints.pair_to_q(kj, ki)
             Lij = dfints.L[q][ki]
             Lji = dfints.L[qrev][kj]
             herm_err = max(herm_err, np.abs(Lij.conj() - Lji.transpose(0, 2, 1)).max())

@@ -11,7 +11,9 @@ run with k-point sampling, for crystals and slabs.
 ## Methods
 
 - **[ADC](docs/methods/adc.md)** — Dyson IP/EA-ADC(2)-X and ADC(3), RHF
-  spin-adapted and UHF/spin-orbital, dense and matrix-free.
+  spin-adapted and UHF/spin-orbital, dense and matrix-free; Faddeev-ADC(3)
+  and Faddeev-ADC(4); generated ADC(2) to ADC(5); excitation-energy ADC(2)
+  and ADC(3).
 - **[GW and linear response](docs/methods/gw.md)** — G0W0, evGW/evGW0 and
   qsGW/qsGW0, restricted or unrestricted, on three routes from O(N⁶) to O(N³);
   Casida/RPA and RPA correlation energies.
@@ -20,18 +22,21 @@ run with k-point sampling, for crystals and slabs.
 - **[Low-scaling factorization](docs/methods/isdf-low-scaling.md)** — the
   separable RI (ISDF) behind the O(N³) routes, and ISDF-J/K for the SCF.
 - **[Environments](docs/methods/environments.md)** — polarizable-continuum
-  screening, equilibrium solvation of charged states, an explicit polarizable
-  shell, QM/MMPol embedding, empirical dispersion.
+  screening, equilibrium solvation of charged states, state-specific
+  solvation of excited states, an explicit polarizable shell, QM/MMPol
+  embedding, empirical dispersion.
 - **[Analytic nuclear gradients](docs/methods/gradients.md)** — cubic-scaling
   dRPA and BSE@GW gradients on a frozen ISDF factorization and their dense
-  counterparts, with an adjoint for every continuation and environment.
-- **[Potential-energy surfaces](docs/methods/properties.md)** — one surface
-  dispatcher, geometry optimization, vibronic analysis, conformers,
-  spin-orbit and nonadiabatic couplings, rates.
+  counterparts, with an adjoint for every continuation and environment;
+  ADC(2) and MP2 forces.
+- **[Potential-energy surfaces](docs/methods/properties.md)** — geometry
+  optimization, vibronic analysis, conformers, spin-orbit and nonadiabatic
+  couplings, band shapes, rates, and command lines for the photophysics of an
+  emitter.
 - **[Density matrices](docs/methods/density-matrices.md)** — MP2/MP3/MP4, GW
   and CC correlated 1-RDMs.
-- **[Coupled cluster](docs/methods/coupled-cluster.md)** — CCSD/CCSDT and
-  EOM-CC (IP/EA/EE).
+- **[Coupled cluster](docs/methods/coupled-cluster.md)** — CCSDT and
+  EOM-CCSDT (IP/EA/EE).
 - **[Finite temperature](docs/methods/finite-temperature.md)** — Matsubara-axis
   grids via the intermediate representation.
 - **[Periodic systems](docs/methods/periodic.md)** — k-point RPA, BSE and GW
@@ -66,8 +71,8 @@ print(f"ADC(3) IP = {-e[0] * 27.2114:.3f} eV   Z = {Z[0]:.3f}")
 See `examples/` for density fitting, Epstein-Nesbet variants, open-shell
 references, several ionization states, and screened singles.
 
-Threads and MPI, basis sets from CP2K, the tests and the source layout are
-in [docs/](docs/index.md).
+Threads and MPI, basis sets from CP2K, what the code does when a solver
+stops short, the tests and the source layout are in [docs/](docs/index.md).
 
 ## License
 
@@ -78,7 +83,7 @@ A few files are third-party components under the Apache License 2.0 —
 the CC DIIS routine and CCSDT amplitude equations (from
 [pdaggerq](https://github.com/edeprince3/pdaggerq)), and the minimax
 quadrature tables plus the imaginary time/frequency transformation weights
-ported from Fortran in `src/Base/utils/time_frequency.py` (from
+ported from Fortran in `src/Base/utils/grids/time_frequency.py` (from
 [GreenX](https://github.com/nomad-coe/greenX)).
 They are listed in [NOTICE](NOTICE), which must be retained in
 redistributions.

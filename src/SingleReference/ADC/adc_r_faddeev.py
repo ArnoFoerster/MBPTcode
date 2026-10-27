@@ -37,16 +37,20 @@ triplet on II'); the particle-hole ones recouple the spins and act on Q (R).
 Both follow from the spin-orbital formulas of adc_u_faddeev evaluated on
 these components, and are checked against it through the CSF isometry.
 """
+
 import numpy as np
 import scipy.linalg as la
 
-from src.Base.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER_JACOBI
-from src.Base.eri_blocks import g_slice
+from src.Base.numerical_flags import flag
+from src.Base.numerics.constants import RICCATI_CONV_TOL, RICCATI_MAX_ITER_JACOBI
+from src.Base.orbital_spaces import ov_energies
+from src.SingleReference.common.eri_blocks import g_slice
 from src.SingleReference.ADC import adc_r_dense_df, adc_r_dense_full
 from src.SingleReference.ADC import adc_r_sigma_df, adc_r_sigma_full
-from src.SingleReference.ADC.adc_r_utils import _u_2h1p_unfold, _u_2p1h_unfold
+from src.SingleReference.ADC.adc_r_utils import u_2h1p_unfold, u_2p1h_unfold
 from src.SingleReference.ADC.eeADC.ee_r_sigma_df import DFVvvvKernels
-from src.SingleReference.ADC.solve import apply_inverse_sqrt, inverse_sqrt_psd
+from src.SingleReference.ADC.solve import (ADCNotConverged, apply_inverse_sqrt,
+                                           inverse_sqrt_psd)
 from src.SingleReference.CC.diis import DIIS
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
@@ -69,7 +73,7 @@ def _df_or_dense(s):
     return s.B_aa, (s.eri if s.B_aa is None else None)
 
 
-def _eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
+def eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
     """{'T', 'dH', 'dN'} of one TDHF spin channel of the particle-hole pair;
     (A, B) are the Casida matrices with the bare kernel.
 
@@ -98,7 +102,7 @@ def _eh_channel(eps, nocc, spin, B_aa, eri_chemist, route, treatment='rpa'):
         eps, coeff_df=B_aa, eri_chemist=eri_chemist).build_casida_matrices(
             nocc, lBSE=True, triplet=(spin == 'triplet'))
     n = A.shape[0]
-    D = (eps[None, nocc:] - eps[:nocc, None]).ravel()          # eps_a - eps_i
+    D = ov_energies(eps, nocc)                                 # eps_a - eps_i
     if treatment == 'rpa':
         require_stable_channel(A, B, f'TDHF {spin} channel')
         if route == 'phonon':
@@ -141,7 +145,7 @@ def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
 
     eh: {'singlet', 'triplet'} -> {'T', 'dH', 'dN'}, TDHF on the (i, a)
         pairs, i outer; dH is block II's (block I carries -dH). eh_triplet
-        selects the triplet channel's treatment (see _eh_channel): 'rpa' (full
+        selects the triplet channel's treatment (see eh_channel): 'rpa' (full
         TDHF), 'first_order' (ADC(3) level) or 'off' (singlet
         eh pairs only). The singlet channel is always RPA.
 
@@ -159,7 +163,7 @@ def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
     route='ccd': every channel from the alpha-beta CCD amplitude t2[i,j,a,b]
         (required), see ccd_channels.
 
-    eh_kernel='drpa': both eh spin channels by direct RPA (_eh_channel
+    eh_kernel='drpa': both eh spin channels by direct RPA (eh_channel
         treatment 'drpa'; the triplet is then non-interacting and eh_triplet
         must stay 'rpa'); pp/hh unchanged.
     """
@@ -178,9 +182,9 @@ def pair_channels(eps, nocc, B_aa=None, eri_chemist=None, route='phonon',
         return ccd_channels(eps, nocc, t2, B_aa, eri_chemist,
                             eh_triplet=eh_triplet)
     singlet, triplet = ('drpa', 'drpa') if eh_kernel == 'drpa' else ('rpa', eh_triplet)
-    out = {'eh': {'singlet': _eh_channel(eps, nocc, 'singlet', B_aa, eri_chemist,
+    out = {'eh': {'singlet': eh_channel(eps, nocc, 'singlet', B_aa, eri_chemist,
                                          route, singlet),
-                  'triplet': _eh_channel(eps, nocc, 'triplet', B_aa, eri_chemist,
+                  'triplet': eh_channel(eps, nocc, 'triplet', B_aa, eri_chemist,
                                          route, triplet)},
            'pp': {}, 'hh': {}}
     if route == 'riccati':
@@ -219,7 +223,7 @@ def _vvvv_ladder(B_aa, eri_chemist, nocc, norb):
     """t -> sum_ef t[k,l,e,f] <ef|cd>, through the DF factor (eeADC
     DFVvvvKernels) or the dense tensor."""
     if B_aa is not None:
-        return DFVvvvKernels(B_aa, nocc, norb)._ldir
+        return DFVvvvKernels(B_aa, nocc, norb).ladder_direct
     v = slice(nocc, norb)
     g_vvvv = g_slice(None, eri_chemist, v, v, v, v)            # <ef|cd>
     return lambda t: np.einsum('klef,efcd->klcd', t, g_vvvv, optimize=True)
@@ -244,7 +248,9 @@ def solve_ladder_amplitudes_restricted(eps, nocc, B_aa=None, eri_chemist=None,
 
     Jacobi steps with the orbital-energy denominators and DIIS; the vvvv
     ladder goes through the DF factor (eeADC DFVvvvKernels), or the dense
-    tensor. Converged when max|R| < conv_tol. Returns a LadderAmplitudes."""
+    tensor. Converged when max|R| < conv_tol. Returns a LadderAmplitudes;
+    one that has not converged in max_iter steps warns (ADCNotConverged) and
+    carries the last iterate with info['converged'] False."""
     eps = np.asarray(eps)
     norb = len(eps)
     o, v = slice(0, nocc), slice(nocc, norb)
@@ -269,16 +275,17 @@ def solve_ladder_amplitudes_restricted(eps, nocc, B_aa=None, eri_chemist=None,
         rmax = float(np.max(np.abs(R)))
         if verbose:
             print(f"  ladder CCD iter {it:3d}  max|R| = {rmax:.3e}", flush=True)
-        if rmax < conv_tol:
-            TA = _ladder_TA(lad, ev, t)
-            return LadderAmplitudes(t, TA, V, G_oooo,
-                                    {'niter': it, 'residual': rmax})
-        if it == max_iter:
+        if rmax < conv_tol or it == max_iter:
             break
         t_new = t - R / D
         t = diis.compute_new_vec(t_new.ravel(), (t_new - t).ravel()).reshape(t.shape)
-    raise RuntimeError(f"ladder CCD not converged in {max_iter} iterations "
-                       f"(max|R| = {rmax:.3e})")
+    converged = rmax < conv_tol
+    if not converged:
+        flag('ladder_amplitudes_not_converged', f"ladder CCD not converged in {max_iter} iterations (max|R| = "
+                      f"{rmax:.3e}); the last iterate is used (converged=False)",
+                      ADCNotConverged, stacklevel=2)
+    return LadderAmplitudes(t, _ladder_TA(lad, ev, t), V, G_oooo,
+                            {'niter': it, 'residual': rmax, 'converged': converged})
 
 
 def ladder_channels(eps, nocc, B_aa=None, eri_chemist=None, verbose=0):
@@ -322,7 +329,7 @@ def first_order_channels(eps, nocc, B_aa=None, eri_chemist=None):
     eo, ev = eps[:nocc], eps[nocc:]
     out = {'eh': {}, 'pp': {}, 'hh': {}}
     for spin in SPINS:
-        out['eh'][spin] = _eh_channel(eps, nocc, spin, B_aa, eri_chemist,
+        out['eh'][spin] = eh_channel(eps, nocc, spin, B_aa, eri_chemist,
                                       'riccati', 'first_order')
         App, Bpp, Cpp = build_pprpa_matrices_restricted(eps, nocc, spin, B_aa,
                                                         eri_chemist)
@@ -356,7 +363,7 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa',
     nonzero (dH, dN) of second order in the amplitude.
 
     phonons=True also returns the eh channels' phonons 'omega', 'X', 'Y', the
-    solutions of (A + dH) X = (1 + dN) X omega with Y = T X, as _eh_channel's
+    solutions of (A + dH) X = (1 + dN) X omega with Y = T X, as eh_channel's
     route 'phonon' does (for the FLEX eh term); 1 + dN = 1 - T^2 must be
     positive definite."""
     eps = np.asarray(eps)
@@ -373,7 +380,7 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa',
             'triplet': (-ty).reshape(O * V, O * V)}
     for spin in SPINS:
         if spin == 'triplet' and eh_triplet != 'rpa':
-            out['eh'][spin] = _eh_channel(eps, nocc, spin, B_aa, eri_chemist,
+            out['eh'][spin] = eh_channel(eps, nocc, spin, B_aa, eri_chemist,
                                           'phonon' if phonons else 'riccati',
                                           eh_triplet)
             continue
@@ -387,7 +394,7 @@ def ccd_channels(eps, nocc, t2, B_aa=None, eri_chemist=None, eh_triplet='rpa',
             omega, X = la.eigh(A + dH, np.eye(len(A)) + dN)
             out['eh'][spin].update(omega=omega, X=X, Y=T @ X)
     o, v = slice(0, O), slice(O, norb)
-    eo, ev = eps[o], eps[v]
+    ev = eps[v]
     TA = _ladder_TA(_vvvv_ladder(B_aa, eri_chemist, O, norb)(t2), ev, t2)
     lad = LadderAmplitudes(t2, TA, g_slice(B_aa, eri_chemist, o, o, v, v),
                            g_slice(B_aa, eri_chemist, o, o, o, o),
@@ -404,8 +411,8 @@ def csf_to_Q(z_Ip, z_IIp, z_IIIp, nv):
     """Q[i,a,b] of a 2p1h CSF vector (z_Ip (O,V), z_IIp/z_IIIp (O,nPv))."""
     au, bu = pair_indices(nv)
     O = z_Ip.shape[0]
-    Q = (_S16 * _u_2p1h_unfold(z_IIp, au, bu, O, nv, True)
-         + _S12 * _u_2p1h_unfold(z_IIIp, au, bu, O, nv, False))
+    Q = (_S16 * u_2p1h_unfold(z_IIp, au, bu, O, nv, True)
+         + _S12 * u_2p1h_unfold(z_IIIp, au, bu, O, nv, False))
     d = np.arange(nv)
     Q[:, d, d] = z_Ip
     return Q
@@ -425,8 +432,8 @@ def Q_to_csf_adjoint(y_Ip, y_IIp, y_IIIp, nv):
     doublet Q equals the CSF inner product with Q_to_csf(Q)."""
     au, bu = pair_indices(nv)
     O = y_Ip.shape[0]
-    Q = (_S32 * _u_2p1h_unfold(y_IIp, au, bu, O, nv, True)
-         + _S12 * _u_2p1h_unfold(y_IIIp, au, bu, O, nv, False))
+    Q = (_S32 * u_2p1h_unfold(y_IIp, au, bu, O, nv, True)
+         + _S12 * u_2p1h_unfold(y_IIIp, au, bu, O, nv, False))
     d = np.arange(nv)
     Q[:, d, d] = y_Ip
     return Q
@@ -436,8 +443,8 @@ def csf_to_R(z_I, z_II, z_III, nocc):
     """R[i,j,a] of a 2h1p CSF vector (z_I (O,V), z_II/z_III (nPo,V))."""
     iu, ju = pair_indices(nocc)
     V = z_I.shape[1]
-    R = (_S16 * _u_2h1p_unfold(z_II, iu, ju, nocc, V, True)
-         + _S12 * _u_2h1p_unfold(z_III, iu, ju, nocc, V, False))
+    R = (_S16 * u_2h1p_unfold(z_II, iu, ju, nocc, V, True)
+         + _S12 * u_2h1p_unfold(z_III, iu, ju, nocc, V, False))
     d = np.arange(nocc)
     R[d, d, :] = z_I
     return R
@@ -456,8 +463,8 @@ def R_to_csf_adjoint(y_I, y_II, y_III, nocc):
     """Transpose of R_to_csf, the 2h1p mirror of Q_to_csf_adjoint."""
     iu, ju = pair_indices(nocc)
     V = y_I.shape[1]
-    R = (_S32 * _u_2h1p_unfold(y_II, iu, ju, nocc, V, True)
-         + _S12 * _u_2h1p_unfold(y_III, iu, ju, nocc, V, False))
+    R = (_S32 * u_2h1p_unfold(y_II, iu, ju, nocc, V, True)
+         + _S12 * u_2h1p_unfold(y_III, iu, ju, nocc, V, False))
     d = np.arange(nocc)
     R[d, d, :] = y_I
     return R
@@ -673,7 +680,7 @@ class _Coupling:
 # the operator
 # ---------------------------------------------------------------------------
 
-class _Pieces:
+class Pieces:
     """The Faddeev-ADC(3) ingredients on the restricted CSF segments:
     dH/dN on satellite vectors, U forward/adjoint, and the ADC(3) operator
     whose satellite block is K + C."""
@@ -682,7 +689,7 @@ class _Pieces:
         if (getattr(s, 'u2_denom_dress', None)
                 or getattr(s, 'W_chemist', None) is not None
                 or getattr(s, 'W_aux', None) is not None
-                or getattr(s, '_is_adc2x', False)):
+                or getattr(s, 'is_adc2x', False)):
             raise ValueError("Faddeev-ADC(3) takes no EN dressing, screening "
                              "or ADC(2)-X: its couplings and pair channels "
                              "replace them")
@@ -761,7 +768,7 @@ def build_operator(s, nocc, static_correction=None, route='phonon',
     CSF layout as the restricted ADC(3) operator, whose satellite block K + C
     it reuses (couplings=False: no ADC(3) U built or applied). `channels`
     overrides the pair channels (first_order_channels gives back ADC(3))."""
-    P = _Pieces(s, nocc, static_correction, route, channels)
+    P = Pieces(s, nocc, static_correction, route, channels)
     mod = adc_r_sigma_df if s.B_aa is not None else adc_r_sigma_full
     aop3, diag3, d = mod.build_operator(s, nocc, static_correction,
                                         couplings=False)
@@ -788,7 +795,7 @@ def build_supermatrix(s, nocc, static_correction=None, route='phonon',
     """(nH, nH) dense restricted Faddeev-ADC(3) supermatrix, for
     benchmarking: K + C from the dense ADC(3) supermatrix, dH/dN/U by
     columns, N^{-1/2} by eigh."""
-    P = _Pieces(s, nocc, static_correction, route, channels)
+    P = Pieces(s, nocc, static_correction, route, channels)
     norb, nsat = P.norb, P.nsat
     mod = adc_r_dense_df if s.B_aa is not None else adc_r_dense_full
     H3 = mod.build_supermatrix(s, nocc, static_correction)

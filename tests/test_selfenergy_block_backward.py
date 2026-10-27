@@ -21,11 +21,11 @@ factors mean anything is `test_downfolded.py`'s business.
 import numpy as np
 import pytest
 
-from src.Base.utils.grids import gauss_legendre_grid
-from src.Base.utils.time_frequency import TimeFrequencyGrid
-from src.gradients.space_time_adjoint import (selfenergy_block,
-                                              selfenergy_block_backward,
-                                              sigma_transforms)
+from src.Base.utils.grids.grids import gauss_legendre_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
+from src.gradients.rpa.space_time_adjoint import (selfenergy_block_backward)
+from src.Base.utils.grids.time_frequency import sigma_transforms
+from src.SingleReference.GW.imaginary_time import selfenergy_block
 
 NORB, NOCC, NAUX, NTAU, NFREQ = 8, 3, 6, 6, 6
 STATES = [2, 3, 4]
@@ -159,7 +159,7 @@ def test_the_mask_actually_changes_the_answer():
 def test_the_block_diagonal_is_the_diagonal_self_energy():
     """`selfenergy_block` and `selfenergy_diag` are one quantity, so p == q of
     the matrix must be the vector, or the two routes have drifted apart."""
-    from src.gradients.space_time_adjoint import selfenergy_diag
+    from src.SingleReference.GW.imaginary_time import selfenergy_diag
     eps, X, D, grid, mu = system()
     tr = sigma_transforms(eps, NOCC, grid.tau_points, grid.omega_points,
                           grid.omega_points, mu=mu)

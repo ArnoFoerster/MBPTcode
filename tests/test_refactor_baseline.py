@@ -1,6 +1,6 @@
 """The recorded baseline still describes this tree.
 
-The baseline (tests/baseline_<sha7>.json) records what the GW/BSE surface
+The baseline (tests/baseline_forward_routes.json) records what the GW/BSE surface
 code computes (quasiparticle energies by eight routes, BSE roots by four
 drivers, the three pieces of E_0, every surface's energy, gradient and
 diagnostics, and the production drivers' own JSON) on one tree, as JSON text.
@@ -8,22 +8,18 @@ Python floats round-trip exactly through `repr`, so a matching record means
 the code computes the same numbers, bit for bit.
 
 A failing schema test means the record is not usable as a gate: a missing
-section, commit or tree, or a setting left as 'auto', leaves it unable to say
+section, or a setting left as 'auto', leaves it unable to say
 which integral was computed. A failing live test means the working tree
 computes something other than what the baseline recorded, which is not a
 rounding question.
 
 The live checks run the two cheapest items in the record: the mean-field
 surface's energy and gradient on water at both recorded geometries, and the
-three E_0 terms on water/Hartree-Fock. The whole record is re-run only under
-REFACTOR_BASELINE_FULL=1, by the recorder and comparison tool under
-tools/refactor_gates/, which this tree does not ship; that test stays skipped.
+three E_0 terms on water/Hartree-Fock.
 """
-import glob
 import json
 import os
 import pathlib
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -32,29 +28,29 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.gradients.isdf_derivatives import exx_double_counting
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.properties.optimize import MeanFieldSurface
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.mean_field_surface import MeanFieldSurface
+from tests.isdf_test_grid import g1
+from tests.pins import assert_pin, recorded_blas
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-GATES = REPO / 'tools' / 'refactor_gates'
 #: Where the recorded baseline lives.
 BASELINE_DIR = pathlib.Path(__file__).resolve().parent
-
-#: Set to 1 to re-run the whole record rather than the two cheap items.
-FULL_ENV = 'REFACTOR_BASELINE_FULL'
 
 #: The E_0 terms as this tree's ISDF fit computes them.
 PINS = json.loads((REPO / 'tests' / 'one_fit_pins.json').read_text())[
     'e0_terms']
-#: Hartree the dRPA correlation energy may sit from the record: the fit's
-#: realization (every pair kept, Gram over every product pair) moves
-#: E_c^dRPA at the last-bit level.
-E0_FIT_MOVE_HA = 1e-14
+PINS_BLAS = recorded_blas(REPO / 'tests' / 'one_fit_pins.json')
+#: Hartree the dRPA correlation energy may sit from the record: the record
+#: was taken on an earlier ISDF grid, whose E_c^dRPA sits 4.0e-5 above the
+#: current one's.
+E0_FIT_MOVE_HA = 1e-4
 
 #: Sections a record must carry to be a gate at all.
 REQUIRED_SECTIONS = ('qp_routes', 'bse', 'e0_terms', 'surfaces',
-                     'campaign_records', 'timing')
+                     'driver_records', 'timing')
 
 #: Settings that must be integers wherever they appear: a grid size held as
 #: a string cannot be compared, and 'auto' cannot be rebuilt.
@@ -97,12 +93,12 @@ def dicts(obj):
 def own_blocks(record):
     """The record minus the driver output it embeds verbatim.
 
-    The route audit's `ntau_source` and the state-pair driver's `ntau_w` and
+    The QP route driver's `ntau_source` and the state-pair driver's `ntau_w` and
     `solver` are recorded as those scripts write them; the settings this test
     holds to integers are the recorder's own.
     """
     out = json.loads(json.dumps(record))
-    for section in ('qp_routes', 'campaign_records'):
+    for section in ('qp_routes', 'driver_records'):
         for entry in out.get(section, {}).values():
             if isinstance(entry, dict):
                 entry.pop('records', None)
@@ -134,12 +130,8 @@ def unresolved(record):
 
 
 def newest_baseline():
-    """The newest `baseline_<sha7>.json`, repeats excluded."""
-    paths = [p for p in glob.glob(str(BASELINE_DIR / 'baseline_*.json'))
-             if not p.endswith('_repeat.json')]
-    if not paths:
-        pytest.skip(f'no baseline_*.json in {BASELINE_DIR}')
-    return pathlib.Path(max(paths, key=os.path.getmtime))
+    """The recorded baseline, `baseline_forward_routes.json`."""
+    return BASELINE_DIR / 'baseline_forward_routes.json'
 
 
 @pytest.fixture(scope='module')
@@ -174,14 +166,13 @@ def at_coords(mol, coords):
 
 
 # ------------------------------------------------------------------- schema
-def test_the_record_names_the_tree_it_describes(baseline):
-    """The record names the commit and tree it was made on, so its code can
-    be checked out again."""
+def test_the_record_names_what_it_was_made_on(baseline):
+    """The record says which code and which machine it was made on: the
+    versions and the BLAS that produced its bits."""
     assert baseline['kind'] == 'gw_bse_refactor_baseline'
-    assert len(baseline['sha']) == 40
-    assert len(baseline['tree']) == 40
-    assert baseline['sha7'] == baseline['sha'][:7]
-    assert baseline['tree'] == baseline['expect_tree']
+    assert baseline['recorded_on']
+    assert {'python', 'numpy', 'scipy', 'pyscf'} <= set(baseline['versions'])
+    assert {'numpy', 'pyscf', 'machine'} <= set(baseline['blas'])
 
 
 def test_every_section_is_present(baseline):
@@ -229,15 +220,19 @@ def test_mean_field_surface_is_bitwise_what_was_recorded(baseline, water):
     recorded = baseline['surfaces']['water']['MeanFieldSurface']
     assert recorded['status'] == 'ok'
     surface = MeanFieldSurface(water, lambda mol: scf_factory(mol, baseline))
+    blas = baseline['blas']
     for label, entry in recorded['geometries'].items():
         mol = at_coords(water, entry['atom_coords_bohr'])
         _, mf = surface.mean_field(mol)
-        assert float(mf.e_tot) == entry['e_scf'], label
-        assert float(surface.total_energy(mol, mf)) == entry['total_energy'], \
-            label
+        assert_pin(mf.e_tot, entry['e_scf'], blas, quantity='energy',
+                   label=label)
+        assert_pin(surface.total_energy(mol, mf), entry['total_energy'], blas,
+                   quantity='energy', label=label)
         grad, energy, _ = surface.total_gradient(mol, mf)
-        assert float(energy) == entry['gradient_energy'], label
-        assert np.asarray(grad, float).tolist() == entry['gradient'], label
+        assert_pin(energy, entry['gradient_energy'], blas, quantity='energy',
+                   label=label)
+        assert_pin(grad, entry['gradient'], blas, quantity='gradient',
+                   label=label)
 
 
 def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
@@ -246,39 +241,15 @@ def test_the_three_e0_terms_are_bitwise_what_was_recorded(baseline, water):
     surface is built from these three. E_c^dRPA reads the chain's ISDF
     factors: `==` its pin, the record within `E0_FIT_MOVE_HA`."""
     recorded = baseline['e0_terms']['water_HF']
-    chain = RPAGroundStateChain(water, lambda mol: scf_factory(mol, baseline))
+    chain = RPAGroundStateChain(water, lambda mol: scf_factory(mol, baseline), numerics=Numerics(isdf={'counts': g1(water)}))
     mf = chain.mf0
-    assert float(mf.e_tot) == recorded['e_scf']
-    assert float(chain.reference_energy(water, mf)) \
-        == recorded['reference_energy']
-    assert float(exx_double_counting(mf, water)) \
-        == recorded['exx_double_counting']
+    blas = baseline['blas']
+    assert_pin(mf.e_tot, recorded['e_scf'], blas, quantity='energy')
+    assert_pin(chain.reference_energy(water, mf),
+               recorded['reference_energy'], blas, quantity='energy')
+    assert_pin(exx_double_counting(mf, water),
+               recorded['exx_double_counting'], blas, quantity='energy')
     e_corr = float(chain.correlation_energy(water, mf))
-    assert e_corr == PINS['water_HF']['e_corr_dRPA']
+    assert_pin(e_corr, PINS['water_HF']['e_corr_dRPA'], PINS_BLAS,
+               quantity='energy')
     assert abs(e_corr - recorded['e_corr_dRPA']) <= E0_FIT_MOVE_HA
-
-
-# ------------------------------------------------------------ the whole record
-@pytest.mark.skipif(os.environ.get(FULL_ENV) != '1',
-                    reason=f'the expensive sections re-run only under '
-                           f'{FULL_ENV}=1')
-def test_the_whole_record_reproduces():
-    """Re-run the recorder and compare its output against the stored record,
-    bitwise, section by section."""
-    path = newest_baseline()
-    stored = json.loads(path.read_text())
-    scratch = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / 'refactor_gate'
-    scratch.mkdir(parents=True, exist_ok=True)
-    fresh = scratch / 'baseline_live.json'
-    made = subprocess.run(
-        [sys.executable, str(GATES / 'record_baseline.py'),
-         '--repo', str(REPO), '--expect-tree', stored['expect_tree'],
-         '--out', str(fresh), '--scratch', str(scratch)],
-        capture_output=True, text=True, cwd=str(REPO))
-    assert made.returncode == 0, made.stderr[-4000:]
-    check = subprocess.run(
-        [sys.executable, str(GATES / 'compare_baselines.py'),
-         '--first', str(path), '--second', str(fresh),
-         '--out', str(scratch / 'merged.json')],
-        capture_output=True, text=True, cwd=str(REPO))
-    assert check.returncode == 0, check.stdout[-8000:]

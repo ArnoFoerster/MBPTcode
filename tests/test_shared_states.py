@@ -1,7 +1,7 @@
 """One shared evaluation for several states at one geometry
-(`StateManifold.evaluate`, `ExcitedStateChain._shared_forward`/`spin_view`).
+(`StateManifold.evaluate`, `ExcitedStateChain.shared_forward`/`spin_view`).
 
-G1, bitwise. On ONE mean field and ONE `FrozenFactorization`, chains of each
+G1, to a few ulp (`tests.blas_bar.same`). On ONE mean field and ONE `FrozenFactorization`, chains of each
 target (spin, root) evaluated alone, and one manifold over all of them: every
 total force, total energy, root index, Casida spectrum (roots and vectors) and
 the ground-state force `array_equal`, with the manifold's targets in both
@@ -36,29 +36,35 @@ same mean field.
 """
 import os
 import sys
-import warnings
 
 import numpy as np
 import pytest
-from pyscf import dft, gto, lib, scf
+from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates  # noqa: E402
-from src.Base.isdf_jk import isdf_jk  # noqa: E402
-from src.Base.separable_ri import resolve_isdf_grid  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.Base.utils.mpi_grid import current_comm, distributed, run_simulated  # noqa: E402
-from src.gradients import qp_space_time  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.gradients.factor_chain import converged_factory  # noqa: E402
-from src.gradients.rpa_bse_surface import RPABSESurface  # noqa: E402
-from src.gradients.state_manifold import StateManifold  # noqa: E402
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.numerics.numerics import numerics_of  # noqa: E402
+from src.Base.factorization.separable_ri import resolve_isdf_grid  # noqa: E402
+from src.environments.solvent_screening import SolventScreening  # noqa: E402
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse import qp_space_time  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
+from src.gradients.reference_mean_field import converged_factory
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface  # noqa: E402
+from src.gradients.gwbse.state_manifold import StateManifold  # noqa: E402
 from src.properties.excitations import (SurfaceSpec, calc_vertical_excitation,  # noqa: E402
                                         calc_vertical_states, surface_of)
+from tests.blas_bar import same, same_solution  # noqa: E402
+from tests.pins import assert_same_tree  # noqa: E402
+from tests.isdf_test_grid import g1, g1_numerics  # noqa: E402
+from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -84,7 +90,9 @@ def molecule(atom=H2O):
 
 
 def converged(mf):
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -111,7 +119,7 @@ def isdf_lrc(mol):
     elements = sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid(GRID_ACCURACY, BASIS, elements,
                                         auxbasis=AUX)
-    mf = isdf_jk(base, auxbasis=AUX, counts=counts, n_start=n_start)
+    mf = isdf_jk_with_force(base, auxbasis=AUX, counts=counts, n_start=n_start)
     mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
     mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
@@ -138,9 +146,9 @@ PRODUCTION = SurfaceSpec(GroundState('dft', 'lrc-wpbeh'), environment=None,
                          chi0='space-time', residues='sop', solver='davidson',
                          factorization='isdf',
                          qp_states=QPStates(kind='frontier'),
-                         numerics={'grid_accuracy': GRID_ACCURACY,
+                         numerics=numerics_of({'grid_accuracy': GRID_ACCURACY,
                                    'sliced': True, 'fit': 'rows',
-                                   'bse_adjoint': 'grid'})
+                                   'bse_adjoint': 'grid'}))
 
 
 def prototype(case, mol):
@@ -153,10 +161,12 @@ def prototype(case, mol):
     factory = one_mean_field_per_geometry(
         {'hf-dense': rhf, 'pbe0-dense': pbe0, 'hf-davidson-grid': rhf,
          'pcm': in_water}[case])
-    kw = {'hf-davidson-grid': dict(solver='davidson', bse_adjoint='grid'),
-          'pcm': dict(environment=SolventScreening(mol, solvent='water'))
-          }.get(case, dict(solver='dense'))
-    return ExcitedStateChain(mol, factory, mf=factory(mol), **kw)
+    route = {'hf-davidson-grid': dict(solver='davidson', bse_adjoint='grid'),
+             'pcm': {}}.get(case, dict(solver='dense'))
+    env = (SolventScreening(mol, solvent='water') if case == 'pcm'
+           else None)
+    return ExcitedStateChain(mol, factory, mf=factory(mol), environment=env,
+                             numerics=g1_numerics(mol, numerics_of({**route})))
 
 
 def fresh(proto, target):
@@ -171,19 +181,19 @@ def watched(chain):
     """`chain` keeping every spectrum its Casida step returns and every
     mean-field force it computes, in the order made."""
     seen = {'spectra': [], 'g0': []}
-    casida, g0 = chain._casida_forward, chain.mean_field_gradient
+    casida, g0 = chain.solve_casida, chain.mean_field_gradient
 
-    def kept_casida(shared):
-        om, pieces = casida(shared)
-        seen['spectra'].append((om, pieces[10], pieces[11]))
-        return om, pieces
+    def kept_casida(shared, warm=True):
+        solution = casida(shared, warm=warm)
+        seen['spectra'].append((solution.omega, solution.x, solution.y))
+        return solution
 
     def kept_g0(mf):
         out = g0(mf)
         seen['g0'].append(out)
         return out
 
-    chain._casida_forward, chain.mean_field_gradient = kept_casida, kept_g0
+    chain.solve_casida, chain.mean_field_gradient = kept_casida, kept_g0
     return seen
 
 
@@ -230,33 +240,42 @@ def evaluated_together(proto, targets, couplings, displaced):
     return out
 
 
+def same_tree(x, y, quantity):
+    """`same` on arrays; on a tuple or list, on every item in turn."""
+    if isinstance(x, (tuple, list)) or isinstance(y, (tuple, list)):
+        return (isinstance(x, (tuple, list)) and isinstance(y, (tuple, list))
+                and len(x) == len(y)
+                and all(same_tree(a, b, quantity) for a, b in zip(x, y)))
+    return same(x, y, quantity=quantity)
+
+
 def g1_mismatches(alone, together, targets, couplings):
-    """The (target, geometry, quantity) whose bits differ."""
+    """The (target, geometry, quantity) whose bits differ.
+
+    The sharing holds to a few ulp on the BLAS the pin files record. On another BLAS
+    (an MKL whose GEMM rounds by call shape) forces, the ground gradient and
+    couplings hold to the gradient class bar, energies and spectra to the
+    energy class bar; the followed root stays an exact identity.
+    """
     names = ('force', 'energy', 'root', 'spectrum', 'g0')
+    classes = {'force': 'gradient', 'energy': 'energy', 'spectrum': 'energy',
+               'g0': 'gradient'}
     bad = []
     for t in targets:
         for k, (a, b) in enumerate(zip(alone[t], together[t])):
             for name, x, y in zip(names, a, b):
-                same = (bitwise(x, y) if name == 'spectrum'
-                        else bitwise((x,), (y,)))
-                if not same:
+                if name == 'root':
+                    agree = bitwise((x,), (y,))
+                elif name == 'spectrum':
+                    # a tuple of roots and vectors: `same_solution`
+                    agree = same_solution(x, y)
+                else:
+                    agree = same_tree(x, y, classes[name])
+                if not agree:
                     bad.append((t, k, name))
     bad += [(c, 0, 'interstate') for c in couplings
-            if not bitwise((alone[c],), (together[c],))]
+            if not same_tree(alone[c], together[c], 'gradient')]
     return bad
-
-
-@pytest.fixture
-def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread inside the rank threads."""
-    threads = lib.num_threads()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(1)
-    yield
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(threads)
 
 
 def g1(case):
@@ -276,7 +295,7 @@ def g1(case):
 
 # ------------------------------------------------------------------ G1
 @pytest.mark.parametrize('case', list(TARGETS))
-def test_one_evaluation_is_each_state_alone(case):
+def test_one_evaluation_is_each_state_alone(case, pyscf_one_thread):
     with distributed(None):
         bad, alone, _ = g1(case)
     assert not bad, f'{case}: (order, target, geometry, quantity) {bad}'
@@ -307,12 +326,13 @@ def test_one_evaluation_over_ranks(case, size, pyscf_one_thread):
 
 def test_the_composed_surface_takes_its_ground_state_once():
     """E_HF + E_c^dRPA + Omega: the dRPA ground-state force is computed once
-    and every target's total is its own surface's, bitwise."""
+    and every target's total is its own surface's (a few ulp on the recording
+    BLAS, the class bars elsewhere, as `g1_mismatches`)."""
     with distributed(None):
         mol = molecule()
         factory = one_mean_field_per_geometry(rhf)
         mf = factory(mol)
-        first = RPABSESurface(mol, factory, mf=mf)
+        first = RPABSESurface(mol, factory, mf=mf, numerics=g1_numerics(mol))
         alone = {}
         for spin in ('singlet', 'triplet'):
             surface = RPABSESurface(mol, factory, spin=spin, mf=mf,
@@ -332,7 +352,10 @@ def test_the_composed_surface_takes_its_ground_state_once():
     assert len(calls) == 1
     for t in (S0, T0):
         g, e, _ = alone[t[0]]
-        assert bitwise((g, e), (ev.gradient[t], ev.energy[t])), t
+        # a surface alone and the manifold: two forwards, so the sharing's
+        # bar (a few ulp on the recording BLAS, the class bar elsewhere)
+        assert same_tree(g, ev.gradient[t], 'gradient'), t
+        assert same_tree(e, ev.energy[t], 'energy'), t
 
 
 # ------------------------------------------------------- one proj(tau) sweep
@@ -380,13 +403,13 @@ def test_a_first_point_is_answered_once_without_a_forward(monkeypatch):
         proto = prototype('hf-dense', molecule())
         man = StateManifold(fresh(proto, S0), states=(S0, T0))
         ev = man.evaluate(gradients=(S0, T0))
-        forwards, shared = [], ExcitedStateChain._shared_forward
+        forwards, shared = [], ExcitedStateChain.shared_forward
 
         def counted(self, *args):
             forwards.append(1)
             return shared(self, *args)
 
-        monkeypatch.setattr(ExcitedStateChain, '_shared_forward', counted)
+        monkeypatch.setattr(ExcitedStateChain, 'shared_forward', counted)
         walk = man.surface(T0, first_point=ev)
         assert (walk.spin, walk.state) == T0
         first = walk.total_gradient(molecule())
@@ -430,6 +453,23 @@ RECORD_FIELDS = ('omega_eV', 'e0_hartree', 'en_hartree', 'gradient',
                  'qp_bookkeeping', 'held_grid')
 
 
+#: The class of a number field of a vertical record, for the bar it holds to
+#: under a BLAS other than the pins' (bitwise under the pins' own).
+FIELD_CLASS = {'gradient': 'gradient', 'driving_force_max': 'gradient',
+               'total_translation_residual': 'gradient',
+               'translation_residual': 'gradient', 'qp_z': 'continued'}
+
+
+def same_field(got, alone, label):
+    """One record field of the state computed together with another and of the
+    state computed alone: equal, as numbers to the bit under the BLAS the pins
+    record and within their class's cross-BLAS bar elsewhere."""
+    key = label[1]
+    assert_same_tree(got, alone,
+                     unit='eV' if key.endswith('_eV') else '1' if key == 'qp_z' else 'Ha',
+                     quantity=FIELD_CLASS.get(key, 'energy'), label=label)
+
+
 def test_vertical_states_are_each_states_own_record():
     states = (Excitation('singlet', root=1), Excitation('triplet', root=1))
     with distributed(None):
@@ -440,7 +480,7 @@ def test_vertical_states_are_each_states_own_record():
             alone = calc_vertical_excitation(PRODUCTION, x, mol, factory)
             got = together[x]
             for key in RECORD_FIELDS:
-                assert got[key] == alone[key], (x, key)
+                same_field(got[key], alone[key], (x, key))
             assert got['physics']['label'] == alone['physics']['label']
             assert repr(got['realization']) == repr(alone['realization'])
     with pytest.raises(ValueError, match='more than spin and root'):

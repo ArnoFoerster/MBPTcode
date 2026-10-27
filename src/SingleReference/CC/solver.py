@@ -11,88 +11,39 @@ import numpy as np
 
 from . import lambda1_residual as L1M
 from . import lambda2_residual as L2M
+from . import lambda3_residual as L3M
 from . import d1_blocks as D1M
-from .diis import DIIS
-
-try:
-    from . import lambda3_residual as L3M
-    HAVE_L3 = True
-except ImportError:
-    HAVE_L3 = False
+from .fixed_point import TO_L_LAYOUT, lambda_denominators, solve_lambda
 
 
 def solve_lambda_ccsdt(t1, t2, t3, fock, g, o, v, e_ai, e_abij, e_abcijk,
                        max_iter=300, stopping_eps=1e-8, verbose=True,
-                       diis_size=15, diis_start_cycle=2):
-    nv, no = t1.shape
+                       diis_size=15, diis_start_cycle=2, out=None):
+    """Lambda-CCSDT multipliers (l1, l2, l3) for converged T.
 
-    fock_e_ai = np.reciprocal(e_ai)
-    fock_e_abij = np.reciprocal(e_abij)
-    fock_e_abcijk = np.reciprocal(e_abcijk)
-
-    le_ai = e_ai.transpose(1, 0)
-    lfock_e_ai = fock_e_ai.transpose(1, 0)
-    le_abij = e_abij.transpose(2, 3, 0, 1)
-    lfock_e_abij = fock_e_abij.transpose(2, 3, 0, 1)
-    if HAVE_L3:
-        le_abcijk = e_abcijk.transpose(3, 4, 5, 0, 1, 2)
-        lfock_e_abcijk = fock_e_abcijk.transpose(3, 4, 5, 0, 1, 2)
+    out: optional dict; receives 'converged' and 'n_iter'. Non-convergence
+        warns (fixed_point.CCNotConverged) and returns the last iterate.
+    """
+    to_l = TO_L_LAYOUT
+    denominators = lambda_denominators((1, 2, 3), e_ai, e_abij, e_abcijk)
 
     # standard CC-Lambda starting point
     l1 = t1.transpose(1, 0).copy()
     l2 = t2.transpose(2, 3, 0, 1).copy()
-    l3 = t3.transpose(3, 4, 5, 0, 1, 2).copy() if HAVE_L3 else np.zeros((no, no, no, nv, nv, nv))
-    kd = np.eye(no + nv)
+    l3 = t3.transpose(3, 4, 5, 0, 1, 2).copy()
+    kd = np.eye(t1.shape[0] + t1.shape[1])
 
-    l1_dim = l1.size
-    l2_dim = l2.size
-    diis_update = DIIS(diis_size, start_iter=diis_start_cycle)
-    old_vec = np.hstack((l1.ravel(), l2.ravel(), l3.ravel()))
+    def residuals(ls):
+        l1, l2, l3 = ls
+        return [L1M.lambda1_residual(t1, t2, t3, l1, l2, l3, fock, g, o, v).transpose(to_l[1]),
+                L2M.lambda2_residual(t1, t2, t3, l1, l2, l3, fock, g, o, v).transpose(to_l[2]),
+                L3M.lambda3_residual(t1, t2, t3, l1, l2, l3, fock, g, kd, o, v).transpose(to_l[3])]
 
-    if verbose:
-        # flush=True: same batch-scheduler buffering reason as amplitudes.kernel
-        print("    ==> Lambda-CCSDT amplitude equations (DIIS) <==", flush=True)
-        print("     Iter          |dL1|          |dL2|          |dL3|", flush=True)
-
-    for it in range(max_iter):
-        r1 = L1M.lambda1_residual(t1, t2, t3, l1, l2, l3, fock, g, o, v).transpose(1, 0)
-        r2 = L2M.lambda2_residual(t1, t2, t3, l1, l2, l3, fock, g, o, v).transpose(2, 3, 0, 1)
-        if HAVE_L3:
-            r3 = L3M.lambda3_residual(t1, t2, t3, l1, l2, l3, fock, g, kd, o, v).transpose(3, 4, 5, 0, 1, 2)
-        else:
-            r3 = np.zeros_like(l3)
-
-        l1_new = (r1 + lfock_e_ai * l1) * le_ai
-        l2_new = (r2 + lfock_e_abij * l2) * le_abij
-        l3_new = (r3 + lfock_e_abcijk * l3) * le_abcijk if HAVE_L3 else l3
-
-        d1 = np.linalg.norm(l1_new - l1)
-        d2 = np.linalg.norm(l2_new - l2)
-        d3 = np.linalg.norm(l3_new - l3) if HAVE_L3 else 0.0
-
-        vec = np.hstack((l1_new.ravel(), l2_new.ravel(), l3_new.ravel()))
-        error_vec = old_vec - vec
-        try:
-            vec = diis_update.compute_new_vec(vec, error_vec)
-        except np.linalg.LinAlgError:
-            # tiny systems can converge so fast the DIIS error vectors become
-            # exactly degenerate (singular B-matrix) -- fall back to the
-            # undamped update for this step rather than crashing.
-            pass
-        old_vec = vec
-
-        l1 = vec[:l1_dim].reshape(l1.shape)
-        l2 = vec[l1_dim:l1_dim + l2_dim].reshape(l2.shape)
-        l3 = vec[l1_dim + l2_dim:].reshape(l3.shape)
-
-        if verbose:
-            print(f"     {it:4d}   {d1:.3e}      {d2:.3e}      {d3:.3e}", flush=True)
-
-        if d1 < stopping_eps and d2 < stopping_eps and d3 < stopping_eps:
-            break
-    else:
-        raise ValueError("Lambda-CCSDT iterations did not converge")
-
+    (l1, l2, l3), converged, n_iter = solve_lambda(
+        residuals, [l1, l2, l3], denominators, ['L1', 'L2', 'L3'], max_iter, stopping_eps,
+        diis_size, diis_start_cycle, verbose, 'Lambda-CCSDT')
+    if out is not None:
+        out['converged'], out['n_iter'] = converged, n_iter
     return l1, l2, l3
 
 

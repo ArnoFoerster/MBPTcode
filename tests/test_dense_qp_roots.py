@@ -33,20 +33,20 @@ from pyscf import gto
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import QB_QP_ROOT_TOL
+from src.properties.optimize import derived_walk
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.eri_blocks import mo_eri
+from src.SingleReference.common.eri_blocks import mo_eri
 from src.SingleReference.GW.quasi_boson import QPqb, largest_weight_root
-from src.SingleReference.LinearResponse.quasi_boson_bse import BSEqb
-from src.gradients.dense_surfaces import tight_rhf
+from src.SingleReference.BSE.quasi_boson_bse import BSEqb
+from src.gradients.gwbse.dense_surfaces import tight_rhf
 from src.properties.optimize import optimize
-from src.properties.surfaces import potential_energy_surface
+from src.gradients.gwbse.surface_factory import potential_energy_surface
+from tests.pins import class_bar
+from tests.dense_qp import dense_max_weight_root
 from tests.test_dense_surfaces import FD_TOL
 
-#: A root found by `largest_weight_root` sits within QB_QP_ROOT_TOL of the root
-#: of the equation it solved (its last Newton step), and that equation within
-#: QB_QP_ROOT_TOL of the full one (the couplings it dropped, by Weyl).
-ROOT_TOL = 2.0 * QB_QP_ROOT_TOL
+#: Roots and pole strengths of the two routes: the roots bar of tests/pins.py.
+ROOT_TOL = class_bar('root')
 
 #: Central-difference steps (Bohr) of the force check. An all-orbital surface
 #: carries continuum orbitals whose largest-weight root changes branch within
@@ -115,7 +115,7 @@ def test_every_water_orbital_carries_the_supermatrix_quasiparticle():
     qp = bare_quasiparticles(surface.mol0)
     assert surface.qp_set == list(range(surface.mol0.nao))
     for p in surface.qp_set:
-        w, z = qp.solve_diag_dense(p)
+        w, z = dense_max_weight_root(qp, p)
         assert abs(surface.seeds[p] - w) < ROOT_TOL, (p, surface.seeds[p], w)
         assert surface.qp_z[p] == pytest.approx(z, abs=ROOT_TOL), p
 
@@ -163,19 +163,23 @@ def test_the_all_orbital_force_is_the_derivative_of_its_energy():
 def test_the_formaldehyde_s1_walk_converges():
     """The walk on the largest-weight roots reaches its minimum."""
     surface = all_orbital_surface(formaldehyde())
-    _, info = optimize(surface, max_cycle=100, verbose=False)
+    _, info = optimize(surface,
+                       numerics=derived_walk(surface, 'a capped test walk', max_cycle=100),
+                       verbose=False)
     assert info['converged'], info['status']
 
 
-def test_the_rule_is_refused_with_a_seed_and_by_an_unknown_name():
-    """A seed would be ignored under 'weight', so it is refused."""
+def test_a_seed_is_followed_and_no_seed_takes_the_largest_weight():
+    """One root rule: unseeded, the root of largest pole strength; seeded at
+    that root, the same root followed through its bracket."""
     mol = water()
     mf = tight_rhf(mol)
     eri = mo_eri(mf, mol)
-    with pytest.raises(ValueError, match='follows no seed'):
-        BSEqb(mf, eri, 5, qp_orbs=[4], seeds={4: -0.5}, qp_root='weight')
-    with pytest.raises(ValueError, match='qp_root'):
-        BSEqb(mf, eri, 5, qp_orbs=[4], qp_root='nearest')
+    free = BSEqb(mf, eri, 5, qp_orbs=[4])
+    w, _ = free.qp.quasiparticle_root(4)
+    assert free.qp_roots[4] == w
+    followed = BSEqb(mf, eri, 5, qp_orbs=[4], seeds={4: w})
+    assert abs(followed.qp_roots[4] - w) < 1e-10
 
 
 @pytest.mark.parametrize('seed', range(4))

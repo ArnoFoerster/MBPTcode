@@ -5,16 +5,14 @@ Scope: T1/T2/T3 (full CCSDT) + Lambda1/Lambda2/Lambda3 (full Lambda-CCSDT)
 + the 1-RDM built from those. Lambda3 IS included: the generator's
 add_st_operator hard-truncates its automatic BCH expansion at quadruple
 commutators, which silently drops T3-dependent diagrams once a rank-3
-projector is folded into the target list -- fixed via hand-built order-5
-(quintuple) commutator corrections,. A single sign bug was found and
-fixed in the rank-3 projector convention during this work: the rank-3
-'e3(d,e,f,n,m,l)' bra (extended by direct analogy from the validated
+projector is folded into the target list; hand-built order-5 (quintuple)
+commutator corrections supply them. The rank-3 projector convention: the
+rank-3 'e3(d,e,f,n,m,l)' bra (extended by direct analogy from the validated
 rank-2 'e2(e,f,n,m)' pattern -- rank 3 has no official generator template
-to check against, unlike rank 1/2) reproduced the correct residual up to a
-uniform overall factor of -1. Caught by check_l3_residual_matches_
-generalized below (max abs diff ~1e-13 after negating, vs ~1e3 before);
-fixed by negating the rank-3 branch's coefficients in
-_lambda_residual_terms (the `s = -1.0 if rank == 3 else 1.0` factor).
+to check against, unlike rank 1/2) reproduces the correct residual up to a
+uniform overall factor of -1, which `_lambda_residual_terms` negates (the
+`s = -1.0 if rank == 3 else 1.0` factor). check_l3_residual_matches_
+generalized below sees it: max abs diff ~1e-13 with the factor, ~1e3 without.
 
 Validation ladder (cheapest/most-trusted oracle first):
 1. Restricted-integral sanity: Fock diagonal / HF energy reproduce the
@@ -22,18 +20,18 @@ Validation ladder (cheapest/most-trusted oracle first):
 2. l3_aaaaaa/aabaab/abbabb_residual vs the generalized lambda3_residual.py,
    on random spin-consistent synthetic amplitudes/integrals (no solver, no
    molecule) -- the cheapest and most direct oracle for the new Lambda3
-   equations themselves. This is the check that caught the sign bug above.
+   equations themselves. This is the check that sees the sign factor above.
 3. H2/6-31g: T3 is small-basis-limited but nonzero for 6-31g (2 virtuals in
    sto-3g would make T3 structurally zero, masking a real test) -- use a
    basis where the comparison actually exercises T3. Full restricted
    pipeline (T-CCSDT + full Lambda-CCSDT) vs the existing generalized
-   CCSDT pipeline: with Lambda3 now included, both the T-CCSDT correlation
+   CCSDT pipeline: with Lambda3 included, both the T-CCSDT correlation
    energy AND the full density should match the generalized pipeline
-   closely (not just the T-energy, as before Lambda3 was added).
+   closely (not just the T-energy).
 4. LiH/sto-3g (this codebase's established genuinely-nonzero-T3 case, see
    tests/test_ccsdt_lambda.py): T-CCSDT correlation energy
    vs the generalized pipeline to ~1e-10; AO density difference vs the
-   generalized pipeline (which also includes genuine Lambda3) now matches
+   generalized pipeline (which also includes genuine Lambda3) matches
    to ~1e-9 as well, since both pipelines solve the same physical Lambda3
    equations end-to-end (DIIS solve + density), not just the T-only energy.
 5. Timing comparison, restricted vs generalized, on LiH/sto-3g -- reports the
@@ -329,7 +327,7 @@ def check_h2_631g_structural_match():
     virtuals (T3 nonzero in general, but the true wavefunction has no
     genuine triple-excitation content for 2 electrons) -- exercises the
     restricted T3/Lambda3 machinery on real (if small) virtual space. With
-    Lambda3 now included, the full density should match the generalized
+    Lambda3 included, the full density should match the generalized
     pipeline closely."""
     mol = pyscf.M(atom='H 0 0 0; H 0 0 0.74', basis='6-31g')
     mf = mol.RHF(); mf.verbose = 0; mf.run()
@@ -367,11 +365,11 @@ def check_lih_sto3g_t_energy_matches():
 
 
 def check_lih_sto3g_density_matches_generalized():
-    """With Lambda3 now included on both sides, the restricted (spin-blocked)
+    """With Lambda3 included on both sides, the restricted (spin-blocked)
     and generalized (spin-orbital) full-CCSDT densities solve the exact
-    same physical Lambda-CCSDT equations, so the AO density should now
+    same physical Lambda-CCSDT equations, so the AO density should
     match to ~1e-9 (float-roundoff / DIIS-convergence level), not just be
-    'small but nonzero' as it was before Lambda3 was added."""
+    'small but nonzero'."""
     mol = pyscf.M(atom='Li 0 0 0; H 0 0 1.5957', basis='sto-3g')
     mf = mol.RHF(); mf.verbose = 0; mf.run()
 

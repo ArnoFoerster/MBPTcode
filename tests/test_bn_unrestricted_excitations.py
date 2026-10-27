@@ -6,9 +6,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                       CasidaSolver)
+
+#: |min eig| below which A + B or A - B counts as singular, Ha: a channel
+#: there may solve or be refused. TDHF (Sz=0) on this reference carries a
+#: zero mode at -5.8e-8 Ha.
+SINGULAR_TOL = 1e-6
 
 if __name__ == '__main__':
     all_ok = True
@@ -37,9 +43,20 @@ if __name__ == '__main__':
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='unrestricted', eta=1e-3)
     w_aux = lr.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
 
-    def check(label, omega):
+    def check(label, A, B):
+        """Positive roots where A + B and A - B are positive definite, a
+        CasidaInstability where either is not."""
+        lowest_pd = min(np.linalg.eigvalsh(A + B)[0],
+                        np.linalg.eigvalsh(A - B)[0])
+        try:
+            omega, _, _ = CasidaSolver(A, B).solve()
+        except CasidaInstability:
+            ok = lowest_pd < SINGULAR_TOL
+            print(f"{label:32s}: refused, min eig(A +- B) = {lowest_pd:+.3e} Ha  {'OK' if ok else 'FAIL'}")
+            return ok
         lowest = np.min(omega)
-        ok = np.all(np.isfinite(omega)) and lowest > 0
+        ok = (np.all(np.isfinite(omega)) and lowest > 0
+              and lowest_pd > -SINGULAR_TOL)
         print(f"{label:32s}: lowest excitation = {lowest:10.6f} Ha  (n_states={len(omega)})  {'OK' if ok else 'FAIL'}")
         return ok
 
@@ -47,32 +64,22 @@ if __name__ == '__main__':
     # a single combined alpha/beta problem (no separate singlet/triplet split
     # the way a closed-shell restricted reference has; that spin-adaptation
     # only exists for RHF references).
-    A, B = lr.build_casida_matrices(nocc, lBSE=False)
-    omega, _, _ = CasidaSolver(A, B).solve()
-    all_ok &= check('RPA (Sz=0)', omega)
+    all_ok &= check('RPA (Sz=0)', *lr.build_casida_matrices(nocc, lBSE=False))
+    all_ok &= check('TDHF (Sz=0, bare exchange)',
+                    *lr.build_casida_matrices(nocc, lBSE=True, W_aux=None))
+    all_ok &= check('BSE (Sz=0, screened exchange)',
+                    *lr.build_casida_matrices(nocc, lBSE=True, W_aux=w_aux))
 
-    A, B = lr.build_casida_matrices(nocc, lBSE=True, W_aux=None)
-    omega, _, _ = CasidaSolver(A, B).solve()
-    all_ok &= check('TDHF (Sz=0, bare exchange)', omega)
-
-    A, B = lr.build_casida_matrices(nocc, lBSE=True, W_aux=w_aux)
-    omega, _, _ = CasidaSolver(A, B).solve()
-    all_ok &= check('BSE (Sz=0, screened exchange)', omega)
-
-    # Spin-flip (Sz=+-1, the open-shell analog of a "triplet" channel):
-    # ba = occ_beta -> virt_alpha, ab = occ_alpha -> virt_beta.
-    for channel in ['ba', 'ab']:
-        A, B = lr.build_spin_flip_casida_matrices(nocc, lBSE=False, channel=channel)
-        omega, _, _ = CasidaSolver(A, B).solve()
-        all_ok &= check(f'RPA spin-flip ({channel})', omega)
-
-        A, B = lr.build_spin_flip_casida_matrices(nocc, lBSE=True, W_aux=None, channel=channel)
-        omega, _, _ = CasidaSolver(A, B).solve()
-        all_ok &= check(f'TDHF spin-flip ({channel})', omega)
-
-        A, B = lr.build_spin_flip_casida_matrices(nocc, lBSE=True, W_aux=w_aux, channel=channel)
-        omega, _, _ = CasidaSolver(A, B).solve()
-        all_ok &= check(f'BSE spin-flip ({channel})', omega)
+    # Spin-flip (Sz=+-1, the open-shell analog of a "triplet" channel): one
+    # problem coupling ab excitations (occ_alpha -> virt_beta) with ba
+    # de-excitations (occ_beta -> virt_alpha) and back. TDHF carries the zero
+    # mode of a global spin rotation here.
+    all_ok &= check('RPA spin-flip',
+                    *lr.build_spin_flip_casida_matrices(nocc, lBSE=False))
+    all_ok &= check('TDHF spin-flip',
+                    *lr.build_spin_flip_casida_matrices(nocc, lBSE=True, W_aux=None))
+    all_ok &= check('BSE spin-flip',
+                    *lr.build_spin_flip_casida_matrices(nocc, lBSE=True, W_aux=w_aux))
 
     print("\nALL PASSED" if all_ok else "\nFAILURES DETECTED")
     sys.exit(0 if all_ok else 1)
