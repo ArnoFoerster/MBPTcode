@@ -13,33 +13,36 @@ with mu adjusted so that Tr[gamma] equals the number of occupied orbitals.
 Two IR grids are used, both at the same beta and omega_max: a fermion grid
 for G and Sigma, and a boson grid for chi and W. Once converged, Sigma is
 continued to the real axis with Pade and the quasiparticle energies are read
-off the peaks of the spectral function.
+off the peaks of the spectral function. The total energy is the
+Galitskii-Migdal energy of the converged G and Sigma
+(`galitskii_migdal_energy`).
 
 `solve_qp_energy_scgw` is the entry point.
 """
 import numpy as np
 import scipy.signal
+import resource
 
 from pyscf.data.elements import chemcore
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.SingleReference.CC.diis import DIIS
+from src.Base.pyscf_interface import get_orbital_energies
 from src.Base.utils.time_frequency import (TimeFrequencyGrid)
 from src.SingleReference.base import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 from src.Base.utils.analyticalContinuation import pade_continue_elementwise
 
 # --- Convergence parameters ---
 # Outer scGW cycle
-GAMMA_CONVERGENCE = 1e-6    # max |gamma - gamma_old| at which the cycle stops
-GAMMA_MIXING = 0.3          # fraction of the new gamma kept in each iteration
-MU_CONVERGENCE = 1e-3       # max change of mu between repeated mu searches
-MAX_SCF_ITER = 100          # cap on scGW iterations
-MAX_MU_ITER = 50            # cap on repeated mu searches per scGW iteration
+RESIDUAL_CONVERGENCE = 1e-7 # max |Sigma_out - Sigma_in|, |F_out - F_in| at which the cycle stops
+LINEAR_MIXING = 1.0         # fraction of the new (Sigma, F) kept in linear-mixing steps
+DIIS_SIZE = 8               # DIIS subspace; 0 mixes linearly throughout
+DIIS_START = 3              # linear-mixing iterations before DIIS takes over
+MAX_SCF_ITER = 150          # cap on scGW iterations
 
 # mu search (mu_cycle)
 MU_STEP = 1e-6              # first step away from the starting mu
 TRACE_TOL = 1e-8            # |Tr[gamma] - nocc| at which mu is converged
+MU_KEEP_TOL = 1e-6          # |Tr[gamma] - nocc| at the incoming mu below which no search is done
 MU_TOL = 1e-10              # smallest bisection bracket width
 STALL_TRACE_TOL = 1e-4      # |Tr[gamma] - nocc| still accepted at that width
 MAX_BRACKET_ITER = 50
@@ -72,17 +75,61 @@ def density_matrix_ir(G, grid_f):
     G_greater_beta = G_even_beta + G_odd_beta
     return -G_greater_beta
 
-def build_new_F(gamma, V, h_mo):
+def galitskii_migdal_energy(G, sigma_mo, mf, h_mo, grid_f, e_nuc):
+    """Closed-shell Galitskii-Migdal total energy from G and Sigma_c.
+
+        E = E_nuc + Tr[gamma (h + F)] + (1/beta) sum_n Tr[Sigma_c(i.omega_n) G(i.omega_n)]
+
+    with gamma per spin and F = h + 2J[gamma] - K[gamma]. The prefactor of
+    the correlation term is 2 (spin) x 1/2 (GM).
+
+    The Matsubara sum runs over all n, not over the IR sampling points. It is
+    done as in `density_matrix_ir`: (1/beta) sum_n X(i.omega_n) = -X(tau = beta)
+    for a fermionic X, evaluated through the IR basis. Tr[Sigma G] decays as
+    1/omega^2, so X(tau) has no jump at tau = 0 and no convergence factor is
+    needed. The trace is taken before the transform: the matrix Sigma G does
+    not satisfy X(-i.omega) = X(i.omega)^dagger, which the even/odd split
+    assumes, but its trace satisfies x(-i.omega) = x(i.omega)*.
+
+    G is expected to be the Dyson solution for sigma_mo; at convergence
+    sigma_mo = Sigma[G] as well. gamma and F are rebuilt from G, not taken
+    from the (mixed) quantities of the scGW cycle.
+
+    Checked on H2/cc-pVDZ: with Sigma = 0 and the HF G0 it reproduces the HF
+    energy to 3e-8; for G0 and Sigma[G0] with the interaction scaled by
+    lambda, E_c / lambda^2 tends to twice the direct MP2 energy.
+
+    G, sigma_mo: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
+    mf: the mean-field object, for J and K (see `build_new_F`).
+    Returns (E, E_c): the total energy and its correlation part, both real.
+    """
+    gamma = density_matrix_ir(G, grid_f)
+    F = build_new_F(gamma, mf, h_mo)
+    E_1b = np.einsum('pq,qp->', gamma, h_mo + F).real
+
+    tr_sigma_G = np.einsum('wij,wji->w', sigma_mo, G)
+    E_c = density_matrix_ir(tr_sigma_G[:, None, None], grid_f)[0, 0].real
+
+    return e_nuc + E_1b + E_c, E_c
+
+def build_new_F(gamma, mf, h_mo):
     """Closed-shell Fock matrix F = h + 2J[gamma] - K[gamma], in the MO basis.
 
+    J and K are built in the AO basis by mf.get_jk, so the (nmo^4) MO
+    integrals are never stored; whether pyscf keeps AO integrals in core,
+    works integral-direct or uses density fitting is decided by mf. With
+    hermi=0 pyscf's J and K equal the MO-basis contractions
+    J_ij = (ij|kl) gamma_kl and K_ij = (ik|jl) gamma_kl for any gamma, also
+    one that is not exactly symmetric.
+
     gamma: (nmo, nmo) density matrix per spin (occupations between 0 and 1).
-    V: two-electron integrals in chemist notation, (ij|kl).
+    mf: the mean-field object whose mo_coeff define the MO basis.
     h_mo: core Hamiltonian.
     """
-    J_ij = np.einsum('ijkl,kl->ij', V, gamma)
-    K_ij = np.einsum('ikjl,kl->ij', V, gamma)
+    C = mf.mo_coeff
+    J_ao, K_ao = mf.get_jk(mf.mol, C @ gamma @ C.T, hermi=0)
 
-    return h_mo + 2* J_ij - K_ij
+    return h_mo + C.T @ (2* J_ao - K_ao) @ C
 
 def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
     """Dyson equation on the imaginary axis:
@@ -109,16 +156,31 @@ def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
             G_hf[k] = np.linalg.inv((G_hf_inv))
         return G, G_hf
 
-def build_Greal_from_F(freq_points, sigma_real, F, eta):
-    """Dyson equation on the real axis:
-    G(omega) = [(omega + i.eta) I - F - Sigma(omega)]^-1.
+def build_Greal_from_F(freq_points, sigma_real, F, eta, trace_only=False):
+    """Dyson equation just above the real axis, at z = omega + i.eta:
+    G(z) = [z I - F - Sigma(z)]^-1.
+
+    sigma_real must be Sigma evaluated at the same z = omega + i.eta, so eta
+    enters both terms. This is not double broadening: it is G at one complex
+    point, so every pole of G becomes a Lorentzian of half-width eta and height
+    Z / (pi * eta). Taking Sigma at omega + i0 instead would give widths Z * eta
+    and the same height 1 / (pi * eta) for every peak, whatever its weight.
 
     No mu here: sigma_real is expected on absolute real frequencies.
+
+    trace_only: return Tr[G(z)] per frequency instead of the full G, so the
+    (nfreq, nmo, nmo) array is never stored.
     """
 
-    G_w = np.empty_like(sigma_real)
     eye = np.eye(F.shape[0])
 
+    if trace_only:
+        tr_G = np.empty(len(freq_points), dtype=complex)
+        for i, w in enumerate(freq_points):
+            tr_G[i] = np.trace(np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i]))
+        return tr_G
+
+    G_w = np.empty_like(sigma_real)
     for i,w in enumerate(freq_points):
         G_w[i] = np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i])
 
@@ -135,37 +197,45 @@ def _mu_cycle_find_trace(mu, F, sigma_mo, grid_f, grid_kind='IR'):
 
     return np.trace(gamma), gamma, G
 
-def mu_cycle(mu, G, gamma, nocc, sigma_mo, V, h_mo,
-            mu_step=MU_STEP, trace_tol=TRACE_TOL, mu_tol=MU_TOL,
+def mu_cycle(mu, F, nocc, sigma_mo,
+            mu_step=MU_STEP, trace_tol=TRACE_TOL, keep_tol=MU_KEEP_TOL, mu_tol=MU_TOL,
             max_bracket_iter=MAX_BRACKET_ITER, max_bisect_iter=MAX_BISECT_ITER,
             grid_f=None, grid_kind='IR', stall_trace_tol=STALL_TRACE_TOL):
     """Find the mu for which Tr[gamma(mu)] = nocc.
 
-    F is built once from the incoming gamma and, like Sigma, kept fixed
-    during the search. Only then is Tr[gamma(mu)] monotonic in mu, which
-    bisection needs; rebuilding F at every trial mu made the trace jump.
-    The caller rebuilds F from the returned gamma.
+    F and Sigma are given by the caller and kept fixed during the search.
+    Only then is Tr[gamma(mu)] monotonic in mu, which bisection needs;
+    rebuilding F at every trial mu made the trace jump. Taking F as input
+    lets the caller mix F before the search, so the returned G is the Dyson
+    solution of the mixed F with the right particle number.
 
     Two phases:
       1. Step away from the starting mu, growing the step by 1.5x each time,
          until the trace crosses nocc.
       2. Bisect inside that bracket.
 
-    Converged when |trace - nocc| < trace_tol. If the bracket shrinks below
+    If the trace at the incoming mu is already within keep_tol of nocc, mu
+    is kept and no search is done. In a gapped system at large beta the
+    trace is nearly flat in mu inside the gap, so a trace error at the
+    1e-8 level of the IR density moves mu by ~1e-6 each search; mu then
+    drifts every scGW iteration and G(i.omega), which depends on mu
+    explicitly, never converges (seen on Ne/cc-pVDZ).
+
+    Once searching, converged when |trace - nocc| < trace_tol. If the bracket shrinks below
     mu_tol first, the result is still accepted when
     |trace - nocc| < stall_trace_tol; otherwise a RuntimeError is raised.
 
-    Returns (mu, G, gamma, F).
+    Returns (mu, G, gamma).
     """
-    F = build_new_F(gamma, V, h_mo)
     trace_old, gamma, G = _mu_cycle_find_trace(
         mu, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind,)
 
     # print(f'Trace before mu-cycle: {trace_old}')
 
-    if abs(trace_old - nocc) < trace_tol:
-        print('mu-cycle already converged within trace tolerance')
-        return mu, G, gamma, F
+    if abs(trace_old - nocc) < keep_tol:
+        print(f'mu_cycle: mu kept, |trace - nocc| = {abs(trace_old - nocc):.2e}')
+        return mu, G, gamma
+    del G, gamma
 
     # --- Phase 1: bracket the root ---
     step = mu_step
@@ -182,27 +252,29 @@ def mu_cycle(mu, G, gamma, nocc, sigma_mo, V, h_mo,
             break
         mu_a, trace_a = mu_b, trace_b
         step *= 1.5
+        del G_b, gamma_b
     else:
         raise RuntimeError(f'mu_cycle: failed to bracket nocc={nocc} '
                            f'within {max_bracket_iter} probes')
 
     # --- Phase 2: bisection ---
     mu_lo, mu_hi, trace_lo = mu_a, mu_b, trace_a
-    gamma_mid, G_mid = gamma_b, G_b
+    del G_b, gamma_b
     for _ in range(max_bisect_iter):
         mu_mid = 0.5 * (mu_lo + mu_hi)
+        G_mid = gamma_mid = None  # free the previous trial before building the next
         trace_mid, gamma_mid, G_mid = _mu_cycle_find_trace(
             mu_mid, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind)
 
         if abs(trace_mid - nocc) < trace_tol:
             print(f'mu_cycle converged: mu={mu_mid}, trace={trace_mid}')
-            return mu_mid, G_mid, gamma_mid, F
+            return mu_mid, G_mid, gamma_mid
 
         if abs(mu_hi - mu_lo) < mu_tol:
             if abs(trace_mid - nocc) < stall_trace_tol:
                 print(f'mu_cycle converged (bracket collapsed, trace within '
                      f'stall_trace_tol): mu={mu_mid}, trace={trace_mid}')
-                return mu_mid, G_mid, gamma_mid, F
+                return mu_mid, G_mid, gamma_mid
             raise RuntimeError(
                 f'mu_cycle: bisection bracket collapsed to width '
                 f'{abs(mu_hi - mu_lo):.2e} (< mu_tol={mu_tol:.1e}) with '
@@ -227,13 +299,16 @@ def project_tau_cross(src_grid, dst_grid, f_src, dim, parity):
 
     f_src: (ntau_src, dim, dim), on src_grid.tau_points.
     parity: 'even' or 'odd', the symmetry sector f_src belongs to.
-    Returns (ntau_dst, dim, dim), on dst_grid.tau_points.
+    Returns (ntau_dst, dim, dim), on dst_grid.tau_points, C-contiguous: the
+    transposed view would make every [t] slice strided, which matmul cannot
+    pass to BLAS (14 s instead of 0.5 s per Sigma build for CH4/cc-pVTZ).
     """
     ntau_src = len(src_grid.tau_points)
     flat = f_src.reshape(ntau_src, dim * dim).T               # (dim*dim, ntau_src)
-    return src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T.reshape(-1, dim, dim)
+    f_dst = src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T
+    return np.ascontiguousarray(f_dst).reshape(-1, dim, dim)
 
-def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
+def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
 
     Steps: G -> chi = G*G -> W = [I - chi]^-1 -> Sigma = G*W. The products
@@ -242,10 +317,20 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
     grid, chi and W on the boson grid, and `project_tau_cross` moves
     quantities between the two.
 
+    Both products are local in tau, so each is done in a loop over tau that
+    takes the result straight back to a small basis, chi(tau) to the
+    auxiliary basis and Sigma(tau) to the MO basis, before the transform to
+    frequency. Only a few (ngrid, ngrid) slices are alive at once, never an
+    (ntau, ngrid, ngrid) array: ngrid is several times nmo and grows with
+    the number of atoms, so those arrays set the peak memory (2.2 GiB for
+    CH4/cc-pVTZ, against ~0.7 GiB with the loops).
+
     G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
     X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
+    return_all: also return the intermediates; otherwise only sigma_new is
+        returned and chi, W and G(tau) are freed as soon as they are used.
 
-    Returns (G_tau, chi_omega, W_omega, sigma_new):
+    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new):
       G_tau      G_lesser + 1j*G_greater, on grid_f.tau_points
       chi_omega  on grid_b.omega_points, auxiliary basis
       W_omega    on grid_b.omega_points, auxiliary basis
@@ -260,71 +345,128 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D):
     # chi lives on the boson grid, so move G onto the boson tau points.
     G_even_b = project_tau_cross(grid_f, grid_b, G_even_f, nmo, 'even')
     G_odd_b = project_tau_cross(grid_f, grid_b, G_odd_f, nmo, 'odd')
-    G_lesser_b = G_even_b - G_odd_b
-    G_greater_b = G_even_b + G_odd_b
 
-    # MO basis -> ISDF/THC grid.
-    Ghat_lesser_b = np.einsum('pi,tij,qj->tpq', X_mo, G_lesser_b, X_mo, optimize=True)
-    Ghat_greater_b = np.einsum('pi,tij,qj->tpq', X_mo, G_greater_b, X_mo, optimize=True)
+    # chi(i.omega) = -2 sum_tau cosft_wt[w, tau] D^T [Go(tau) * Gv(tau)] D,
+    # the same as chi0_imaginary_frequency, with Go = Ghat_greater and
+    # Gv = -Ghat_lesser for the dressed G. The two minus signs cancel.
+    # Ghat = X_mo G X_mo^T is G on the ISDF/THC grid (lesser = even - odd,
+    # greater = even + odd).
+    #
+    # The (ngrid, ngrid) products are written into buffers reused over tau,
+    # and X^T, D^T are made contiguous: in benchmarks at ngrid = 740
+    # (OpenBLAS), fresh arrays and transposed views as left operand made
+    # these products up to 2-3x slower than the batched einsums.
+    naux = D.shape[1]
+    ngrid = X_mo.shape[0]
+    XT = np.ascontiguousarray(X_mo.T)
+    DT = np.ascontiguousarray(D.T)
+    buf_a = np.empty((ngrid, ngrid))
+    buf_b = np.empty((ngrid, ngrid))
 
-    # chi(i.omega) from the dressed G. The minus on Gv matches the sign
-    # convention chi0_imaginary_frequency uses for its bare Go/Gv. eps and
-    # nocc are not needed when Go/Gv are passed, hence None.
-    chi_omega = chi0_imaginary_frequency(X_mo, D, None, None, grid_b,
-                                         Go=Ghat_greater_b, Gv=-Ghat_lesser_b)
+    pi_aux = np.empty((len(grid_b.tau_points), naux, naux))
+    for t in range(len(grid_b.tau_points)):
+        np.matmul(X_mo @ (G_even_b[t] - G_odd_b[t]), XT, out=buf_a)
+        np.matmul(X_mo @ (G_even_b[t] + G_odd_b[t]), XT, out=buf_b)
+        buf_a *= buf_b
+        pi_aux[t] = (DT @ buf_a) @ D
+    del G_even_b, G_odd_b
+    chi_omega = 2.0 * np.tensordot(grid_b.cosft_wt, pi_aux, axes=(1, 0))
+    del pi_aux
 
     # W = [I - chi]^-1 at each frequency.
-    naux = chi_omega.shape[-1]
     eye_aux = np.eye(naux)
     W_omega = np.empty_like(chi_omega)
     for k in range(chi_omega.shape[0]):
         W_omega[k] = np.linalg.inv(eye_aux - chi_omega[k])
+    if not return_all:
+        del chi_omega
 
     # W(i.omega) -> W(tau). Only the correlation part W - I is transformed
     # (the constant does not decay), and it is even, so cosine only.
     Wt_tau_b = np.einsum('tk,kab->tab', grid_b.cosft_tw, W_omega - eye_aux, optimize=True)
+    if not return_all:
+        del W_omega
 
     # Sigma lives on the fermion grid, so move W onto the fermion tau points.
     Wt_tau_f = project_tau_cross(grid_b, grid_f, Wt_tau_b, naux, 'even')
+    del Wt_tau_b
 
-    # Auxiliary basis -> ISDF/THC grid.
-    Zt_tau = np.einsum('Pa,tab,Qb->tPQ', D, Wt_tau_f, D, optimize=True)
+    # Sigma(tau) = G(tau) * Z(tau) elementwise on the ISDF/THC grid, with
+    # Z = D (W - I) D^T; unlike chi, no extra sign is needed. G is taken at
+    # the fermion tau points straight from the fermion-grid G rather than
+    # projecting the boson-grid copy back. Sigma_greater +- Sigma_lesser,
+    # the even and odd parts, need only the even and odd parts of G:
+    #     even = 2 X^T [(X G_even X^T) * Z] X,  odd = 2 X^T [(X G_odd X^T) * Z] X.
+    # Sigma(tau) -> Sigma(i.omega) with overall prefactor -0.5, the same
+    # normalization as self_energy_matrix_imaginary_time (imaginary_time.py);
+    # it cancels the 2 above, so even/odd below are the halves.
+    # Checked against that routine for the bare G0: agreement to 8e-9.
+    even = np.empty((len(grid_f.tau_points), nmo, nmo))
+    odd = np.empty_like(even)
+    Z_t = np.empty((ngrid, ngrid))
+    for t in range(len(grid_f.tau_points)):
+        np.matmul(D @ Wt_tau_f[t], DT, out=Z_t)
+        np.matmul(X_mo @ G_even_f[t], XT, out=buf_a)
+        buf_a *= Z_t
+        even[t] = (XT @ buf_a) @ X_mo
+        np.matmul(X_mo @ G_odd_f[t], XT, out=buf_a)
+        buf_a *= Z_t
+        odd[t] = (XT @ buf_a) @ X_mo
+    del Z_t, buf_a, buf_b, Wt_tau_f
 
-    # G on the ISDF/THC grid at the fermion tau points, straight from the
-    # fermion-grid G rather than projecting the boson-grid copy back.
-    Ghat_lesser_f = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f - G_odd_f, X_mo, optimize=True)
-    Ghat_greater_f = np.einsum('pi,tij,qj->tpq', X_mo, G_even_f + G_odd_f, X_mo, optimize=True)
+    sigma_new = -(np.tensordot(grid_f.cosft_wt, even, axes=(1, 0))
+                  + 1j * np.tensordot(grid_f.sinft_wt, odd, axes=(1, 0)))
+    del even, odd
 
-    # Sigma(tau) = G(tau) * W(tau), elementwise on the ISDF/THC grid. Unlike
-    # chi, no extra sign is needed here.
-    sig_lesser_thc = Zt_tau * Ghat_lesser_f
-    sig_greater_thc = Zt_tau * Ghat_greater_f
-
-    # ISDF/THC grid -> MO basis.
-    sig_lesser = np.einsum('pi,tpq,qj->tij', X_mo, sig_lesser_thc, X_mo, optimize=True)
-    sig_greater = np.einsum('pi,tpq,qj->tij', X_mo, sig_greater_thc, X_mo, optimize=True)
-
-    even = sig_greater + sig_lesser
-    odd = sig_greater - sig_lesser
-
-    # Sigma(tau) -> Sigma(i.omega) on the fermion grid.
-    sigma_new = (np.einsum('wt,tij->wij', grid_f.cosft_wt, even, optimize=True)
-                + 1j * np.einsum('wt,tij->wij', grid_f.sinft_wt, odd, optimize=True))
+    if not return_all:
+        return sigma_new
 
     G_lesser_f = G_even_f - G_odd_f
     G_greater_f = G_even_f + G_odd_f
-    # Overall prefactor -0.5, the same normalization as
-    # self_energy_matrix_imaginary_time (imaginary_time.py). Checked against
-    # that routine for the bare G0: agreement to 8e-9.
-    return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, -0.5 * sigma_new
+    return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, sigma_new
+
+def pack_sigma_F(sigma, F, sigma_weight=1.0):
+    """(Sigma, F) as one real vector, for DIIS.
+
+    Real and imaginary parts of Sigma are stored separately, so the plain
+    dot product of two such vectors is Re<e1|e2>, the DIIS inner product.
+    sigma_weight scales the Sigma block: it has nfreq times more entries
+    than F and would otherwise dominate the DIIS B-matrix. It is applied to
+    the error vectors only; the iterates are packed unweighted, so DIIS
+    combines them without unpacking the weight again.
+
+    sigma: (nfreq, nmo, nmo) complex. F: (nmo, nmo) real.
+    """
+    return np.concatenate([sigma_weight * sigma.real.ravel(),
+                           sigma_weight * sigma.imag.ravel(),
+                           F.ravel()])
+
+def unpack_sigma_F(x, sigma_shape):
+    """Inverse of `pack_sigma_F` (for sigma_weight = 1)."""
+    n = int(np.prod(sigma_shape))
+    sigma = (x[:n] + 1j * x[n:2 * n]).reshape(sigma_shape)
+    # Copy, so F does not keep the whole packed vector x alive as a view.
+    F = x[2 * n:].reshape(sigma_shape[1:]).copy()
+    return sigma, F
+
+def pack_G(G):
+    """G as one real vector for DIIS (real and imaginary parts, as in `pack_sigma_F`)."""
+    return np.concatenate([G.real.ravel(), G.imag.ravel()])
+
+def unpack_G(x, G_shape):
+    """Inverse of `pack_G`."""
+    n = int(np.prod(G_shape))
+    return (x[:n] + 1j * x[n:]).reshape(G_shape)
 
 def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_file=None, **kwargs):
     """Self-consistent GW quasiparticle energies on IR grids.
 
-    Starts from the mean-field G0, iterates Sigma, mu, the density and F to
-    self-consistency (convergence is on the density matrix), then continues
+    Starts from the mean-field G0, iterates Sigma and F to self-consistency
+    (DIIS on (Sigma, F), convergence on their residual), then continues
     Sigma to the real axis with Pade and takes the quasiparticle energies
     from the peaks of the spectral function A(omega) = -Tr[Im G(omega)] / pi.
+    The total energy is the Galitskii-Migdal energy of the converged G and
+    Sigma.
 
     mf, mol: converged pyscf mean-field object and its molecule.
     nocc: number of doubly occupied orbitals.
@@ -332,12 +474,19 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     grid_kind: only 'IR' is implemented.
     save_file: if given, (w_real, A) is written there as CSV.
     kwargs: `factors` (precomputed output of `separable_factors`) or
-        `auxbasis` (used to build them).
+        `auxbasis` (used to build them); `beta` and `omega_max` override
+        the IR grid parameters that are otherwise derived from mf's
+        orbital energies (e.g. to run different starts on the same grid);
+        `diis_size`, `diis_start` and `mixing` override DIIS_SIZE,
+        DIIS_START and LINEAR_MIXING; `mix` picks what is mixed, 'sigma_F'
+        (default) or 'G' (see the comment at the cycle).
 
-    Returns (qpes, A, w_real): the peak positions, the spectral function and
-    the real frequency axis it is on.
+    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
+    function, the real frequency axis it is on, the Galitskii-Migdal
+    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
+    and the converged chemical potential.
     With skip_scf=True, returns
-    (G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D) instead.
+    (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
 
     if grid_kind.upper() != 'IR':
@@ -356,14 +505,14 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     dG = np.abs(eps - mu)
     e_min = eps[virt].min() - eps[occ].max()
     e_max = eps[virt].max() - eps[occ].min()
-    omega_max = 3.0 * (dG.max() + e_max)
+    omega_max = kwargs.get('omega_max') or 3.0 * (dG.max() + e_max)
 
     # beta must be large enough that the gap is effectively at T = 0, but
     # not larger: Lambda = beta * omega_max also sets how well conditioned
     # the omega -> tau transform is. Measured on Ne/cc-pVDZ, with the default
     # Matsubara sampling: 100/dG.min() diverged within ~5 iterations,
     # 25/dG.min() was stable.
-    beta = 25.0 / dG.min()
+    beta = kwargs.get('beta') or 25.0 / dG.min()
 
     # The default Matsubara sampling only reaches 1.1 - 1.4 x omega_max,
     # which leaves the transform ill-conditioned near tau = 0 and beta, where
@@ -398,7 +547,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     print(f'boson   duality_error (even/odd) = '
             f'{grid_b.duality_error("even"):.2e} / {grid_b.duality_error("odd"):.2e}\n')
 
-    X_mo, D, X_ao, coords = (kwargs.get('factors') if kwargs.get('factors') is not None
+    X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
                                 else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis')))
 
     # --- First iteration: G0 -> gamma, Sigma -> F -> G ---
@@ -413,78 +562,153 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     gamma = density_matrix_ir(G0, grid_f)
     print(f'Trace gamma_G0: {np.trace(gamma)}, expected nocc: {nocc}\n')
 
-    _, _, _, sigma_new = calc_new_sigma_ir(
-        G0, grid_f, grid_b, X_mo, D)
+    sigma_new = calc_new_sigma_ir(G0, grid_f, grid_b, X_mo, D)
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
-    V = get_two_electron_integrals_chemist(mol,mf)
+    e_nuc = mol.energy_nuc()
 
-    F = build_new_F(gamma, V, h_mo)
+    F = build_new_F(gamma, mf, h_mo)
     G = build_G_from_F(mu, grid_f.omega_points, sigma_new, F)
 
     if skip_scf:
-        return G, F, G0, mu, V, h_mo, grid_f, grid_b, X_mo, D
+        return G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D
+    del G0
 
     # --- Self-consistency cycle ---
-    # Per iteration: new Sigma from G, then repeat the mu search (which also
-    # rebuilds F, G and gamma) until mu stops moving, then mix gamma with the
-    # previous one (fraction alpha of the new).
-    delta_gamma = 999
-    gamma_convergence = GAMMA_CONVERGENCE
+    # mix='sigma_F': the iterate is the Dyson input x_in = (Sigma_in, F_in).
+    #   1. x_out = (Sigma[G], F[gamma[G]]) from the current G
+    #   2. residual r = x_out - x_in; stop when it is below tolerance
+    #   3. new x_in by linear mixing (first diis_start iterations, or when
+    #      the DIIS B-matrix is singular) or DIIS
+    #   4. mu search with x_in fixed -> G, gamma
+    # The mu search comes last, so every G is the Dyson solution of x_in with
+    # Tr[gamma] = nocc, and its GM energy is meaningful at every iteration.
+    #
+    # mix='G': the iterate is G_in (gamma_in = gamma[G_in] is linear in G,
+    # so mixing G mixes gamma as well).
+    #   1. Sigma[G_in], F[gamma_in], mu search -> G_out
+    #   2. residual r = G_out - G_in; stop when it is below tolerance
+    #   3. new G_in by linear mixing or DIIS
+    # Every G_out has Tr[gamma] = nocc and the mixing coefficients sum to 1,
+    # so G_in keeps the right particle number, but it is not the Dyson
+    # solution of any Sigma; the GM energy is that of G_out.
+    #
+    # mu itself is not mixed in either: the search fixes it from Sigma and F.
+    mix = kwargs.get('mix', 'sigma_F')
+    if mix not in ('sigma_F', 'G'):
+        raise ValueError(f"mix={mix!r}: choose 'sigma_F' or 'G'")
+    alpha = kwargs.get('mixing', LINEAR_MIXING)
+    diis_size = kwargs.get('diis_size', DIIS_SIZE)
+    diis_start = kwargs.get('diis_start', DIIS_START)
+    diis = DIIS(diis_size, start_iter=0) if diis_size > 0 else None
 
-    alpha = GAMMA_MIXING
+    # Weight of the Sigma block in the DIIS error, see pack_sigma_F.
+    sigma_weight = 1.0 / np.sqrt(len(freq_points))
+    sigma_shape = sigma_new.shape
 
-    gamma = density_matrix_ir(G, grid_f)
+    sigma_in, F_in = sigma_new, F
+    del sigma_new, F, G, gamma
+    # print(f'Sigma_in: {sigma_in.nbytes / 2**30:.3f} GiB')
+    mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                            grid_f=grid_f, grid_kind='IR')
 
-    print('\n----SCF----\n')
+    print(f'\n----SCF (mixing {mix})----\n')
 
-    for _ in range(MAX_SCF_ITER):
-        if delta_gamma <= gamma_convergence:
-            break
+    residual = np.inf
+    for it in range(MAX_SCF_ITER):
+        mu_old = mu
+        if mix == 'sigma_F':
+            # 1. Outputs from the current G
+            sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            F_out = build_new_F(gamma, mf, h_mo)
 
-        gamma_old = gamma
-        sigma_old = sigma_new
+            # 2. Residual
+            r_sigma = sigma_out - sigma_in
+            r_F = F_out - F_in
+            res_sigma = np.max(np.abs(r_sigma))
+            res_F = np.max(np.abs(r_F))
+            residual = max(res_sigma, res_F)
+            print(f'Iteration {it}: residual Sigma: {res_sigma:.3e}, F: {res_F:.3e}')
+            if residual <= RESIDUAL_CONVERGENCE:
+                del sigma_out, F_out, r_sigma, r_F
+                break
 
-        _, _, _, sigma_new = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            x_in = pack_sigma_F(sigma_in, F_in)
+            x_out = pack_sigma_F(sigma_out, F_out)
+            error = pack_sigma_F(r_sigma, r_F, sigma_weight)
+            del sigma_out, F_out, r_sigma, r_F
+        else:
+            # 1. G_out from the current G_in
+            sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            F_in = build_new_F(gamma, mf, h_mo)
+            mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                                            grid_f=grid_f, grid_kind='IR')
 
-        delta_sigma = np.max(np.abs(sigma_old - sigma_new))
+            # 2. Residual
+            res_G = np.max(np.abs(G_out - G))
+            res_gamma = np.max(np.abs(gamma_out - gamma))
+            residual = res_G
+            print(f'Iteration {it}: residual G: {res_G:.3e}, gamma: {res_gamma:.3e}')
+            if residual <= RESIDUAL_CONVERGENCE:
+                G, gamma = G_out, gamma_out
+                del G_out, gamma_out
+                break
 
-        mu_pre_scf = mu
+            x_in = pack_G(G)
+            x_out = pack_G(G_out)
+            error = x_out - x_in
 
-        mu_convergence = MU_CONVERGENCE
+        # 3. Mix
+        x_new = None
+        if diis is not None and it >= diis_start:
+            try:
+                x_new = diis.compute_new_vec(x_out, error)
+                step = 'DIIS'
+            except np.linalg.LinAlgError:
+                # Near convergence the error vectors can become linearly
+                # dependent; take a linear step instead.
+                pass
+        if x_new is None:
+            x_new = x_in + alpha * (x_out - x_in)
+            step = f'linear (alpha = {alpha})'
+        del x_in, x_out, error
 
-        # for _ in range(MAX_MU_ITER):
-        #     mu_old = mu
+        if mix == 'sigma_F':
+            sigma_in, F_in = unpack_sigma_F(x_new, sigma_shape)
+            del x_new, G, gamma
 
-        #     mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
-        #                     sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
+            # 4. Dyson + particle number
+            mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
+                                    grid_f=grid_f, grid_kind='IR')
+            G_dyson = G
+        else:
+            G = unpack_G(x_new, sigma_shape)
+            gamma = density_matrix_ir(G, grid_f)
+            G_dyson = G_out
+            del x_new, G_out, gamma_out
 
-        #     if abs(mu_old - mu) <= mu_convergence:
-        #         break
-        # else:
-        #     raise RuntimeError(f'scGW: mu did not settle within {MAX_MU_ITER} '
-        #                        f'mu searches (last change {abs(mu_old - mu):.2e})')
-
-
-        # TESTING ONE MU CYCLE INSTEAD OF CONVERGING MU
-        mu, G, gamma, F = mu_cycle(mu, G, gamma, nocc,
-                                   sigma_mo=sigma_new, V=V, h_mo=h_mo, grid_f=grid_f, grid_kind='IR')
-        F = build_new_F(gamma, V, h_mo)
-
-        
-        print(f'Mu post mu_scf: {mu}')
-
-        gamma = alpha * gamma + (1 - alpha) * gamma_old
-
-        delta_gamma = np.max(np.abs(gamma - gamma_old))
-        delta_mu = abs(mu - mu_pre_scf)
-        print(f'Delta gamma: {delta_gamma}\nDelta mu: {delta_mu}\nDelta Sigma: {delta_sigma}\n\n')
+        # G_dyson is the Dyson solution for sigma_in, so this is the GM
+        # energy of the current iterate; it converges with the cycle.
+        E_gm, E_c = galitskii_migdal_energy(G_dyson, sigma_in, mf, h_mo, grid_f, e_nuc)
+        print(f'Step: {step}\nmu: {mu} (delta mu: {abs(mu - mu_old):.3e})\n'
+              f'E_GM: {E_gm} (E_c: {E_c})\n\n')
+        del G_dyson
     else:
-        if delta_gamma > gamma_convergence:
-            raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
-                               f'(delta gamma = {delta_gamma:.2e})')
+        raise RuntimeError(f'scGW: not converged in {MAX_SCF_ITER} iterations '
+                           f'(residual = {residual:.2e})')
 
     print('\n----END SCF----\n')
+
+    # G is the Dyson solution of (sigma_in, F_in); continue those to the real
+    # axis so G, F and Sigma below stay consistent.
+    sigma_new, F = sigma_in, F_in
+
+    E_gm, E_c = galitskii_migdal_energy(G, sigma_new, mf, h_mo, grid_f, e_nuc)
+    print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
+
+    # Nothing from the cycle is needed on the real axis; free it before the
+    # (large) real-frequency arrays are allocated.
+    del h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
@@ -494,7 +718,12 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     w_step = eta / 10
 
     eps_F = np.linalg.eigvalsh(F)
-    w_real = np.arange(eps_F[chemcore(mol)] - 0.5, eps_F[-1] + 0.5, w_step)
+
+    # These settings should be put in the documentation
+    A_window = kwargs.get('A_window') or 0.5
+    A_range = kwargs.get('A_range') or [eps_F[chemcore(mol)] - A_window , 2 * mu - eps_F[chemcore(mol)] + A_window]
+
+    w_real = np.arange(A_range[0], A_range[1], w_step)
     pade_max_order = 24
 
     z_fit = mu + 1j * grid_f.omega_points
@@ -502,17 +731,19 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     sigma_real = pade_continue_elementwise(z_fit, sigma_new, z_real, greedy=True,
                                         symmetric=True, max_order=pade_max_order) 
+    # print(f'SigmaReal: {sigma_real.nbytes / 2**30:.3f} GiB')
 
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
         f'eta = {eta}: shape {sigma_real.shape}')
     print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
         f'{np.max(np.abs(pade_continue_elementwise(z_fit, sigma_new, z_fit, symmetric=True, max_order=pade_max_order) - sigma_new))}\n')
 
-    G_w = build_Greal_from_F(w_real, sigma_real, F, eta)
-    A = -1/np.pi * np.trace(G_w, axis1=1, axis2=2).imag
+    tr_G_w = build_Greal_from_F(w_real, sigma_real, F, eta, trace_only=True)
+    del sigma_real
+    A = -1/np.pi * tr_G_w.imag
 
     if save_file is not None:
-        np.savetxt(save_file, (w_real, A), delimiter=',')
+        np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
 
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # height threshold is set as a minimum weight rather than a fixed number.
@@ -527,4 +758,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         shift = 0.5 * (a_left - a_right) / (a_left - 2 * a_mid + a_right)
         qpes[i] = w_real[peak] + shift * w_step
 
-    return qpes, A, w_real
+    peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
+    print(f'\nPeak memory usage: {peak_gib} GiB\n')
+
+    return qpes, A, w_real, E_gm, mu
