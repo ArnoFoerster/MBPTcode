@@ -24,3 +24,5 @@ src/SingleReference/DensityMatrix/generated_mpn/mpn_amp_numerators_o*.py
 # the restricted order-4 ground state of non-Dyson ADC(5), written with the ADC(5)
 # runtime (GenerateRuntime)
 src/SingleReference/DensityMatrix/generated_mpn_restricted/mpn_order4_ground_state_restricted.py
+
+.claude/

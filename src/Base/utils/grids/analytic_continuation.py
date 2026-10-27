@@ -87,3 +87,76 @@ class PadeFit:
 
     def __call__(self, z_query):
         return pade_eval(z_query, self.z, self.coefficients)
+
+
+def _greedy_thiele(z, f):
+    """greedy_pade_order and thiele_coefficients in one O(n^2) pass. Returns (order, a).
+
+    Same ordering and coefficients as the two separate calls: a candidate's next
+    Thiele coefficient only needs its own row of the reciprocal-difference table,
+    so every remaining row is advanced one column per added node instead of
+    rebuilding the whole table for each candidate.
+    """
+    n = len(z)
+    row = np.array(f, dtype=complex)
+    remaining = np.ones(n, dtype=bool)
+    order = np.empty(n, dtype=int)
+    a = np.empty(n, dtype=complex)
+
+    last = int(np.argmin(np.abs(z)))
+    for i in range(n):
+        if i > 0:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                row[remaining] = (a[i - 1] - row[remaining]) / ((z[remaining] - z[last]) * row[remaining])
+            score = np.where(remaining & np.isfinite(row), np.abs(row), np.inf)
+            last = int(np.argmin(score))
+            if not np.isfinite(score[last]):
+                raise FloatingPointError(
+                    f'greedy Pade ordering: every next Thiele coefficient of the '
+                    f'{n - i} points left is non-finite after {i} nodes')
+        order[i], a[i] = last, row[last]
+        remaining[last] = False
+
+    return order, a
+
+
+def pade_continue_elementwise(z, F, z_query, greedy=True, symmetric=False, rel_tol=1e-10,
+                              max_order=None):
+    """Thiele-Pade continuation of every element of a matrix-valued function independently.
+
+    z         : (n,) sample points
+    F         : (n,d,d) samples
+    z_query   : (nq,) points to evaluate at
+    symmetric : F[k] = F[k].T for every k, so only the upper triangle is fitted.
+    rel_tol   : elements whose samples all stay below rel_tol*max|F| are returned as
+                exactly zero. Thiele divides by the samples, so a symmetry-forbidden
+                element would otherwise be a fit to round-off.
+    max_order : cap on the number of Pade nodes, applied after the ordering (None
+                keeps all of them). Same meaning as in PadeFit.
+
+    Returns (nq,d,d). Each element gets its own greedy ordering, as a PadeFit per
+    element would, but through the single-pass _greedy_thiele.
+    """
+    z = np.asarray(z, dtype=complex)
+    F = np.asarray(F, dtype=complex)
+    z_query = np.atleast_1d(np.asarray(z_query, dtype=complex))
+    d = F.shape[-1]
+    out = np.zeros((len(z_query), d, d), dtype=complex)
+    floor = rel_tol * np.abs(F).max()
+    n_nodes = len(z) if max_order is None else min(max_order, len(z))
+
+    for p in range(d):
+        for q in range(p if symmetric else 0, d):
+            f = F[:, p, q]
+            if np.abs(f).max() <= floor:
+                continue
+            if greedy:
+                order, a = _greedy_thiele(z, f)
+                # Thiele coefficients are nested, so truncating them is the lower-order fit.
+                out[:, p, q] = pade_eval(z_query, z[order[:n_nodes]], a[:n_nodes])
+            else:
+                out[:, p, q] = pade_eval(z_query, z[:n_nodes], thiele_coefficients(z[:n_nodes], f[:n_nodes]))
+            if symmetric:
+                out[:, q, p] = out[:, p, q]
+
+    return out

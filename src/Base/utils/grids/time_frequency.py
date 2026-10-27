@@ -670,7 +670,8 @@ class TimeFrequencyGrid:
                          'lambda': beta * omega_max, 'size': basis.size,
                          'n_matsubara': n_mats,
                          'n_even_sector': int(real_l.sum()),
-                         'sector_u_tau': sector_u_tau})
+                         'sector_u_tau': sector_u_tau,
+                         'sector_mask': {'even': real_l, 'odd': imag_l}})
 
     # ---- use --------------------------------------------------------------
 
@@ -693,6 +694,39 @@ class TimeFrequencyGrid:
         mat = self._require(self.cosft_tw if parity == 'even' else self.sinft_tw,
                             f'{parity}-parity omega->tau')
         return np.asarray(f_omega) @ mat.T
+
+    def project_tau(self, f_tau, tau_new, parity='even'):
+        """Re-evaluate an IR-fitted quantity, known on THIS grid's own
+        tau_points, at a DIFFERENT set of tau points (e.g. another grid's,
+        built at the same beta but a different statistics -- fermion and
+        boson IR grids have different native tau_points, and a pointwise
+        product like Sigma = i G W needs both factors at the SAME tau).
+
+        Only meaningful for 'IR': the basis is a true two-sided
+        representation (fit at the sampling points, evaluate anywhere), which
+        a minimax grid's one-shot fit does not support.
+
+        f_tau: (..., ntau) along the LAST axis, at self.tau_points.
+        Returns (..., len(tau_new)), the same sector's basis evaluated at
+        tau_new.
+        """
+        if self.method != 'IR':
+            raise ValueError("project_tau only applies to 'IR' grids -- a "
+                             "minimax fit has no off-grid evaluation to use.")
+        beta = self.meta['beta']
+        basis = self.meta['basis']
+        mask = self.meta['sector_mask'][parity]
+        U_tau = self.meta['sector_u_tau'][parity]         # (L_s, ntau), native grid
+        f_tau = np.asarray(f_tau)
+
+        # f_tau = c @ U_tau  =>  c = f_tau @ pinv(U_tau); same fit ir() itself
+        # does to build cosft_tw/sinft_tw, just kept explicit here since the
+        # coefficients are also what gets evaluated at the new points.
+        coeffs = f_tau @ np.linalg.pinv(U_tau)             # (..., L_s)
+
+        x_new = 2.0 * np.asarray(tau_new) / beta - 1.0
+        U_new = basis.u_at(x_new)[mask]                    # (L_s, len(tau_new))
+        return coeffs @ U_new
 
     def duality_error(self, parity='even'):
         """How far this grid's forward/backward pair is from a two-sided map.
