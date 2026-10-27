@@ -64,7 +64,7 @@ def test_sigma_zero_gives_hf(mol, mf_start, e_hf, name):
     state as a whole.
     """
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
+    factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri', grid_accuracy='G2')
     try:
         with sigma_switched_off():
             _, _, _, E_gm, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
@@ -111,7 +111,7 @@ def converged_gm_energy(mol, mf_start, **grid):
     to override the IR grid.
     """
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri')
+    factors = separable_factors(mf_start, mol, auxbasis='cc-pvdz-ri', grid_accuracy='G2')
     _, _, _, E_gm, _ = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
                                               factors=factors, **grid)
     # _, _, _, E_gm = scgw.solve_qp_energy_scgw(mf_start, mol, nocc,
