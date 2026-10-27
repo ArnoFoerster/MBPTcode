@@ -1,19 +1,20 @@
 """Imaginary-axis GW vs the exact Casida route for a DFT (KS/hybrid) starting point.
 
-tests/test_imaginary_axis_gw.py only ever starts from HF, and HF hides a real
-bug: solve_qp_energy_imaginary_axis samples Sigma_c along a vertical line in the
-complex plane and Pade-continues to the real axis, and that line used to be the
-plain imaginary axis, Re z = 0. The sampled Green's functions G_m(z + i*omega')
+tests/test_imaginary_axis_gw.py only ever starts from HF, and HF hides a
+failure mode: solve_qp_energy_imaginary_axis samples Sigma_c along a vertical
+line in the complex plane and Pade-continues to the real axis, and the plain
+imaginary axis, Re z = 0, is the wrong line. The sampled Green's functions
+G_m(z + i*omega')
 sit a distance |eps_m| from such a contour, so the construction is only sound
 while no orbital energy is near the absolute zero of energy. A HF gap straddles
 zero comfortably (phenol/cc-pVDZ: HOMO -0.314, LUMO +0.131 Ha), but a KS or
 hybrid one does not -- PBE0 pushes the LUMO to within a few meV of zero and the
 contour then runs essentially through a pole of G. The minimax quadrature cannot
 resolve a Lorentzian that narrow and the Pade fit inherits a near-singularity
-sitting on top of its own sample points; phenol/cc-pVDZ@PBE0 HOMO came out
+sitting on top of its own sample points; phenol/cc-pVDZ@PBE0 HOMO comes out
 anywhere in 4.1-7.1 eV against an exact 7.79 eV, with no trend in nfreq.
 
-The fix is to sample on Re z = mu instead, mu = mid-gap. These systems are
+The line is Re z = mu instead, mu = mid-gap. These systems are
 chosen so the unshifted contour would be pathological -- every one has an
 orbital within 0.05 Ha of zero, asserted below so the test cannot quietly stop
 exercising the failure mode -- and every case here is off by 0.4-3 eV at some
@@ -27,10 +28,11 @@ from pyscf import gto, scf, dft
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 
 ETHENE = '''
@@ -76,7 +78,7 @@ def run_case(atom, basis, xc, which, nfreqs):
 
     ref = float(np.atleast_1d(
         calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True, state=p_state))[0])
-    qps = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=n) * HARTREE_TO_EV
+    qps = [solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, numerics=Numerics(imagfreq={'nfreq': n})) * HARTREE_TO_EV
            for n in nfreqs]
     return ref, qps, min_abs_eps
 

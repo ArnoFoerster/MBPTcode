@@ -30,17 +30,46 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df, dft, gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment, dresses_interaction
-from src.Base.solvent_screening import (SolventScreening,
-                                        detach_solvent_screening)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.environment import dresses_interaction
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import (SolventScreening,
+                                                detach_solvent_screening)
+from src.SingleReference.GW import reaction_field
 from src.SingleReference.GW.reaction_field import (
-    bare_gauge_transform, environment_quasiparticle_shift, quasiparticle_shift,
-    screened_interaction_difference)
-from src.SingleReference.LinearResponse.davidson import isdf_bse_factors
+    bare_gauge_transform, environment_quasiparticle_shift)
+from src.SingleReference.BSE.solve import isdf_bse_factors
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 BASIS, EPS_INF = 'cc-pvdz', 1.78
 WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+
+
+def screened_interaction_difference(w_aux, d_mo, auxmol, environment):
+    """Delta W(0) on the interpolation grid, (M, M), from one chi0: the
+    explicit matrix the module's compact forms never build, kept here as the
+    reference they are checked against. Zero (None) in the gas phase."""
+    t = bare_gauge_transform(auxmol, environment)
+    if t is None:
+        return None
+    n = w_aux.shape[0]
+    chi_bare = t.T @ (np.eye(n) - np.linalg.inv(w_aux)) @ t
+    w_bare = np.linalg.inv(np.eye(n) - chi_bare)
+    d_bare = d_mo @ t
+    return d_mo @ w_aux @ d_mo.T - d_bare @ w_bare @ d_bare.T
+
+
+def quasiparticle_shift(x_mo, delta_w, nocc):
+    """Eq. (18) for every orbital from an explicit Delta W, in Hartree: the
+    reference form of `separable_quasiparticle_shift`."""
+    if delta_w is None:
+        return np.zeros(x_mo.shape[1])
+    density = x_mo ** 2
+    shift = 0.5 * np.einsum('kp,kl,lp->p', density, delta_w, density,
+                            optimize=True)
+    shift[:nocc] *= -1.0
+    return shift
 
 
 def check(ok, label, detail=''):
@@ -61,9 +90,12 @@ def build():
 
     detach_solvent_screening(mf)
     x_bare, d_bare, w_bare = isdf_bse_factors(mf, mol, nocc,
-                                              auxbasis=BASIS + '-ri')
+                                              auxbasis=BASIS + '-ri',
+                                              counts=g1(mol))
     attach_environment(mf, env)
-    x_dr, d_dr, w_dr = isdf_bse_factors(mf, mol, nocc, auxbasis=BASIS + '-ri')
+    x_dr, d_dr, w_dr = isdf_bse_factors(mf, mol, nocc,
+                                          auxbasis=BASIS + '-ri',
+                                          counts=g1(mol))
     detach_solvent_screening(mf)
     return dict(mol=mol, mf=mf, nocc=nocc, env=env, auxmol=aux, x=x_dr,
                 d_dr=d_dr, w_dr=w_dr, d_bare=d_bare, w_bare=w_bare,
@@ -190,11 +222,15 @@ def check_a_second_environment_gets_its_own_reaction_field():
                'a larger dielectric screens more, so Delta W grows',
                f'gap closure {gap(s1):.4f} eV at eps=1.78 vs {gap(s2):.4f} at 3.0')
 
-    del mf._reaction_field_shift
-    ok &= check(np.array_equal(s2, environment_quasiparticle_shift(mf)),
+    # each side below is built afresh (the cache was dropped), so the two are
+    # two computations: to a few ulp, not bitwise
+    del reaction_field._SHIFTS[mf]
+    ok &= check(matches(s2, environment_quasiparticle_shift(mf),
+                        RECORDING_BLAS),
                 'the cached array is what the uncached route returns')
     attach_environment(mf, water)
-    ok &= check(np.array_equal(environment_quasiparticle_shift(mf), s1),
+    ok &= check(matches(environment_quasiparticle_shift(mf), s1,
+                        RECORDING_BLAS),
                 'and the first continuum gets its own back, not the resident one')
     detach_solvent_screening(mf)
     ok &= check(environment_quasiparticle_shift(mf) is None,

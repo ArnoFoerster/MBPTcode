@@ -30,15 +30,17 @@ from pyscf import dft, gto
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import (QP_CD_NEWTON_TOL,  # noqa: E402
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.Base.numerics.constants import (QP_ROOT_TOL,  # noqa: E402
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import QPStates  # noqa: E402
 from src.SingleReference.GW.qp_states import resolve_qp_states  # noqa: E402
 from src.SingleReference.GW.sum_over_poles import compressible  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
-from src.gradients.qp_space_time import (  # noqa: E402
-    frozen_on_pole_model, pole_model_route)
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
+from src.gradients.gwbse.qp_space_time import (  # noqa: E402
+    FALLBACK_ROUTE, frozen_on_pole_model, pole_model_route)
+from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
 H2CO = 'C 0 0 -0.5296; O 0 0 0.6763; H 0 0.9339 -1.1088; H 0 -0.9339 -1.1088'
 #: The states whose Eq. (27) verdict differs between eps_p and the root.
@@ -57,12 +59,11 @@ def factory(mol):
 
 def set_solve(chain, mol, mf):
     """(roots, routes) of one solve of the chain's set at `mol`."""
-    x_mo, d, eps, mu = chain._factors_for(mol, mf)[:4]
-    out, route_out = chain._qp_set_solve(
-        x_mo, d, eps, mu, chain._xc_correction(mf, chain.qp_set),
-        np.zeros(len(chain.qp_set)))
-    return (np.asarray(out[0], float),
-            {int(p): r for p, r in route_out['routes'].items()})
+    x_mo, d, eps, mu = chain.factors_for(mol, mf)[:4]
+    out, _ = chain.quasiparticles.qp_set_solve(
+        x_mo, d, eps, mu, chain.xc_correction(mf, chain.resolved.qp_set),
+        np.zeros(len(chain.resolved.qp_set)))
+    return np.asarray(out[0], float), dict(chain.qp_diagnostics['routes'])
 
 
 @pytest.fixture(scope='module')
@@ -74,8 +75,9 @@ def solved():
     eps = np.asarray(mf.mo_energy, float)
     window = list(resolve_qp_states(QPStates(), eps, mol.nelectron // 2,
                                     degeneracy_tol=1e-6).explicit)
-    chain = ExcitedStateChain(mol, factory, mf=mf, qp_window=window,
-                              residue_route='sop')
+    chain = ExcitedStateChain(
+        mol, factory, mf=mf,
+        numerics=g1_numerics(mol, Numerics(qp={'window': window, 'residue_route': 'sop'})))
     roots, routes = set_solve(chain, mol, mf)
     return chain, roots, routes, eps
 
@@ -86,14 +88,14 @@ def test_the_case_crosses_the_wall(solved):
     for p in CROSSING:
         assert routes[p] == 'sop', (p, routes[p])
         assert compressible(eps[p], eps, nocc)[0], p
-        assert not compressible(chain.qp_seeds[p], eps, nocc)[0], p
+        assert not compressible(chain.resolved.qp_seeds[p], eps, nocc)[0], p
 
 
 def test_the_reference_geometry_repeats_its_routes_and_roots(solved):
     chain, roots, routes, _ = solved
     again, routes_again = set_solve(chain, chain.mol0, chain.mf0)
     assert routes_again == routes
-    np.testing.assert_allclose(again, roots, rtol=0, atol=QP_CD_NEWTON_TOL)
+    np.testing.assert_allclose(again, roots, rtol=0, atol=QP_ROOT_TOL)
 
 
 def test_a_displaced_geometry_keeps_the_reference_routes(solved):
@@ -120,9 +122,10 @@ def test_the_frozen_verdict_rule():
     # an orbital the mappings do not name has nothing frozen
     assert frozen_on_pole_model(1, {0: past}, poles) is None
     route = lambda w0, sop_poles: pole_model_route(
-        'sop', None, 0, eps, nocc, w0, None, sop_poles)[0]
+        'sop', None, 0, eps, nocc, w0, sop_poles)[0]
     assert route({0: past}, poles) == 'sop'
-    assert route({0: -0.9}, {}) == 'auto'
+    # frozen off the pole model: one residue backend for the whole walk
+    assert route({0: -0.9}, {}) == FALLBACK_ROUTE
     assert route(None, None) == 'sop'
 
 

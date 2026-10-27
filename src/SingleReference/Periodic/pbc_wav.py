@@ -1,5 +1,7 @@
 """W-av: mini-Brillouin-zone averaging of the interaction.
 
+No driver calls this module yet; its tests are its only users.
+
 `pbc_self_energy.q_grid` returns a uniform momentum grid with equal weights and
 `sigma_c_diag` sums over it directly. For a three-dimensional semiconductor
 that is defensible. For a metallic slab, where the integrand carries a sqrt(q)
@@ -77,7 +79,8 @@ occupation-weighted response of `pbc_occupations`.
 """
 import numpy as np
 
-from src.SingleReference.Periodic.pbc_smallq import (inplane_cell_area,
+from src.SingleReference.Periodic.pbc_smallq import (clip_halfplane,
+                                                     inplane_cell_area,
                                                      minibz_polygon, polygon_area,
                                                      polygon_radial_moments)
 
@@ -327,25 +330,15 @@ def transfer_grid(cell, kmesh):
 
 def _clip_to_convex(poly, clipper):
     """Sutherland-Hodgman clip of a convex polygon against a convex clipper,
-    both counter-clockwise. Returns [] if they do not overlap."""
+    both counter-clockwise, one `clip_halfplane` per clipper edge with a 1e-14
+    tolerance. Returns [] if they do not overlap."""
     out = [np.asarray(v, dtype=float) for v in poly]
     n = len(clipper)
     for i in range(n):
         a, b = clipper[i], clipper[(i + 1) % n]
         edge = b - a
         normal = np.array([edge[1], -edge[0]])          # outward for CCW
-        offset = float(a @ normal)
-        clipped = []
-        m = len(out)
-        for j in range(m):
-            p, q = out[j], out[(j + 1) % m]
-            dp = float(p @ normal) - offset
-            dq = float(q @ normal) - offset
-            if dp <= 1e-14:
-                clipped.append(p)
-            if (dp < -1e-14 < 1e-14 < dq) or (dq < -1e-14 < 1e-14 < dp):
-                clipped.append(p + (q - p) * (dp / (dp - dq)))
-        out = clipped
+        out = clip_halfplane(out, normal, float(a @ normal), tol=1e-14)
         if len(out) < 3:
             return []
     return out

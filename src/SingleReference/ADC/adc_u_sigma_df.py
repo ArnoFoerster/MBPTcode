@@ -4,9 +4,9 @@ anywhere); the production open-shell path."""
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-from src.SingleReference.ADC.adc_utils import _g_block_df
+from src.SingleReference.ADC.adc_utils import g_block_df
 from src.SingleReference.ADC.adc_u_utils import (
-    u2_denominators, u1_dressing_shift,
+    assemble_operator, u2_denominators, u1_dressing_shift,
     u1_shift_terms_2h1p, u1_shift_terms_2p1h)
 
 
@@ -17,12 +17,12 @@ def apply_U_2h1p(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     B = s.B_spin
     dy_shift, dy_p_shift = u1_shift_terms_2h1p(norb, nocc, z_p, Vfull, u1_shift)
 
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     B_v, B_v_full, B_o_full = ing['B_v'], ing['B_v_full'], ing['B_o_full']
     B_ov, B_oo, B_vo = ing['B_ov'], ing['B_oo'], ing['B_vo']
     if t2_ijcd is None:
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
+        t2_ijcd = g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
 
     Zo = _cached_einsum('Qip,p->Qi', B_o_full, z_p, optimize=True)   # (naux,O)
     Zv = _cached_einsum('Qcp,p->Qc', B_v_full, z_p, optimize=True)   # (naux,V)
@@ -72,12 +72,12 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
     B = s.B_spin
     dy_shift, dy_p_shift = u1_shift_terms_2p1h(norb, nocc, z_p, Vfull, u1_shift)
 
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     B_v, B_v_full, B_o_full = ing['B_v'], ing['B_v_full'], ing['B_o_full']
     B_ov, B_oo, B_vo = ing['B_ov'], ing['B_oo'], ing['B_vo']
     if t2_ijcd is None:
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
+        t2_ijcd = g_block_df(B, occ, occ, virt, virt) / denom_ij_cd
     # t2m == -t2_abkl, a transposed VIEW of the shared t2_ijcd array
     # (no copy); each t2-linear term below flips sign accordingly --
     # on the term prefactor for forward terms, on the small rank-3
@@ -129,7 +129,7 @@ def apply_U_2p1h(s, nocc, z_p, Vfull, t2_ijcd=None, u1_shift=None):
 def apply_C_2h1p(s, nocc, V):
     """(Vfull, c_2h1p) from rank<=3 B chains -- per-occupied-index loop
     (triangle contraction graph, no rank-4-free batched order exists)."""
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     iu, ju, nvirt = ing['iu'], ing['ju'], ing['nvirt']
     Vfull = np.zeros((nocc, nocc, nvirt))
     Vfull[iu, ju, :] = V
@@ -162,7 +162,7 @@ def apply_C_2h1p(s, nocc, V):
 
 def apply_C_2p1h(s, nocc, V):
     """Mirror of apply_C_2h1p."""
-    ing = s._build_matrix_free_ingredients(nocc)
+    ing = s.matrix_free_ingredients(nocc)
     au, bu, nvirt = ing['au'], ing['bu'], ing['nvirt']
     Vfull = np.zeros((nocc, nvirt, nvirt))
     Vfull[:, au, bu] = V
@@ -199,21 +199,6 @@ def apply_C_2p1h(s, nocc, V):
 def build_operator(s, nocc, static_correction=None, t2_ijcd=None):
     """(aop, diag, dims): matrix-free spin-orbital ADC(3) operator.
     t2_ijcd: optional EN-dressed T2^(1) (u1 shift threaded automatically)."""
-    ing = s._build_matrix_free_ingredients(nocc)
-    norb = s.norb
-    eps = s.eps
-    d = ing['d']
-    nH = d['nH']
-    npair_o, npair_v = ing['npair_o'], ing['npair_v']
-    off_2h1p, off_2p1h = ing['off_2h1p'], ing['off_2p1h']
-    K_2h1p, K_2p1h = ing['K_2h1p'], ing['K_2p1h']
-    iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
-
-    if static_correction is None:
-        F = np.diag(eps)
-    else:
-        F = np.diag(eps) + static_correction
-
     u1_shift = None
     if t2_ijcd is not None:
         u1_shift = u1_dressing_shift(s, nocc, t2_ijcd)
@@ -223,24 +208,6 @@ def build_operator(s, nocc, static_correction=None, t2_ijcd=None):
     if t2_ijcd is None:
         occ_, virt_ = slice(0, nocc), slice(nocc, s.norb)
         denom_ij_cd, _ = u2_denominators(s.eps, nocc)
-        t2_ijcd = _g_block_df(s.B_spin, occ_, occ_, virt_, virt_) / denom_ij_cd
-
-    def aop(z):
-        z_p = z[:norb]
-        z_2h1p = z[off_2h1p:off_2p1h].reshape(npair_o, -1)
-        z_2p1h = z[off_2p1h:nH].reshape(nocc, npair_v)
-
-        Vfull_2h1p, c_2h1p = apply_C_2h1p(s, nocc, z_2h1p)
-        Vfull_2p1h, c_2p1h = apply_C_2p1h(s, nocc, z_2p1h)
-        u2h1p_full, u_from_2h1p = apply_U_2h1p(s, nocc, z_p, Vfull_2h1p, t2_ijcd,
-                                               u1_shift=u1_shift)
-        u2p1h_full, u_from_2p1h = apply_U_2p1h(s, nocc, z_p, Vfull_2p1h, t2_ijcd,
-                                               u1_shift=u1_shift)
-
-        y_p = F @ z_p + u_from_2h1p + u_from_2p1h
-        y_2h1p = u2h1p_full[iu, ju, :].reshape(-1) + K_2h1p * z_2h1p.reshape(-1) + c_2h1p.reshape(-1)
-        y_2p1h = u2p1h_full[:, au, bu].reshape(-1) + K_2p1h * z_2p1h.reshape(-1) + c_2p1h.reshape(-1)
-        return np.concatenate([y_p, y_2h1p, y_2p1h])
-
-    diag = np.concatenate([np.diag(F), K_2h1p, K_2p1h])
-    return aop, diag, d
+        t2_ijcd = g_block_df(s.B_spin, occ_, occ_, virt_, virt_) / denom_ij_cd
+    return assemble_operator(s, nocc, static_correction, t2_ijcd, u1_shift, apply_C_2h1p,
+                             apply_C_2p1h, apply_U_2h1p, apply_U_2p1h)

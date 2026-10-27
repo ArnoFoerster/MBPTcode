@@ -12,15 +12,15 @@ become resonant, which is the one thing no M repairs.
 The physics gate at the end is the same comparison on water, where the fit is
 not exact and the residual is the compression error.
 """
-import warnings
 
 import numpy as np
 import pytest
 import scipy.linalg
 
-from src.Base.constants import (HARTREE_TO_EV, SOP_CLEARANCE_MIN,
-                                SOP_FIT_RCOND, SOP_POLE_MERGE_TOL)
-from src.Base.utils.grids import gauss_legendre_grid, gap_scaled_w0
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                         SOP_POLE_MERGE_TOL)
+from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0
 from src.SingleReference.GW.contour_deformation import residue_set, sigma_cd
 from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
                                                    initial_poles,
@@ -28,7 +28,7 @@ from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
                                                    pole_clearance,
                                                    qp_energy_sop, sigma_sop,
                                                    sigma_sop_slope, sop_from_wc)
-from src.gradients.sum_over_poles_adjoint import sigma_sop_backward
+from src.gradients.gwbse.sum_over_poles_adjoint import sigma_sop_backward
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -206,11 +206,11 @@ def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
     """The physics gate: a real screening, where the fit is not exact."""
     pyscf = pytest.importorskip('pyscf')
     from pyscf import gto, scf
-    from src.Base.pyscf_interface import get_density_fitting_coefficients
-    from src.SingleReference.base import get_occ_virt_indices
+    from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
+    from src.Base.orbital_spaces import get_occ_virt_indices
     from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
                                                             wc_explicit)
-    from src.SingleReference.GW.real_screening import ov_energies
+    from src.Base.orbital_spaces import ov_energies
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
@@ -223,13 +223,12 @@ def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
     for p in (nocc - 1, nocc):
         bp = b[:, p, :]
         wc = wc_explicit(bp, c_ov, ov_energies(eps, nocc), nu)
-        w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov,
-                                  relax_offset=False)
+        w_cd, _, _ = qp_energy_cd(p, bp, eps, nocc, nu, wt, wc=wc, C_ov=c_ov)
         poles, amp = sop_from_wc(wc, nu, eps, nocc, n_poles=n_poles, stride=3)
         ok, reach = compressible(w_cd, eps, nocc)
         assert ok, f'orbital {p} is outside the wall at reach {reach:.2f}'
-        w_sop, _ = qp_energy_sop(p, amp, poles, eps, nocc, w0=w_cd)
-        err = abs(w_sop - w_cd) * HARTREE_TO_EV * 1e3
+        w_sop, _ = qp_energy_sop(p, amp, poles, eps, nocc)
+        err = abs(w_sop - w_cd) * HARTREE_TO_MEV
         assert err < tol_mev, (f'orbital {p}: SOP {w_sop * HARTREE_TO_EV:.4f} '
                                f'vs CD {w_cd * HARTREE_TO_EV:.4f} eV, '
                                f'{err:.2f} meV at M = {n_poles}')

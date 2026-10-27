@@ -349,7 +349,7 @@ def load_ri_basis(basis_name, elements, max_error=None, min_lmax=None, path=None
     return out
 
 
-def _write_nwchem(fh, table):
+def write_nwchem(fh, table):
     """{element: PySCF internal basis} as NWChem text PySCF reads back bit for bit."""
     for el, shells in table.items():
         fh.write(f'#BASIS SET: {el}\n')
@@ -431,7 +431,7 @@ def register(name, max_error=None):
         if key in pyscf_basis.ALIAS or key in pyscf_basis.GTH_ALIAS:
             raise ValueError(f'{alias} collides with a basis name PySCF ships')
         path = os.path.join(out, f'{alias}.dat')
-        _replace_with(path, lambda fh: _write_nwchem(fh, table))
+        _replace_with(path, lambda fh: write_nwchem(fh, table))
         pyscf_basis.USER_BASIS_ALIAS[key] = path
     return name, ri_name
 

@@ -1,19 +1,17 @@
 """`rsh_split` and `xc_hybrid_coeff`, the two coefficient readers.
 
-WHAT THESE ARE NOT ANY MORE: a pin on a refusal. The skeleton derivatives
-CARRY a range-separated hybrid now, channel by channel -- see
-`test_range_separated_exchange.py`, which gates that, and
-`isdf_derivatives.exchange_channels`, which is what they are built from. What
-survives here is the reading of the coefficients themselves, and the fact that
-`xc_hybrid_coeff` returns ALPHA and so is not a weight: that is the trap the
-refusal was really guarding, and it outlived the refusal.
+The skeleton derivatives CARRY a range-separated hybrid, channel by channel --
+see `test_range_separated_exchange.py`, which gates that, and
+`pyscf_interface.exchange_channels`, which is what they are built from. What
+is gated here is the reading of the coefficients themselves, and the fact that
+`xc_hybrid_coeff` returns ALPHA and so is not a weight.
 """
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.gradients.isdf_derivatives import (require_no_range_separation,
-                                            rsh_split, xc_hybrid_coeff)
+from src.gradients.mean_field_response import require_no_range_separation
+from src.Base.pyscf.pyscf_interface import rsh_split, xc_hybrid_coeff
 
 
 @pytest.fixture(scope='module')

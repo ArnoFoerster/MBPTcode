@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import get_method_info, METHOD_REGISTRY
+from src.SingleReference.GW.self_energy import get_method_info, METHOD_REGISTRY
 
 if __name__ == '__main__':
     all_ok = True
@@ -55,7 +55,7 @@ if __name__ == '__main__':
         print(f"{name}.needs_triplet == False: {'OK' if ok else 'FAIL'}")
 
     # End-to-end: calc_qp_energy must fail loudly for an unimplemented method
-    # (item 9/10 of the refactor -- no silent fallback to plain GW).
+    # (no silent fallback to plain GW).
     from pyscf import gto, scf, df
     from src.SingleReference.GW.qp_energy import calc_qp_energy
 

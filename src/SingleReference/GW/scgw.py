@@ -25,11 +25,12 @@ import resource
 
 from pyscf.data.elements import chemcore
 from src.SingleReference.CC.diis import DIIS
-from src.Base.pyscf_interface import get_orbital_energies
-from src.Base.utils.time_frequency import (TimeFrequencyGrid)
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.numerics.constants import SURFACE_GRID_ACCURACY
+from src.Base.pyscf.pyscf_interface import get_orbital_energies
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid)
+from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
-from src.Base.utils.analyticalContinuation import pade_continue_elementwise
+from src.Base.utils.grids.analytic_continuation import pade_continue_elementwise
 
 # --- Convergence parameters ---
 # Outer scGW cycle
@@ -474,7 +475,8 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     grid_kind: only 'IR' is implemented.
     save_file: if given, (w_real, A) is written there as CSV.
     kwargs: `factors` (precomputed output of `separable_factors`) or
-        `auxbasis` (used to build them); `beta` and `omega_max` override
+        `auxbasis` and `grid_accuracy` (ISDF grid level, default
+        SURFACE_GRID_ACCURACY; used to build them); `beta` and `omega_max` override
         the IR grid parameters that are otherwise derived from mf's
         orbital energies (e.g. to run different starts on the same grid);
         `diis_size`, `diis_start` and `mixing` override DIIS_SIZE,
@@ -548,7 +550,9 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
             f'{grid_b.duality_error("even"):.2e} / {grid_b.duality_error("odd"):.2e}\n')
 
     X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
-                                else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis')))
+                                else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis'),
+                                                       grid_accuracy=kwargs.get('grid_accuracy',
+                                                                                SURFACE_GRID_ACCURACY)))
 
     # --- First iteration: G0 -> gamma, Sigma -> F -> G ---
     freq_points = grid_f.omega_points

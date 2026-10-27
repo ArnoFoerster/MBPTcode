@@ -1,6 +1,6 @@
 """Dielectric environment around a SLAB: v -> v + vtilde for periodic GW-BSE.
 
-The periodic counterpart of src/Base/solvent_screening.py. Same one-line
+The periodic counterpart of src/environments/solvent_screening.py. Same one-line
 physics -- fold the environment's reducible polarizability into the Coulomb
 kernel seen inside the cavity, then do an ordinary gas-phase calculation
 (Duchemin, Jacquemin and Blase, J. Chem. Phys. 144, 164106 (2016)) -- but the
@@ -108,20 +108,17 @@ What this does NOT do
 import numpy as np
 from pyscf import lib
 from pyscf.data import radii as pyscf_radii
-from pyscf.pbc import tools
-from pyscf.pbc.df import ft_ao
 
-from src.Base.solvent_screening import resolve_optical_eps, solvent_dielectrics
-from src.SingleReference.Periodic.pbc_rpa import (make_auxcell, _bz_index,
-                                                  coulomb_metric_inv_sqrt)
+from src.Base.numerics.constants import PBC_K_HEAD_TOL
+from src.environments.solvent_screening import resolve_optical_eps
+from src.SingleReference.Periodic.pbc_rpa import (coulomb_metric_inv_sqrt,
+                                                  gspace_ri_factors,
+                                                  kernel_cell, make_auxcell)
 from src.SingleReference.Periodic.pbc_integrals import (
     PBCDFIntegrals, get_momentum_transfer_map)
-from src.SingleReference.Periodic.pbc_rpa_damping import assert_damping_fits
 
 einsum = lib.einsum
 
-#: |k| below which the 2pi/k head is replaced by its Brillouin-zone-cell average.
-_K_HEAD_TOL = 1e-8
 
 
 class SlabDielectricEnvironment:
@@ -211,7 +208,7 @@ class SlabDielectricEnvironment:
         """
         kpar = np.asarray(kpar, dtype=float)
         b_top, b_bot = self.beta
-        small = kpar < _K_HEAD_TOL
+        small = kpar < PBC_K_HEAD_TOL
         safe_k = np.where(small, 1.0, kpar)
         two_pi_over_k = np.where(small, head_value, 2.0 * np.pi / safe_k)
         s = np.exp(-2.0 * kpar * self.z_half_width)
@@ -244,7 +241,7 @@ class SlabDielectricEnvironment:
         out = []
         for sign in (+1, -1):
             denom = kpar - 1j * sign * gz
-            degenerate = np.abs(denom) < _K_HEAD_TOL
+            degenerate = np.abs(denom) < PBC_K_HEAD_TOL
             num = np.exp(-1j * sign * gz * z0) - s * np.exp(1j * sign * gz * z0)
             out.append(np.where(degenerate, 2.0 * z0 + 0j,
                                 num / np.where(degenerate, 1.0, denom)) * phase)
@@ -284,7 +281,7 @@ def reaction_kernel_mixed(env, kpar, z, zp, head_value=None):
     zetap = np.asarray(zp, dtype=float)[None, None, :] - env.z_center
     b_top, b_bot = env.beta
     z0 = env.z_half_width
-    small = kpar < _K_HEAD_TOL
+    small = kpar < PBC_K_HEAD_TOL
     safe = np.where(small, 1.0, kpar)
     two_pi_over_k = (2.0 * np.pi / safe if head_value is None
                      else np.where(small, head_value, 2.0 * np.pi / safe))
@@ -397,70 +394,36 @@ def build_dfintegrals_screened(mf, env, coulG_fn=None, auxbasis='weigend',
     q_par + G_par = 0. The default 0.0 drops that channel; see the module
     docstring for why no naive regularization works there.
     """
-    cell = mf.cell
-    if mesh is not None:
-        cell = cell.copy()
-        cell.mesh = mesh
-        cell.build(False, False)
-    if coulG_fn is None:
-        coulG_fn = lambda c, q, Gv: tools.get_coulG(c, k=q, mesh=c.mesh, Gv=Gv)
+    kpts = np.asarray(mf.kpts)
+    cell, coulG_fn = kernel_cell(mf.cell, kpts, coulG_fn, mesh, check_support)
     if env.cell.nao_nr() != cell.nao_nr():
         raise ValueError("the environment was built for a different cell")
-
-    kpts = np.asarray(mf.kpts)
-    # A damped kernel's real-space support must still fit the cell along
-    # every unsampled direction at THIS k-mesh -- r0 grows with the grid while
-    # the vacuum does not, so a slab that was fine on a coarse mesh can silently
-    # stop being fine on a finer one. No-op for any non-damped kernel.
-    if check_support:
-        assert_damping_fits(cell, kpts, coulG_fn)
-    nkpts = len(kpts)
     mo = np.asarray(mf.mo_coeff)
     nmo = mo.shape[-1]
     aux = make_auxcell(cell, auxbasis)
     naux = aux.nao_nr()
     kscaled = cell.get_scaled_kpts(kpts)
-    kscaled -= kscaled[0]
-    if np.abs(kscaled[:, 2]).max() > 1e-8:
+    if np.abs(kscaled[:, 2] - kscaled[0, 2]).max() > 1e-8:
         raise ValueError("the slab kernel needs a single k-point along the "
                          "vacuum direction (k_z = 0 for every k-point).")
-    b = cell.reciprocal_vectors()
-    Gv, _, kws = cell.get_Gv_weights(cell.mesh)
-    kws = np.asarray(kws)
-    nG = len(Gv)
+    nG = len(cell.get_Gv_weights(cell.mesh)[0])
 
     gpar, gz, wz, shape = _planar_grid(cell, cell.mesh)
     area = cell.vol / np.linalg.norm(cell.a[2])
     kconserv_pair = get_momentum_transfer_map(cell, kpts)
 
-    L = []
-    for iq in range(nkpts):
-        qs = kscaled[iq]
-        J = np.zeros((naux, naux), dtype=np.complex128)
-        Bf = np.zeros((naux, nkpts, nmo, nmo), dtype=np.complex128)
-        for ki in range(nkpts):
-            kj, G0 = _bz_index(kscaled, kscaled[ki] + qs)
-            qtrue = (kscaled[kj] + G0 - kscaled[ki]).dot(b)
-            vG = coulG_fn(cell, qtrue, Gv) * kws
-            auxG = ft_ao.ft_ao(aux, Gv, kpt=qtrue)
-            pqG = ft_ao.ft_aopair(cell, Gv, aosym='s1',
-                                  kpti_kptj=(kpts[ki], kscaled[kj].dot(b)),
-                                  q=qtrue).reshape(nG, nmo, nmo)
-            rho = einsum('gpq,pP,qR->gPR', pqG, mo[ki].conj(), mo[kj])
-            wA = auxG.conj() * vG[:, None]
-            J += einsum('gP,gQ->PQ', wA, auxG)
-            Bf[:, ki] += einsum('gP,gpr->Ppr', wA, rho)
+    def reaction_field(auxG, rho, qtrue):
+        """The reaction field, rank 2 per in-plane momentum, in J and B."""
+        dJ = reaction_field_form(env, auxG, auxG, qtrue, gpar, gz, wz, area,
+                                 head_value)
+        dB = reaction_field_form(env, auxG, rho.reshape(nG, nmo * nmo), qtrue,
+                                 gpar, gz, wz, area,
+                                 head_value).reshape(naux, nmo, nmo)
+        return dJ, dB
 
-            # --- the reaction field, rank 2 per in-plane momentum ----------
-            J += reaction_field_form(env, auxG, auxG, qtrue, gpar, gz, wz,
-                                     area, head_value)
-            Bf[:, ki] += reaction_field_form(
-                env, auxG, rho.reshape(nG, nmo * nmo), qtrue, gpar, gz, wz,
-                area, head_value).reshape(naux, nmo, nmo)
-
-        J /= nkpts
+    def inv_sqrt(J, iq):
         try:
-            Jm12 = coulomb_metric_inv_sqrt(J)
+            return coulomb_metric_inv_sqrt(J)
         except ValueError as err:
             # v + vtilde is a positive kernel, so an indefinite metric here has
             # exactly two sources, and which one it is depends on whether the
@@ -499,8 +462,11 @@ def build_dfintegrals_screened(mf, env, coulG_fn=None, auxbasis='weigend',
                 f"env.leaked_density_fraction(mf) -- keep it well under a "
                 f"percent -- then widen z_half_width or refine mesh[2].\n"
                 f"Underlying: {err}") from err
-        Lhalf = einsum('PQ,Qkpr->Pkpr', Jm12, Bf)
-        L.append(np.ascontiguousarray(Lhalf.transpose(1, 0, 2, 3)))
+
+    L = [np.ascontiguousarray(Lhalf.transpose(1, 0, 2, 3))
+         for _, Lhalf in gspace_ri_factors(cell, aux, mo, kpts, coulG_fn,
+                                           extra=reaction_field,
+                                           inv_sqrt=inv_sqrt)]
 
     return PBCDFIntegrals(L, kconserv_pair, mf.mo_energy, mf.mo_occ, kpts,
                           cell=cell, mf=mf)

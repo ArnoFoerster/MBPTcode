@@ -102,23 +102,25 @@ import warnings
 import numpy as np
 from pyscf import dft, gto, lib
 
-from src.Base import fragment_localization
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.fragments import localization as fragment_localization
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.distributed_df import distributed_handles
-from src.Base.isdf_jk import isdf_jk
-from src.Base.separable_ri import resolve_isdf_grid
-from src.Base.utils.mpi_grid import (broadcast, current_comm, distributed,
-                                     grid_comm, lockstep_mean_field,
-                                     lockstep_stats)
-from src.gradients import fragment_diabatic
-from src.gradients.excited_state import ExcitedStateChain
-from src.gradients.fragment_diabatic import DiabaticGradient
-from src.properties import fragment_bse
-from src.properties.surfaces import potential_energy_surface
-from tests.test_fragment_diabatic import (AUX, BASIS, DIMER, FRAGMENTS, SITES,
-                                          factory)
+from src.Base.factorization.distributed_df import distributed_handles
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,
+                                              grid_comm, lockstep_mean_field,
+                                              lockstep_stats)
+from src.gradients.gwbse import fragment_diabatic
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.fragment_diabatic import DiabaticGradient
+from src.gradients.gwbse import fragment_bse
+from src.gradients.gwbse.surface_factory import potential_energy_surface
+from src.Base.numerics.numerics import numerics_of
+from tests.isdf_test_grid import g1
+from tests.test_fragment_diabatic import (AUX, BASIS, DIMER, FRAGMENTS, OMEGA0,
+                                          SITES, factory)
 
 #: The `reduced` bars (module docstring).
 PARTITION_BAR = 1e-10
@@ -354,21 +356,20 @@ def own_mean_field(gate, mf0):
 
 def evaluate(mol, mf, tda, adjoint, sliced):
     """The partition and the ELEMENTS' gradients of one run."""
-    chain = ExcitedStateChain(mol, factory, bse_tda=tda, auxbasis=AUX, mf=mf,
-                              sliced=sliced, bse_adjoint=adjoint)
+    chain = ExcitedStateChain(mol, factory, bse_tda=tda, mf=mf, numerics=numerics_of({'auxbasis': AUX, 'counts': g1(mol), 'sliced': sliced, 'bse_adjoint': adjoint}))
     return measure(DiabaticGradient(chain, FRAGMENTS, SITES, mf=mf,
-                                    route='isdf'))
+                                    route='isdf', omega0=OMEGA0))
 
 
 def isdf_factory(mol):
     """An LRC-wPBEh ISDF-K mean field at grid G1: converged here serially,
     built and handed to the chain unconverged under ranks, which converges it
-    over them (`factor_chain.converged_factory`)."""
+    over them (`reference_mean_field.converged_factory`)."""
     mf = dft.RKS(mol, xc=ISDF_XC)
     elements = sorted({mol.atom_symbol(i) for i in range(mol.natm)})
     counts, n_start = resolve_isdf_grid('G1', str(mol.basis), elements,
                                         auxbasis=AUX)
-    mf = isdf_jk(mf, auxbasis=AUX, counts=counts, n_start=n_start)
+    mf = isdf_jk_with_force(mf, auxbasis=AUX, counts=counts, n_start=n_start)
     mf.conv_tol, mf.conv_tol_grad = (SCF_DIFFERENTIABLE_CONV_TOL,
                                      SCF_DIFFERENTIABLE_GRAD_TOL)
     mf.max_cycle, mf.verbose = 200, 0
@@ -386,8 +387,9 @@ def isdf_evaluate(mol):
         excitation=Excitation('singlet', root=1, kernel='bse'),
         chi0='space-time', residues='sop', solver='davidson',
         factorization='isdf', qp_states=QPStates('admitted'),
-        grid_accuracy='G1', nroots=5, sliced=True, fit='rows',
-        bse_adjoint='grid')
+        numerics=numerics_of({'grid_accuracy': 'G1', 'nroots': 5,
+                              'sliced': True, 'fit': 'rows',
+                              'bse_adjoint': 'grid'}))
     g = DiabaticGradient(chain, FRAGMENTS, SITES, route='isdf')
     return measure(g), g
 

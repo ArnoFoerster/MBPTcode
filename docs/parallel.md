@@ -27,13 +27,22 @@ ELPA's Python binding `pyelpa` both import, on one rank or on several.
 Otherwise, or with `MBPT_USE_ELPA=0`, they call `scipy.linalg.eigh`, as they do
 for every complex Hermitian matrix.
 
+A visible GPU takes such a solve first. With the run's
+`numerics.layout.eigh_device` at its default `auto` (or no `Numerics` passed to
+`diagonalize_matrix` / `eigh_symmetric`), rank 0 solves a matrix of dimension
+5000 or more on the GPU through CuPy when one is visible, and on the host when
+the device runs out of memory or cuSOLVER refuses the size; `cpu` never uses the
+GPU, `gpu` always does, at any size, and raises where it cannot. The served ranks
+stay idle through a GPU solve.
+`tests/test_eigh_device.py` pins the device solve to the host's.
+
 Rank 0 runs the script alone; the other ranks wait to serve its eigensolves.
 Open and close the script with
 
 ```python
 import sys
 
-from src.Base.utils.linearAlgebra.diagonalization import (serve_distributed_solves,
+from src.Base.utils.linear_algebra.diagonalization import (serve_distributed_solves,
                                                           release_workers)
 
 if serve_distributed_solves():
@@ -111,23 +120,27 @@ script -- the SCF loop, the Davidson, the gradient, the geometry optimization --
 and MPI lives only inside the numerical kernels: the time and frequency sweeps
 of the GW self-energy, the ISDF fit, the BSE matrix-vector products, the SCF's
 Coulomb, exchange and exchange-correlation builds, and the pieces of an
-analytic force. A driver never takes a communicator; the kernels read it from
-the region the script opens once:
+analytic force. A driver needs no communicator: the kernels read it from the
+region the script opens once. (`solve_bse_isdf` also takes `comm=` and
+`distribute=`, for a caller that wants a communicator other than the region's.)
 
 ```python
 from pyscf import dft, gto
 
-from src.Base.distributed_df import distributed_mean_field
-from src.Base.utils.mpi_grid import distributed, grid_comm
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.Base.factorization.distributed_df import distributed_mean_field
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
+from src.SingleReference.BSE.solve import solve_bse_isdf
 
 comm = grid_comm()[0]                  # COMM_WORLD, or None without mpi4py
 with distributed(comm):
     mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
                 basis='cc-pvdz')
-    mf = dft.RKS(mol, xc='pbe0').density_fit()
+    mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
     distributed_mean_field(mf)         # J/K and the xc grid split over ranks
-    omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2, nroots=5)
+    numerics = Numerics(isdf={'level': 'G1'}, bse={'nroots': 5})
+    omega, X, Y, info = solve_bse_isdf(mf, mol, mol.nelectron // 2,
+                                       numerics=numerics)
     if comm is None or comm.Get_rank() == 0:
         print(omega)                   # the same bits on every rank
 ```
@@ -137,6 +150,16 @@ cores each rank may use (see [Threads](#threads)). Without `mpi4py`, or with
 `MBPT_USE_MPI=0`, `grid_comm` returns None and the same script runs serially,
 bit for bit the serial code.
 `mpi4py` is imported on first use, never at module import.
+
+A solvent continuum works the same way. `SolventScreening.mean_field`
+converges the solvated SCF through `distributed_mean_field`; the reaction
+field of the cavity is cheap, so every rank computes it from the shared
+density, and the code checks that it matches rank 0's. A gradient chain in a
+continuum also runs on sliced factors (`sliced=True`) and on the
+row-distributed fit (`fit='rows'`): every interaction it reads (the dressed
+one, the bare one the self-energy screens with, and the static one of a split
+equilibrium) is built from the same fit as grid rows, so no rank holds a
+factor whole.
 
 Two ranks need not agree in the last bits of an orbital energy or a Davidson
 residual, and a decision taken from such a number -- a grid size, when to stop

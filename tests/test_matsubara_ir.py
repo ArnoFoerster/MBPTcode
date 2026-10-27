@@ -2,7 +2,7 @@
 
 Every imaginary-axis grid in Base/utils/grids.py is a T = 0 construction scaled
 by the smallest transition energy -- the gap. For a metal there isn't one, and
-the failures are silent. src/Base/utils/matsubara.py supplies the two things
+the failures are silent. src/Base/utils/grids/matsubara.py supplies the two things
 that fixes: the thermal e_min that makes the existing quadratures well defined
 again, and the intermediate representation, which has no gap in its
 construction at all.
@@ -13,10 +13,10 @@ IR basis; Li, Wallerberger, Chikano, Yeh, Gull, Shinaoka, PRB 101, 035144
 the Matsubara points.
 
 Checks:
-  1. The T = 0 grids now REFUSE a vanishing, zero or inverted gap instead of
+  1. The T = 0 grids REFUSE a vanishing, zero or inverted gap instead of
      returning a collapsed grid, negative frequencies and negative weights.
      This is the test that fails without the guard.
-  2. thermal_e_min restores them: at finite temperature a metal gets a valid,
+  2. thermal_e_min supplies a gap: at finite temperature a metal gets a valid,
      strictly positive grid with positive weights.
   3. The IR basis is correct as a basis: u and v orthonormal, the kernel
      reconstructed to its truncation level, and the singular values decaying
@@ -41,10 +41,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 
-from src.Base.utils.grids import (minimax_frequency_grid, minimax_time_grid,
-                                  gauss_legendre_grid, gap_scaled_w0)
-from src.Base.utils.matsubara import (IRBasis, thermal_e_min, matsubara_frequencies,
-                                      ir_continuation_order, _log_kernel)
+from src.Base.utils.grids.grids import (minimax_frequency_grid, minimax_time_grid,
+                                        gauss_legendre_grid, gap_scaled_w0)
+from src.Base.utils.grids.matsubara import (IRBasis, thermal_e_min, matsubara_frequencies,
+                                            ir_continuation_order, _log_kernel)
 
 WMAX = 10.0
 
@@ -185,12 +185,12 @@ def check_tau_transport_jacobian():
 
     `uhat` integrates over x in [-1, 1] rather than tau in [0, beta], so a
     Matsubara fit transported onto the tau axis is long by dtau/dx = beta/2.
-    The reason this needs a test rather than a comment is the second check
-    below: the fit -> evaluate_matsubara round trip is self-consistent, so the
-    factor cancels there and the obvious test passes while the mixed path is
-    wrong. It cost a self-energy calculation a factor of 200 at beta = 400
-    before it was found -- a clean constant, invisible to a beta scan because
-    the error is beta-dependent but not beta-convergent.
+    The second check below is the one that sees it: the fit ->
+    evaluate_matsubara round trip is self-consistent, so the factor cancels
+    there and the obvious test passes while the mixed path is wrong. A
+    self-energy calculation is off by a factor of 200 at beta = 400 -- a clean
+    constant, invisible to a beta scan because the error is beta-dependent but
+    not beta-convergent.
     """
     rng = np.random.default_rng(0)
     ok = True
@@ -217,8 +217,7 @@ def check_tau_transport_jacobian():
     # 1e-3, not 1e-10. What is under test is that NO beta/2 appears here: a
     # missing Jacobian shows as an error of order 200 at beta = 400, so any
     # bound far below 1 settles it. The fit's own floor at eps=1e-8 is ~3e-6
-    # (measured over lambda = 100..1600), and 1e-10 was never reachable -- the
-    # test simply had never run.
+    # (measured over lambda = 100..1600), so 1e-10 is not reachable.
     ok &= check(np.abs(back - c).max() < 1e-3,
                 'while fit -> evaluate_matsubara needs NO Jacobian, which is '
                 'why the round-trip test cannot catch this',
@@ -255,21 +254,20 @@ SAMPLING_SWEEP = [(lam, eps) for lam in (100, 200, 400, 800, 1600)
 def check_sampling_determines_the_fit():
     """Every (Lambda, eps) must give a sampling set that PINS the coefficients.
 
-    This is the gate on the defect the module was shipped with. The paper's
-    count -- one point per sign change of uhat_{L-1}, halved by positive_only
-    -- is marginal by construction: it lands on 2 (L/2) = L against L unknowns
-    and tips either way. Ten of these twenty bases came back underdetermined,
-    with the worst coefficient out by 0.05 to 0.89 and no warning, because
-    `lstsq` returns the minimum-norm solution and it reproduces the sampled
-    values exactly.
+    The paper's count -- one point per sign change of uhat_{L-1}, halved by
+    positive_only -- is marginal by construction: it lands on 2 (L/2) = L
+    against L unknowns and tips either way. Ten of these twenty bases come
+    out underdetermined under it, with the worst coefficient out by 0.05 to
+    0.89 and no warning, because `lstsq` returns the minimum-norm solution and
+    it reproduces the sampled values exactly.
 
     Recovering random coefficients is the sharp form of the test: an arbitrary
     c in R^L probes the whole space, where a physical Green's function may sit
     in the part of it that happens to survive.
 
-    Tolerances are the measured floor after the fix, worst over the sweep:
-    1.2e-12 on the coefficients and cond 5.8e3 (both at Lambda = 1600,
-    eps = 1e-12), against 8.9e-01 and 6.0e+09 before it.
+    Tolerances are the measured floor, worst over the sweep: 1.2e-12 on the
+    coefficients and cond 5.8e3 (both at Lambda = 1600, eps = 1e-12), against
+    8.9e-01 and 6.0e+09 with the paper's count.
     """
     rng = np.random.default_rng(0)
     ok = True
@@ -282,7 +280,7 @@ def check_sampling_determines_the_fit():
         ok &= check(determined and err < 1e-11,
                     f'lambda={lam} eps={eps:.0e}: the one-sided set determines the fit',
                     f'L={b.size} npts={len(n)} rows={nrows} cond={cond:.1e} err={err:.1e}')
-        # the row count is the criterion the shipped set failed, so pin it
+        # the row count is the criterion the paper's count fails, so pin it
         ok &= check(2 * len(n) >= b.size,
                     f'lambda={lam} eps={eps:.0e}: 2 n_pos >= L',
                     f'2*{len(n)} = {2 * len(n)} vs L = {b.size}')
@@ -292,11 +290,10 @@ def check_sampling_determines_the_fit():
 def check_sampling_stays_sparse():
     """The augmentation must not buy determinacy with points.
 
-    Each Matsubara point is a self-energy evaluation, so a fix that doubled the
-    count would be a different regression. Measured worst 1.01 L over the sweep
-    plus Lambda = 1e4 -- FEWER than the shipped set produced in the bases where
-    it read the wrong part of uhat and picked up far-tail crossings (up to
-    2.6 L).
+    Each Matsubara point is a self-energy evaluation, so a set that doubled the
+    count would be too costly. Measured worst 1.01 L over the sweep plus
+    Lambda = 1e4 -- FEWER than reading the wrong part of uhat produces, which
+    picks up far-tail crossings (up to 2.6 L).
     """
     ok = True
     for lam, eps in SAMPLING_SWEEP + [(10000, 1e-10), (10000, 1e-12)]:
@@ -311,8 +308,8 @@ def check_sampling_stays_sparse():
 def check_sampling_reads_the_carrying_part_of_uhat():
     """uhat_l's parity ALTERNATES with l, so the part to read is not fixed.
 
-    The shipped code took `top.imag` for every fermionic basis, while its own
-    docstring says uhat_{L-1} is real for even L-1. In 12 of 24 bases that read
+    Taking `top.imag` for every fermionic basis would contradict uhat_{L-1}
+    being real for even L-1. In 12 of 24 bases that reads
     the truncation floor -- |Re| = 5e-12 .. 7e-6 against |Im| = 0.23 .. 0.47 --
     so the sign changes were round-off, the sampling points landed in the far
     tail, and the design matrix reached cond 2e10. The count rule above cannot
@@ -337,7 +334,7 @@ def check_sampling_reads_the_carrying_part_of_uhat():
 def check_fit_refuses_an_underdetermined_set():
     """A starved set must raise, not return the minimum-norm vector.
 
-    `default_matsubara_sampling` now guarantees its own output, so this guards
+    `default_matsubara_sampling` guarantees its own output, so this guards
     the other door: a caller's hand-rolled set. The message must not send them
     to positive_only=False, which does NOT repair a real fit -- see the next
     check.
@@ -364,8 +361,8 @@ def check_mirroring_does_not_repair_a_real_fit():
 
     uhat_l(-n-1) = conj(uhat_l(n)) makes the mirrored rows duplicates up to a
     sign: measured rank 54 for both the one-sided and the symmetric set of a
-    basis with L = 57, and an identical error of 0.46. That is why the fix is
-    to augment with the next basis function rather than to mirror -- worth a
+    basis with L = 57, and an identical error of 0.46. That is why the set is
+    augmented with the next basis function rather than mirrored -- worth a
     test because mirroring is the obvious move and it looks like it works
     (twice the points, same rank).
     """
@@ -374,7 +371,7 @@ def check_mirroring_does_not_repair_a_real_fit():
         b = IRBasis(lam, eps=eps)
         n_max = int(4 * max(b.size, 4) + b.lambda_ / (2 * np.pi))
         n = np.arange(-n_max, n_max + 1)
-        # the SHIPPED recipe: peaks of the top function only, no augmentation
+        # the paper's recipe: peaks of the top function only, no augmentation
         bare = np.array(b._peaks_per_group(n, b.uhat(n)[-1]))
         pos, sym = bare[bare >= 0], bare
         rk = [np.linalg.matrix_rank(np.vstack([(A := b.uhat(m).T).real, A.imag]))

@@ -11,18 +11,23 @@ import numpy as np
 import pytest
 from pyscf import gto, scf, ao2mo
 
-from src.Base.constants import KAPPA
-from src.SingleReference.GW.quasi_boson import build_rpa_AB
-from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
-                                               QPqbAdjoint as QPqb,
-                                               RPAAdjoint as RPA)
-from src.Base.eri_blocks import MOEriBlocks
-from src.gradients.targets import rpa_partials, qp_partials
+from src.Base.numerics.constants import (KAPPA, SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
+from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                                     QPqbAdjoint as QPqb,
+                                                     RPAAdjoint as RPA)
+from src.SingleReference.common.eri_blocks import MOEriBlocks
+from src.gradients.gwbse.targets import rpa_partials, qp_partials
+from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
+from src.Solvers.qp_equation import solve_qp_equation_pole_strength
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_screened_coulomb_chemist)
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.casida import (CasidaInstability,
+                                                       CasidaSolver)
 from src.SingleReference.LinearResponse.rpa_energy import rpa_correlation_energy_casida
+from tests.dense_qp import dense_max_weight_root
 
 
 @pytest.fixture(scope='module')
@@ -30,8 +35,8 @@ def h4():
     mol = gto.M(atom='H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9',
                 unit='Bohr', basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.kernel()
     norb = mol.nao
     nocc = mol.nelectron // 2
@@ -54,8 +59,6 @@ def test_rpa_closed_form(h4):
 
 def test_qp_diag_vs_dense_and_selfenergy_newton(h4):
     mol, mf, eri, nocc, norb = h4
-    from src.SingleReference.GW.self_energy import SelfEnergySolver
-    from src.Solvers.qp_equation import solve_qp_equation_newton
     qp = QPqb(mf.mo_energy, eri, nocc, screening='rpa')
     lr = LinearResponseSolver(mf.mo_energy, eri_chemist=eri,
                               spin_mode='restricted', eta=1e-9)
@@ -65,14 +68,14 @@ def test_qp_diag_vs_dense_and_selfenergy_newton(h4):
                           spin_mode='restricted', eta=1e-9)
     for p in range(norb):
         w_mine, Z = qp.solve_diag(p)
-        w_dense, _ = qp.solve_diag_dense(p)
+        w_dense, _ = dense_max_weight_root(qp, p)
         assert abs(w_mine - w_dense) < 1e-10
         chi_a = se.get_chi_a(nocc, X, Y, p_state=p)
         func = lambda w: w - mf.mo_energy[p] - np.real(
             se.calculate_self_energy(p, w, nocc, om, chi_a, None, vertex_mode='GW'))
-        w_newton = solve_qp_equation_newton(func, mf.mo_energy[p], tol=1e-12,
-                                            max_iter=200)
-        assert abs(w_mine - w_newton) < 1e-9
+        w_ref = solve_qp_equation_pole_strength(func, mf.mo_energy[p],
+                                                  tol=1e-12)
+        assert abs(w_mine - w_ref) < 1e-9
 
 
 @pytest.fixture(scope='module')
@@ -83,8 +86,8 @@ def h4_bhlyp(h4):
     mf = dft.RKS(mol)
     mf.xc = 'bhandhlyp'
     mf.grids.level = 5
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.kernel()
     eri = ao2mo.general(mol, (mf.mo_coeff,) * 4,
                         compact=False).reshape((mol.nao,) * 4)
@@ -115,8 +118,6 @@ def test_qp_on_a_kohn_sham_reference_carries_the_static_shift(h4_bhlyp):
     the SCF.
     """
     mol, mf, eri, nocc, norb = h4_bhlyp
-    from src.SingleReference.GW.self_energy import SelfEnergySolver
-    from src.Solvers.qp_equation import solve_qp_equation_newton
 
     delta = static_exchange_diagonal(mf, mol, np.arange(norb), exchange='mf')
     assert np.abs(delta).max() > 1e-2          # the reference really is not HF
@@ -136,14 +137,14 @@ def test_qp_on_a_kohn_sham_reference_carries_the_static_shift(h4_bhlyp):
         om, X, Y = CasidaSolver(Aw, B).solve()
         for p in range(norb):
             w_mine, _ = qp.solve_diag(p)
-            w_dense, _ = qp.solve_diag_dense(p)
+            w_dense, _ = dense_max_weight_root(qp, p)
             assert abs(w_mine - w_dense) < 1e-10, (screening, p)
             chi_a = se.get_chi_a(nocc, X, Y, p_state=p)
             func = lambda w: w - mf.mo_energy[p] - delta[p] - np.real(
                 se.calculate_self_energy(p, w, nocc, om, chi_a, None,
                                          vertex_mode='GW'))
-            w_prod = solve_qp_equation_newton(func, mf.mo_energy[p] + delta[p],
-                                              tol=1e-12, max_iter=200)
+            w_prod = solve_qp_equation_pole_strength(
+                func, mf.mo_energy[p] + delta[p], tol=1e-12)
             assert abs(w_mine - w_prod) < 1e-9, (screening, p)
             # and it is nowhere near the unshifted answer
             assert abs(w_mine - QPqb(mf.mo_energy, eri, nocc,
@@ -263,7 +264,7 @@ def test_dense_route_takes_its_spin_from_the_kappa_table(h4):
     with pytest.raises(ValueError, match='one of'):
         BSEqb(mf, eri, nocc, screening='rpa', spin='quintet')
 
-    with pytest.raises(ValueError, match='BSE instability'):
+    with pytest.raises(CasidaInstability, match='unstable'):
         BSEqb(mf, eri, nocc, screening='rpa', spin='triplet')
 
     tda = BSEqb(mf, eri, nocc, screening='rpa', spin='triplet', bse_tda=True)

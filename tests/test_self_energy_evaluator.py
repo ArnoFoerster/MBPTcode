@@ -6,10 +6,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
-from src.Base.constants import get_method_info
-from src.Base.pyscf_interface import (get_orbital_energies,
-                                      get_density_fitting_coefficients)
-from src.SingleReference.GW.qp_energy import _casida_spectrum, _self_energy_amplitudes
+from src.SingleReference.GW.self_energy import get_method_info
+from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
+                                            get_density_fitting_coefficients)
+from src.SingleReference.GW.qp_energy import casida_spectrum, _self_energy_amplitudes
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
@@ -34,7 +34,7 @@ if __name__ == '__main__':
     methods = ['GW', 'GWGammaInf', 'PSD1', 'PSD2', 'PSD4', 'PSD5', 'PSD6', 'PSD7',
               'PSD8', 'PSD9']
     infos = {m: get_method_info(m) for m in methods}
-    spectrum = _casida_spectrum(lr, nocc, 'BSE', w_aux, False, infos, methods,
+    spectrum = casida_spectrum(lr, nocc, 'BSE', w_aux, False, infos, methods,
                                 False, True)
 
     all_ok = True

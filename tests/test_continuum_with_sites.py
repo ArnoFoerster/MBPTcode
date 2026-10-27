@@ -14,10 +14,10 @@ folded into vtilde = U Q U^T - E' M E'^T.
      difference of point charges, the closed form matches the full block
      solve of the coupled linear problem, the kernel is symmetric and
      negative semidefinite, differs from the sum of the members, and reduces
-     exactly to each member alone (B = 0, eps = 1).
+     to each member alone to a few ulp (B = 0, eps = 1).
   3. Through the GW routes: the Casida and space-time Eq. (18) routes agree,
      the shell water adds polarization on top of the continuum, and B = 0
-     reproduces the shell continuum alone bitwise.
+     reproduces the shell continuum alone to a few ulp.
   4. Refusals: a continuum that does not enclose the shell, a site outside
      the cavity, a frequency-dependent member in the dRPA factor, the routes
      without W, and a force.
@@ -34,13 +34,16 @@ import numpy as np
 import pytest
 from pyscf import df, gto, scf
 
-from src.Base.composite_environment import (ContinuumWithSites,
-                                            dipole_surface_potential)
-from src.Base.environment import attach_environment
-from src.Base.polarizable_sites import PolarizableSites, site_field
-from src.Base.solvent_screening import EnclosingPCM, SolventScreening
+from src.environments.composite_environment import (ContinuumWithSites,
+                                                    dipole_surface_potential)
+from src.Base.environment_seam import attach_environment
+from src.environments.polarizable_sites import PolarizableSites, site_field
+from src.environments.solvent_screening import EnclosingPCM, SolventScreening
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.Base.numerics.numerics import numerics_of
+from tests.isdf_test_grid import g1, g1_route
+from tests.pins import assert_same
 
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
 #: a second water 4 A out, beyond the sites' 3.4 A clearance from the solute
@@ -130,16 +133,18 @@ def test_the_coupled_kernel(small):
     assert np.linalg.eigvalsh(0.5 * (kernel + kernel.T)).max() < 1e-10
     summed = continuum.aux_kernel(auxmol) + sites.aux_kernel(auxmol)
     assert np.abs(kernel - summed).max() > 1e-3 * np.abs(kernel).max()
-    # each member alone, exactly
+    # each member alone, to a few ulp (each kernel built again)
     inert = PolarizableSites.from_response_matrix([SHELL[0][1]],
                                                   np.zeros((3, 3)),
                                                   unit='Angstrom')
-    assert np.array_equal(ContinuumWithSites(continuum, inert).aux_kernel(auxmol),
-                          continuum.aux_kernel(auxmol))
+    assert_same(ContinuumWithSites(continuum, inert).aux_kernel(auxmol),
+                continuum.aux_kernel(auxmol), quantity='root',
+                label='B = 0 kernel')
     vacuum = SolventScreening(mol, eps=1.0, allow_static_eps=True,
                               cavity_atoms=SHELL)
-    assert np.array_equal(ContinuumWithSites(vacuum, sites).aux_kernel(auxmol),
-                          sites.aux_kernel(auxmol))
+    assert_same(ContinuumWithSites(vacuum, sites).aux_kernel(auxmol),
+                sites.aux_kernel(auxmol), quantity='root',
+                label='eps = 1 kernel')
 
 
 def test_through_the_gw_routes():
@@ -160,14 +165,16 @@ def test_through_the_gw_routes():
     def levels(environment, mode='casida'):
         attach_environment(mf, environment)
         try:
-            out = calc_qp_energy(mf, state=[nocc - 1, nocc], mode=mode)
+            out = calc_qp_energy(mf, state=[nocc - 1, nocc], mode=mode,
+                            **g1_route(mf, mode))
         finally:
             attach_environment(mf, None)
         return np.array([out[p]['GW'] for p in (nocc - 1, nocc)]
                         if isinstance(out, dict) else out)
 
     alone = levels(continuum)
-    assert np.array_equal(levels(ContinuumWithSites(continuum, inert)), alone)
+    assert_same(levels(ContinuumWithSites(continuum, inert)), alone,
+                unit='eV', quantity='energy', label='B = 0')
     coupled = levels(composite)
     assert coupled[0] - alone[0] > 5e-3 and coupled[1] - alone[1] < -2e-3, \
         (coupled, alone)
@@ -196,9 +203,7 @@ def test_refusals(small):
     # a chain carries the composite's energies and refuses its force (the ISDF
     # grid is tabulated at cc-pVDZ)
     dz = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
-    chain = ExcitedStateChain(
-        dz, lambda m: scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri').run(),
-        environment=ContinuumWithSites(_continuum(dz), sites), solver='dense')
+    chain = ExcitedStateChain(dz, lambda m: scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri').run(), environment=ContinuumWithSites(_continuum(dz), sites), numerics=numerics_of({'solver': 'dense', 'counts': g1(dz)}))
     assert np.isfinite(chain.quasiparticle(0))
     with pytest.raises(NotImplementedError, match='no nuclear derivative'):
         chain.quasiparticle_gradient(0)

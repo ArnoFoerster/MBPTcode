@@ -25,7 +25,7 @@ import numpy as np
 import scipy.linalg as la
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC.adc_r_faddeev import (
     _alpha_beta_ladder, solve_ladder_amplitudes_restricted)
 from src.SingleReference.LinearResponse.pp_rpa import (

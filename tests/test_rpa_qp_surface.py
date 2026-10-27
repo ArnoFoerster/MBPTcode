@@ -13,8 +13,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.gradients.dense_surfaces import QuasiparticleSurface
-from src.gradients.rpa_bse_surface import RPAQPSurface
+from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
+from src.gradients.gwbse.rpa_bse_surface import RPAQPSurface
+from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -36,7 +37,7 @@ def water():
 @pytest.fixture(scope='module')
 def surface(water):
     """One mean field and one factorization for every check below."""
-    return RPAQPSurface(water, hf_factory, state=0, mf=hf_factory(water))
+    return RPAQPSurface(water, hf_factory, state=0, mf=hf_factory(water), numerics=g1_numerics(water))
 
 
 def test_removing_an_electron_costs_a_positive_ionization_potential(surface):

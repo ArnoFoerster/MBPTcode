@@ -4,13 +4,14 @@ that module's docstring), wiring together
 src/SingleReference/DensityMatrix/generated_mpn_unrestricted/
 mpn_density_pieces_unrestricted.py. Scope: MP2 + MP3 density
 (compute_delta_gamma2/compute_delta_gamma3) -- all the UHF production
-branches consume; no MP4, no Laplace acceleration (the t3^(2) blocks are
-materialized explicitly, O(nv^3*no^3) per spin sector -- same memory scale
-the restricted driver already accepts for its cross-spin t3 sector).
+branches consume; no MP4. The order-3 density takes the t3^(2) contributions
+either materialized (O(nv^3*no^3) per spin sector) or Laplace-fused
+(laplace_ntau, the default MPN_DENSITY_LAPLACE_NTAU; generated mp3_t3_laplace
+modules).
 
 l-tag axis convention: same pure-vs-mixed rule as the restricted driver
-(_to_l_restricted's docstring has the full derivation/validation history):
-pure blocks (all one spin, now including the genuinely distinct all-beta
+(to_l's docstring has the full derivation):
+pure blocks (all one spin, including the genuinely distinct all-beta
 ones) get (occ, vir-REVERSED) with sign (-1)**(rank//2); mixed blocks get a
 plain occ<->vir side swap, sign +1, no internal reordering.
 
@@ -27,6 +28,10 @@ tests/test_mpn_density_unrestricted.py):
 """
 import numpy as np
 
+from src.Base.numerics.constants import MPN_DENSITY_LAPLACE_NTAU
+
+from src.SingleReference.common.mp_amplitudes import orbital_denominator_axes, to_l
+
 from src.SingleReference.DensityMatrix.generated_mpn_unrestricted import mpn_density_pieces_unrestricted as gen
 from src.SingleReference.DensityMatrix.generated_mpn_unrestricted import mpn_density_pieces_unrestricted_df as gen_df
 from src.SingleReference.DensityMatrix.generated_mpn_unrestricted import mp3_t3_laplace_unrestricted as gen_lap3
@@ -35,18 +40,6 @@ from src.SingleReference.DensityMatrix.generated_mpn_unrestricted import mp3_t3_
 T2_BLOCKS = ('aaaa', 'abab', 'bbbb')
 T1_BLOCKS = ('aa', 'bb')
 T3_BLOCKS = ('aaaaaa', 'aabaab', 'abbabb', 'bbbbbb')
-
-
-def _to_l_unrestricted(t_arr, block):
-    """See module docstring (and _to_l_restricted's for the full story)."""
-    rank = len(block) // 2
-    if len(set(block)) == 1:
-        axes = list(range(rank, 2 * rank)) + list(range(rank - 1, -1, -1))
-        sign = (-1) ** (rank // 2)
-    else:
-        axes = list(range(rank, 2 * rank)) + list(range(rank))
-        sign = 1
-    return sign * t_arr.transpose(*axes)
 
 
 class MPnDensityDriverUnrestricted:
@@ -74,7 +67,7 @@ class MPnDensityDriverUnrestricted:
         self._no = {'a': nocc_a, 'b': nocc_b}
         self.custom_denom = custom_denom or {}
 
-    def _args(self):
+    def kernel_args(self):
         return dict(g_aaaa=self.g_aaaa, g_abab=self.g_abab, g_bbbb=self.g_bbbb,
             d_aa=self.d_aa, d_bb=self.d_bb,
             o_a=self.o_a, v_a=self.v_a, o_b=self.o_b, v_b=self.v_b,
@@ -85,21 +78,9 @@ class MPnDensityDriverUnrestricted:
         axis's spin taken from the block's pair pattern (block[:rank])."""
         if self.custom_denom and block in self.custom_denom:
             return self.custom_denom[block]
-        rank = len(block) // 2
-        spins = block[:rank]
-        eps_o = {s: self._eps[s][:self._no[s]] for s in 'ab'}
-        eps_v = {s: self._eps[s][self._no[s]:] for s in 'ab'}
-        n = 2 * rank
-        d = np.zeros([len(eps_v[s]) for s in spins] + [len(eps_o[s]) for s in spins])
-        for p, s in enumerate(spins):
-            sh = [1] * n
-            sh[rank + p] = len(eps_o[s])
-            d = d + eps_o[s].reshape(sh)
-        for p, s in enumerate(spins):
-            sh = [1] * n
-            sh[p] = len(eps_v[s])
-            d = d - eps_v[s].reshape(sh)
-        return d
+        spins = block[:len(block) // 2]
+        return orbital_denominator_axes([self._eps[s][:self._no[s]] for s in spins],
+                                        [self._eps[s][self._no[s]:] for s in spins])
 
     def _t3_shape(self, block):
         """t3_2_{block}'s own storage shape (vir(3)..., occ(3)...), per-spin
@@ -112,7 +93,7 @@ class MPnDensityDriverUnrestricted:
         return tuple(nv[s] for s in spins) + tuple(no[s] for s in spins)
 
     def compute_t2_1(self):
-        args = self._args()
+        args = self.kernel_args()
         return {b: getattr(gen, f't2_1_{b}_numerator')(**args) / self._denom(b) for b in T2_BLOCKS}
 
     def compute_order2_amplitudes(self, t2_1, max_rank=3, laplace_ntau=None):
@@ -123,8 +104,8 @@ class MPnDensityDriverUnrestricted:
         m3_ov_{a,b}_12_unrestricted's t3-dependent terms) are instead filled
         in via gen_lap3's Laplace-fused pieces by compute_t1_3/
         compute_delta_gamma3 below (see
-        generate_mp3_t3_laplace_unrestricted.py)."""
-        args = self._args()
+        src/CodeGeneration/generate_mpn_laplace.py)."""
+        args = self.kernel_args()
         kw = {f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}
         t1_2 = {b: getattr(gen, f't1_2_{b}_numerator')(**args, **kw) / self._denom(b) for b in T1_BLOCKS}
         t2_2 = t3_2 = None
@@ -146,7 +127,7 @@ class MPnDensityDriverUnrestricted:
         NOT the ordinary t1_3_{aa,bb}_numerator with a zero placeholder,
         since the ndim<=4 invariant is enforced per-operand regardless of
         value."""
-        args = self._args()
+        args = self.kernel_args()
         kw = {}
         kw.update({f't1_2_{b}': t1_2[b] for b in T1_BLOCKS})
         kw.update({f't2_2_{b}': t2_2[b] for b in T2_BLOCKS})
@@ -176,12 +157,22 @@ class MPnDensityDriverUnrestricted:
         compute_order2_amplitudes(...) results, to avoid recomputing
         T2^(1)/T1^(2) when the caller also wants Delta_gamma^(3) from the
         same amplitudes -- see compute_delta_gamma23."""
-        args = self._args()
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1()
         t1_2 = order2[0] if order2 is not None else self.compute_order2_amplitudes(t2_1, max_rank=1)[0]
+        return self._gamma2_blocks(self.kernel_args(), t2_1, t1_2)
 
-        l2_1 = {b: _to_l_unrestricted(t2_1[b], b) for b in T2_BLOCKS}
-        l1_2 = {b: _to_l_unrestricted(t1_2[b], b) for b in T1_BLOCKS}
+    def _dead_args(self):
+        """The m2_*/m3_* cross-density pieces carry no bracket integral, so the DF
+        route calls them with g_aaaa = g_abab = g_bbbb = None (dead parameters)."""
+        return dict(g_aaaa=None, g_abab=None, g_bbbb=None, d_aa=self.d_aa, d_bb=self.d_bb,
+                    o_a=self.o_a, v_a=self.v_a, o_b=self.o_b, v_b=self.v_b,
+                    nv_a=self.nv_a, no_a=self.no_a, nv_b=self.nv_b, no_b=self.no_b)
+
+    def _gamma2_blocks(self, margs, t2_1, t1_2):
+        """Delta_gamma^(2) per spin channel from the amplitudes; margs the
+        generated pieces' integral arguments (self.kernel_args() or self._dead_args())."""
+        l2_1 = {b: to_l(t2_1[b], len(b) // 2, b) for b in T2_BLOCKS}
+        l1_2 = {b: to_l(t1_2[b], len(b) // 2, b) for b in T1_BLOCKS}
 
         N2 = gen.overlap2_unrestricted(**{f'l_{b}': l2_1[b] for b in T2_BLOCKS},
                                        **{f't_{b}': t2_1[b] for b in T2_BLOCKS})
@@ -191,12 +182,12 @@ class MPnDensityDriverUnrestricted:
         for s in ('a', 'b'):
             for block in ('oo', 'vv', 'ov'):
                 m11 = getattr(gen, f'm2_{block}_{s}_11_unrestricted')(
-                    **args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
+                    **margs, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
                     **{f't_2_1_{b}': t2_1[b] for b in T2_BLOCKS})
                 m20 = getattr(gen, f'm2_{block}_{s}_20_unrestricted')(
-                    **args, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS})
+                    **margs, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS})
                 m02 = getattr(gen, f'm2_{block}_{s}_02_unrestricted')(
-                    **args, **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS})
+                    **margs, **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS})
                 out[(block, s)] = m11 + m20 + m02 + c2 * self._gamma_hf(block, s)
         return (out[('oo', 'a')], out[('oo', 'b')], out[('ov', 'a')],
                 out[('ov', 'b')], out[('vv', 'a')], out[('vv', 'b')])
@@ -218,38 +209,12 @@ class MPnDensityDriverUnrestricted:
         return {b: getattr(gen_df, f't1_2_{b}_numerator_df')(**args, **kw) / self._denom(b) for b in T1_BLOCKS}
 
     def compute_delta_gamma2_df(self, t2_1=None, t1_2=None):
-        """DF/RI variant of compute_delta_gamma2 -- see the restricted
-        driver's own compute_delta_gamma2_df docstring for why
-        overlap2_unrestricted/m2_*_11/20/02 are reused UNCHANGED from `gen`
-        (no bracket integral factor at all) with g_aaaa/g_abab/g_bbbb passed
-        as None (dead params)."""
+        """DF/RI variant of compute_delta_gamma2: T2^(1)/T1^(2) from the
+        DF-dressed numerators, the bracket-free m2_* pieces with dead integral
+        arguments (_dead_args)."""
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1_df()
         t1_2 = t1_2 if t1_2 is not None else self.compute_t1_2_df(t2_1)
-
-        l2_1 = {b: _to_l_unrestricted(t2_1[b], b) for b in T2_BLOCKS}
-        l1_2 = {b: _to_l_unrestricted(t1_2[b], b) for b in T1_BLOCKS}
-
-        N2 = gen.overlap2_unrestricted(**{f'l_{b}': l2_1[b] for b in T2_BLOCKS},
-                                       **{f't_{b}': t2_1[b] for b in T2_BLOCKS})
-        c2 = -N2
-
-        dead_args = dict(g_aaaa=None, g_abab=None, g_bbbb=None, d_aa=self.d_aa, d_bb=self.d_bb,
-                         o_a=self.o_a, v_a=self.v_a, o_b=self.o_b, v_b=self.v_b,
-                         nv_a=self.nv_a, no_a=self.no_a, nv_b=self.nv_b, no_b=self.no_b)
-
-        out = {}
-        for s in ('a', 'b'):
-            for block in ('oo', 'vv', 'ov'):
-                m11 = getattr(gen, f'm2_{block}_{s}_11_unrestricted')(
-                    **dead_args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
-                    **{f't_2_1_{b}': t2_1[b] for b in T2_BLOCKS})
-                m20 = getattr(gen, f'm2_{block}_{s}_20_unrestricted')(
-                    **dead_args, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS})
-                m02 = getattr(gen, f'm2_{block}_{s}_02_unrestricted')(
-                    **dead_args, **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS})
-                out[(block, s)] = m11 + m20 + m02 + c2 * self._gamma_hf(block, s)
-        return (out[('oo', 'a')], out[('oo', 'b')], out[('ov', 'a')],
-                out[('ov', 'b')], out[('vv', 'a')], out[('vv', 'b')])
+        return self._gamma2_blocks(self._dead_args(), t2_1, t1_2)
 
     def compute_order2_amplitudes_df(self, t2_1, laplace_ntau=None, max_rank=3):
         """DF/RI variant of compute_order2_amplitudes. max_rank>3 not supported (MP4 out of scope,
@@ -284,7 +249,7 @@ class MPnDensityDriverUnrestricted:
                 num[b] = num[b] + laplace_t1_3_contrib[b]
         return {b: num[b] / self._denom(b) for b in T1_BLOCKS}
 
-    def compute_delta_gamma3_df(self, laplace_ntau=6, t2_1=None, order2=None):
+    def compute_delta_gamma3_df(self, laplace_ntau=MPN_DENSITY_LAPLACE_NTAU, t2_1=None, order2=None):
         """DF/RI variant of compute_delta_gamma3 -- T2^(1)/T1^(2)/T2^(2)/
         T3^(2)/T1^(3) come from the DF-dressed numerators above (including
         the DF+Laplace-composed gen_lap3_df pieces); every m3_* cross-
@@ -292,76 +257,11 @@ class MPnDensityDriverUnrestricted:
         compute_delta_gamma2_df's m2_* pieces) and is called UNCHANGED from
         `gen` with g_aaaa=g_abab=g_bbbb=None (dead params)."""
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1_df()
-        t1_2, t2_2, t3_2 = order2 if order2 is not None else \
+        order2 = order2 if order2 is not None else \
             self.compute_order2_amplitudes_df(t2_1, max_rank=3, laplace_ntau=laplace_ntau)
+        return self._gamma3_blocks(True, laplace_ntau, t2_1, order2)
 
-        l2_1 = {b: _to_l_unrestricted(t2_1[b], b) for b in T2_BLOCKS}
-        l1_2 = {b: _to_l_unrestricted(t1_2[b], b) for b in T1_BLOCKS}
-        l2_2 = {b: _to_l_unrestricted(t2_2[b], b) for b in T2_BLOCKS}
-
-        args_df = self._args_df()
-        laplace_t1_3_contrib = laplace_ov_contrib = None
-        if laplace_ntau is not None:
-            laplace_t1_3_contrib = {
-                'aa': gen_lap3_df.t1_3_aa_t3_laplace_df(**args_df, eps_a=self._eps['a'], eps_b=self._eps['b'],
-                                                        **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-                'bb': gen_lap3_df.t1_3_bb_t3_laplace_df(**args_df, eps_a=self._eps['a'], eps_b=self._eps['b'],
-                                                        **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-            }
-            laplace_ov_contrib = {
-                'a': gen_lap3_df.m3_ov_a_t3_laplace_df(**args_df, eps_a=self._eps['a'], eps_b=self._eps['b'],
-                                                       **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS},
-                                                       **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-                'b': gen_lap3_df.m3_ov_b_t3_laplace_df(**args_df, eps_a=self._eps['a'], eps_b=self._eps['b'],
-                                                       **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS},
-                                                       **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-            }
-
-        t1_3 = self.compute_t1_3_df(t1_2, t2_2, t3_2, laplace_t1_3_contrib=laplace_t1_3_contrib)
-
-        z3 = {b: np.zeros(self._t3_shape(b)) for b in T3_BLOCKS}
-        t3_arg = t3_2 if t3_2 is not None else z3
-        l3_2 = z3
-        l1_3 = {b: _to_l_unrestricted(t1_3[b], b) for b in T1_BLOCKS}
-
-        N3 = 2.0 * gen.overlap2_unrestricted(**{f'l_{b}': l2_1[b] for b in T2_BLOCKS},
-                                             **{f't_{b}': t2_2[b] for b in T2_BLOCKS})
-        c3 = -N3
-
-        dead_args = dict(g_aaaa=None, g_abab=None, g_bbbb=None, d_aa=self.d_aa, d_bb=self.d_bb,
-                         o_a=self.o_a, v_a=self.v_a, o_b=self.o_b, v_b=self.v_b,
-                         nv_a=self.nv_a, no_a=self.no_a, nv_b=self.nv_b, no_b=self.no_b)
-
-        out = {}
-        for s in ('a', 'b'):
-            for block in ('oo', 'vv', 'ov'):
-                if block == 'ov' and t3_2 is None:
-                    m12 = getattr(gen, f'm3_ov_{s}_12_unrestricted_no_t3')(
-                        **dead_args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
-                        **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS},
-                        **{f't_2_2_{b}': t2_2[b] for b in T2_BLOCKS})
-                else:
-                    m12 = getattr(gen, f'm3_{block}_{s}_12_unrestricted')(
-                        **dead_args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
-                        **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS},
-                        **{f't_2_2_{b}': t2_2[b] for b in T2_BLOCKS},
-                        **{f't_3_2_{b}': t3_arg[b] for b in T3_BLOCKS})
-                if block == 'ov' and laplace_ov_contrib is not None:
-                    m12 = m12 + laplace_ov_contrib[s]
-                m21 = getattr(gen, f'm3_{block}_{s}_21_unrestricted')(
-                    **dead_args, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS},
-                    **{f'l_2_2_{b}': l2_2[b] for b in T2_BLOCKS},
-                    **{f'l_3_2_{b}': l3_2[b] for b in T3_BLOCKS},
-                    **{f't_2_1_{b}': t2_1[b] for b in T2_BLOCKS})
-                m30 = getattr(gen, f'm3_{block}_{s}_30_unrestricted')(
-                    **dead_args, **{f'l_1_3_{b}': l1_3[b] for b in T1_BLOCKS})
-                m03 = getattr(gen, f'm3_{block}_{s}_03_unrestricted')(
-                    **dead_args, **{f't_1_3_{b}': t1_3[b] for b in T1_BLOCKS})
-                out[(block, s)] = m12 + m21 + m30 + m03 + c3 * self._gamma_hf(block, s)
-        return (out[('oo', 'a')], out[('oo', 'b')], out[('ov', 'a')],
-                out[('ov', 'b')], out[('vv', 'a')], out[('vv', 'b')])
-
-    def compute_delta_gamma23(self, laplace_ntau=6):
+    def compute_delta_gamma23(self, laplace_ntau=MPN_DENSITY_LAPLACE_NTAU):
         """Delta_gamma^(2) and Delta_gamma^(3) together, computing T2^(1)/
         T1^(2)/T2^(2) exactly once instead of once per call (production MP3
         density always needs both -- see the restricted driver's own
@@ -373,55 +273,65 @@ class MPnDensityDriverUnrestricted:
         gamma3 = self.compute_delta_gamma3(laplace_ntau=laplace_ntau, t2_1=t2_1, order2=order2)
         return gamma2, gamma3
 
-    def compute_delta_gamma3(self, laplace_ntau=6, t2_1=None, order2=None):
+    def compute_delta_gamma3(self, laplace_ntau=MPN_DENSITY_LAPLACE_NTAU, t2_1=None, order2=None):
         """Delta_gamma^(3) = M^(3) + c^(3)*M^(0), per spin channel (c^(2)
         only ever multiplies M^(1) = 0 -- see the restricted driver). Returns
         (oo_a, oo_b, ov_a, ov_b, vv_a, vv_b).
 
-        laplace_ntau: if not None (default: production laplace_ntau=6,
+        laplace_ntau: if not None (default: production laplace_ntau=MPN_DENSITY_LAPLACE_NTAU,
         matching the restricted driver's own production default), none of
         the four O(nv^3*no^3) t3_2_* tensors are ever materialized -- their
         only two live consumers (t1_3_{aa,bb}'s and
         m3_ov_{a,b}_12_unrestricted's t3-dependent terms) are filled in via
-        gen_lap3 instead (see generate_mp3_t3_laplace_unrestricted.py). Every
+        gen_lap3 instead (see src/CodeGeneration/generate_mpn_laplace.py). Every
         other m3_{oo,vv}_{a,b}_12/m3_{oo,vv,ov}_{a,b}_21 body declares
         t_3_2_*/l_3_2_* as a parameter but never references it in an einsum
         (confirmed dead, same pattern as the restricted driver), so a zero
         placeholder there is always exact, laplace mode or not -- pass
-        laplace_ntau=None to get the old fully-materialized behavior (kept
-        for tests/oracle cross-checks only)."""
-        args = self._args()
+        laplace_ntau=None to materialize the t3_2_* tensors (for
+        cross-checks only)."""
         t2_1 = t2_1 if t2_1 is not None else self.compute_t2_1()
-        t1_2, t2_2, t3_2 = order2 if order2 is not None else \
+        order2 = order2 if order2 is not None else \
             self.compute_order2_amplitudes(t2_1, max_rank=3, laplace_ntau=laplace_ntau)
+        return self._gamma3_blocks(False, laplace_ntau, t2_1, order2)
 
-        l2_1 = {b: _to_l_unrestricted(t2_1[b], b) for b in T2_BLOCKS}
-        l1_2 = {b: _to_l_unrestricted(t1_2[b], b) for b in T1_BLOCKS}
-        l2_2 = {b: _to_l_unrestricted(t2_2[b], b) for b in T2_BLOCKS}
+    def _gamma3_blocks(self, df, laplace_ntau, t2_1, order2):
+        """Delta_gamma^(3) per spin channel from T2^(1) and the order-2
+        amplitudes (t1_2, t2_2, t3_2), dense (df False) or DF (df True: DF
+        Laplace pieces and t1_3, dead integral arguments for the m3_* pieces)."""
+        args = self._args_df() if df else self.kernel_args()
+        margs = self._dead_args() if df else args
+        lap = gen_lap3_df if df else gen_lap3
+        sfx = '_df' if df else ''
+        t1_2, t2_2, t3_2 = order2
+
+        l2_1 = {b: to_l(t2_1[b], len(b) // 2, b) for b in T2_BLOCKS}
+        l1_2 = {b: to_l(t1_2[b], len(b) // 2, b) for b in T1_BLOCKS}
+        l2_2 = {b: to_l(t2_2[b], len(b) // 2, b) for b in T2_BLOCKS}
 
         laplace_t1_3_contrib = laplace_ov_contrib = None
         if laplace_ntau is not None:
             laplace_t1_3_contrib = {
-                'aa': gen_lap3.t1_3_aa_t3_laplace(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
+                'aa': getattr(lap, 't1_3_aa_t3_laplace' + sfx)(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
                                                   **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-                'bb': gen_lap3.t1_3_bb_t3_laplace(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
+                'bb': getattr(lap, 't1_3_bb_t3_laplace' + sfx)(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
                                                   **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
             }
             laplace_ov_contrib = {
-                'a': gen_lap3.m3_ov_a_t3_laplace(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
+                'a': getattr(lap, 'm3_ov_a_t3_laplace' + sfx)(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
                                                  **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS},
                                                  **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
-                'b': gen_lap3.m3_ov_b_t3_laplace(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
+                'b': getattr(lap, 'm3_ov_b_t3_laplace' + sfx)(**args, eps_a=self._eps['a'], eps_b=self._eps['b'],
                                                  **{f't2_1_{b}': t2_1[b] for b in T2_BLOCKS},
                                                  **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS}, ntau=laplace_ntau),
             }
 
-        t1_3 = self.compute_t1_3(t1_2, t2_2, t3_2, laplace_t1_3_contrib=laplace_t1_3_contrib)
+        t1_3 = (self.compute_t1_3_df if df else self.compute_t1_3)(t1_2, t2_2, t3_2, laplace_t1_3_contrib=laplace_t1_3_contrib)
 
         z3 = {b: np.zeros(self._t3_shape(b)) for b in T3_BLOCKS}
         t3_arg = t3_2 if t3_2 is not None else z3
         l3_2 = z3  # declared-but-unused in m3_{oo,vv,ov}_{a,b}_21 (see docstring)
-        l1_3 = {b: _to_l_unrestricted(t1_3[b], b) for b in T1_BLOCKS}
+        l1_3 = {b: to_l(t1_3[b], len(b) // 2, b) for b in T1_BLOCKS}
 
         N3 = 2.0 * gen.overlap2_unrestricted(**{f'l_{b}': l2_1[b] for b in T2_BLOCKS},
                                              **{f't_{b}': t2_2[b] for b in T2_BLOCKS})
@@ -437,26 +347,26 @@ class MPnDensityDriverUnrestricted:
                     # matching comment for why a zero t_3_2_* placeholder
                     # isn't an option (ndim<=4 is enforced per-operand).
                     m12 = getattr(gen, f'm3_ov_{s}_12_unrestricted_no_t3')(
-                        **args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
+                        **margs, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
                         **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS},
                         **{f't_2_2_{b}': t2_2[b] for b in T2_BLOCKS})
                 else:
                     m12 = getattr(gen, f'm3_{block}_{s}_12_unrestricted')(
-                        **args, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
+                        **margs, **{f'l_2_1_{b}': l2_1[b] for b in T2_BLOCKS},
                         **{f't_1_2_{b}': t1_2[b] for b in T1_BLOCKS},
                         **{f't_2_2_{b}': t2_2[b] for b in T2_BLOCKS},
                         **{f't_3_2_{b}': t3_arg[b] for b in T3_BLOCKS})
                 if block == 'ov' and laplace_ov_contrib is not None:
                     m12 = m12 + laplace_ov_contrib[s]
                 m21 = getattr(gen, f'm3_{block}_{s}_21_unrestricted')(
-                    **args, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS},
+                    **margs, **{f'l_1_2_{b}': l1_2[b] for b in T1_BLOCKS},
                     **{f'l_2_2_{b}': l2_2[b] for b in T2_BLOCKS},
                     **{f'l_3_2_{b}': l3_2[b] for b in T3_BLOCKS},
                     **{f't_2_1_{b}': t2_1[b] for b in T2_BLOCKS})
                 m30 = getattr(gen, f'm3_{block}_{s}_30_unrestricted')(
-                    **args, **{f'l_1_3_{b}': l1_3[b] for b in T1_BLOCKS})
+                    **margs, **{f'l_1_3_{b}': l1_3[b] for b in T1_BLOCKS})
                 m03 = getattr(gen, f'm3_{block}_{s}_03_unrestricted')(
-                    **args, **{f't_1_3_{b}': t1_3[b] for b in T1_BLOCKS})
+                    **margs, **{f't_1_3_{b}': t1_3[b] for b in T1_BLOCKS})
                 out[(block, s)] = m12 + m21 + m30 + m03 + c3 * self._gamma_hf(block, s)
         return (out[('oo', 'a')], out[('oo', 'b')], out[('ov', 'a')],
                 out[('ov', 'b')], out[('vv', 'a')], out[('vv', 'b')])

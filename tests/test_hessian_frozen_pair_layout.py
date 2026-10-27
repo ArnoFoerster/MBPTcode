@@ -6,14 +6,18 @@ choice. `numerical_hessian` differences forces of independent SCFs at
 R0 +/- h; screened again at each of them, a pair crossing the threshold
 between R0 - h and R0 + h makes the two forces of one central difference
 forces of two energies, and the column an O(1/h) error. Formaldehyde/cc-pVDZ
-Hartree-Fock on the G3 grid (the Hessian floor) drops one pair of the SCF's
+Hartree-Fock on the GH grid (the Hessian floor) drops one pair of the SCF's
 screen when hydrogen 2 moves CROSSING Bohr along y; the reference sits 3.7e-5
 Bohr short of it, so every stencil along that coordinate straddles it (and,
 the pair being shared, several other coordinates' stencils do too).
 
 The same construction as test_scf_frozen_pair_layout, on the
-equilibrium-like geometry of test_numerical_hessian, where the G3 surface is
-smooth on the step's scale.
+equilibrium-like geometry of test_numerical_hessian, where the GH surface is
+smooth on the step's scale. CROSSING is a crossing of the points the
+covariant frames of each geometry place, so the Hessians here keep those
+frames (`frames=None`): the layout is the one convention under test. Frozen
+at R0 (`numerical_hessian`'s default) the points move otherwise and the
+crossing sits elsewhere.
 
 Measured (max |H - H^T| before symmetrizing, Ha/Bohr^2, h = 1e-3, 5e-4,
 2.5e-4): each SCF on its own screen 2.1e-4, 4.2e-4, 8.4e-4, growing as 1/h;
@@ -29,19 +33,23 @@ from pyscf import gto, lib, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base import separable_ri
-from src.Base.constants import ISDF_GRID_ACCURACY, NUCLEAR_FD_STEP
-from src.Base.distributed_isdf_jk import scf_pair_layout
-from src.Base.isdf_jk import isdf_grid, isdf_jk
-from src.Base.separable_ri import _SHELL_ORDER
-from src.Base.utils.mpi_grid import mpi_map, run_simulated
+from src.Base.factorization import separable_ri
+from src.Base.numerics.constants import ISDF_GRID_ACCURACY, NUCLEAR_FD_STEP
+from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import mpi_map
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.factorization.separable_ri import SHELL_ORDER
+from src.Base.geometry.geometry import displaced
 from src.properties import hessian as H
+from tests.pins import assert_same
 
 ATOM = ('C 0.0 0.0 -0.6035; O 0.0 0.0 0.7349; '
         'H 0.0 0.9753 -1.1057; H 0.0 -0.9753 -1.1057')
 AUXBASIS = 'cc-pvdz-ri'
-COUNTS = dict(zip(_SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz']['G3']))
-#: Bohr, hydrogen 2 along y from ATOM: one pair of the G3 screen drops here.
+COUNTS = dict(zip(SHELL_ORDER, ISDF_GRID_ACCURACY['cc-pvdz']['GH']))
+#: Bohr, hydrogen 2 along y from ATOM: one pair of the GH screen drops here.
 CROSSING = 0.008182855963706971
 SHIFT = CROSSING - 3.7e-5
 MOVED = (2, 1)
@@ -73,7 +81,7 @@ def _reference():
 
 
 def _factory(mol):
-    mf = isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=COUNTS)
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=AUXBASIS, counts=COUNTS)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     assert mf.converged
@@ -81,7 +89,7 @@ def _factory(mol):
 
 
 def _screen(mol):
-    lay = separable_ri.test_set_layout(
+    lay = separable_ri.fit_test_set_layout(
         mol, isdf_grid(mol, counts=COUNTS, auxbasis=AUXBASIS))
     return set(zip(lay[0].tolist(), lay[1].tolist()))
 
@@ -140,7 +148,8 @@ def serial(mol0):
 
             mp.setattr(H, 'gradient_at', keep)
             spy, info = Spy(), {}
-            hess = H.numerical_hessian(mol0, spy, step=step, info=info)
+            hess = H.numerical_hessian(mol0, spy, step=step, info=info,
+                                       frames=None)
             out[step] = (hess, _raw(grads, mol0.natm, step), info,
                          spy.layouts)
     return out
@@ -149,8 +158,8 @@ def serial(mol0):
 def test_every_stencil_straddles_a_pair_crossing(mol0):
     s0 = _screen(mol0)
     for h in STEPS:
-        assert _screen(H.displaced(mol0, *MOVED, +1, h)) != s0
-        assert _screen(H.displaced(mol0, *MOVED, -1, h)) == s0
+        assert _screen(displaced(mol0, H.component_step(mol0, *MOVED, h))) != s0
+        assert _screen(displaced(mol0, H.component_step(mol0, *MOVED, -h))) == s0
 
 
 def test_every_displaced_mean_field_fits_on_the_reference_layout(
@@ -211,14 +220,15 @@ def test_ranks_difference_forces_on_one_layout(mol0, reference, serial,
     try:
         ranked = run_simulated(
             lambda comm: H.numerical_hessian(
-                mol0, spy, step=step,
+                mol0, spy, step=step, frames=None,
                 map_fn=functools.partial(mpi_map, comm=comm)), 2)
     finally:
         lib.num_threads(threads)
     assert len(spy.layouts) == 1 + 6 * mol0.natm
     assert sum(lay is None for lay in spy.layouts) == 1
     assert all(_same(lay, frozen) for lay in spy.layouts if lay is not None)
-    assert np.array_equal(ranked[0], ranked[1])
+    # each rank assembles the Hessian from the mapped forces: a few ulp
+    assert_same(ranked[0], ranked[1], quantity='gradient', label='ranks')
     assert float(np.abs(ranked[0] - serial[step][0]).max()) < 1e-6
 
 

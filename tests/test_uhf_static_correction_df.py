@@ -11,8 +11,16 @@ Two tiers, same split as tests/test_mp2_density_df.py:
    dressing replication, and the rank<=3 final G[dgamma] contraction -- not
    the shared Z-vector solve: both routes call the same
    solve_cphf_relaxation_uhf on the same mf (that solver has its own oracle,
-   tests/test_uhf_mp2_relaxed_finite_field.py), given cphf_tol=1e-12 here so
-   its convergence noise sits below the comparison threshold.
+   tests/test_uhf_mp2_relaxed_finite_field.py). Both solves are taken to
+   CORRELATION_CPHF_TOL, and the bar is that same number: the test compares
+   the two builders, not the solver's stop points. At that tolerance both
+   routes' solves stop in the same refinement round of src.Base.pyscf.cphf
+   (OH relaxed EN 1.0e-14 apart, workstation). A tighter tolerance measures
+   the solver instead: OH's orbital Hessian is nearly singular (lowest
+   eigenvalue about 2.5e-10, tests/test_cphf_residual.py), so the last bits
+   of the two right-hand sides, amplified along that soft rotation, decide
+   where each solve stops (OH relaxed EN: 6.3e-12 at 1e-12, 5.0e-10 at
+   1e-13 on the workstation; 1.6e-9 at 1e-12 under MKL).
 2. Realistic-RI, through the production dispatcher: build_static_correction(
    mf, mol, kind=..., df=True) vs df=False on a density-fitted mf. The dense
    branch always rebuilds exact ao2mo integrals regardless of mf.with_df and
@@ -35,7 +43,8 @@ from src.SingleReference.ADC.static_correction import (
     build_static_correction,
     build_mp2_static_correction, build_mp2_static_correction_uhf_df,
 )
-from src.Base.pyscf_interface import get_uhf_spin_orbital_df_factor_blockstacked
+from src.Base.numerics.constants import CORRELATION_CPHF_TOL
+from src.Base.pyscf.pyscf_interface import get_uhf_spin_orbital_df_factor_blockstacked
 
 
 if __name__ == '__main__':
@@ -58,12 +67,13 @@ if __name__ == '__main__':
             dname = 'hh+pp EN' if dress else 'bare'
 
             dense = build_mp2_static_correction(
-                mf, mol, relax=relax, u2_denom_dress=dress, cphf_tol=1e-12)
+                mf, mol, relax=relax, u2_denom_dress=dress,
+                cphf_tol=CORRELATION_CPHF_TOL)
             df_exact = build_mp2_static_correction_uhf_df(
                 mf, mol, B_exact, relax=relax, u2_denom_dress=dress,
-                cphf_tol=1e-12)
+                cphf_tol=CORRELATION_CPHF_TOL)
             diff = np.max(np.abs(dense - df_exact))
-            ok = diff < 1e-10
+            ok = diff < CORRELATION_CPHF_TOL
             all_ok &= ok
             print(f"{label} {kind:14s} ({dname:8s}): DF (naux=norb^2 exact) "
                   f"matches dense (max diff={diff:.2e}): {'OK' if ok else 'FAIL'}")

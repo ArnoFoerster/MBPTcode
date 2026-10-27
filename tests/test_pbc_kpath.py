@@ -111,10 +111,10 @@ def check_real_input_gives_real_output():
     between mesh points even for real input. Measured max|imag| 0.84 at 2^3 and
     1.27 at 4^3, against 1.5e-16 at 3^3 where the set IS symmetric.
 
-    The old tests missed this because they only compared magnitudes, and
-    |complex - real| is a perfectly good number. The consequence downstream was
-    not cosmetic: json.dump raises partway through a complex array, so every
-    attempt to write a band structure produced a TRUNCATED file.
+    A comparison of magnitudes misses this, since |complex - real| is a
+    perfectly good number. The consequence downstream is not cosmetic:
+    json.dump raises partway through a complex array, so an attempt to write
+    a band structure would produce a TRUNCATED file.
     """
     cell = _al()
     ok = True

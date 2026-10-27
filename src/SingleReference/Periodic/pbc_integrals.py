@@ -1,5 +1,5 @@
 """k-point density-fitted 3-center MO integrals -- the periodic analog of
-Base/pyscf_interface.get_density_fitting_coefficients + DFIntegrals.
+Base/pyscf/pyscf_interface.get_density_fitting_coefficients + DFIntegrals.
 
 Builds the complex 3-center MO tensors organized by momentum transfer q, plus
 the k-point occ/virt bookkeeping and momentum-conservation maps that every
@@ -26,8 +26,27 @@ Organized by momentum transfer: for a fixed transfer index q, every k-pair
 same naux, so L for a given q is a dense array (nkpts, naux_q, nmo, nmo).
 """
 import numpy as np
+from pyscf import lib
 from pyscf.ao2mo import _ao2mo
 from pyscf.ao2mo.incore import _conc_mos
+from pyscf.pbc.df.df import _load3c
+from pyscf.pbc.lib.kpts_helper import is_zero
+
+
+def kpoint_matches(kscaled, target, tol=1e-8):
+    """Indices of the scaled k-points equal to `target` up to a reciprocal
+    lattice vector (fractional coordinates, `tol` on the distance)."""
+    diff = kscaled - target
+    return np.where(np.linalg.norm(np.round(diff) - diff, axis=1) < tol)[0]
+
+
+def bz_index(kscaled, kvec):
+    """(idx, G0scaled) with kvec == kscaled[idx] + G0scaled, G0scaled integer."""
+    idx = kpoint_matches(kscaled, kvec)
+    if len(idx) != 1:
+        raise RuntimeError(f"no unique BZ match for {kvec} ({len(idx)} found)")
+    i = idx[0]
+    return i, np.round(kvec - kscaled[i])
 
 
 def get_momentum_transfer_map(cell, kpts, tol=1e-8):
@@ -43,9 +62,7 @@ def get_momentum_transfer_map(cell, kpts, tol=1e-8):
     kconserv_pair = -np.ones((nk, nk), dtype=int)
     for q in range(nk):
         for ki in range(nk):
-            target = kscaled[ki] + kscaled[q]
-            diff = kscaled - target
-            match = np.where(np.linalg.norm(np.round(diff) - diff, axis=1) < tol)[0]
+            match = kpoint_matches(kscaled, kscaled[ki] + kscaled[q], tol)
             if len(match) != 1:
                 raise RuntimeError(
                     f"momentum transfer map: q={q}, ki={ki} matched {len(match)} "
@@ -54,9 +71,44 @@ def get_momentum_transfer_map(cell, kpts, tol=1e-8):
     return kconserv_pair
 
 
+def gdf_pair_factors(mydf, kpts, pairs):
+    """
+    Yield (ki, kj, B^{ki,kj}) with B of shape (naux, nao, nao), complex: the
+    GDF factors of every k-pair in `pairs`, exactly as `mydf.sr_loop` gives
+    them, from one open cderi file. sr_loop opens and searches the file
+    again for every pair; a rank reading thousands of pairs from a file of
+    hundreds of GB on shared storage spends its time there, not reading.
+    Pairs are best given grouped by transfer: the builder writes each
+    transfer and its conjugate together. Three-dimensional cells only: a
+    file with negative-metric blocks is refused.
+    """
+    nao = mydf.cell.nao_nr()
+    with _load3c(mydf._cderi, mydf._dataname) as getitem:
+        if mydf._dataname + '-' in getitem.__self__.feri:
+            raise NotImplementedError('gdf_pair_factors: negative-metric GDF blocks '
+                                      '(low-dimensional cell); three-dimensional only.')
+        for ki, kj in pairs:
+            kptij = np.asarray([kpts[ki], kpts[kj]])
+            j3c = getitem(*kptij)
+            data = np.asarray(j3c[0:j3c.shape[0]])
+            # the post-processing of sr_loop(compact=False), on the whole block
+            if is_zero(kptij):
+                real = np.asarray(data.real)
+                if is_zero(kptij[0] - kptij[1]) and real.shape[1] != nao ** 2:
+                    real = lib.unpack_tril(real).reshape(-1, nao ** 2)
+                imag = np.zeros_like(real)
+            else:
+                real = np.asarray(data.real, order='C')
+                imag = np.asarray(data.imag, order='C')
+                if is_zero(kptij[0] - kptij[1]) and real.shape[1] != nao ** 2:
+                    real = lib.unpack_tril(real).reshape(-1, nao ** 2)
+                    imag = lib.unpack_tril(imag, lib.ANTIHERMI).reshape(-1, nao ** 2)
+            yield ki, kj, (real + 1j * imag).reshape(-1, nao, nao)
+
+
 class PBCDFIntegrals:
     """k-point DF 3-center MO tensors L^q, container parallel to the molecular
-    DFIntegrals (Base/pyscf_interface.py).
+    DFIntegrals (Base/pyscf/pyscf_interface.py).
 
     Attributes
     ----------
@@ -86,12 +138,16 @@ class PBCDFIntegrals:
         self.mf = mf
 
     @classmethod
-    def from_scf(cls, cell, mf, tol=1e-8):
+    def from_scf(cls, cell, mf, tol=1e-8, factors=None):
         """Build all L^q from a converged KRHF/KRKS mean field with GDF.
 
         Mirrors DFIntegrals.from_scf: pulls the DF object off mf, transforms
         the AO 3-center integrals to the MO basis per k-pair, and packs them
-        by momentum transfer.
+        by momentum transfer. `factors` is a source of the AO factors
+        (`pbc_gdf_build`: FileGDF, or DistributedGDF to build them over the
+        ranks without a cderi file); by default each pair is read with
+        mf.with_df.sr_loop, which also takes the negative-metric blocks of a
+        low-dimensional cell.
         """
         mydf = getattr(mf, 'with_df', None)
         if mydf is None:
@@ -106,6 +162,12 @@ class PBCDFIntegrals:
         nmo = mo_coeff.shape[-1]
 
         kconserv_pair = get_momentum_transfer_map(cell, kpts, tol=tol)
+        if factors is not None:
+            B = factors(kpts, kconserv_pair, np.arange(nkpts))
+            L = [np.stack([cls._mo_transform(B[q][ki].reshape(-1, nao * nao),
+                                             mo_coeff, ki, kconserv_pair[q, ki], nmo)
+                           for ki in range(nkpts)]) for q in range(nkpts)]
+            return cls(L, kconserv_pair, mo_energy, mo_occ, kpts, cell=cell, mf=mf)
 
         L = []
         for q in range(nkpts):
@@ -135,7 +197,12 @@ class PBCDFIntegrals:
         Lpq = []
         for LpqR, LpqI, sign in mydf.sr_loop([kpts[ki], kpts[kj]], compact=False):
             Lpq.append(LpqR + LpqI * 1.0j)
-        Lpq = np.vstack(Lpq).reshape(-1, nao * nao)
+        return PBCDFIntegrals._mo_transform(np.vstack(Lpq).reshape(-1, nao * nao),
+                                            mo_coeff, ki, kj, nmo)
+
+    @staticmethod
+    def _mo_transform(Lpq, mo_coeff, ki, kj, nmo):
+        """(naux, nao^2) AO factor of the pair (ki, kj) -> (naux, nmo, nmo) MO."""
         moij, ijslice = _conc_mos(mo_coeff[ki], mo_coeff[kj])[2:]
         Lij = _ao2mo.r_e2(Lpq, moij, ijslice, [], None)
         return Lij.reshape(-1, nmo, nmo)
@@ -148,11 +215,6 @@ class PBCDFIntegrals:
     def virt_slice(self, k):
         return slice(self.nocc[k], self.nmo)
 
-    def L_ov(self, q, ki):
-        """Occ-virt block L^{q}_{i in ki, a in ki+q}, shape (naux, nocc_ki, nvirt_kj)."""
-        kj = self.kconserv_pair[q, ki]
-        return self.L[q][ki][:, self.occ_slice(ki), self.virt_slice(kj)]
-
     def Lblock(self, k1, k2):
         """Full MO 3-center factor L^{k1,k2}_{L,pq}, shape (naux, nmo, nmo).
 
@@ -160,17 +222,8 @@ class PBCDFIntegrals:
         (q = k2 - k1) automatically. Downstream A/B assembly slices this by
         occ/virt to get ov/oo/vv blocks at arbitrary momentum transfer.
         """
-        q = self._pair_to_q(k1, k2)
+        q = self.pair_to_q(k1, k2)
         return self.L[q][k1]
-
-    def eri_block(self, k1, k2, k3, k4, s1, s2, s3, s4):
-        """DF chemist MO integral (p_k1 q_k2 | r_k3 s_k4) for orbital ranges
-        s1..s4 (slices), from the stored L^q. Momentum must conserve:
-        k1 - k2 + k3 - k4 = 0. Returns a 4-index block, no conjugation
-        (see the module-level convention note)."""
-        L12 = self.Lblock(k1, k2)[:, s1, s2]
-        L34 = self.Lblock(k3, k4)[:, s3, s4]
-        return np.einsum('Lpq,Lrs->pqrs', L12, L34)
 
     # ---- validation ----
 
@@ -181,15 +234,24 @@ class PBCDFIntegrals:
         DFIntegrals.reconstruct_g. Requires momentum conservation
         k1 - k2 + k3 - k4 = 0; picks the q-slices that realize the two pairs.
         """
-        q12 = self._pair_to_q(k1, k2)
-        q34 = self._pair_to_q(k3, k4)
+        q12 = self.pair_to_q(k1, k2)
+        q34 = self.pair_to_q(k3, k4)
         L12 = self.L[q12][k1]
         L34 = self.L[q34][k3]
         return np.einsum('Lij,Lkl->ijkl', L12, L34)
 
-    def _pair_to_q(self, ki, kj):
+    def pair_to_q(self, ki, kj):
         """Transfer index q with kconserv_pair[q, ki] == kj."""
         matches = np.where(self.kconserv_pair[:, ki] == kj)[0]
         if len(matches) != 1:
             raise RuntimeError(f"no unique momentum transfer for pair ({ki},{kj})")
         return matches[0]
+
+    def kpoint_minus_q(self, q, kp):
+        """Index km with kpts[km] = kpts[kp] - kpts[q] (mod G), i.e.
+        kconserv_pair[q, km] == kp: the transfers ARE k-points, so km is
+        recovered by inverting kconserv_pair along its other axis."""
+        matches = np.where(self.kconserv_pair[q] == kp)[0]
+        if len(matches) != 1:
+            raise RuntimeError(f"no unique k - q for kp={kp}, q={q}")
+        return int(matches[0])

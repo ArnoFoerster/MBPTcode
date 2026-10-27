@@ -20,8 +20,8 @@ available to the MPn density-matrix drivers (compute_t2_1_custom_denom).
 """
 import numpy as np
 
-from src.Base.pyscf_interface import (get_coulomb_exchange_diagonals,
-                                      get_coulomb_exchange_diagonals_df)
+from src.Base.pyscf.pyscf_interface import (get_coulomb_exchange_diagonals,
+                                            get_coulomb_exchange_diagonals_df)
 
 
 def _diag_ladder(g, idx1, idx2):
@@ -30,34 +30,28 @@ def _diag_ladder(g, idx1, idx2):
     return np.einsum('pqpq->pq', g[idx1, idx2, idx1, idx2], optimize=True)
 
 
-def _diag_ladder_df(B, idx1, idx2):
+def diag_ladder_df(B, idx1, idx2, W_aux=None):
     """_diag_ladder from a spin-orbital DF factor B (naux, nso, nso) instead of
     dense g -- <pq||pq> = sum_Q B[Q,p,p]B[Q,q,q] - sum_Q B[Q,p,q]B[Q,q,p]
-    (rank<=2 intermediates; validated identical to the dense version)."""
+    (rank<=2 intermediates; validated identical to the dense version).
+
+    W_aux: (naux, naux) static inverse-dielectric metric
+    (static_screened_coulomb_aux[_uhf]); with it the DIRECT term J is
+    statically RPA-screened, J_W - K (BSE-kernel channel split: the
+    exchange/ring term K stays bare -- see denominators.build_dressed_e_ai's
+    docstring). When idx1/idx2 mix spins (e.g. a spin-orbital blockstacked B
+    with cross-spin blocks zero), the cross-spin elements of both J_W and K
+    vanish from B's own block structure, so no spin bookkeeping is needed."""
     d1 = np.einsum('Qpp->Qp', B[:, idx1][:, :, idx1])
     d2 = np.einsum('Qqq->Qq', B[:, idx2][:, :, idx2])
-    J = np.einsum('Qp,Qq->pq', d1, d2, optimize=True)
+    if W_aux is None:
+        J = np.einsum('Qp,Qq->pq', d1, d2, optimize=True)
+    else:
+        J = d1.T @ W_aux @ d2
     B12 = B[:, idx1][:, :, idx2]
     B21 = B[:, idx2][:, :, idx1]
     K = np.einsum('Qpq,Qqp->pq', B12, B21, optimize=True)
     return J - K
-
-
-def _diag_ladder_df_screened(B, W_aux, idx1, idx2):
-    """_diag_ladder_df with the DIRECT term J statically RPA-screened, J_W - K
-    (BSE-kernel channel split: exchange/ring term K stays bare -- see
-    denominators._build_dressed_e_ai's docstring). W_aux: (naux, naux) static
-    inverse-dielectric metric (static_screened_coulomb_aux[_uhf]); when idx1/
-    idx2 mix spins (e.g. a spin-orbital blockstacked B with cross-spin blocks
-    zero), the cross-spin elements of both J_W and K vanish automatically from
-    B's own block structure, so no separate spin bookkeeping is needed here."""
-    d1 = np.einsum('Qpp->Qp', B[:, idx1][:, :, idx1])
-    d2 = np.einsum('Qqq->Qq', B[:, idx2][:, :, idx2])
-    J_W = d1.T @ W_aux @ d2
-    B12 = B[:, idx1][:, :, idx2]
-    B21 = B[:, idx2][:, :, idx1]
-    K = np.einsum('Qpq,Qqp->pq', B12, B21, optimize=True)
-    return J_W - K
 
 
 def epstein_nesbet_shift(g, no, layout='pphh', bare_sign=1.0, hh=True, pp=False, hp=False,
@@ -80,13 +74,13 @@ def epstein_nesbet_shift(g, no, layout='pphh', bare_sign=1.0, hh=True, pp=False,
     (no,no,nv,nv) for 'hhpp'.
 
     B: optional spin-orbital DF factor (naux, nso, nso) -- when given, the
-    diagonal ladder blocks are built from B (_diag_ladder_df, rank<=2, no
+    diagonal ladder blocks are built from B (diag_ladder_df, rank<=2, no
     dense g touched) and `g` may be None. Same result to machine precision
     when B exactly factorizes g."""
     norb = len(g) if B is None else B.shape[1]
     o, v = slice(0, no), slice(no, norb)
     nv = norb - no
-    ladder = _diag_ladder if B is None else (lambda _g, i1, i2: _diag_ladder_df(B, i1, i2))
+    ladder = _diag_ladder if B is None else (lambda _g, i1, i2: diag_ladder_df(B, i1, i2))
     if layout == 'pphh':
         p_axes, h_axes, shape = (0, 1), (2, 3), (nv, nv, no, no)
     elif layout == 'hhpp':
@@ -95,6 +89,8 @@ def epstein_nesbet_shift(g, no, layout='pphh', bare_sign=1.0, hh=True, pp=False,
         raise ValueError(f"layout={layout!r}; expected 'pphh' or 'hhpp'")
 
     def _place(mat, ax_a, ax_b):
+        if ax_a > ax_b:              # 'hhpp' puts the hole axis of a cross pair first
+            mat, ax_a, ax_b = mat.T, ax_b, ax_a
         bshape = [1, 1, 1, 1]
         bshape[ax_a], bshape[ax_b] = mat.shape
         return mat.reshape(bshape)

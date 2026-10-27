@@ -33,10 +33,13 @@ displaced mean field:
       bits on every rank, while pyscf's own gradient of the locked mean field
       differs between ranks;
   (b) on the shape-sensitive BLAS and the free memory (subprocess): the same
-      three numbers of each layout rank 0's on every rank, the sliced layout
-      bitwise the whole one, and the row fit's forces and energy within
-      FIT_REALIZATION_FORCE_TOL and FIT_REALIZATION_ENERGY_TOL of the
-      whole-fit sliced layout's, two realizations of the one fit;
+      three numbers of each layout rank 0's on every rank, the sliced
+      layout's bitwise the whole layout's under the BLAS the pins record
+      (within the cross-BLAS bar of each class under another, whose real
+      GEMM rounds by call shape where the stand-in does not reach), and the
+      row fit's forces and
+      energy within FIT_REALIZATION_FORCE_TOL and FIT_REALIZATION_ENERGY_TOL
+      of the whole-fit sliced layout's, two realizations of the one fit;
   (c) on all three stand-ins at once (subprocess): every number of (b) rank
       0's on every rank.
 
@@ -67,16 +70,22 @@ from pyscf import dft, gto, scf
 from pyscf.df.grad import rhf as pyscf_df_grad
 from pyscf.lib import numpy_helper
 
-from src.Base.constants import (FIT_REALIZATION_ENERGY_TOL,
-                                FIT_REALIZATION_FORCE_TOL)
-from src.Base.utils.mpi_grid import (current_comm, lockstep_mean_field,
-                                     run_simulated)
-from src.gradients.dense_surfaces import DenseRPASurface
-from src.gradients.rpa_bse_surface import RPABSESurface
-from src.properties.optimize import mean_field_force
+from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
+                                         FIT_REALIZATION_FORCE_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import numerics_of
+from src.Base.utils.parallel.mpi_grid import current_comm, lockstep_mean_field
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse.dense_surfaces import DenseRPASurface
+from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
+from src.gradients.mean_field_surface import mean_field_force
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
+from tests.isdf_test_grid import g1_numerics
+from tests.pins import pin_bar, recorded_blas
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PINS_BLAS = recorded_blas(os.path.join(REPO, 'tests', 'one_fit_pins.json'))
 SIZES = [2, 3, 8]
 #: The rank counts (c) runs at: its gate is (a)'s and (b)'s together.
 ALL_SIZES = [3, 8]
@@ -180,7 +189,9 @@ class ShapeFinder(importlib.abc.MetaPathFinder):
 def chain_scf(m):
     """A mean field converged for gradient work (conv_tol_grad 1e-11)."""
     out = scf.RHF(m).density_fit(auxbasis='cc-pvdz-ri')
-    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.conv_tol = SCF_TIGHT_CONV_TOL
+    out.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    out.max_cycle = 200
     out.kernel()
     return out
 
@@ -189,7 +200,9 @@ def exact_scf(m):
     """`chain_scf` without the density fit, for the dense route's exact
     (pq|rs)."""
     out = scf.RHF(m)
-    out.conv_tol, out.conv_tol_grad, out.max_cycle = 1e-14, 1e-11, 200
+    out.conv_tol = SCF_TIGHT_CONV_TOL
+    out.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    out.max_cycle = 200
     out.kernel()
     return out
 
@@ -319,10 +332,13 @@ def import_src_on_the_shape_sensitive_blas():
 
 
 def layout_numbers(surface_class, mol, mf, here, mf_here, **kw):
-    """(composed force, energy, dRPA force) of one layout at `here` on the
-    given mean fields."""
-    surface = surface_class(mol, chain_scf, spin='singlet', mf=mf,
-                            solver='davidson', bse_conv_tol=BSE_CONV_TOL, **kw)
+    """(composed force, energy, dRPA force) of one layout at `here`, on the
+    mean fields it is handed."""
+    # the settings records of the src copy `surface_class` came from
+    settings = importlib.import_module('src.gradients.rpa.chain_settings')
+    surface = surface_class(
+        mol, chain_scf, spin='singlet', mf=mf,
+        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **kw, 'bse_conv_tol': BSE_CONV_TOL})))
     g, e, _ = surface.total_gradient(here, mf_here)
     return (np.asarray(g), np.atleast_1d(e),
             np.asarray(surface.ground.total_gradient(here, mf_here)[0]))
@@ -421,7 +437,15 @@ def test_layouts_on_the_shape_sensitive_blas(size):
     print(f'{size} ranks: {got}')
     assert got['perturbed'] > 0, 'the shape-sensitive BLAS scaled nothing'
     assert not got['not rank 0s'], got['not rank 0s']
-    assert got['sliced is whole'] == [True] * len(NUMBERS), got
+    # the sliced layout is the whole one: bitwise under the BLAS the pins
+    # were recorded on, within the cross-BLAS bar of each class elsewhere,
+    # where the real BLAS rounds by call shape outside the stand-in
+    for name, dist in got['sliced - whole'].items():
+        bar = pin_bar(PINS_BLAS, quantity='energy' if name == 'energy'
+                      else 'gradient')
+        print(f'[info] {size} ranks, sliced - whole {name}: |d| {dist:.2e} '
+              f'against {bar:.0e}')
+        assert dist <= bar, (size, name, dist, bar)
     for name, dist in got['row fit'].items():
         bar = (FIT_REALIZATION_ENERGY_TOL if name == 'energy'
                else FIT_REALIZATION_FORCE_TOL)
@@ -441,9 +465,9 @@ def shape_main(mode, size):
     """(b) or (c) here: src imported afresh on the shape-sensitive BLAS, the
     free memory rank-dependent and, for 'all', pyscf racing."""
     import_src_on_the_shape_sensitive_blas()
-    fresh_grid = importlib.import_module('src.Base.utils.mpi_grid')
+    fresh_grid = importlib.import_module('src.Base.utils.parallel.mpi_grid')
     surface_class = importlib.import_module(
-        'src.gradients.rpa_bse_surface').RPABSESurface
+        'src.gradients.gwbse.rpa_bse_surface').RPABSESurface
     pyscf_df_grad.lib = RankMemoryLib(pyscf_df_grad.lib,
                                       fresh_grid.current_comm)
     if mode == 'all':
@@ -454,15 +478,18 @@ def shape_main(mode, size):
         out['raw'] = np.asarray(fields[3].Gradients().kernel())
         return out
 
-    res = fresh_grid.run_simulated(rank, size)
+    res = importlib.import_module('src.Base.utils.parallel.simulated_comm').run_simulated(
+        rank, size)
     verdict = {'perturbed': SHAPE_STATE['perturbed'],
                'raced': distinct([r['raw'] for r in res]),
                'not rank 0s': not_rank_0s(res, LAYOUTS)}
     if mode == 'all':
         return verdict
-    verdict['sliced is whole'] = [
-        all(np.array_equal(r['sliced'][i], r['whole'][i]) for r in res)
-        for i in range(len(NUMBERS))]
+    verdict['sliced - whole'] = {
+        name: max(float(np.abs(np.asarray(r['sliced'][i])
+                               - np.asarray(r['whole'][i])).max())
+                  for r in res)
+        for i, name in enumerate(NUMBERS)}
     sliced, rows = res[0]['sliced'], res[0]['rows']
     verdict['row fit'] = {
         name: float(np.abs(np.asarray(rows[i]) - np.asarray(sliced[i])).max())

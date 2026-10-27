@@ -16,16 +16,17 @@ from pyscf import df, dft, gto
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.environment import attach_environment
-from src.Base.solvent_screening import SolventScreening, detach_solvent_screening
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import SolventScreening, detach_solvent_screening
 from src.SingleReference.GW.reaction_field import (bare_gauge_transform,
                                                    separable_quasiparticle_shift)
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.reaction_field_adjoint import (reaction_field_backward,
-                                                  reaction_field_shift,
-                                                  static_grid)
+from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
+                                                        reaction_field_shift)
+from src.SingleReference.LinearResponse.space_time import static_screening_grid
+from tests.isdf_test_grid import g1
 
-BASIS, AUXBASIS = 'sto-3g', 'cc-pvdz-ri'
+BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 STEP = 1e-4
 
 
@@ -41,14 +42,14 @@ def setup():
     env = SolventScreening(mol, eps=1.78)
 
     detach_solvent_screening(mf)
-    x_mo, d_bare, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    x_mo, d_bare, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     attach_environment(mf, env)
-    x_dr, d_dressed, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    x_dr, d_dressed, _, _ = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     detach_solvent_screening(mf)
     assert np.abs(x_dr - x_mo).max() < 1e-12, 'the fit must not see the cavity'
 
     eps = np.asarray(mf.mo_energy, float)
-    grid = static_grid(eps, nocc)
+    grid = static_screening_grid(eps, nocc)
     return dict(mol=mol, mf=mf, env=env, nocc=nocc, eps=eps, x_mo=x_mo,
                 d_dressed=d_dressed, d_bare=d_bare, grid=grid)
 
@@ -62,7 +63,7 @@ def test_the_two_factorizations_reproduce_the_congruence(setup):
 
     auxmol = df.addons.make_auxmol(s['mol'], auxbasis=AUXBASIS)
     t = bare_gauge_transform(auxmol, s['env'])
-    from src.gradients.space_time_adjoint import chi0_frequency
+    from src.gradients.rpa.space_time_adjoint import chi0_frequency
     chi0 = chi0_frequency(s['x_mo'], s['d_dressed'], s['eps'], s['nocc'],
                           s['grid'])[0]
     w_dressed = np.linalg.inv(np.eye(chi0.shape[0]) - chi0)
@@ -132,3 +133,29 @@ def test_each_adjoint_matches_a_finite_difference(setup, target):
     err = np.abs(numeric - exact).max() / scale
     assert err < 1e-6, (f'{target}: analytic {np.round(exact, 9)} vs finite '
                         f'difference {np.round(numeric, 9)}, rel {err:.2e}')
+
+
+def test_a_dressed_chi0_seed_rides_the_same_sweep(setup):
+    """`dressed_chi0_bar` (the BSE kernel's W adjoint in a continuum) swept
+    with Eq. (18)'s own is the two swept apart and added: chi0's adjoint is
+    linear in its seed, so only the association moves."""
+    from src.gradients.rpa.space_time_adjoint import chi0_backward
+    s = setup
+    w = _weights(len(s['eps']))
+    rng = np.random.default_rng(11)
+    naux = s['d_dressed'].shape[1]
+    seed = rng.normal(size=(naux, naux))
+    seed = 1e-3 * (seed + seed.T)
+    args = (w, s['x_mo'], s['d_dressed'], s['d_bare'], s['eps'], s['nocc'])
+    merged = reaction_field_backward(*args, grid=s['grid'],
+                                     dressed_chi0_bar=seed)
+    alone = reaction_field_backward(*args, grid=s['grid'])
+    extra = chi0_backward(seed[None], s['x_mo'], s['d_dressed'], s['eps'],
+                          s['nocc'], s['grid'])
+    apart = (alone[0] + extra[0], alone[1] + extra[1], alone[2] + extra[2],
+             alone[3])
+    for name, a, b in zip(('eps', 'x_mo', 'd_dressed', 'd_bare'), merged,
+                          apart):
+        rel = np.abs(a - b).max() / np.abs(b).max()
+        assert rel < 1e-12, f'{name}: merged vs apart {rel:.2e}'
+    assert np.array_equal(merged[3], alone[3]), 'the bare sweep took the seed'

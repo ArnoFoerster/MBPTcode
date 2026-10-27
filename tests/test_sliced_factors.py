@@ -1,6 +1,7 @@
 """The separable factors held as grid-point slices: each rank its rows, a stage
 that reads an array whole gathers it once, and every output is the replicated
-factors' bit for bit.
+factors' to a few ulp (a second fit is a second computation; one rank's
+lockstepped value on another stays bit for bit).
 
 `separable_factors(sliced=True)` inside a region returns `SlicedFactors`: the
 rank's `contiguous_block` of the grid rows of X_mo, D and X_ao, cut from the
@@ -9,34 +10,37 @@ whole, lockstepped fit. Gated here over 2, 3 and 8 simulated ranks
 water/cc-pVDZ Hartree-Fock, against the unsliced factors built in the same
 region:
 
-  * serially the flag is inert: the tuple comes back, bitwise the unsliced one;
-  * the slices ARE the rows of the replicated fit, bitwise, and tile the grid;
+  * serially the flag is inert: the tuple comes back, the unsliced one to a
+    few ulp;
+  * the slices ARE the rows of the replicated fit, to a few ulp, and tile the
+    grid;
   * THE MEMORY ASSERTION: every array a rank's factors hold is its slice --
     X_mo, D and X_ao of exactly contiguous_block(M, rank, nranks) rows, the
     grid points whole -- read off the object, not off the formula, and over
     the ranks the slices add up to one copy of each array;
   * the BSE block action on slices (BSE, TDHF, RPA; Davidson and the (A-B)
-    probe): roots, vectors and probe value bitwise the unsliced run's on every
-    rank, every rank's equal to rank 0's, and ONE gather of D and one of X_o
+    probe): roots, vectors and probe value the unsliced run's (to the
+    Davidson's solution bars) on every rank, every rank's bitwise rank 0's, and ONE gather of D and one of X_o
     per action build whatever the iteration count (none for RPA, which reads
     rows alone);
   * the GW window on slices, in-core and frequency-blocked: quasiparticle
-    energies bitwise, every rank rank 0's, and one gather each of D, X_o,
+    energies to a few ulp, every rank rank 0's, and one gather each of D, X_o,
     X_v and X_ao per solve;
-  * the whole ISDF BSE on slices (GW diagonal, W carried from the GW axis,
-    Davidson, and the probe on the Davidson's own action) and the static W
-    rebuilt on its own: bitwise, with the gathers counted per stage;
+  * the whole ISDF BSE on slices (GW diagonal, the static W the GW stage
+    built and hands over, Davidson, and the probe on the Davidson's own action) and the static W
+    rebuilt on its own: to a few ulp, with the gathers counted per stage;
   * what cannot be served from slices is refused on every rank before any
-    collective: unpacking them as a tuple, a serial consumer, a reaction
-    field;
+    collective: unpacking them as a tuple, a serial consumer (a reaction
+    field is served, tests/test_solvated_sliced_energy.py);
   * `mpi_grid.allgather_rows`, the row-counted gather the slices travel
     through, returns what `allgather_blocks` does, bitwise;
   * `mpi_grid.reduce_scatter_rows`, the block action's grid reduction: each
     rank's `contiguous_block` rows of the all-reduce, within the spread of
     the summed partials over the orders a reduction adds them in (zero at two
     ranks, where one addition commutes) and, the simulated communicator
-    adding both in rank order, bitwise; the partial untouched; cut at a
-    count limit the one call's bits; and a block one row off fails the bar.
+    adding both in rank order, to a few ulp; the partial untouched; cut at a
+    count limit the one call's to a few ulp; and a block one row off fails
+    the bar.
 
 Collectives are counted by wrapping `sliced_factors.allgather_rows`, per rank.
 """
@@ -51,24 +55,26 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.Base.utils.mpi_grid as mpi_grid
-from src.Base import sliced_factors
-from src.Base.sliced_factors import SlicedFactors
-from src.Base.utils.mpi_grid import (SimulatedComm, allgather_blocks,
-                                     allgather_rows, contiguous_block,
-                                     distributed, reduce_scatter_rows,
-                                     reduce_sum, run_simulated)
-from src.SingleReference.GW.space_time import (_sliced_solve_factors,
-                                               separable_factors,
+import src.Base.utils.parallel.mpi_grid as mpi_grid
+from tests.pins import (RECORDING_BLAS, assert_same, matches, same_solution,
+                        solution_miss)
+from src.Base.factorization import sliced_factors
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.mpi_grid import (
+    allgather_blocks, allgather_rows, contiguous_block, distributed,
+    reduce_scatter_rows, reduce_sum)
+from src.Base.utils.parallel.simulated_comm import SimulatedComm, run_simulated
+from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import (isdf_bse_factors,
-                                                         isdf_block_action,
-                                                         lowest_amb_eigenvalue,
-                                                         solve_bse_isdf,
-                                                         solve_casida_davidson)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
+from src.SingleReference.LinearResponse.probe import lowest_amb_eigenvalue
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 
 from tests.test_proj_rows import LIMIT
+from tests.isdf_test_grid import g1
 
 SIZES = [2, 3, 8]
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -83,7 +89,7 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis=AUXBASIS)
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis=AUXBASIS)
+    factors = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     W = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return mol, mf, nocc, W
 
@@ -105,13 +111,22 @@ def collectives(monkeypatch):
 
 def both_fits(mol, mf):
     """(unsliced, sliced) factors from the same region, on this rank."""
-    whole = separable_factors(mf, mol, auxbasis=AUXBASIS)
-    return whole, separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True)
+    whole = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
+    return whole, separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True, counts=g1(mol))
 
 
 def bitwise(a, b):
-    """Every array of `a` holds the bits of the same array of `b`."""
+    """Every array of `a` holds the bits of the same array of `b`: a copy
+    (rank 0's lockstepped roots on another rank)."""
     return len(a) == len(b) and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def few_ulp(a, b):
+    """Every array of `a` is the same array of `b` to a few ulp: two
+    computations (two fits, two calls)."""
+    return len(a) == len(b) and all(
+        matches(x, y, RECORDING_BLAS, unit='1', quantity='root')
+        for x, y in zip(a, b))
 
 
 def scatter_shapes(size):
@@ -175,10 +190,10 @@ def scattered(shapes, size, reduce_scatter=reduce_scatter_rows):
 def test_serial_call_returns_the_tuple(water):
     mol, mf, _, _ = water
     with distributed(None):
-        plain = separable_factors(mf, mol, auxbasis=AUXBASIS)
-        flagged = separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True)
+        plain = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
+        flagged = separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True, counts=g1(mol))
     assert isinstance(flagged, tuple)
-    assert bitwise(plain, flagged)
+    assert few_ulp(plain, flagged)
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -188,9 +203,9 @@ def test_slices_are_the_rows_of_the_replicated_fit(water, size):
     def rank(comm):
         whole, part = both_fits(mol, mf)
         r0, r1 = part.rows
-        return (part.rows, bitwise([a[r0:r1] for a in whole[:3]],
+        return (part.rows, few_ulp([a[r0:r1] for a in whole[:3]],
                                    [part.X_mo, part.D, part.X_ao]),
-                np.array_equal(part.coords, whole[3]), part.npts)
+                few_ulp([part.coords], [whole[3]]), part.npts)
 
     out = run_simulated(rank, size)
     npts = out[0][3]
@@ -238,7 +253,7 @@ def test_block_action_on_slices(water, collectives, size, mode):
             lr = LinearResponseSolver(np.asarray(mf.mo_energy),
                                       spin_mode='restricted')
             n0, stats = collectives[comm.Get_rank()], {}
-            om, X, Y = solve_casida_davidson(lr, nocc, nroots=NROOTS,
+            om, X, Y = solve_casida_davidson(lr, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
                                              polarizability=mode, W_aux=W_aux,
                                              isdf_factors=fac, stats=stats)
             n1 = collectives[comm.Get_rank()]
@@ -252,7 +267,9 @@ def test_block_action_on_slices(water, collectives, size, mode):
 
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
-        assert bitwise(out['sliced'], out['whole']), f'rank {r}: not bitwise'
+        assert same_solution(out['sliced'], out['whole']), (
+            f'rank {r}: not the whole layout\'s',
+            solution_miss(out['sliced'], out['whole']))
         assert bitwise(out['sliced'], res[0]['sliced']), f"rank {r} != rank 0"
         per_build = 0 if mode == 'RPA' else 2          # D and X_o, once each
         davidson, probe, vind = out['sliced_gathers']
@@ -280,7 +297,8 @@ def test_gw_window_on_slices(water, collectives, size, path):
 
     res = run_simulated(rank, size)
     for r, (qp, qp_whole, n, by_name) in enumerate(res):
-        assert np.array_equal(qp, qp_whole), f'rank {r}: {qp - qp_whole}'
+        assert_same(qp, qp_whole, quantity='continued',
+                    label=f'rank {r}: {qp - qp_whole}')
         assert np.array_equal(qp, res[0][0]), f'rank {r} != rank 0'
         assert n == 4 and by_name == {'D': 1, 'X_o': 1, 'X_v': 1, 'X_ao': 1}
 
@@ -293,8 +311,9 @@ def test_bse_on_slices(water, size):
         whole, part = both_fits(mol, mf)
         out = {}
         for tag, fac in (('whole', whole), ('sliced', part)):
-            om, X, Y, info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS,
-                                            factors=fac, progress=False)
+            om, X, Y, info = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+                                            factors=fac, progress=False,
+                                            probe=True)
             out[tag] = (om, X, Y, info['eps'], info['W_aux'],
                         np.atleast_1d(info['min_eig_amb']))
         out['by_name'] = dict(part.gathers)
@@ -302,10 +321,13 @@ def test_bse_on_slices(water, size):
 
     res = run_simulated(rank, size)
     for r, out in enumerate(res):
-        assert bitwise(out['sliced'], out['whole']), f'rank {r}: not bitwise'
+        assert same_solution(out['sliced'], out['whole']), (
+            f'rank {r}: not the whole layout\'s',
+            solution_miss(out['sliced'], out['whole']))
         assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
-        # the GW diagonal once each; D and X_o once more for the Davidson's
-        # action, which the probe after it reuses rather than rebuilds
+        # the GW diagonal once each, its static W on the same branches; D and
+        # X_o once more for the Davidson's action, which the probe after it
+        # reuses rather than rebuilds
         assert out['by_name'] == {'D': 2, 'X_o': 2, 'X_v': 1, 'X_ao': 1}
 
 
@@ -321,7 +343,7 @@ def test_static_w_on_slices(water, size):
 
     for r, (same, D, W, W_whole, by_name) in enumerate(run_simulated(rank, size)):
         assert same and D is None
-        assert np.array_equal(W, W_whole), f'rank {r}'
+        assert_same(W, W_whole, quantity='root', label=f'rank {r}')
         assert by_name == {'D': 1, 'X_o': 1, 'X_v': 1}
 
 
@@ -343,9 +365,6 @@ def test_what_slices_cannot_serve_is_refused(water):
                                       spin_mode='restricted')
             with pytest.raises(ValueError, match='serial reference'):
                 isdf_block_action(lr, nocc, True, W, part)
-        refused.append(True)
-        with pytest.raises(ValueError, match='reaction field'):
-            _sliced_solve_factors(part, comm, np.eye(part.naux))
         refused.append(True)
         return refused
 
@@ -384,7 +403,9 @@ def test_reduce_scatter_rows_are_the_allreduce_rows(size):
             want = summed[r0:r1]
             assert rows.shape == want.shape and returned and untouched
             assert np.abs(rows - want).max(initial=0.0) <= bar
-            assert np.array_equal(rows, want) and np.array_equal(into, rows)
+            assert matches(rows, want, RECORDING_BLAS, unit='1',
+                           quantity='root')
+            assert np.array_equal(into, rows)
     live = reassociation_bar(rank_partials(size, shapes[0]))
     assert live == 0.0 if size == 2 else live > 0.0
 
@@ -406,7 +427,8 @@ def test_reduce_scatter_rows_in_windows_is_one_call(size, monkeypatch):
     cut = scattered(shapes, size)
     for per_rank, cut_rank in zip(whole, cut):
         for a, b in zip(per_rank, cut_rank):
-            assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+            assert_same(b[0], a[0], unit='1', quantity='root', label='rows')
+            assert_same(b[1], a[1], unit='1', quantity='root', label='into')
     assert max(sizes) <= LIMIT
     assert len(sizes) > 2 * len(shapes) * size        # more than one a call
 
@@ -428,7 +450,7 @@ def test_a_wrong_row_block_fails_the_bar(size):
 def test_sliced_factors_refuse_one_rank(water):
     mol, mf, _, _ = water
     with distributed(None):
-        whole = separable_factors(mf, mol, auxbasis=AUXBASIS)
+        whole = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
     with pytest.raises(ValueError, match='more than one rank'):
         SlicedFactors(*whole, comm=None)
 

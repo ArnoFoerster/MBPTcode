@@ -48,7 +48,7 @@ import numpy as np
 from pyscf import gto, scf
 from pyscf.cc.addons import spatial2spin
 
-from src.Base.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC import (ADCSolver, ADCSolverRestricted,
                                      ADCSolverUnrestricted)
 from src.SingleReference.ADC import adc_r_faddeev as FR
@@ -91,8 +91,8 @@ def csf_isometry(sr, so, nocc):
     n = sr.norb
     nv = n - nocc
     d, ds = sr.dimensions(nocc), so.dimensions(2 * nocc)
-    i1, j1, a1 = so._configs_2h1p(2 * nocc)
-    i2, a2, b2 = so._configs_2p1h(2 * nocc)
+    i1, j1, a1 = so.configs_2h1p(2 * nocc)
+    i2, a2, b2 = so.configs_2p1h(2 * nocc)
     idx1 = {c: k for k, c in enumerate(zip(i1, j1, a1))}
     idx2 = {c: k for k, c in enumerate(zip(i2, a2, b2))}
     o1, o2 = 2 * n, 2 * n + ds['n2h1p']
@@ -157,8 +157,8 @@ def check_spin_orbital_reference(so, nocc):
            'hh': {'T': ch1['hh']['T'], 'dH': -Cpp, 'dN': np.eye(len(Cpp))}}
     dHI, _, dHII, _ = FU.correction_blocks(eps, nocc, chP)
     dd = so.dimensions(nocc)
-    i2, j2, a2 = so._configs_2h1p(nocc)
-    i3, a3, b3 = so._configs_2p1h(nocc)
+    i2, j2, a2 = so.configs_2h1p(nocc)
+    i3, a3, b3 = so.configs_2p1h(nocc)
     KI = np.diag(eps[i2] + eps[j2] - eps[a2])
     KII = np.diag(eps[a3] + eps[b3] - eps[i3])
     CI = C_2h1p_block(so, nocc, np.arange(dd['n2h1p']))
@@ -203,7 +203,7 @@ def check_eh_treatments(sr, so, nocc, W):
     eps, B_aa = sr.eps, sr.B_aa
     ch_r = FR.first_order_channels(eps, nocc, B_aa=B_aa)
     for spin in ('singlet', 'triplet'):
-        ch_r['eh'][spin] = FR._eh_channel(eps, nocc, spin, B_aa, None, 'riccati', 'off')
+        ch_r['eh'][spin] = FR.eh_channel(eps, nocc, spin, B_aa, None, 'riccati', 'off')
     ch_s = FU.first_order_channels(so.eps, so.g, 2 * nocc)
     A, _ = FU.build_tdhf_matrices(so.eps, so.g, 2 * nocc)
     n = A.shape[0]
@@ -216,7 +216,7 @@ def check_eh_treatments(sr, so, nocc, W):
     d = np.abs(W.T @ Hs @ W - Hr).max()
     ok &= check(d < 1e-12, "eh pair 'off' in both spin channels == spin-orbital "
                 "reference with the eh channel off", f'{d:.1e}')
-    t1 = FR._eh_channel(eps, nocc, 'triplet', B_aa, None, 'riccati', 'first_order')
+    t1 = FR.eh_channel(eps, nocc, 'triplet', B_aa, None, 'riccati', 'first_order')
     d = np.abs(t1['T'] - FR.first_order_channels(eps, nocc, B_aa=B_aa)['eh']['triplet']['T']).max()
     ok &= check(d < 1e-14 and not t1['dH'].any(), "eh_triplet='first_order' is the "
                 "ADC(3) triplet channel", f'{d:.1e}')
@@ -333,8 +333,8 @@ def check_solver_api(mf, nocc):
     e_mf, e_d = [], None
     for route in ('phonon', 'riccati'):
         s = ADCSolver(mf, level='faddeev_adc3', df=True, pair_route=route)
-        e, Z = s.solve(nroots=1, homo_index=nocc - 1, conv_tol=1e-7)
-        ok &= check(bool(np.all(s.last_result['converged'])),
+        e, Z = s.solve(nroots=1, homo_index=nocc - 1, tol=1e-7)
+        ok &= check(bool(np.all(s.last_result['conv'])),
                     f'Davidson converged ({route})')
         e_mf.append(e[0])
     s = ADCSolver(mf, level='faddeev_adc3', df=True, pair_route='ccd')
@@ -372,8 +372,8 @@ def check_drpa(mf, sr, nocc, scaling=False):
     ok = True
     eps, B = mf.mo_energy, sr.B_aa
     for route in ('riccati', 'phonon'):
-        a = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'drpa')
-        b = FR._eh_channel(eps, nocc, 'triplet', B, None, route, 'off')
+        a = FR.eh_channel(eps, nocc, 'triplet', B, None, route, 'drpa')
+        b = FR.eh_channel(eps, nocc, 'triplet', B, None, route, 'off')
         d = max(np.abs(a[k] - b[k]).max() for k in ('T', 'dH', 'dN'))
         ok &= check(d < 1e-12, f"dRPA triplet == non-interacting 'off' pair ({route})",
                     f'{d:.1e}')

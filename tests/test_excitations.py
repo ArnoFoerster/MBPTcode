@@ -25,38 +25,37 @@ cycles and its record says `converged: False` with the cycle limit as its
 status. What is gated below is what the records carry and what they refuse --
 not the physics of that minimum, which no assertion here depends on.
 
-THE EQUIVALENCE GATES WERE SHOWN TO FAIL. Each was run once against a
-deliberately broken copy of the file named, which was then restored from a
-backup and `cmp` confirmed byte-identical:
+What breaks each equivalence gate:
 
   test_the_emission_energy_is_the_gap_at_the_relaxed_geometry
-      src/properties/excitations.py: `emission_block` taking E_0 at R0 rather
-      than at R*_n -> FAILED: e0_hartree_at_excited_minimum came back
-      -76.25806819101113, the ground-state energy at R0 to the last digit, and
-      the emission energy with it -- 7.34 eV where the gap at the relaxed
-      geometry is 2.21 eV.
+      `emission_block` taking E_0 at R0 rather than at R*_n:
+      e0_hartree_at_excited_minimum is -76.25806819101113, the ground-state
+      energy at R0 to the last digit, and the emission energy 7.34 eV where
+      the gap at the relaxed geometry is 2.21 eV.
   test_the_routine_adds_nothing_to_the_excitation_energy
-      `excitation_energy` rebuilding Omega as E_n - E_0 -> FAILED:
-      8.428662087951224 eV against the chain's own 8.428662087951114 eV, the
-      same quantity to 1.1e-13 eV and a different float.
+      `excitation_energy` rebuilding Omega as E_n - E_0: 8.428662087951224 eV
+      against the chain's own 8.428662087951114 eV, the same quantity to
+      1.1e-13 eV and a different float.
   test_no_field_of_a_record_is_called_grad_max
-      `relaxation_fields` emitting the residual under `grad_max` as well ->
-      FAILED: record['grad_max'].
+      `relaxation_fields` emitting the residual under `grad_max` as well.
   test_a_record_measures_the_refreeze_or_says_it_did_not[dense]
-      `relaxation_fields` dropping the optimizer's `refreeze_denergy` ->
-      FAILED: refreeze_shift_meV None on a record whose outer loop ran and
-      whose marker says 'measured'.
+      `relaxation_fields` dropping the optimizer's `refreeze_denergy`: a null
+      energy change on a record whose outer loop ran and whose marker says
+      'measured'.
   test_the_two_routes_declare_one_physics_and_differ_only_in_realization
-      `vertical_block` recording the GROUND surface's realization -> FAILED:
-      ['chi0', 'factorization', 'grid', 'realizing_class'], four fields short
-      of what the two excited surfaces differ in.
+      `vertical_block` recording the GROUND surface's realization: ['chi0',
+      'factorization', 'grid', 'realizing_class'], four fields short of what
+      the two excited surfaces differ in.
   test_a_mean_field_ground_state_is_refused_against_a_drpa_one
       `calc_adiabatic_gap` with BOTH refusals removed -- the one on the
       declarations and `compare_surfaces` on the built surfaces, since either
-      alone still refuses -> FAILED: DID NOT RAISE PhysicsMismatch.
+      alone still refuses.
   test_vibronic_refuses_two_relaxations_of_different_functionals
-      src/properties/vibronic.py: the raise in `adiabatic_gap` removed ->
-      FAILED: DID NOT RAISE PhysicsMismatch.
+      the raise in `vibronic.adiabatic_gap` removed.
+  test_a_quasiparticle_the_largest_weight_left_is_followed_and_logged
+      `qp_set._log_qp_branches` not logging a flipped branch (an empty
+      qp_branch_warnings), or the retired refusal below QP_WINDOW_Z_MIN
+      (the isdf fixture errors at its first step).
 
 Every check ASSERTS: pytest discards a returned verdict and passes on False.
 """
@@ -65,20 +64,23 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import dataclasses
 from dataclasses import fields
 
 import pytest
-from pyscf import gto, scf
+from pyscf import gto
 
-import src.gradients  # noqa: F401  cycle: src.properties imports src.gradients
-from src.Base.constants import HARTREE_TO_EV
+from tests.pins import assert_same
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import (ChargedExcitation, Excitation, GroundState,
                                   PhysicsMismatch, QPStates)
 from src.properties.excitations import (SurfaceSpec, calc_adiabatic_excitation,
                                         calc_adiabatic_gap,
                                         calc_vertical_excitation, surface_of)
-from src.properties.surfaces import Realization, compare_surfaces
+from src.gradients.gwbse.surface_factory import Realization, compare_surfaces
 from src.properties.vibronic import adiabatic_gap
+from tests.reference_scf import rhf_tight
 
 SINGLET = Excitation('singlet')
 TRIPLET = Excitation('triplet')
@@ -106,21 +108,18 @@ MEAN_FIELD = SurfaceSpec(GroundState('dft', 'hf'))
 #: instead -- so a machine with geomeTRIC on its path would otherwise be
 #: running a different optimization from the one these numbers came off. Both
 #: engines write the same record fields, which test_optimize_refreeze gates.
-LOOSE = dict(engine='cartesian', trust=0.05, trust_max=0.1, verbose=False)
+LOOSE = dict(engine='cartesian', verbose=False)
+
+
+def loose_walk(max_cycle):
+    """The walk at half the default trust radius, at most `max_cycle` steps."""
+    return Numerics(walk={'trust': 0.05, 'trust_max': 0.1, 'max_cycle': max_cycle})
 
 
 def water():
     """The one geometry every surface below is built at."""
     return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
                  basis='cc-pvdz', verbose=0)
-
-
-def rhf(mol):
-    """A reference converged tightly enough to differentiate."""
-    mf = scf.RHF(mol)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-11, 200
-    mf.kernel()
-    return mf
 
 
 def every_key(record, path='record'):
@@ -150,8 +149,8 @@ def dense_record(mol):
     telling those two apart is exactly what the marker is for.
     """
     # nudge=0: the dissociative S1 holds its shoulder only from the exact start
-    return calc_adiabatic_excitation(DENSE, SINGLET, mol, rhf, refreeze=1,
-                                     max_cycle=40, nudge=0, **LOOSE)
+    return calc_adiabatic_excitation(DENSE, SINGLET, mol, rhf_tight, refreeze=1,
+                                     nudge=0, numerics=loose_walk(40), **LOOSE)
 
 
 @pytest.fixture(scope='module')
@@ -163,8 +162,10 @@ def isdf_record(mol):
     -- which is a second full optimization -- is not asked for. The record says
     both things about itself.
     """
-    return calc_adiabatic_excitation(ISDF, SINGLET, mol, rhf, refreeze=0,
-                                     max_cycle=10, **LOOSE)
+    # the cubic surface walks on its own numerics, which carry the walk
+    spec = dataclasses.replace(ISDF, numerics=loose_walk(10))
+    return calc_adiabatic_excitation(spec, SINGLET, mol, rhf_tight, refreeze=0,
+                                     **LOOSE)
 
 
 def test_the_emission_energy_is_the_gap_at_the_relaxed_geometry(dense_record):
@@ -216,11 +217,11 @@ def test_a_record_measures_the_refreeze_or_says_it_did_not(name, dense_record,
     record = {'dense': dense_record, 'isdf': isdf_record}[name]
     if name == 'dense':
         assert record['refreeze'] == 'measured'
-        assert isinstance(record['refreeze_shift_meV'], float)
+        assert isinstance(record['refreeze_denergy_meV'], float)
         assert isinstance(record['refreeze_shift_bohr'], float)
     else:
         assert record['refreeze'] == 'not measured'
-        assert record['refreeze_shift_meV'] is None
+        assert record['refreeze_denergy_meV'] is None
     assert isinstance(record['ground_opt_grad_max'], float)
     assert isinstance(record['opt_grad_max'], float)
     assert isinstance(record['driving_force_max'], float)
@@ -282,8 +283,8 @@ def test_the_two_routes_declare_one_physics_and_differ_only_in_realization(
     assert differs == ['chi0', 'residues', 'factorization', 'grid',
                        'qp_states', 'qp_explicit', 'outside_treatment',
                        'realizing_class']
-    report = compare_surfaces(surface_of(DENSE, SINGLET, mol, rhf),
-                              surface_of(ISDF, SINGLET, mol, rhf))
+    report = compare_surfaces(surface_of(DENSE, SINGLET, mol, rhf_tight),
+                              surface_of(ISDF, SINGLET, mol, rhf_tight))
     assert report['realization_differs'] == differs
 
 
@@ -313,7 +314,7 @@ def test_a_mean_field_ground_state_is_refused_against_a_drpa_one(mol):
     on the DECLARATIONS, so it costs no integral.
     """
     with pytest.raises(PhysicsMismatch) as exc:
-        calc_adiabatic_gap(MEAN_FIELD, SINGLET, DENSE, TRIPLET, mol, rhf)
+        calc_adiabatic_gap(MEAN_FIELD, SINGLET, DENSE, TRIPLET, mol, rhf_tight)
     assert GroundState('dft', 'hf').label() in str(exc.value)
     assert GroundState('rpa', 'hf').label() in str(exc.value)
 
@@ -326,8 +327,8 @@ def test_a_singlet_and_a_triplet_on_one_spec_are_what_a_gap_is(mol):
     is ACCEPTED and reported, not the gap itself. Both records come back whole
     and the realization list is empty, since both states are on one route.
     """
-    gap = calc_adiabatic_gap(DENSE, SINGLET, DENSE, TRIPLET, mol, rhf,
-                             refreeze=0, max_cycle=2, **LOOSE)
+    gap = calc_adiabatic_gap(DENSE, SINGLET, DENSE, TRIPLET, mol, rhf_tight,
+                             refreeze=0, numerics=loose_walk(2), **LOOSE)
     assert gap['realization_differs'] == []
     assert gap['physics']['record'][0].excitation == SINGLET
     assert gap['physics']['record'][1].excitation == TRIPLET
@@ -347,9 +348,13 @@ def test_the_routine_adds_nothing_to_the_excitation_energy(mol):
     the same quantity to 1.1e-13 eV and is NOT the same float, which is why the
     record takes Omega off the surface instead of rebuilding it.
     """
-    record = calc_vertical_excitation(MEAN_FIELD, SINGLET, mol, rhf)
-    chain = surface_of(MEAN_FIELD, SINGLET, mol, rhf)
-    assert record['omega_eV'] == chain.excitation() * HARTREE_TO_EV
+    record = calc_vertical_excitation(MEAN_FIELD, SINGLET, mol, rhf_tight)
+    chain = surface_of(MEAN_FIELD, SINGLET, mol, rhf_tight)
+    # the record and the chain each solve their own SCF: the same conversion of
+    # the same quantity, bitwise on the recording BLAS, energy class bar on
+    # another
+    assert_same(record['omega_eV'], chain.excitation() * HARTREE_TO_EV,
+                unit='eV', label='omega')
     assert record['omega_eV'] != (record['en_hartree']
                                   - record['e0_hartree']) * HARTREE_TO_EV
     assert record['omega_eV'] == pytest.approx(
@@ -362,14 +367,14 @@ def test_a_charged_state_carries_its_pole_strength_and_its_route(mol):
     """Z and the residue backend, where the surface's gradient exposes them.
 
     A quasiparticle root with Z near zero is a satellite and not the state
-    asked for, and which backend produced the residues is a choice
-    `residues='auto'` makes per orbital -- so both belong in the record of any
-    surface that reports them. A neutral excitation folds its whole set through
-    one solve and reports neither; None there is not a Z of zero.
+    asked for, and which backend produced the residues is the route's -- so
+    both belong in the record of any surface that reports them. A neutral
+    excitation folds its whole set through one solve and reports neither;
+    None there is not a Z of zero.
     """
     ionization = calc_vertical_excitation(
         SurfaceSpec(GroundState('rpa', 'hf')), ChargedExcitation(4, -1), mol,
-        rhf)
+        rhf_tight)
     assert 0.5 < ionization['qp_z'] < 1.0
     assert ionization['residue_route_taken'] == 'explicit'
     assert ionization['omega_eV'] > 0.0
@@ -394,3 +399,22 @@ def test_vibronic_refuses_two_relaxations_of_different_functionals():
     assert adiabatic_gap({'e_total': -113.72080728},
                          {'e_total': -113.74816714}) == \
         pytest.approx(0.02735986, abs=1e-8)
+
+
+def test_a_quasiparticle_the_largest_weight_left_is_followed_and_logged(
+        isdf_record):
+    """A walk keeps the branch it follows when the largest Z moves to another
+    root, even below QP_WINDOW_Z_MIN, writes a warning into the record and keeps optimizing.
+    Water/cc-pVDZ orbital 15 is that case on the cubic route: Z 0.540 (its
+    partner 0.366) at the reference, 0.427 against 0.448 one step out. Its
+    entry carries the orbital, the geometry, the root followed and its Z,
+    and the larger weight beside it; the walk runs past that geometry."""
+    log = isdf_record['qp_branch_warnings']
+    orbital_15 = [e for e in log if e['orbital'] == 15]
+    assert orbital_15, f'no warning for orbital 15 in {log}'
+    first = orbital_15[0]
+    assert first['followed'] and not first['quasiparticle']
+    assert first['z'] < first['largest_z']
+    assert first['root'] != first['largest_root']
+    assert isinstance(first['geometry'], str)
+    assert isdf_record['cycles'] > 1

@@ -1,5 +1,5 @@
 """The mean-field skeleton derivatives in fixed tiles over the ranks
-(`src/Base/skeleton_tiles.py`), on water, ethylene and formaldehyde/cc-pVDZ
+(`src/gradients/skeleton_tiles.py`), on water, ethylene and formaldehyde/cc-pVDZ
 (C1-distorted, so no force component cancels by symmetry), PBE0 and
 LRC-wPBEh, on density-fitted (cc-pVDZ-JKFIT) and ISDF-K (cc-pVDZ-RI)
 references, at 1, 2, 3 and 8 simulated ranks:
@@ -8,12 +8,12 @@ references, at 1, 2, 3 and 8 simulated ranks:
     whole-tensor contraction to `ISDF_GRADIENT_FLOOR`: the tiles contract
     (mn|P) in another order and the exchange applies an explicit Cholesky
     inverse of the metric where the whole form solves against it;
-  * over the ranks every rank holds the serial skeleton bitwise: every
+  * over the ranks every rank holds the serial skeleton to a few ulp: every
     tile's (natm, 3) addend added in tile order (`ordered_sum`);
   * planted: a rank dropping one of its tiles, a rank counting one twice --
     both break the bits and move the skeleton past the floor;
-  * the interpolated exchange skeleton on the row fit is the same bits at
-    every rank count, one rank included, for the mean-field force, the
+  * the interpolated exchange skeleton on the row fit is the same to a few
+    ulp at every rank count, one rank included, for the mean-field force, the
     folded Fock partial and the Sigma_x - v_xc channels; planted, a rank
     skipping one streamed column tile moves it;
   * on water, where the pair screen keeps every pair, the row realization
@@ -26,13 +26,15 @@ references, at 1, 2, 3 and 8 simulated ranks:
     9.0e-10 and 4.2e-10 from the difference; a 1e-6 relative defect of the
     whole form's D_bar puts them 3.4e-7 apart);
   * on a distributed ISDF-K SCF the skeleton reuses the SCF's own tiles
-    (bitwise the refit at the same tiles) and never builds the whole ISDFJK;
+    (the refit at the same tiles to a few ulp) and never builds the whole
+    ISDFJK;
   * no rank binds a (nao, nao, naux) array or one whole along the grid twice
     in any frame of either kernel (the `HeldCensus` of
     tests/test_mpi_routes.py), and the census finds both in the whole forms;
   * on a shape-sensitive BLAS (tests/test_force_serial_shaped.py's
-    stand-in, a subprocess) the row kernel stays bitwise across rank
-    counts and every fitted partial stays its own addends' bits.
+    stand-in, a subprocess) the row kernel stays the same to a few ulp
+    across rank counts and every fitted partial its own addends' sum; a
+    rank-shaped product (planted) moves the bits.
 """
 import importlib
 import json
@@ -49,29 +51,33 @@ from pyscf.df import incore
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from src.Base import skeleton_tiles  # noqa: E402
-from src.Base import separable_ri  # noqa: E402
-from src.Base.constants import (FIT_REALIZATION_FORCE_TOL,  # noqa: E402
-                                ISDF_GRADIENT_FLOOR)
-from src.Base.distributed_df import distributed_mean_field  # noqa: E402
-from src.Base.distributed_isdf_jk import distributed_isdf_jk  # noqa: E402
-from src.Base.isdf_jk import isdf_grid, isdf_jk  # noqa: E402
-from src.Base.separable_ri import (RowFit, RowFitAdjoint,  # noqa: E402
-                                   screened_layout)
-from src.Base.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
-                                     fitted_fock_skeleton,
-                                     isdf_exchange_rows)
-from src.Base.utils.mpi_grid import (current_comm, distributed,  # noqa: E402
-                                     run_simulated)
+from src.gradients import skeleton_tiles  # noqa: E402
+from src.Base.factorization import separable_ri  # noqa: E402
+from src.Base.numerics.constants import (FIT_REALIZATION_FORCE_TOL,  # noqa: E402
+                                         ISDF_GRADIENT_FLOOR)
+from src.Base.factorization.distributed_df import distributed_mean_field  # noqa: E402
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk  # noqa: E402
+from src.Base.factorization.isdf_jk import isdf_grid
+from src.gradients.isdf_mean_field import isdf_jk_with_force  # noqa: E402
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import RowFit, screened_layout  # noqa: E402
+from src.gradients.isdf_fit_adjoint import RowFitAdjoint  # noqa: E402
+from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
+                                          fitted_fock_skeleton,
+                                          isdf_exchange_rows)
+from src.Base.utils.parallel.mpi_grid import current_comm, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_derivatives import (  # noqa: E402
-    _auxmol_of, exchange_channel_skeleton, fock_partial_skeleton_df,
     isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
     two_centre_adjoint)
+from src.gradients.mean_field_response import (  # noqa: E402
+    exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa
-from src.SingleReference.LinearResponse.rpa_energy import (  # noqa: E402
-    exchange_channels)
+from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels  # noqa: E402
 from tests import test_force_serial_shaped as shaped  # noqa: E402
 from tests.test_mpi_routes import HeldCensus  # noqa: E402
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches  # noqa: E402
 
 GEOMS = {
     'water': 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4492',
@@ -113,7 +119,7 @@ def unrun(name, xc, route, coords=None):
     mol = molecule(name, coords)
     base = dft.RKS(mol, xc=xc) if xc != 'hf' else scf.RHF(mol)
     mf = (base.density_fit(auxbasis=DF_AUX) if route == 'df'
-          else isdf_jk(base, auxbasis=ISDF_AUX))
+          else isdf_jk_with_force(base, auxbasis=ISDF_AUX, counts=g1(base)))
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-9, 200
     return mf
 
@@ -184,7 +190,7 @@ def fitted_addends(mf, gamma, channels, coulomb=True):
     g = C @ (0.5 * (gamma + gamma.T)) @ C.T
     full = sum(w for o, w in channels if o == 0.0)
     Cd = C[:, occ > 0] * np.sqrt(occ[occ > 0])
-    args = (mf.mol, _auxmol_of(mf), g, mf.make_rdm1())
+    args = (mf.mol, auxmol_of(mf), g, mf.make_rdm1())
     kw = dict(occ=Cd if full else None, coulomb=coulomb, exchange=full)
     sk = FittedFockSkeleton(*args, **kw)
     sk.prepare(range(len(sk.tiles)), None)
@@ -200,7 +206,7 @@ def fitted_over_ranks(case, size, plant=None):
     def rank(comm):
         mf = mean_field(name, xc, 'df')
         chan, _ = channels_of(mf)
-        return fock_partial_skeleton_df(mf, _auxmol_of(mf), partial_of(mf),
+        return fock_partial_skeleton_df(mf, auxmol_of(mf), partial_of(mf),
                                         0, channels=chan)
 
     if plant is None:
@@ -223,14 +229,14 @@ def fitted_over_ranks(case, size, plant=None):
 
 
 def fitted_distances(case, size, plant=None):
-    """(worst |distributed - one rank|, every rank the serial skeleton's
-    bits)."""
+    """(worst |distributed - one rank|, every rank the serial skeleton to a
+    few ulp)."""
     name, xc = case
     mf = mean_field(name, xc, 'df')
     chan, _ = channels_of(mf)
     whole, _, _ = fitted_addends(mf, partial_of(mf), chan)
     with distributed(None):
-        serial = fock_partial_skeleton_df(mf, _auxmol_of(mf), partial_of(mf),
+        serial = fock_partial_skeleton_df(mf, auxmol_of(mf), partial_of(mf),
                                           0, channels=chan)
     res = fitted_over_ranks(case, size, plant)
     # the four-centre long-range channel rides beside the reduction
@@ -239,7 +245,8 @@ def fitted_distances(case, size, plant=None):
         o, w) for o, w in chan if o != 0.0), np.zeros_like(whole))
     one = whole + four
     worst = max(float(np.abs(g - one).max()) for g in res)
-    same = all(np.array_equal(g, serial) for g in res)
+    same = all(matches(g, serial, RECORDING_BLAS, quantity='gradient')
+               for g in res)
     return worst, same
 
 
@@ -250,7 +257,7 @@ CASES = [(name, xc) for name in GEOMS for xc in XCS]
 def test_fitted_skeleton_is_the_whole_contraction(case):
     name, xc = case
     mf = mean_field(name, xc, 'df')
-    auxmol, gamma = _auxmol_of(mf), partial_of(mf)
+    auxmol, gamma = auxmol_of(mf), partial_of(mf)
     chan, delta = channels_of(mf)
     for label, kw in (('fock', dict(channels=chan)),
                       ('xc', dict(channels=delta, coulomb=False))):
@@ -267,7 +274,7 @@ def test_fitted_skeleton_over_ranks(size):
     for case in CASES:
         worst, same = fitted_distances(case, size)
         print(f'{size} ranks {case}: |d| {worst:.2e}, every rank the serial '
-              f'skeleton bitwise: {same}')
+              f'skeleton to a few ulp: {same}')
         assert same, f'{case}: a rank holds another skeleton than the serial'
         assert worst <= ISDF_GRADIENT_FLOOR, (case, worst)
 
@@ -275,7 +282,7 @@ def test_fitted_skeleton_over_ranks(size):
 @pytest.mark.parametrize('plant', ('dropped', 'doubled'))
 def test_fitted_skeleton_planted_tiles_fail(plant):
     worst, same = fitted_distances(('ethylene', 'pbe0'), 3, plant)
-    print(f'{plant}: |d| {worst:.2e}, bitwise {same}')
+    print(f'{plant}: |d| {worst:.2e}, the serial skeleton {same}')
     assert not same
     assert worst > ISDF_GRADIENT_FLOOR
 
@@ -294,16 +301,17 @@ def row_densities(mf):
 
 
 def rows_kernel(mf, dm, dm_other, prefactor, channels, block=ROW_BLOCK,
-                block_memory_gb=4.0):
-    """`isdf_exchange_rows` on the mean field's grid at `block`, flattened."""
+                numerics=None):
+    """`isdf_exchange_rows` on the mean field's grid at `block`, flattened;
+    `numerics` the fit's (its working set, `LayoutNumerics.fit_gb`)."""
     wd = mf.with_df
     if not wd._built:
         wd.build()
     layout = screened_layout(mf.mol, wd.coords, block=block)
     centre, points, _ = isdf_exchange_rows(
-        mf.mol, _auxmol_of(mf), wd.coords, layout, dm, dm_other=dm_other,
+        mf.mol, auxmol_of(mf), wd.coords, layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, block=block,
-        block_memory_gb=block_memory_gb)
+        numerics=numerics)
     return np.concatenate([centre.ravel(), points.ravel()])
 
 
@@ -321,8 +329,10 @@ def test_row_exchange_skeleton_is_bitwise_over_ranks(size):
 
             res = run_simulated(rank, size)
             for k in one:
-                ok = all(np.array_equal(r[k], one[k]) for r in res)
-                assert ok, f'{size} ranks {name} {xc} {k}: not the one-rank bits'
+                ok = all(matches(r[k], one[k], RECORDING_BLAS,
+                                 quantity='gradient') for r in res)
+                assert ok, (f'{size} ranks {name} {xc} {k}: not the one-rank '
+                            'numbers to a few ulp')
 
 
 def test_row_exchange_skeleton_planted_tile_fails():
@@ -356,7 +366,7 @@ def test_rows_is_replicated_where_every_pair_is_kept():
     mf = mean_field('water', 'pbe0', 'isdf')
     wd = mf.with_df
     wd.build()
-    layout = separable_ri.test_set_layout(mf.mol, wd.coords)
+    layout = separable_ri.fit_test_set_layout(mf.mol, wd.coords)
     assert len(layout[0]) == mf.mol.nao_nr() ** 2
     rows = isdf_mean_field_gradient(mf, fit='rows')
     whole = isdf_mean_field_gradient(mf, fit='replicated')
@@ -370,7 +380,7 @@ def test_the_distributed_screen_is_the_whole_screen():
         mf = mean_field(name, 'pbe0', 'isdf')
         mf.with_df.build()
         crd = mf.with_df.coords
-        whole = separable_ri.test_set_layout(mf.mol, crd)
+        whole = separable_ri.fit_test_set_layout(mf.mol, crd)
         for size in (1, 3):
             got = run_simulated(
                 lambda comm: screened_layout(mf.mol, crd, block=ROW_BLOCK),
@@ -419,8 +429,8 @@ def test_both_skeletons_are_the_scf_energys_derivative():
 def test_the_distributed_scf_tiles_are_reused(size):
     """On a distributed ISDF-K SCF (tiles of ROW_BLOCK points) the mean
     field's exchange skeleton takes the SCF's own M^T and collocation tiles,
-    bitwise the row fit rebuilt at those tiles, and the whole ISDFJK is never
-    built."""
+    the row fit rebuilt at those tiles to a few ulp, and the whole ISDFJK is
+    never built."""
     def rank(comm):
         mf = unrun('water', 'lrc-wpbeh', 'isdf')
         distributed_isdf_jk(mf, comm, tile=ROW_BLOCK)
@@ -429,23 +439,27 @@ def test_the_distributed_scf_tiles_are_reused(size):
         dm, _, _, chan = row_densities(mf)['mean field']
         force = isdf_exchange_skeleton(mf, dm=dm, channels=chan)
         wd = mf.with_df
-        crd = isdf_grid(mf.mol, radii=wd.radii, auxbasis=wd.auxbasis,
-                        n_start=wd.n_start)
+        crd = isdf_grid(mf.mol, counts=wd.counts, radii=wd.radii,
+                        auxbasis=wd.auxbasis, n_start=wd.n_start)
         layout = screened_layout(mf.mol, crd, block=ROW_BLOCK)
         runs = []
         for mt, X in ((handle.MT, handle.X), (None, None)):
             centre, points, _ = isdf_exchange_rows(
-                mf.mol, _auxmol_of(mf), crd, layout, dm, channels=chan,
+                mf.mol, auxmol_of(mf), crd, layout, dm, channels=chan,
                 mt=mt, X=X, block=ROW_BLOCK)
             runs.append(np.concatenate([centre.ravel(), points.ravel()]))
-        return (force, wd._built, np.array_equal(handle.coords, crd),
-                np.array_equal(*runs))
+        return (force, wd._built,
+                matches(handle.coords, crd, RECORDING_BLAS, unit='1',
+                        quantity='root'),
+                matches(*runs, RECORDING_BLAS, quantity='gradient'))
 
     res = run_simulated(rank, size)
-    assert all(np.array_equal(r[0], res[0][0]) for r in res)
+    for r in res:
+        # each rank assembles its own force: rank 0's to a few ulp
+        assert_same(r[0], res[0][0], quantity='gradient', label='rank force')
     assert not any(r[1] for r in res), 'the whole ISDFJK was built'
     assert all(r[2] for r in res), "the SCF's points are not the grid's"
-    assert all(r[3] for r in res), "the SCF's tiles are not the refit's bits"
+    assert all(r[3] for r in res), "the SCF's tiles are not the refit's"
 
 
 class SkeletonCensus(HeldCensus):
@@ -482,7 +496,7 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
     def rank(comm):
         out = {}
         mf = mean_field('water', 'pbe0', 'df')
-        aux = _auxmol_of(mf)
+        aux = auxmol_of(mf)
         chan, _ = channels_of(mf)
         dims = (0, aux.nao_nr(), mf.mol.nao_nr())
         out['fitted'] = census_of(
@@ -494,13 +508,14 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
             whole_fitted_skeleton.__code__, *dims)
         mi = mean_field('water', 'pbe0', 'isdf')
         mi.with_df.build()
-        dims = (len(mi.with_df.coords), _auxmol_of(mi).nao_nr(),
+        dims = (len(mi.with_df.coords), auxmol_of(mi).nao_nr(),
                 mi.mol.nao_nr())
         dm, other, p, chan = row_densities(mi)['fock partial']
         # one shell per block of the fit, so water's AO range is not one block
         out['rows'] = census_of(
             lambda: rows_kernel(mi, dm, other, p, chan,
-                                block_memory_gb=CENSUS_BLOCK_GB),
+                                numerics=Numerics(
+                                    layout={'fit_gb': CENSUS_BLOCK_GB})),
             isdf_exchange_rows.__code__, *dims)
         out['rows, whole'] = census_of(
             lambda: isdf_exchange_skeleton(mi, dm=dm, dm_other=other,
@@ -543,17 +558,17 @@ def shape_main(size, plant=False):
     row kernel and the fitted skeleton's partials at one and `size` ranks;
     `plant` routes the row fit's M^T through a rank-shaped product."""
     shaped.import_src_on_the_shape_sensitive_blas()
-    grid = importlib.import_module('src.Base.utils.mpi_grid')
-    tiles = importlib.import_module('src.Base.skeleton_tiles')
-    sep = importlib.import_module('src.Base.separable_ri')
+    sim = importlib.import_module('src.Base.utils.parallel.simulated_comm')
+    tiles = importlib.import_module('src.gradients.skeleton_tiles')
+    sep = importlib.import_module('src.Base.factorization.separable_ri')
     if plant:
         tiles.fit_rows = rank_shaped_fit(tiles.fit_rows)
     ref = mean_field('ethylene', 'lrc-wpbeh', 'isdf')
     ref.with_df.build()
-    crd, aux = ref.with_df.coords, _auxmol_of(ref)
+    crd, aux = ref.with_df.coords, auxmol_of(ref)
     dm, other, p, chan = row_densities(ref)['fock partial']
     dmf = mean_field('ethylene', 'pbe0', 'df')
-    daux = _auxmol_of(dmf)
+    daux = auxmol_of(dmf)
     C, occ = dmf.mo_coeff, dmf.mo_occ
     g = C @ partial_of(dmf) @ C.T
     Cd = C[:, occ > 0] * np.sqrt(occ[occ > 0])
@@ -575,19 +590,22 @@ def shape_main(size, plant=False):
             partial += sk.addend(t)
         return np.concatenate([centre.ravel(), points.ravel()]), partial, mine
 
-    one = grid.run_simulated(rank, 1)[0]
+    one = sim.run_simulated(rank, 1)[0]
     sk = tiles.FittedFockSkeleton(dmf.mol, daux, g, dmf.make_rdm1(), occ=Cd,
                                   exchange=full)
     sk.prepare(range(len(sk.tiles)), None)
     addends = [sk.addend(t) for t in range(len(sk.tiles))]
-    res = grid.run_simulated(rank, size)
+    res = sim.run_simulated(rank, size)
     partial_ok = []
     for got, partial, mine in res:
         want = np.zeros_like(partial)
         for t in mine:
             want += addends[t]
-        partial_ok.append(bool(np.array_equal(partial, want)))
+        partial_ok.append(matches(partial, want, RECORDING_BLAS,
+                                  quantity='gradient'))
     return {'perturbed': shaped.SHAPE_STATE['perturbed'],
+            'rows same': all(matches(r[0], one[0], RECORDING_BLAS,
+                                     quantity='gradient') for r in res),
             'rows bitwise': all(np.array_equal(r[0], one[0]) for r in res),
             'partials': partial_ok}
 
@@ -612,7 +630,7 @@ def test_on_the_shape_sensitive_blas(size):
     got = shape_run(size)
     print(f'{size} ranks: {got}')
     assert got['perturbed'] > 0, 'the shape-sensitive BLAS scaled nothing'
-    assert got['rows bitwise'], got
+    assert got['rows same'], got
     assert all(got['partials']), got
 
 

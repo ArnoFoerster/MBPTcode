@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Does every production module still import?
+"""Does every production module import?
 
 One second, and it catches the class of breakage that no physics test does: a
-module that references a name another module no longer defines. Every other
+module that references a name another module does not define. Every other
 test in this directory imports only the few modules it exercises, so a rename
 that misses one caller passes all of them and fails at the front door.
 
@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 CORE = ['src/Base', 'src/Solvers', 'src/SingleReference/GW',
         'src/SingleReference/LinearResponse', 'src/SingleReference/Periodic',
-        'src/gradients', 'src/properties']
+        'src/gradients', 'src/properties', 'src/autograd_oracle']
 SKIP = {'__pycache__', 'data'}
 
 
@@ -37,6 +37,9 @@ def modules(roots):
         for f in sorted((ROOT / r).rglob('*.py')):
             if any(p in SKIP for p in f.parts) or f.name.startswith('_'):
                 continue
+            if f.parent.name == 'autograd_oracle' and (
+                    f.name.startswith('torch_') or f.name == 'pin_integrals.py'):
+                continue  # torch never shares a process with pyscf (its __init__); pin_integrals imports torch and pyscf together
             yield '.'.join(f.relative_to(ROOT).with_suffix('').parts)
 
 
@@ -95,6 +98,27 @@ def test_all_core_modules_import():
         f'import sweep failed (exit {done.returncode}):\n'
         f'{done.stdout[-4000:]}\n{done.stderr[-2000:]}')
     assert 'ALL PASSED' in done.stdout
+
+
+#: modules on a declared import cycle; each must import as the FIRST module of
+#: an interpreter, whichever end of the cycle that is
+CYCLE_ENTRIES = ['src.SingleReference.GW.qp_energy', 'src.SingleReference.GW.evGW',
+                 'src.SingleReference.GW.qsGW', 'src.SingleReference.ADC.base',
+                 'src.SingleReference.ADC.spin_adapt']
+
+
+def test_cycle_members_import_first():
+    """No package __init__ imports one end of a cycle first any more, so an
+    entry from the other end must work on its own: each cycle member is
+    imported alone in a fresh interpreter."""
+    env = dict(os.environ, MPI4PY_RC_INITIALIZE='0')
+    failed = []
+    for name in CYCLE_ENTRIES:
+        done = subprocess.run([sys.executable, '-c', f'import {name}'],
+                              capture_output=True, text=True, env=env, cwd=str(ROOT))
+        if done.returncode:
+            failed.append(f'{name}: {done.stderr.strip().splitlines()[-1]}')
+    assert not failed, '\n'.join(failed)
 
 
 if __name__ == '__main__':

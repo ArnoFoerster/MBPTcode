@@ -1,19 +1,21 @@
 """The frozen scissor outside the quasiparticle set carries the reaction field once.
 
-In a continuum the quasiparticle equation of an explicit orbital q is
+In a continuum the root of an explicit orbital q is
 
-    w_q = eps_q + <q|Sigma_x - v_xc|q> + Sigma_c,qq(w_q) + Sigma^env_qq,
+    w_q = w'_q + Sigma^env_qq,   w'_q = eps_q + <q|Sigma_x - v_xc|q> + Sigma_c,qq(w'_q),
 
 Sigma^env the static reaction-field term of Duchemin, Jacquemin and Blase,
-J. Chem. Phys. 144, 164106 (2016), Eq. (18). An orbital p outside the set has
-no equation: `outside='scissor'` lends it the GW correction of its probe q and
+J. Chem. Phys. 144, 164106 (2016), Eq. (18), added whole after the G0W0
+solve. An orbital p outside the set has
+no equation: the frozen scissor lends it the GW correction of its probe q and
 `_env_static_outside` adds its own Sigma^env_pp, so
 
     eps^QP_p = eps_p + (w_q - eps_q - Sigma^env_qq) + Sigma^env_pp.
 
-Both tests fail if the scissor lends w_q - eps_q, which puts the probe's
-reaction field on top of the orbital's own (about 2 eV for water/cc-pVDZ,
-RHF, PCM(toluene)). The gas-phase scissor is checked by
+The first two tests fail if the scissor lends w_q - eps_q, which puts the
+probe's reaction field on top of the orbital's own (about 2 eV for
+water/cc-pVDZ, RHF, PCM(toluene)). The third holds the record's tiers to the
+probe that lent each shift. The gas-phase scissor is checked by
 tests/test_outside_scissor.py, and the force in a continuum with the scissor
 outside against a central difference by tests/test_isdf_pcm_force.py.
 
@@ -21,7 +23,6 @@ Run: python tests/test_solvated_outside_scissor.py   (or pytest)
 """
 import os
 import sys
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -30,9 +31,12 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..'))
 
-from src.Base.constants import HARTREE_TO_EV  # noqa: E402
-from src.Base.solvent_screening import SolventScreening  # noqa: E402
-from src.gradients.excited_state import ExcitedStateChain  # noqa: E402
+from src.Base.numerics.constants import HARTREE_TO_EV  # noqa: E402
+from src.Base.numerics.numerics import Numerics  # noqa: E402
+from src.environments.solvent_screening import SolventScreening  # noqa: E402
+from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
+from src.gradients.gwbse.diagnostics import qp_bookkeeping  # noqa: E402
+from tests.isdf_test_grid import g1_numerics  # noqa: E402
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -54,24 +58,14 @@ def scf_factory(mol):
 
 def chain(mol, mf, environment=None):
     """The frontier set, the frozen scissor outside it, SOP residues."""
-    return ExcitedStateChain(mol, scf_factory, mf=mf, qp_window=2,
-                             outside='scissor', residue_route='sop',
-                             environment=environment)
-
-
-def forward(ch, mol, mf):
-    """eps, eps^QP and the Eq. (18) term of the chain's forward at `mol`,
-    read off `kernel_pieces`."""
-    pieces = ch.kernel_pieces(mol, mf)
-    shift = pieces[14]
-    return SimpleNamespace(
-        eps=np.asarray(pieces[6]), eps_qp=np.asarray(pieces[7]),
-        shift=None if shift is None else np.asarray(shift))
+    return ExcitedStateChain(
+        mol, scf_factory, mf=mf, environment=environment,
+        numerics=g1_numerics(mol, Numerics(qp={'window': 2, 'residue_route': 'sop'})))
 
 
 @pytest.fixture(scope='module')
 def water():
-    """(chain, its forward) in the gas phase and in toluene."""
+    """(chain, its shared forward) in the gas phase and in toluene."""
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
     mf = scf_factory(mol)
     out = {}
@@ -79,12 +73,12 @@ def water():
                       ('toluene', SolventScreening(mol, solvent='toluene'))):
         ch = chain(mol, mf, env)
         ch.excitation(mol, mf)
-        out[name] = (ch, forward(ch, mol, mf))
+        out[name] = (ch, ch.shared_forward(mol, mf))
     return mol, out
 
 
 def outside_of(ch, norb):
-    inside = {int(p) for p in ch.qp_set}
+    inside = {int(p) for p in ch.resolved.qp_set}
     return [p for p in range(norb) if p not in inside]
 
 
@@ -94,8 +88,8 @@ def test_the_scissor_lends_the_probe_gw_correction_without_its_reaction_field(
     w_q - eps_q - Sigma^env_qq, on every orbital outside the set."""
     _, out = water
     ch, sh = out['toluene']
-    eps, env, eps_qp = sh.eps, sh.shift, sh.eps_qp
-    probes = [int(q) for q in ch.qp_set]
+    eps, env, eps_qp = sh.eps, np.asarray(sh.shift), sh.eps_qp
+    probes = [int(q) for q in ch.resolved.qp_set]
     outside = outside_of(ch, len(eps))
     assert outside, 'the window must leave orbitals outside'
     worst = 0.0
@@ -123,6 +117,19 @@ def test_a_scissored_orbital_feels_the_reaction_field_once(water):
     assert np.abs(moved).max() < ONCE_EV, (
         f'scissored orbitals moved {moved.min():+.3f} to {moved.max():+.3f} '
         f'eV beyond their own reaction field')
+
+
+def test_the_record_names_the_nearest_probe(water):
+    """qp_bookkeeping's tiers name the probe whose GW correction was lent."""
+    mol, out = water
+    ch, sh = out['toluene']
+    eps = sh.eps
+    probes = [int(q) for q in ch.resolved.qp_set]
+    record = qp_bookkeeping(ch, mol)
+    for tier in record['scissor_tiers']:
+        for p in tier['orbitals']:
+            q = min(probes, key=lambda r: abs(eps[r] - eps[p]))
+            assert tier['probe'] == q, (p, tier['probe'], q)
 
 
 if __name__ == '__main__':

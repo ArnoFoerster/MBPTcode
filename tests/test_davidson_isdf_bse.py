@@ -14,11 +14,12 @@ point of the test:
      the separable fit's error. That is a property of the grid, not of the
      solver, so it is REPORTED separately instead of being folded into the
      tolerance of check 1. It behaves like one: benzene/cc-pVDZ moves from
-     74.6 meV at 148 grid points per atom to 6.5 meV at 244 (--dense-grid),
-     while check 1 sits at 1e-11 throughout. Water is at 2.7 meV on the default
-     grid. The published Duchemin-Blase tables are cc-pVTZ only, so a cc-pVDZ
-     run falls back on one L-BFGS-B descent per element, which separable_ri.py
-     already documents as landing above the published grids' accuracy.
+     74.6 meV on a 148-point grid to 6.5 meV at 244 points (--dense-grid),
+     while check 1 sits at 1e-11 throughout. Water is at 2.7 meV on the
+     148-point grid. The published Duchemin-Blase tables are cc-pVTZ only, so a
+     cc-pVDZ run falls back on one L-BFGS-B descent per element, which
+     separable_ri.py already documents as landing above the published grids'
+     accuracy.
 
 Both silent traps are made loud here as well:
 
@@ -44,16 +45,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
+from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import (solve_casida_davidson,
-                                                         isdf_block_action,
-                                                         isdf_bse_factors,
-                                                         isdf_df_coefficients)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
+from src.SingleReference.BSE.solve import (
+    isdf_bse_factors, isdf_df_coefficients)
+from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.Base.constants import HARTREE_TO_EV
-
-HARTREE_TO_MEV = 27211.386245988
+from src.Base.numerics.constants import (BSE_DAVIDSON_CONV_TOL, HARTREE_TO_EV,
+                                         HARTREE_TO_MEV)
+from src.Base.numerics.numerics import numerics_of
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.SingleReference.GW.space_time import unrefused_separable_factors
 
 GEOMETRIES = {
     'water': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
@@ -75,22 +78,27 @@ GEOMETRIES = {
 
 BASIS = 'cc-pvdz'
 AUXBASIS = 'cc-pvdz-ri'
-#: Lebedev sub-shell replicas per atom: 148 grid points, and 244 for the
+#: Lebedev sub-shell replicas per atom: the validated G1 level, and G3 for the
 #: --dense-grid run that shows the factorization error following the grid.
-COUNTS = {'A1': 8, 'A2': 5, 'A3': 3, 'B1': 1}
-DENSE_COUNTS = {'A1': 12, 'A2': 8, 'A3': 5, 'B1': 2}
+COUNTS = resolve_isdf_grid('G1', BASIS)[0]
+DENSE_COUNTS = resolve_isdf_grid('G3', BASIS)[0]
 #: Benzene at NROOTS=5 is also the regression pin for the Davidson GUESS. Its
-#: unit-vector guess used to be one vector per requested root, which skips roots
-#: whenever the orbital-energy differences come in degenerate sets: benzene RPA
-#: at five roots reported converged=True on all five while having missed four of
-#: the true lowest eight. That was never a property of either block action -- the
-#: DF and ISDF actions agree to 1.6e-16 on this system and returned the SAME
-#: skipped set -- so this test used to solve for eight roots and compare five to
-#: work around it. `davidson.GUESS_FACTOR` fixes it at the source, and comparing
-#: exactly the roots asked for is what keeps that fixed.
+#: unit-vector guess of one vector per requested root skips roots whenever the
+#: orbital-energy differences come in degenerate sets: benzene RPA at five
+#: roots would report converged=True on all five while missing four of the true
+#: lowest eight. That is not a property of either block action -- the DF and
+#: ISDF actions agree to 1.6e-16 on this system and return the SAME skipped
+#: set. `davidson.GUESS_FACTOR` avoids it at the source, and comparing exactly
+#: the roots asked for holds it there.
 NROOTS = 5
-#: Davidson's own residual threshold is 1e-5, and an eigenvalue converges
-#: quadratically in it; 1e-8 is the level the DF path already meets.
+#: Every solve asks for the production residual. At the solver's default 1e-5
+#: the 95-pair water RPA solve on the shipped grid grows its trial
+#: space to 93 of the 95 pair directions, where round-off takes the positive
+#: definiteness of the projected A-B block (its Cholesky factor fails).
+CONV_TOL = BSE_DAVIDSON_CONV_TOL
+SOLVER_NUMERICS = numerics_of({'nroots': NROOTS, 'bse_conv_tol': CONV_TOL})
+#: An eigenvalue converges quadratically in the residual; 1e-8 is the level the
+#: DF path already meets.
 ALGEBRA_TOL = 1e-8
 
 
@@ -109,8 +117,11 @@ def run(name, counts):
     nvirt = len(eps) - nocc
 
     t0 = time.perf_counter()
-    X_mo, D, W_isdf = isdf_bse_factors(mf, mol, nocc, auxbasis=AUXBASIS,
-                                       counts=counts)
+    # benzene's virtual 86 is missed on G1 and the factors would be refused;
+    # this script gates the solver against the dense eigensolve, not the fit
+    X_mo, D, W_isdf = isdf_bse_factors(
+        mf, mol, nocc, factors=unrefused_separable_factors(
+            mf, mol, auxbasis=AUXBASIS, counts=counts))
     t_fac = time.perf_counter() - t0
     print(f"nao={mol.nao_nr()}  nocc={nocc}  nvirt={nvirt}  n_pair={nocc * nvirt}  "
           f"naux={D.shape[1]}  grid points M={D.shape[0]}   (factorization {t_fac:.1f}s)")
@@ -139,9 +150,10 @@ def run(name, counts):
         omega_dense = np.sort(CasidaSolver(A, Bm).solve()[0])[:NROOTS]
         kw = {'W_aux': w_isdf} if mode == 'BSE' else {}
         t0 = time.perf_counter()
-        omega_mf = np.sort(solve_casida_davidson(lr_isdf, nocc, nroots=NROOTS,
+        omega_mf = np.sort(solve_casida_davidson(lr_isdf, nocc, numerics=SOLVER_NUMERICS,
                                                  polarizability=mode,
-                                                 isdf_factors=(X_mo, D), **kw)[0])
+                                                 isdf_factors=(X_mo, D),
+                                                 **kw)[0])
         t_mf = time.perf_counter() - t0
         d = np.max(np.abs(omega_dense - omega_mf))
         ok &= check(d < ALGEBRA_TOL,
@@ -185,7 +197,7 @@ def run(name, counts):
                 f'rel {d_elem:.1e}')
 
     # Negative control: the ISDF factors with the cderi-gauge W_aux.
-    omega_mixed = np.sort(solve_casida_davidson(lr_isdf, nocc, nroots=NROOTS,
+    omega_mixed = np.sort(solve_casida_davidson(lr_isdf, nocc, numerics=SOLVER_NUMERICS,
                                                 polarizability='BSE', W_aux=W_df,
                                                 isdf_factors=(X_mo, D))[0])
     shift = np.abs(omega_mixed - omega_bse_isdf).max() * HARTREE_TO_MEV

@@ -1,7 +1,7 @@
 """The distributed Fock build reproduces the serial mean field, and divides
 the fitted tensor and the quadrature grid.
 
-`mpi_grid.simulated_world` runs each rank in a thread of this process and
+`simulated_comm.simulated_world` runs each rank in a thread of this process and
 broadcasts and reduces through shared memory, so the whole sequence runs here
 without MPI: pyscf's SCF on every rank, the density and its orbitals locked at
 every J/K build and every quadrature, the reductions of (J, K) and of (nelec,
@@ -13,7 +13,8 @@ so both gates carry a rank whose block is one row short, and the slices have to
 tile their index rather than merely cover it.
 
 What is bitwise and what is not. Against the same column blocks walked by one
-rank the rows a rank builds are bitwise: the metric factor is rank 0's,
+rank the rows a rank builds agree to a few ulp (a second walk is a second
+computation, `assert_same`): the metric factor is rank 0's,
 replicated, and every AO-pair column is evaluated by one rank and travels
 verbatim (`test_slices_tile_the_auxiliary_index`). Against pyscf's default
 blocking they differ in the last bit of the smallest elements, a property of
@@ -48,7 +49,6 @@ import json
 import os
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -59,19 +59,26 @@ from pyscf import df, dft, gto, scf
 from pyscf.df import addons
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 
-from src.Base import distributed_df
-from src.Base.constants import COMPOSED_GRAD_K
-from src.Base.distributed_df import (TIMING_KEYS, DistributedDF,
-                                     DistributedNumInt, distributed_df_jk,
-                                     distributed_df_storage,
-                                     distributed_handles,
-                                     distributed_mean_field,
-                                     distributed_numint)
-from src.Base.isdf_jk import isdf_jk
-from src.Base.utils.mpi_grid import (contiguous_block, current_comm,
-                                     distributed, lockstep_stats,
-                                     run_simulated)
-from src.Base.utils.threads import blas_single_threaded, blas_threads
+from tests.archived_tree import require_commit, unpack_commit
+from tests.blas_bar import bar_with_drift
+from tests.pins import (RECORDING_BLAS, assert_archive_same, assert_same,
+                        bar_under)
+from tests.archive_radii import install_current_radii
+from src.Base.factorization import distributed_df
+from src.Base.numerics.constants import COMPOSED_GRAD_K
+from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF,
+                                                   DistributedNumInt, distributed_df_jk,
+                                                   distributed_df_storage,
+                                                   distributed_handles,
+                                                   distributed_mean_field,
+                                                   distributed_numint)
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.utils.parallel.mpi_grid import (
+    contiguous_block, current_comm, distributed, lockstep_stats)
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
+from tests.isdf_test_grid import g1
+from tests.pins import THREAD_CAPS
 
 SIZES = [2, 3]
 #: The widest world the gates run: more ranks than water's density fit has
@@ -104,7 +111,7 @@ PERTURBED_BUILD = 4
 #: Not the split's error: `incore.cholesky_eri` differs from itself by 2.5e-17
 #: on ethylene/cc-pVTZ between max_memory 4000 and 20, because the number of
 #: columns in one `solve_triangular` decides how LAPACK blocks the solve.
-CDERI_BLOCKING_TOL = 1e-15
+CDERI_BLOCKING_TOL = bar_with_drift(1e-15)  # plus the energy class bar off the recording BLAS
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
@@ -133,8 +140,20 @@ sys.path.insert(0, {tree!r})
 import numpy as np
 from pyscf import dft
 
-from src.Base.distributed_df import distributed_df_jk
-from src.Base.utils.mpi_grid import run_simulated
+try:
+    from src.Base.factorization.distributed_df import distributed_df_jk
+except ImportError:  # an older tree's module layout
+    from src.Base.distributed_df import distributed_df_jk
+try:
+    try:
+        from src.Base.utils.parallel.simulated_comm import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.simulated_comm import run_simulated
+except ImportError:    # a tree from before the simulated world left mpi_grid
+    try:
+        from src.Base.utils.parallel.mpi_grid import run_simulated
+    except ImportError:  # an older tree's module layout
+        from src.Base.utils.mpi_grid import run_simulated
 
 warnings.simplefilter('ignore')
 rows = {{}}
@@ -150,12 +169,6 @@ for name, atom, basis in {cases!r}:
         rows[f'{{name}}_{{size}}_bare'] = np.concatenate(out)
 np.savez({out!r}, **rows)
 '''
-#: A shared machine: the archived probe is capped rather than left to size
-#: itself against the whole node, as every subprocess gate in this repo is.
-THREAD_CAPS = {name: '2' for name in
-               ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
-                'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS')}
-
 #: The stage keys that must sum to no more than `scf_total`.
 STAGE_KEYS = ('scf_build_slices', 'scf_guess', 'scf_grid', 'scf_fock_jk',
               'scf_fock_xc', 'scf_reduce', 'scf_lockstep', 'scf_driver')
@@ -362,7 +375,8 @@ def test_slices_tile_the_auxiliary_index(serial):
     """Each rank holds ceil(naux/nranks) rows at most, the blocks tile the
     auxiliary index, and the resident bytes fall with the rank count.
 
-    The reassembled slices are bitwise the same block list walked serially:
+    The reassembled slices are the same block list walked serially, to a few
+    ulp (`assert_same`: a second walk, not a copy):
     every column is evaluated by one rank and travels verbatim. That
     reference shares this module's block kernel, so it pins the exactness of
     the split, not the kernel; the kernel is pinned by the comparison against
@@ -383,9 +397,10 @@ def test_slices_tile_the_auxiliary_index(serial):
             assert blocks[0][0] == 0 and blocks[-1][1] == naux
             assert all(a[1] == b[0] for a, b in zip(blocks, blocks[1:]))
             rebuilt = np.concatenate([r['cderi'] for r in out], axis=0)
-            assert np.array_equal(rebuilt,
-                                  serial_column_walk(ref['mf'], out[0]['all']))
-            assert np.abs(rebuilt - whole).max() <= CDERI_BLOCKING_TOL
+            assert_same(rebuilt, serial_column_walk(ref['mf'], out[0]['all']),
+                        unit='1', quantity='root', label=(name, size))
+            assert np.abs(rebuilt - whole).max() <= bar_under(
+                RECORDING_BLAS, CDERI_BLOCKING_TOL, unit='1')
             rows = -(-naux // size)             # ceil
             assert max(b[1] - b[0] for b in blocks) == rows
             assert [r['nbytes'] for r in out] == [(b[1] - b[0]) * nao_pair * 8
@@ -647,11 +662,12 @@ def test_a_perturbed_density_is_repaired_at_entry(serial, monkeypatch):
             d += sign * np.spacing(np.abs(d))
         return get_jk(self, dm, *args, **kwargs)
 
-    def recorded(self, h, s):
+    def recorded(self, h, *args, **kwargs):
+        # forward whatever the pyscf version passes (2.13 adds `x=`)
         comm = current_comm()
         if comm is not None:
             focks.setdefault(comm.Get_rank(), []).append(np.array(h))
-        return eig(self, h, s)
+        return eig(self, h, *args, **kwargs)
 
     def audited(comm, mf):
         with distributed(comm, audit=True):
@@ -697,29 +713,34 @@ def test_the_context_is_the_communicator(serial):
         return dict(e=mf.e_tot, handles=hasattr(mf, '_distributed'),
                     timed=hasattr(mf, '_distributed_timings'))
 
+    # two SCF runs each time: the same to a few ulp, not bitwise
     for mine, theirs in zip(on_ranks(implicit, 2, WATER, 'cc-pvdz', 'pbe0'),
                             explicit):
-        assert mine['e'] == theirs['e']
-        assert np.array_equal(mine['mo'], theirs['mo'])
+        assert_same(mine['e'], theirs['e'], label='implicit against explicit')
+        assert_same(mine['mo'], theirs['mo'], unit='1', quantity='vector',
+                    label='implicit against explicit')
         assert mine['handles'] and mine['timed']
     for r in on_ranks(serial_region, 2, WATER, 'cc-pvdz', 'pbe0'):
-        assert r['e'] == serial[('water', 'pbe0')]['e']
+        assert_same(r['e'], serial[('water', 'pbe0')]['e'],
+                    label='serial region')
         assert not r['handles'] and not r['timed']
 
 
 def test_one_rank_world_is_pyscf(serial):
     """Without a communicator, and on a world of one, nothing here runs.
 
-    Bitwise against pyscf's own SCF, and the mean field still carries pyscf's
-    own DF object and numint: a rank count of one must not pay a reduction, a
+    Against pyscf's own SCF, and the mean field still carries pyscf's own DF
+    object and numint: a rank count of one must not pay a reduction, a
     broadcast or a re-associated sum for a distribution that is not happening.
+    The energies are two SCF runs, so they agree to a few ulp (`assert_same`
+    of tests/pins.py), not bitwise; the objects say which path ran.
     """
     for xc in (None, 'pbe0'):
         ref = serial[('water', xc)]
         mf = mean_field(WATER, 'cc-pvdz', xc)
         numint_before = getattr(mf, '_numint', None)
         distributed_mean_field(mf, None)
-        assert mf.e_tot == ref['e']
+        assert_same(mf.e_tot, ref['e'], label=('no communicator', xc))
         assert type(mf.with_df) is type(ref['mf'].with_df)
         assert getattr(mf, '_numint', None) is numint_before
         assert distributed_df_jk(mf, None) is None
@@ -727,7 +748,7 @@ def test_one_rank_world_is_pyscf(serial):
 
         alone = run_simulated(
             lambda comm: converge(comm, mean_field(WATER, 'cc-pvdz', xc)), 1)
-        assert alone[0]['e'] == ref['e']
+        assert_same(alone[0]['e'], ref['e'], label=('world of one', xc))
         assert alone[0]['with_df'] == 'DF'
         # No dict either: a mean field that carries one ran distributed.
         assert getattr(mf, '_distributed_timings', None) is None
@@ -736,7 +757,7 @@ def test_one_rank_world_is_pyscf(serial):
 def isdf_mean_field():
     """Water/cc-pVDZ Hartree-Fock whose J/K is ISDF's (`isdf_jk`), unrun."""
     mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
-    mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri')
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=g1(scf.RHF(mol)))
     mf.conv_tol, mf.conv_tol_grad = CONV_TOL, CONV_TOL_GRAD
     return mf
 
@@ -759,7 +780,7 @@ def test_a_foreign_with_df_is_refused_while_isdf_is_dispatched():
     `tests/test_distributed_isdf_scf.py` gates that SCF, so this only checks
     that the dispatch reaches a converged mean field. Without a communicator
     the refusal does not run and the foreign mean field is its own serial
-    kernel, bit for bit."""
+    kernel, to a few ulp (two SCF runs)."""
     mfs = [foreign_mean_field() for _ in range(2)]
 
     def one_rank(comm):
@@ -787,8 +808,10 @@ def test_a_foreign_with_df_is_refused_while_isdf_is_dispatched():
     mf = foreign_mean_field()
     distributed_mean_field(mf, comm=None)
     assert type(mf.with_df).__name__ == 'ForeignDF'
-    assert mf.e_tot == ref.e_tot
-    assert np.array_equal(mf.mo_coeff, ref.mo_coeff)
+    # two SCF runs: the same to a few ulp, not bitwise
+    assert_same(mf.e_tot, ref.e_tot, label='foreign with_df, serial')
+    assert_same(mf.mo_coeff, ref.mo_coeff, unit='1', quantity='vector',
+                label='foreign with_df, serial')
     assert getattr(mf, '_distributed_timings', None) is None
 
 
@@ -866,12 +889,9 @@ def extracted(tmp_path_factory, commit):
     """The tree of `commit`, unpacked into a temporary directory."""
     out = tmp_path_factory.mktemp(f'distributed_df_{commit[:7]}')
     tar = out.parent / f'{commit}.tar'
-    done = subprocess.run(['git', '-C', str(REPO), 'archive', '--format=tar',
-                           '-o', str(tar), commit],
-                          capture_output=True, text=True)
-    assert done.returncode == 0, done.stderr
-    with tarfile.open(tar) as fh:
-        fh.extractall(out)
+    require_commit(REPO, commit)
+    unpack_commit(REPO, commit, tar, out)
+    install_current_radii(out)
     assert (out / 'src' / 'Base' / 'distributed_df.py').is_file()
     return out
 
@@ -902,8 +922,9 @@ def rows_both_trees(tmp_path_factory):
 @pytest.mark.parametrize('size', SIZES)
 @pytest.mark.parametrize('name', [c[0] for c in ROWS_CASES])
 def test_rows_are_the_one_pool_trees_bits(rows_both_trees, name, size):
-    """The bare rows the ranks build, reassembled, are the bytes of the
-    `ONE_POOL_COMMIT` tree, whose metric solve runs at one BLAS thread.
+    """The bare rows the ranks build, reassembled, are the rows of the
+    `ONE_POOL_COMMIT` tree to a few ulp (`assert_archive_same`), whose metric
+    solve runs at one BLAS thread.
 
     Under the thread caps no wrap engages (`BLAS_WRAP_MIN_THREADS`), so what
     this pins is the integrals and everything around the solve; that the
@@ -912,13 +933,14 @@ def test_rows_are_the_one_pool_trees_bits(rows_both_trees, name, size):
     old, new = rows_both_trees
     key = f'{name}_{size}_bare'
     assert old[key].shape == new[key].shape, key
-    assert old[key].tobytes() == new[key].tobytes(), key
+    assert_archive_same(new[key], old[key], unit='1', quantity='root',
+                        label=key)
 
 
 def test_the_metric_solve_runs_on_the_pool_the_wrap_took(serial, monkeypatch):
     """Inside the build's `blas_single_threaded` the libcint pass holds BLAS
     at one thread and every block's metric solve runs on the count the wrap
-    found, with the rows it gives unchanged.
+    found, with the rows it gives unchanged (to a few ulp: two walks).
 
     The solve is naux^2 flops per column against naux for the integrals, so
     held at one thread it dominates the build. The wrap is entered here with
@@ -953,7 +975,8 @@ def test_the_metric_solve_runs_on_the_pool_the_wrap_took(serial, monkeypatch):
             wrapped = serial_column_walk(mf, blocks)
     assert seen['ints'] == [1] * len(blocks)
     assert seen['solve'] == [2] * len(blocks)
-    assert np.array_equal(wrapped, reference)
+    assert_same(wrapped, reference, unit='1', quantity='root',
+                label='rows on the pool')
 
 
 if __name__ == '__main__':

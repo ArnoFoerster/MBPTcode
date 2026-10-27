@@ -28,7 +28,8 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse import davidson
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from tests.test_davidson_preconditioner import WATER, _system, lr_of
@@ -45,11 +46,16 @@ def water():
     return _system(WATER)
 
 
-def solve(s, timings, **kw):
-    """One BSE Davidson on water's ISDF action."""
-    return solve_casida_davidson(lr_of(s), s['nocc'], nroots=NROOTS,
+def solve(s, timings, max_cycle=None, **kw):
+    """One BSE Davidson on water's ISDF action, capped at `max_cycle`
+    (None: the default cap)."""
+    bse = {'nroots': NROOTS, 'conv_tol': CONV_TOL}
+    if max_cycle is not None:
+        bse['max_cycle'] = max_cycle
+    numerics = Numerics(bse=bse)
+    return solve_casida_davidson(lr_of(s), s['nocc'], numerics=numerics,
                                  polarizability='BSE', W_aux=s['W_aux'],
-                                 isdf_factors=s['factors'], conv_tol=CONV_TOL,
+                                 isdf_factors=s['factors'],
                                  timings=timings, **kw)
 
 
@@ -90,7 +96,7 @@ def test_the_recomputed_residual_is_the_solvers(water):
                      read_tol=CONV_TOL)
     assert t['davidson_verdict'] == 'converged'
     assert t['davidson_read_residuals'] is None
-    act, diag = davidson._casida_action(lr_of(water), water['nocc'], 'BSE',
+    act, diag = davidson.casida_action(lr_of(water), water['nocc'], 'BSE',
                                         water['W_aux'], water['factors'],
                                         CONV_TOL)
     r = davidson._root_residuals(act, om, X, Y, diag.shape)

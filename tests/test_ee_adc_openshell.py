@@ -21,7 +21,7 @@ import pytest
 from pyscf import gto, scf, adc
 
 from src.SingleReference.ADC.eeADC import ee_utils
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 RADICALS = [('O 0 0 0; H 0 0 0.97', 1, 'OH'),
             ('N 0 0 0; H 0 0 1.04; H 1.0 0 -0.3', 1, 'NH2')]

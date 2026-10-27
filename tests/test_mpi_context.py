@@ -46,11 +46,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 
-from src.Base.utils import mpi_grid
-from src.Base.utils.mpi_grid import (SimulatedComm, current_comm, distributed,
-                                     lockstep, lockstep_stats, mpi_map,
-                                     partition, reduce_sum, run_simulated,
-                                     simulated_world)
+from src.Base.utils.parallel import mpi_grid
+from src.Base.utils.parallel.mpi_grid import (
+    current_comm, distributed, lockstep, lockstep_stats, mpi_map, partition,
+    reduce_sum)
+from src.Base.utils.parallel.simulated_comm import (
+    SimulatedComm, run_simulated, simulated_world)
+from tests.pins import assert_same
 
 SIZE = 3
 HANG_SECONDS = 60                              # the whole file runs in ~1 s
@@ -204,8 +206,8 @@ def test_a_kernel_finds_the_comm_without_being_passed_one():
         return _kernel(v), v
 
     for out, v in _ranks(one_rank, SIZE):
-        assert out.tobytes() == serial.tobytes()
-        assert v.tobytes() == v0.tobytes()
+        assert_same(out, serial, unit='1', quantity='root', label='kernel')
+        assert v.tobytes() == v0.tobytes()      # lockstepped: rank 0's copy
 
 
 def test_mpi_maps_items_run_in_a_serial_region():

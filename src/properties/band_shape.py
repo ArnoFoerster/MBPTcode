@@ -6,7 +6,7 @@ Huang-Rhys factor S_k (`vibronic.huang_rhys_from_gradient` or
 `huang_rhys_from_displacement`). No Duschinsky rotation and no frequency change
 between the states; within that model the band is exact at any temperature.
 
-The Franck-Condon density is `rates.fc_weighted_dos`, the same generating
+The Franck-Condon density is `franck_condon.fc_weighted_dos`, the same generating
 function the golden-rule rates use, evaluated at the electronic energy the
 photon leaves to the nuclei:
 
@@ -32,10 +32,10 @@ Energies in Hartree, temperature in Kelvin, wavelengths in nm.
 """
 import numpy as np
 
-from src.Base.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
-                                GAUSSIAN_FWHM_PER_SIGMA,
-                                HARTREE_WAVELENGTH_NM)
-from src.properties.rates import TRAPEZOID, fc_weighted_dos
+from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+                                         GAUSSIAN_FWHM_PER_SIGMA,
+                                         HARTREE_WAVELENGTH_NM)
+from src.properties.franck_condon import TRAPEZOID, fc_weighted_dos
 
 
 def gaussian_limit_fwhm(s_k, omega_k, temperature):

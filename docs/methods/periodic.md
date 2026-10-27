@@ -35,7 +35,11 @@ Two factorizations:
 - `sigma_c_diag` / `sigma_vertex_diag` build the diagonal G0W0 self-energy
   (plain, or GWΓ∞/PSD1 vertex-corrected) from the RPA or BSE excitons at
   each q.
-- `qp_energy_g0w0` linearizes it into a quasiparticle energy.
+- `qp_energy_g0w0` solves the quasiparticle equation for its root with the
+  root finder of the molecular routes (the root of largest pole strength Z),
+  not by linearizing about the mean-field level. It returns a dict that also
+  says how many roots the window holds: on a metal the spectral weight may be
+  split between several.
 - A subtle normalization trap: the BZ q-average and the response's own
   1/nkpts are two separate factors, easy to conflate. Only
   `tests/test_pbc_sigma_folding.py`'s supercell-folding check catches it — a
@@ -56,9 +60,11 @@ Two factorizations:
   meshes (Yeh & Morales, Sec. 4); symmorphic groups only.
 
 **Metals** (`pbc_occupations`, `pbc_isdf_gw`)
-- `pbc_occupations` replaces the fixed occ/virt partition with an
-  occupation-weighted response built from ordered pairs. Stays Hermitian for
-  any occupation that is monotone in energy — verified, not assumed.
+- `pbc_occupations` builds the response from occupation-weighted ordered
+  pairs instead of a fixed occ/virt partition. The periodic polarizability,
+  Casida blocks, W and Σ_c all use it, for insulators and metals alike. It
+  stays Hermitian for any occupation that is monotone in energy — verified,
+  not assumed.
 - `sigma_c_matsubara_thc` builds the self-energy on a fermionic Matsubara
   grid, via the same intermediate-representation sampling used in
   [Finite temperature](finite-temperature.md) (Shinaoka et al., PRB 96,
@@ -82,6 +88,13 @@ Two factorizations:
   metric — the periodic form of Duchemin, Jacquemin and Blase, J. Chem.
   Phys. 144, 164106 (2016). RPA, W, BSE and Σ_c all pick up the screening
   through the same `L`. See `examples/18_periodic_slab_gw.py`.
+
+**Not yet called by a driver.** The periodic full BSE and the vertex
+self-energy built on it (`sigma_vertex_diag`), the k-mesh symmetry
+(`pbc_symmetry`) and the symmetry-adapted ISDF (`build_isdf_kpts_symm`),
+`pbc_kpath`, `pbc_smallq` and `pbc_wav` are complete, and their tests check
+them, but no driver calls them yet. The BSE and the vertex self-energy need
+integer occupations.
 
 **Band structures** (`pbc_kpath`)
 - Interpolates the quasiparticle correction QP(k) - eps(k), which is smooth

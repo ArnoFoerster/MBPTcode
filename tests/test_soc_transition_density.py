@@ -28,16 +28,23 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_CM
-from src.Base.pyscf_interface import get_density_fitting_coefficients
+from src.Base.numerics.constants import HARTREE_TO_CM
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       GROUND_SPIN_FACTOR, _blocks, coupling,
-                                       ground_state_element,
+from src.properties.spin_orbit import (_blocks, coupling, ground_state_element,
                                        interstate_element, soc_operator_mo)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from test_spin_orbit import CH2O
+from tests.pins import assert_same
+
+
+def same(got, want, label):
+    """Two computations of one matrix element (complex): a few ulp."""
+    for part in (np.real, np.imag):
+        assert_same(part(got), part(want), quantity='root', label=label)
 
 
 def element(h_mo, nocc, xs, xt, ys, yt, y_sign):
@@ -67,7 +74,7 @@ def formaldehyde_bse():
         np.asarray(mf.mo_energy), spin_mode='restricted',
         coeff_df=get_density_fitting_coefficients(mol, mf,
                                                   representation='spatial'))
-    kw = dict(nroots=3, polarizability='BSE', conv_tol=1e-6, max_cycle=400,
+    kw = dict(numerics=Numerics(bse={'nroots': 3, 'conv_tol': 1e-6, 'max_cycle': 400}), polarizability='BSE',
               W_aux=lr.static_screening_aux(nocc))
     singlet = solve_casida_davidson(lr, nocc, spin='singlet', **kw)
     triplet = solve_casida_davidson(lr, nocc, spin='triplet', **kw)
@@ -81,10 +88,9 @@ def test_the_local_form_is_the_modules_own(formaldehyde_bse):
     h, nocc, (_, xs, ys), (_, xt, yt) = formaldehyde_bse
     for i in range(2):
         for j in range(2):
-            assert np.allclose(
-                element(h, nocc, xs[:, i], xt[:, j], ys[:, i], yt[:, j], +1),
-                interstate_element(h, nocc, xs[:, i], xt[:, j],
-                                   ys[:, i], yt[:, j]), rtol=0, atol=0)
+            same(element(h, nocc, xs[:, i], xt[:, j], ys[:, i], yt[:, j], +1),
+                 interstate_element(h, nocc, xs[:, i], xt[:, j],
+                                    ys[:, i], yt[:, j]), (i, j))
 
 
 def test_the_two_density_forms_are_one_expression_at_tda(formaldehyde_bse):
@@ -95,7 +101,7 @@ def test_the_two_density_forms_are_one_expression_at_tda(formaldehyde_bse):
     for i in range(2):
         for j in range(2):
             a = (h, nocc, xs[:, i], xt[:, j], z[:, i], z[:, j])
-            assert np.array_equal(element(*a, +1), element(*a, -1))
+            same(element(*a, +1), element(*a, -1), (i, j))
 
 
 def test_the_yy_sign_is_worth_under_a_per_cent(formaldehyde_bse):

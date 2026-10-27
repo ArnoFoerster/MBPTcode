@@ -19,7 +19,7 @@ from src.SingleReference.Periodic import pbc_casida as pc
 from src.SingleReference.Periodic import pbc_amplitudes as pa
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
-from src.SingleReference.base import get_occ_virt_indices
+from src.Base.orbital_spaces import get_occ_virt_indices
 
 
 class _MolAmp(AmplitudeGenerator):
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     map_ok = True
     for q in range(nk_prim):
         for kp in range(nk_prim):
-            km = pa.kpoint_minus_q(dfints3, q, kp)
+            km = dfints3.kpoint_minus_q(q, kp)
             if dfints3.kconserv_pair[q, km] != kp:
                 map_ok = False
     print(f"2. k-q momentum helper consistent for all (q,kp): {'OK' if map_ok else 'FAIL'}")

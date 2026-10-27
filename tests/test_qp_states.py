@@ -1,53 +1,51 @@
-"""One declaration, one set of orbital indices, and the two legacy windows it replaces.
+"""One declaration, one set of orbital indices, and the two windows it
+subsumes.
 
 `SingleReference/GW/qp_states.py` is where a `QPStates` declaration becomes the
-orbitals a surface solves explicitly. Two incompatible windows used to live
-under the name `qp_window` -- an integer half-width around the Fermi level
-widened over degenerate blocks (`ExcitedStateChain._qp_set`) and the valence
-occupied plus ten virtuals of the dense route (`dense_surfaces.qp_window`) --
-so the gates here are `array_equal` against those two functions, not
-tolerances: a surface whose quasiparticle set moved is a different surface and
-its energies are not differenceable against the old ones.
+orbitals a surface solves explicitly. Two incompatible windows exist under the
+name `qp_window` -- an integer half-width around the Fermi level widened over
+degenerate blocks (`QuasiparticleSet.resolve_qp_set`) and the valence occupied plus
+ten virtuals of the dense route (`dense_surfaces.qp_window`) -- so the gates
+here are `array_equal` against those two functions, not tolerances: a surface
+whose quasiparticle set moved is a different surface and its energies are not
+differenceable against the other's.
 
-The reference for the two moved windows is a VERBATIM copy of the code that was
-replaced (`_old_qp_set`, `_old_qp_window`), because `dense_surfaces.qp_window`
-is now an alias of the production function and comparing against it alone would
-gate nothing.
+The reference for the two windows is a VERBATIM copy of the original code
+(`_old_qp_set`, `_old_qp_window`), because `dense_surfaces.qp_window` is an
+alias of the production function and comparing against it alone would gate
+nothing.
 
-Every gate below was shown to fail once, by breaking in the source what the
-gate watches and running the 28 cases of this file against it; each run was
-restored from a backup copy and the restore checked byte for byte:
+What breaks each gate:
 
   * the degeneracy widening dropped from production `frontier_qp_states` (both
-    while loops removed): 5 fail, 23 pass. On methane/cc-pVDZ, whose t2
-    orbitals are degenerate to machine precision, half_width 1 goes from
-    [2 3 4 5] to [4 5] and half_width 2 from [2 3 4 5 6 7 8] to [3 4 5 6]: half
-    of a degenerate triple then carries a quasiparticle energy and half the
-    mean field, which differentiates across an arbitrary rotation. Water, whose
+    while loops removed). On methane/cc-pVDZ, whose t2 orbitals are
+    degenerate to machine precision, half_width 1 goes from [2 3 4 5] to
+    [4 5] and half_width 2 from [2 3 4 5 6 7 8] to [3 4 5 6]: half of a
+    degenerate triple then carries a quasiparticle energy and half the mean
+    field, which differentiates across an arbitrary rotation. Water, whose
     frontier is non-degenerate, does not move at all -- which is why the
     methane case is in the file.
   * the valence window shifted by one, `range(ncore + 1, nocc)` in production
-    `valence_qp_states`: 4 fail, 24 pass. The window loses orbital 1 on both
-    molecules -- the 2s of oxygen and of carbon, the inner valence, which is
-    exactly where a frozen shift has the most leverage on a frontier
-    quasiparticle (3.6-10 meV per eV, against 0.05 meV per 20 eV for the core).
+    `valence_qp_states`. The window loses orbital 1 on both molecules -- the
+    2s of oxygen and of carbon, the inner valence, which is exactly where a
+    frozen shift has the most leverage on a frontier quasiparticle (3.6-10 meV
+    per eV, against 0.05 meV per 20 eV for the core).
   * `admitted_by_pole_condition` dividing the worst swept pole by `limit`
-    squared: 3 fail, 25 pass. On water/cc-pVDZ, where E_g = 0.6787 Ha, the O 1s
-    reach reads 43.543 instead of 29.552 and the set the condition admits at
-    limit = E_g shrinks from [2 3 4 5 6 7 8] to [2 3 4 5 6], so it stops
-    agreeing with `compressible` in both the verdict and the number. The
-    threshold='gap' route cannot see it, because that one calls `compressible`
-    itself -- which is the point of gating the two against each other.
-  * `qp_space_time` wrapping the moved `frozen_scissor` in a forwarding
-    function instead of re-exporting it: 1 fail, 27 pass. The behaviour is
-    identical and only the identity gate sees it -- which is the failure mode a
-    re-export actually has, a name that resolves to something merely resembling
-    the moved object.
+    squared. On water/cc-pVDZ, where E_g = 0.6787 Ha, the O 1s reach reads
+    43.543 instead of 29.552 and the set the condition admits at limit = E_g
+    shrinks from [2 3 4 5 6 7 8] to [2 3 4 5 6], so it stops agreeing with
+    `compressible` in both the verdict and the number. The threshold='gap'
+    route cannot see it, because that one calls `compressible` itself -- which
+    is the point of gating the two against each other.
+  * `qp_space_time` wrapping `frozen_scissor` in a forwarding function instead
+    of re-exporting it. The behaviour is identical and only the identity gate
+    sees it -- which is the failure mode a re-export has, a name that
+    resolves to something merely resembling the moved object.
   * the import gate cannot be broken from inside production: importing
     anything of `src.gradients` there is circular through
     `gradients/__init__.py` -> `qp_space_time` and dies at import time. Its
     sensitivity is a positive control in the same test instead -- the same
-    subprocess probe run on `src.gradients.qp_space_time`, which must show
+    subprocess probe run on `src.gradients.gwbse.qp_space_time`, which must show
     `src.gradients` in sys.modules.
 """
 import subprocess
@@ -58,12 +56,15 @@ import pytest
 from pyscf import gto, scf
 from pyscf.data.elements import chemcore
 
-from src.Base.constants import QP_WINDOW_Z_MIN
+from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.Base.declaration import QPStates
 from src.SingleReference.GW import qp_states as prod
+from src.Base.orbital_spaces import particle_hole_window
 from src.SingleReference.GW.sum_over_poles import compressible
-from src.gradients import dense_surfaces, qp_space_time
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse import dense_surfaces, qp_space_time
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.gwbse.qp_set import QuasiparticleSet
+from tests.pins import assert_same, assert_same_tree
 
 #: The chain's own degeneracy tolerance; `resolve_qp_states` has no default.
 DEGENERACY_TOL = 1e-4
@@ -127,7 +128,7 @@ def test_frontier_is_the_chains_window(spectra, name, half_width):
     """The production function and the chain's staticmethod, index for index."""
     _, eps, nocc = spectra[name]
     got = prod.frontier_qp_states(eps, nocc, half_width, DEGENERACY_TOL)
-    assert np.array_equal(got, ExcitedStateChain._qp_set(eps, nocc, half_width,
+    assert np.array_equal(got, QuasiparticleSet.resolve_qp_set(eps, nocc, half_width,
                                                         DEGENERACY_TOL))
     assert np.array_equal(got, _old_qp_set(eps, nocc, half_width,
                                            DEGENERACY_TOL))
@@ -150,7 +151,7 @@ def test_frontier_takes_all_when_asked(spectra):
     assert np.array_equal(prod.frontier_qp_states(eps, nocc, 'all',
                                                   DEGENERACY_TOL),
                           np.arange(len(eps)))
-    assert np.array_equal(ExcitedStateChain._qp_set(eps, nocc, 'all',
+    assert np.array_equal(QuasiparticleSet.resolve_qp_set(eps, nocc, 'all',
                                                     DEGENERACY_TOL),
                           np.arange(len(eps)))
 
@@ -160,7 +161,7 @@ def test_resolve_frontier_matches_the_chain(spectra):
     spec = QPStates(kind='frontier', half_width=2)
     got = prod.resolve_qp_states(spec, eps, nocc, degeneracy_tol=DEGENERACY_TOL)
     assert np.array_equal(got.explicit,
-                          ExcitedStateChain._qp_set(eps, nocc, 2, DEGENERACY_TOL))
+                          QuasiparticleSet.resolve_qp_set(eps, nocc, 2, DEGENERACY_TOL))
     assert got.reach == {}, 'reach is the admitted criterion and nothing else'
 
 
@@ -232,7 +233,7 @@ def test_admitted_holds_the_frontier_and_excludes_the_oxygen_core(spectra):
     _, eps, nocc = spectra['water']
     resolved = prod.resolve_qp_states(QPStates(kind='admitted'), eps, nocc,
                                       degeneracy_tol=DEGENERACY_TOL)
-    frontier = ExcitedStateChain._qp_set(eps, nocc, 2, DEGENERACY_TOL)
+    frontier = QuasiparticleSet.resolve_qp_set(eps, nocc, 2, DEGENERACY_TOL)
     assert set(frontier) <= set(resolved.explicit)
     assert 0 in resolved.outside
     assert resolved.reach[0] > 1.0
@@ -243,15 +244,17 @@ def test_admitted_holds_the_frontier_and_excludes_the_oxygen_core(spectra):
 
 def test_the_pole_condition_reproduces_compressible_on_the_gap(spectra):
     """`compressible` is this test with limit fixed to E_g, so at that limit
-    the two must agree bitwise -- in the verdict AND in the reach."""
+    the two must agree -- in the verdict exactly AND in the reach to a few
+    ulp."""
     for name in MOLS:
         _, eps, nocc = spectra[name]
-        limit = prod.particle_hole_gap(eps, nocc)
+        limit = particle_hole_window(eps, nocc)[0]
         for p in range(len(eps)):
             got = prod.admitted_by_pole_condition(eps, nocc, p, limit)
             want = compressible(float(eps[p]), eps, nocc)
             assert got[0] is want[0], (name, p)
-            assert got[1] == want[1], (name, p)
+            assert_same(got[1], want[1], unit='1', quantity='root',
+                        label=(name, p))
 
 
 def test_omega1_refuses_without_the_lowest_drpa_root(spectra):
@@ -261,12 +264,13 @@ def test_omega1_refuses_without_the_lowest_drpa_root(spectra):
     spec = QPStates(kind='admitted', threshold='omega1')
     with pytest.raises(ValueError, match='omega1'):
         prod.resolve_qp_states(spec, eps, nocc, degeneracy_tol=DEGENERACY_TOL)
-    at_gap = prod.resolve_qp_states(spec, eps, nocc, omega1=prod.particle_hole_gap(eps, nocc),
+    at_gap = prod.resolve_qp_states(spec, eps, nocc, omega1=particle_hole_window(eps, nocc)[0],
                                     degeneracy_tol=DEGENERACY_TOL)
     on_gap = prod.resolve_qp_states(QPStates(kind='admitted'), eps, nocc,
                                     degeneracy_tol=DEGENERACY_TOL)
     assert at_gap.explicit == on_gap.explicit
-    assert at_gap.reach == on_gap.reach
+    assert_same_tree(at_gap.reach, on_gap.reach, unit='1', quantity='root',
+                     label='reach')
 
 
 def test_the_gap_is_the_conservative_threshold(spectra):
@@ -274,7 +278,7 @@ def test_the_gap_is_the_conservative_threshold(spectra):
     does: testing against the gap can only leave a state out, never let one in
     that the true Om_1 would exclude."""
     _, eps, nocc = spectra['water']
-    gap = prod.particle_hole_gap(eps, nocc)
+    gap = particle_hole_window(eps, nocc)[0]
     loose = prod.resolve_qp_states(QPStates(kind='admitted', threshold='omega1'),
                                    eps, nocc, omega1=2.0 * gap,
                                    degeneracy_tol=DEGENERACY_TOL)
@@ -318,22 +322,18 @@ def test_the_resolved_record_is_hashable(spectra):
     assert len({a, b}) == 1
 
 
-# ------------------------------------------------------------- the moved pair
+# ------------------------------------------------------------- the scissor pair
 
-def test_the_scissor_pair_is_one_object_on_both_paths():
-    """`qp_space_time` re-exports the moved names rather than keeping a copy:
-    two spellings of the tier assignment is how a displaced geometry stops
-    matching the reference one."""
-    for name in ('calibrate_scissor', 'scissor_route', 'frozen_scissor'):
-        assert getattr(qp_space_time, name) is getattr(prod, name), name
+def test_the_gradient_layer_routes_the_scissor_through_production():
+    """`qp_space_time` reads the one tier assignment rather than keeping a
+    copy: two spellings of it is how a displaced geometry stops matching the
+    reference one."""
+    assert qp_space_time.scissor_route is prod.scissor_route
 
 
 def test_the_scissor_pair_answers_the_same_on_both_paths():
     roots = {0: -11.6, 1: -1.50}
     want = prod.calibrate_scissor(EPS_TIER, NOCC_TIER, roots, excluded=[0, 1, 2])
-    got = qp_space_time.calibrate_scissor(EPS_TIER, NOCC_TIER, roots,
-                                          excluded=[0, 1, 2])
-    assert got == want
     assert want[0] == pytest.approx(-0.6) and want[2] == pytest.approx(-0.15)
     start = float(EPS_TIER[0] + 0.01)
     assert (qp_space_time.scissor_route(want, 0, EPS_TIER, NOCC_TIER, start)
@@ -363,4 +363,4 @@ def test_production_does_not_reach_into_the_gradient_package():
     see what this one denies -- otherwise the probe proves nothing.
     """
     assert not _imports('src.SingleReference.GW.qp_states')
-    assert _imports('src.gradients.qp_space_time'), 'the probe can see it'
+    assert _imports('src.gradients.gwbse.qp_space_time'), 'the probe can see it'

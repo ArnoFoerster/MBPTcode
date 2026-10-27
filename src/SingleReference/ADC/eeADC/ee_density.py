@@ -49,8 +49,7 @@ Normalization: the FULL eigenvector is a unit vector, sum u1^2 + sum u2^2 = 1
 alone. The terms sum to a traceless matrix, so the difference density holds
 no charge. The density is unrelaxed: no orbital response.
 
-Independent check (tests/test_ee_adc_state_specific.py): pyscf's ISR-ADC(2)
-excited-state density (Banerjee and Sokolov, radc_ee / uadc_ee make_rdm1)
+pyscf's ISR-ADC(2) excited-state density (Banerjee and Sokolov, radc_ee / uadc_ee make_rdm1)
 is the TOTAL density rho_HF + T1 rho_0^(2) + Delta; this module's Delta
 equals it minus rho_HF minus T1 rho_0^(2), rho_0^(2) the MP2 ground-state
 correlation density, for singlets and (through uadc_ee) triplets. The two
@@ -69,6 +68,7 @@ from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_utils
+from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
 TERMS = {
     'oo': ('oo_ss0', 'oo_dd', 'oo_ru', 'oo_p0', 'oo_tt_o', 'oo_tt_v', 'oo_tru'),
@@ -76,12 +76,6 @@ TERMS = {
     'ov': ('ov_sd', 'ov_tsd', 'ov_p0v', 'ov_p0o', 'ov_tdv', 'ov_tdo'),
 }
 ALL_TERMS = TERMS['oo'] + TERMS['vv'] + TERMS['ov']
-# the terms of an ADC(1) (CIS) state: its singles alone, unit weight
-ADC1_TERMS = ('oo_ss0', 'vv_ss0')
-
-
-def _sym(A):
-    return 0.5 * (A + A.transpose(1, 0))
 
 
 def difference_density_terms(be, u1, u2=None, t2=None, p0=None):
@@ -106,16 +100,16 @@ def difference_density_terms(be, u1, u2=None, t2=None, p0=None):
     out.update({
         'oo_dd': -2.0 * ein('ikab,jkab->ij', u2, u2),
         'oo_ru': -ein('ia,ja->ij', r, r),
-        'oo_p0': _sym(ein('ik,kj->ij', p1_oo, p0['oo'])),
-        'oo_tt_o': -0.5 * _sym(ein('ikcd,lk,jlcd->ij', t2, p1_oo, t2)),
-        'oo_tt_v': _sym(ein('ikcd,jkcb,db->ij', t2, t2, p1_vv)),
-        'oo_tru': -_sym(ein('ia,jkac,kc->ij', u1, t2, r)),
+        'oo_p0': symmetrize(ein('ik,kj->ij', p1_oo, p0['oo'])),
+        'oo_tt_o': -0.5 * symmetrize(ein('ikcd,lk,jlcd->ij', t2, p1_oo, t2)),
+        'oo_tt_v': symmetrize(ein('ikcd,jkcb,db->ij', t2, t2, p1_vv)),
+        'oo_tru': -symmetrize(ein('ia,jkac,kc->ij', u1, t2, r)),
         'vv_dd': 2.0 * ein('ijac,ijbc->ab', u2, u2),
         'vv_ru': ein('ia,ib->ab', r, r),
-        'vv_p0': -_sym(ein('ac,cb->ab', p1_vv, p0['vv'])),
-        'vv_tt_v': -0.5 * _sym(ein('klbc,klad,cd->ab', t2, t2, p1_vv)),
-        'vv_tt_o': _sym(ein('klbc,jk,jlac->ab', t2, p1_oo, t2)),
-        'vv_tru': _sym(ein('ikac,kc,ib->ab', t2, r, u1)),
+        'vv_p0': -symmetrize(ein('ac,cb->ab', p1_vv, p0['vv'])),
+        'vv_tt_v': -0.5 * symmetrize(ein('klbc,klad,cd->ab', t2, t2, p1_vv)),
+        'vv_tt_o': symmetrize(ein('klbc,jk,jlac->ab', t2, p1_oo, t2)),
+        'vv_tru': symmetrize(ein('ikac,kc,ib->ab', t2, r, u1)),
         'ov_sd': p2_ov,
         'ov_tsd': -ein('ijab,jb->ia', t2, p2_ov),
         'ov_p0v': -ein('ib,ba->ia', p0['ov'], p1_vv),
@@ -172,38 +166,8 @@ def spin_free_difference_density(eps, V, no, v, level='adc2', parity=None,
         out = spin_summed(difference_density_terms(be, u1))
     else:
         gb = _sb.g_blocks_sb(V, no, norb)
-        d_ijab, d_ia, _ = ee_utils._denominators(np.asarray(eps, float), no)
+        d_ijab, d_ia, _ = ee_utils.orbital_denominators(np.asarray(eps, float), no)
         amps = _eq.amplitudes(be, gb, d_ijab, d_ia, order=2)
         p0 = _eq.density2(be, amps)
         out = spin_summed(difference_density_terms(be, u1, u2, amps['t2_1'], p0))
     return out if terms else assemble(out, no, nv)
-
-
-def spin_orbital_difference_density(eps, g, nocc, v, level='adc2',
-                                    terms=False):
-    """Delta rho of one full eigenvector of the spin-orbital route
-    (ee_u_dense_full: singles, then unique-configuration doubles), in the
-    spin-orbital basis (norb, norb); the validation form."""
-    norb = len(eps)
-    nv = norb - nocc
-    be = _eq.NUMPY
-    n_s = nocc * nv
-    v = np.asarray(v, float)
-    u1 = v[:n_s].reshape(nocc, nv)
-    if level == 'adc1':
-        out = difference_density_terms(be, u1)
-    else:
-        u2 = ee_utils.unfold_doubles(v[n_s:], nocc, norb) / ee_utils.PAPER_DOUBLES_SCALE
-        amps = ee_utils.mp_amplitudes(eps, g, nocc, norb, order=2)
-        out = difference_density_terms(be, u1, u2, amps['t2_1'],
-                                       ee_utils.mp_density2(amps))
-    return out if terms else assemble(out, nocc, nv)
-
-
-def embed_active(D_act, nmo, frozen):
-    """A density of the active orbitals (frozen core dropped) in the full MO
-    basis: the frozen rows and columns are zero, the frozen core being
-    uncorrelated in the ADC treatment."""
-    D = np.zeros((nmo, nmo))
-    D[frozen:, frozen:] = D_act
-    return D

@@ -5,7 +5,7 @@
 # restricted.py; consumed by compute_t1_4_laplace.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
-from src.Base.utils.grids import minimax_time_grid
+from src.Base.utils.grids.grids import minimax_time_grid
 
 
 def t1_4_aa_laplace(g_aaaa, g_abab, g_bbbb, o, v, nv, no, eps_a, t1_3_aa, t2_3_aaaa, t2_3_abab, t2_2_aaaa, t2_2_abab, t1_2_aa, t2_1_aaaa, t2_1_abab, ntau=6):

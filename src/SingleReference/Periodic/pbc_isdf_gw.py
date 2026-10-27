@@ -40,20 +40,36 @@ guessable -- fitting the tau grid on the screening range instead of the
 self-energy range is a silent accuracy loss, not an error. The driver owns
 them, and dispatches between the two routes on `beta`.
 """
+import warnings
+
 import numpy as np
 
-from src.Base.utils.time_frequency import (DEFAULT_TAU_TARGET,
-                                           minimax_points_for_ranges,
-                                           self_energy_fit_ranges_from_window)
-from src.SingleReference.Periodic.pbc_isdf_rpa import (chemical_potential_occ,
-                                                       require_integer_occupation)
-from src.SingleReference.Periodic.pbc_occupations import fermi_level_from_mf
+from src.Base.numerics.constants import DEFAULT_TAU_TARGET, IR_EPS
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid, minimax_time_grid
+from src.Base.utils.grids.matsubara import (IRBasis, matsubara_frequencies,
+                                            self_energy_range)
+from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
+                                                 minimax_points_for_ranges,
+                                                 minimax_transform_weights,
+                                                 self_energy_fit_ranges_from_window)
+from src.SingleReference.GW.qp_solve import (imaginary_axis_sample_points,
+                                             solve_qp_from_imaginary_axis)
+from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
+from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts
+from src.SingleReference.Periodic.pbc_isdf_rpa import (
+    chemical_potential, green_functions_tau, polarizability_q_frequency,
+    require_integer_occupation)
+from src.SingleReference.Periodic.pbc_occupations import (fermi_level_from_mf,
+                                                          split_transition_window,
+                                                          transition_window)
+from src.SingleReference.Periodic.pbc_rpa_damping import kmesh_from_kpts
+from src.SingleReference.Periodic.pbc_self_energy import get_exchange_minus_vxc
 
 
 def self_energy_fit_ranges_k(mo_energy, mo_occ, mu=None):
     """((w_lo, w_hi), (sig_lo, sig_hi)) over the whole k-mesh.
 
-    Periodic form of `GW.imaginary_time.self_energy_fit_ranges`, and the
+    Periodic form of `time_frequency.sigma_fit_ranges`, and the
     reason the range trap needs its own code rather than a forwarded
     sentinel: the self-energy range is the SUM of the Green's function and
     screening ranges, so it is wider than either, and it must be taken over all
@@ -61,12 +77,9 @@ def self_energy_fit_ranges_k(mo_energy, mo_occ, mu=None):
     """
     e = np.asarray(mo_energy)
     f = np.asarray(mo_occ, dtype=float)
-    mu = chemical_potential_occ(e, f) if mu is None else mu
-    occ, virt = f > 1.0, f <= 1.0
-    return self_energy_fit_ranges_from_window(
-        e, mu,
-        float(e[virt].min() - e[occ].max()),
-        float(e[virt].max() - e[occ].min()))
+    mu = chemical_potential(e, f) if mu is None else mu
+    e_min, e_max = split_transition_window(e, f > 1.0)
+    return self_energy_fit_ranges_from_window(e, mu, float(e_min), float(e_max))
 
 
 def screened_interaction_tilde_q(Vq, Pi_q):
@@ -91,34 +104,9 @@ def _pi_at(Pi, q):
 
     Accepting a callable is what lets a caller avoid materializing Pi for
     every transfer at once; `qp_energy_thc` passes a closure over
-    `polarizability_q_frequency_occ`.
+    `polarizability_q_frequency`.
     """
     return Pi(q) if callable(Pi) else Pi[q]
-
-
-def green_functions_tau_gw(X, mo_energy, mo_occ, tau, mu):
-    """(G_lesser, G_greater) at the interpolation points, each (nk, M, M).
-
-        G^<_{nu mu}(tau) = sum_m      f_m  X^k_{m nu} X^{k*}_{m mu} e^{+(eps_m-mu) tau} / 2
-        G^>_{nu mu}(tau) = -sum_m (2 - f_m) X^k_{m nu} X^{k*}_{m mu} e^{-(eps_m-mu) tau} / 2
-
-    Written occupation-weighted so a metal is a change of grid rather than a
-    change of algebra; for integer occupations the f/2 and (2-f)/2 factors are
-    exactly the occupied and virtual indicator functions, reproducing
-    `GW.imaginary_time.greens_function_imaginary_time`.
-    """
-    e = np.asarray(mo_energy)
-    f = np.asarray(mo_occ, dtype=float)
-    G_l, G_g = [], []
-    with np.errstate(divide='ignore', invalid='ignore'):
-        logf, logh = np.log(0.5 * f), np.log(0.5 * (2.0 - f))
-    for k in range(len(X)):
-        Xk, x = X[k], e[k] - mu
-        wl = np.where(f[k] > 0, np.exp(logf[k] + x * tau), 0.0)
-        wg = np.where(f[k] < 2.0, np.exp(logh[k] - x * tau), 0.0)
-        G_l.append((Xk * wl) @ Xk.conj().T)
-        G_g.append(-(Xk * wg) @ Xk.conj().T)
-    return np.asarray(G_l), np.asarray(G_g)
 
 
 def self_energy_tau_convolution(G, Wt, kmesh):
@@ -173,11 +161,8 @@ def sigma_c_diag_thc(X, V, Pi, mo_energy, mo_occ, kmesh, kn, states,
     `sigma_c_matsubara_thc` for a metal; the half-line grid there is wrong for
     the same three reasons it is wrong for the polarizability.
     """
-    from src.Base.utils.time_frequency import (COSINE_TW, COSINE_WT, SINE_TW,
-                                               minimax_transform_weights)
-
     require_integer_occupation(mo_occ, who='sigma_c_diag_thc')
-    mu = chemical_potential_occ(mo_energy, mo_occ) if mu is None else mu
+    mu = chemical_potential(mo_energy, mo_occ) if mu is None else mu
     rW, rS = ranges or self_energy_fit_ranges_k(mo_energy, mo_occ, mu)
 
     # Wt is built and transformed ONE TRANSFER AT A TIME. Materializing the
@@ -202,14 +187,16 @@ def sigma_c_diag_thc(X, V, Pi, mo_energy, mo_occ, kmesh, kn, states,
         del Wq
 
     states = np.atleast_1d(states)
-    scalar = np.ndim(states) == 0
     ntau, nq = len(tau_points), len(V)
     sig_l = np.zeros((ntau, len(states)), dtype=np.complex128)
     sig_g = np.zeros((ntau, len(states)), dtype=np.complex128)
     Xn = np.ascontiguousarray(X[kn][:, states])                 # (M, nstates)
 
     for t, tau in enumerate(tau_points):
-        G_l, G_g = green_functions_tau_gw(X, mo_energy, mo_occ, tau, mu)
+        # G^< = Go / 2 and G^> = -conj(Gv) / 2: `green_functions_tau` weights
+        # its hole and particle sums by f and 2 - f, these by f/2 and 1 - f/2
+        Go, Gv = green_functions_tau(X, mo_energy, mo_occ, tau, mu)
+        G_l, G_g = 0.5 * Go, -0.5 * Gv.conj()
         Wt_t = np.ascontiguousarray(Wt_tau[:, t])
         if use_fft:
             Sl = self_energy_tau_convolution(G_l, Wt_t, kmesh)[kn]
@@ -225,15 +212,12 @@ def sigma_c_diag_thc(X, V, Pi, mo_energy, mo_occ, kmesh, kn, states,
     S, _ = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS,
                                      warn=False)
     out = -0.5 * ((sig_g + sig_l).T @ C.T + 1j * ((sig_g - sig_l).T @ S.T))
-    return out[0] if scalar else out
+    return out
 
 
-# A frequency-route reference for Sigma_c (the counterpart of
-# `pbc_isdf_rpa.polarizability_q_frequency`) was declared here and never
-# implemented. It has been removed rather than left as a NotImplementedError
-# that reads like a route: the imaginary-time Sigma_c already has an
-# INDEPENDENT oracle in `pbc_self_energy.qp_energy_g0w0`, which reaches the
-# same quasiparticle energies by a real-frequency spectral sum over GDF
+# There is no frequency-route reference for Sigma_c here: the imaginary-time
+# Sigma_c has an INDEPENDENT oracle in `pbc_self_energy.qp_energy_g0w0`, which
+# reaches the same quasiparticle energies by a real-frequency spectral sum over GDF
 # integrals (agreement <= 0.8 meV, test_pbc_isdf_gw.py rung 3). A second
 # reference sharing this module's conventions would be weaker than that one.
 
@@ -279,9 +263,7 @@ def self_energy_range_k(mo_energy, mo_occ, screening_max, mu=None):
     a Remez least-squares fit: sizing a continuation and sizing a fit range are
     different questions that happen to share this core.
     """
-    from src.Base.utils.matsubara import self_energy_range
-
-    mu = chemical_potential_occ(mo_energy, mo_occ) if mu is None else mu
+    mu = chemical_potential(mo_energy, mo_occ) if mu is None else mu
     return self_energy_range(mo_energy, mu, screening_max)
 
 
@@ -317,7 +299,7 @@ def green_function_tau_matsubara(X, mo_energy, mo_occ, tau, beta, mu):
 
 
 def sigma_c_matsubara_thc(X, V, Pi_bosonic, mo_energy, mo_occ, kmesh, beta,
-                          omega_max, kn, states, mu=None, eps_ir=1e-10,
+                          omega_max, kn, states, mu=None, eps_ir=IR_EPS,
                           use_fft=True, kminus=None, return_diagnostics=False):
     """Sigma_c^{n,kn}(i.omega_n) on a FERMIONIC Matsubara grid. Metals included.
 
@@ -328,9 +310,7 @@ def sigma_c_matsubara_thc(X, V, Pi_bosonic, mo_energy, mo_occ, kmesh, beta,
     Returns (sigma, omega_fermionic) with sigma of shape (nstates, nfreq) and
     omega SIGNED.
     """
-    from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
-
-    mu = chemical_potential_occ(mo_energy, mo_occ) if mu is None else mu
+    mu = chemical_potential(mo_energy, mo_occ) if mu is None else mu
     bF = IRBasis(beta * omega_max, eps=eps_ir, statistics='fermion')
     bB = IRBasis(beta * omega_max, eps=eps_ir, statistics='boson')
     xF = bF.default_tau_sampling()
@@ -391,19 +371,18 @@ def sigma_c_matsubara_thc(X, V, Pi_bosonic, mo_energy, mo_occ, kmesh, beta,
     return sigma, wF
 
 
-def bosonic_sampling(beta, omega_max, eps_ir=1e-10):
+def bosonic_sampling(beta, omega_max, eps_ir=IR_EPS):
     """The bosonic Matsubara frequencies `sigma_c_matsubara_thc` will expect.
 
     Exposed so Pi is built on exactly these points; deriving them twice from
     the same beta/omega_max is how the two silently drift apart.
     """
-    from src.Base.utils.matsubara import IRBasis, matsubara_frequencies
     bB = IRBasis(beta * omega_max, eps=eps_ir, statistics='boson')
     nB = bB.default_matsubara_sampling(positive_only=False)
     return np.abs(matsubara_frequencies(nB, beta, 'boson'))
 
 
-def minimax_points_for_gw_k(mo_energy, mo_occ, kplus, mu=None,
+def minimax_points_for_gw_k(mo_energy, mo_occ, mu=None,
                             target=DEFAULT_TAU_TARGET, npoints_max=34,
                             threshold=None):
     """Smallest minimax tau grid that resolves every range this route integrates.
@@ -418,9 +397,8 @@ def minimax_points_for_gw_k(mo_energy, mo_occ, kplus, mu=None,
                                                          PRODUCT, so its decay
                                                          rates are SUMS
 
-    -- so a hardcoded ntau is wrong at one end of any size series. It was
-    hardcoded here (`ntau or 18`), and the periodic case is the one that can
-    least afford it: it needs MORE points than the molecular tolerance
+    -- so a fixed ntau is wrong at one end of any size series, and the
+    periodic case is the one that can least afford it: it needs MORE points than the molecular tolerance
     suggests, because rS is wider (measured 1.6x on diamond). Do not carry a
     molecular ntau across.
 
@@ -431,14 +409,12 @@ def minimax_points_for_gw_k(mo_energy, mo_occ, kplus, mu=None,
     tabulated reaches it the best available is returned with the accuracy
     actually obtained, and the caller is expected to look.
     """
-    from src.SingleReference.Periodic.pbc_isdf_rpa import transition_window_occ
-
     # No mean field in scope here, so no sigma to invert: this takes mu as
     # given, and `qp_energy_thc` passes the root-found one down.
-    mu = chemical_potential_occ(mo_energy, mo_occ) if mu is None else mu
+    mu = chemical_potential(mo_energy, mo_occ) if mu is None else mu
     rW, rS = self_energy_fit_ranges_k(mo_energy, mo_occ, mu)
     kw = {} if threshold is None else {'threshold': threshold}
-    e_min, e_max = transition_window_occ(mo_energy, mo_occ, kplus, **kw)
+    e_min, e_max = transition_window(mo_energy, mo_occ, **kw)
     ratios = (e_max / e_min, rW[1] / rW[0], rS[1] / rS[0])
 
     return minimax_points_for_ranges(ratios, target=target,
@@ -450,10 +426,14 @@ def minimax_points_for_gw_k(mo_energy, mo_occ, kplus, mu=None,
 # ---------------------------------------------------------------------------
 
 
+class MinimaxGridShort(RuntimeWarning):
+    """No tabulated minimax grid reaches the asked tau-fit accuracy."""
+
+
 def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
                   nw_screening=64, nw_sigma=16, mesh=None, coulG_fn=None,
                   beta=None, mu=None, exchange_minus_vxc=None, exxdiv=None,
-                  threshold=None, solver_mode='pole_strength', ke_cutoff=None,
+                  threshold=None, ke_cutoff=None,
                   alpha=None, tau_target=DEFAULT_TAU_TARGET,
                   return_diagnostics=False):
     """G0W0 quasiparticle energies through THC, from a converged KRHF/KRKS.
@@ -486,24 +466,18 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
     energies in HARTREE, shape (nstates,), or (energies, diagnostics) when
     `return_diagnostics`.
 
-    NOTE the QP equation is solved for its root (solver_mode='pole_strength'
-    by default, 'graphical' on request), never linearised, and must stay that
-    way for a metal: a linearised solver returned Z = 0.45 and Z = -0.18 on
-    bulk Al.
+    NOTE the QP equation is solved for its root (the largest pole strength,
+    `Solvers.qp_equation.solve_qp_equation_pole_strength`), never linearised,
+    and must stay that way for a metal: a linearised solver returned Z = 0.45
+    and Z = -0.18 on bulk Al.
     """
-    from src.Base.utils.grids import gauss_legendre_grid, minimax_time_grid
-    from src.SingleReference.GW.qp_solve import (imaginary_axis_sample_points,
-                                                 solve_qp_from_imaginary_axis)
-    from src.SingleReference.Periodic.pbc_integrals import get_momentum_transfer_map
-    from src.SingleReference.Periodic.pbc_isdf import build_isdf_kpts
-    from src.SingleReference.Periodic.pbc_isdf_rpa import polarizability_q_frequency_occ
-    from src.SingleReference.Periodic.pbc_rpa_damping import kmesh_from_kpts
-
     kpts = np.asarray(mf.kpts)
     mo = [np.asarray(c) for c in mf.mo_coeff]
     mo_energy = np.asarray(mf.mo_energy)
     mo_occ = np.asarray(mf.mo_occ)
-    nocc = int((mo_occ[0] > 1e-8).sum())
+    # the occupied count AT kn: with smearing or a ragged filling it differs
+    # between k-points, and k-point 0's would pick the wrong HOMO/LUMO here
+    nocc = int((mo_occ[kn] > 1e-8).sum())
     kmesh = kmesh_from_kpts(cell, kpts)
     kplus = get_momentum_transfer_map(cell, kpts)
     kw = {} if threshold is None else {'threshold': threshold}
@@ -516,20 +490,19 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
                                  alpha=alpha)
     if mu is None:
         # A smeared mean field carries what is needed to SOLVE for mu, and
-        # chemical_potential_occ's heuristic drifts ~100 meV once states are
+        # chemical_potential's heuristic drifts ~100 meV once states are
         # genuinely partially occupied -- which propagates, since mu sets the
         # self-energy range and the range selects ntau. See
         # pbc_occupations.fermi_level for the measurements, including why
         # mf.get_fermi() is not this quantity.
         mu = fermi_level_from_mf(mf)
         if mu is None:                       # unsmeared: no sigma to invert
-            mu = chemical_potential_occ(mo_energy, mo_occ)
+            mu = chemical_potential(mo_energy, mo_occ)
     rW, rS = self_energy_fit_ranges_k(mo_energy, mo_occ, mu)
 
     if exchange_minus_vxc is None:
         # Sigma_x - v_xc is NOT assumed to vanish: on a KRHF start with
         # exxdiv=None it is 2.6e-3 Ha on diamond, which is 70 meV of QP energy.
-        from src.SingleReference.Periodic.pbc_self_energy import get_exchange_minus_vxc
         xmv_all = get_exchange_minus_vxc(mf, exxdiv=exxdiv)
         xmv = [float(xmv_all[kn, n].real) for n in states]
     else:
@@ -550,23 +523,28 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
         # exactly the kind of thing that reads as a converged answer.
         tau_err = None
         if isinstance(ntau, str) and ntau.lower() == 'auto':
-            ntau, tau_err = minimax_points_for_gw_k(mo_energy, mo_occ, kplus,
+            ntau, tau_err = minimax_points_for_gw_k(mo_energy, mo_occ,
                                                     mu=mu, target=tau_target,
                                                     **kw)
             if not np.isfinite(tau_err) or tau_err > tau_target:
-                raise ValueError(
+                # a numerical shortfall of the tabulated grids, not an input:
+                # the largest grid runs, warned and flagged
+                warnings.warn(
                     f"no tabulated minimax grid up to {ntau} points resolves "
                     f"this system's ranges to {tau_target:g} (best "
-                    f"{tau_err:g}). The binding ratio is the SELF-ENERGY's "
-                    f"rS = {rS[0]:.4g}..{rS[1]:.4g} (R = {rS[1] / rS[0]:.1f}), "
-                    f"not the screening range -- pass ntau explicitly and "
-                    f"accept the accuracy, or narrow the window.")
+                    f"{tau_err:g}); the {ntau}-point grid is used. The binding "
+                    f"ratio is the SELF-ENERGY's rS = {rS[0]:.4g}..{rS[1]:.4g} "
+                    f"(R = {rS[1] / rS[0]:.1f}), not the screening range; "
+                    f"narrow the window to reach the target.",
+                    MinimaxGridShort, stacklevel=2)
+                diag.setdefault('numerical_flags', {})[
+                    'minimax_tau_target_missed'] = float(tau_err)
 
-        omega_in = gauss_legendre_grid(nw_screening, w0=0.5 * rW[0])[0]
+        omega_in = gauss_legendre_grid(nw_screening, w0=gap_scaled_w0(gap=rW[0]))[0]
 
         def Pi(q, _w=omega_in):
             """Pi^q on demand -- see the note in the metallic branch below."""
-            return polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus,
+            return polarizability_q_frequency(X, mo_energy, mo_occ, kplus,
                                                   q, _w, **kw)
 
         tau = 0.5 * minimax_time_grid(ntau, *rS)[0]
@@ -574,11 +552,11 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
         qp = []
         for n, x in zip(states, xmv):
             z_fit, iw = imaginary_axis_sample_points(
-                gauss_legendre_grid(nw_sigma, w0=0.5 * rW[0])[0], nocc, n, mu)
+                gauss_legendre_grid(nw_sigma, w0=gap_scaled_w0(gap=rW[0]))[0], nocc, n, mu)
             sig = sigma_c_diag_thc(X, V, Pi, mo_energy, mo_occ, kmesh, kn, [n],
                                    omega_in, iw, tau, mu=mu, ranges=(rW, rS))[0]
             qp.append(solve_qp_from_imaginary_axis(mo_energy[kn], n, x, z_fit,
-                                                   sig, solver_mode=solver_mode))
+                                                   sig))
     else:
         omega_max = self_energy_range_k(mo_energy, mo_occ, rW[1], mu)
         nuB = bosonic_sampling(beta, omega_max)
@@ -588,7 +566,7 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
         # Building it per q costs one recomputation of nothing (each q is
         # visited once) and removes that tensor entirely.
         def Pi(q, _w=nuB):
-            return polarizability_q_frequency_occ(X, mo_energy, mo_occ, kplus,
+            return polarizability_q_frequency(X, mo_energy, mo_occ, kplus,
                                                   q, _w, **kw)
 
         sig, wF, sdiag = sigma_c_matsubara_thc(X, V, Pi, mo_energy, mo_occ,
@@ -599,12 +577,13 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
         qp = []
         for i, (n, x) in enumerate(zip(states, xmv)):
             # One branch only -- see the docstring. Sigma(-i w) = Sigma(i w)^*,
-            # so the two halves are different data, not redundant samples.
-            sign = -1.0 if n < nocc else 1.0
+            # so the two halves are different data, not redundant samples. The
+            # branch is the side of mu the level sits on: a count of occupied
+            # states puts a smeared level above mu on the occupied side.
+            sign = -1.0 if mo_energy[kn][n] < mu else 1.0
             keep = np.where(np.sign(wF) == sign)[0]
             qp.append(solve_qp_from_imaginary_axis(
-                mo_energy[kn], n, x, mu + 1j * wF[keep], sig[i][keep],
-                solver_mode=solver_mode))
+                mo_energy[kn], n, x, mu + 1j * wF[keep], sig[i][keep]))
 
     qp = np.asarray(qp, dtype=float)
     return (qp, diag) if return_diagnostics else qp

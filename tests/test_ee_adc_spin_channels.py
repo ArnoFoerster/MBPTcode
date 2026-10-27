@@ -37,10 +37,10 @@ import numpy as np
 from pyscf import adc, gto, scf
 from pyscf.lib import logger
 
-from src.Base.pyscf_interface import (DFIntegrals, get_orbital_energies,
-                                      get_two_electron_integrals_chemist)
+from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
 
 HARTREE_TO_EV = 27.211386245988
@@ -68,7 +68,7 @@ def build(basis='cc-pvdz'):
 
 
 def operator(mol, mf, level, frozen=0, df=False, en_dress=None):
-    """The spin-free route's operator, as _solve_spin_free builds it."""
+    """The spin-free route's operator, as solve_spin_free builds it."""
     eps = get_orbital_energies(mf, representation='spatial')[frozen:]
     no = mol.nelectron // 2 - frozen
     act = slice(frozen, None)
@@ -192,12 +192,13 @@ def check_variants(mol, mf):
         ok &= channels(mol, mf, level, **kw)[0]
     h2 = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)).run()
     for path, matrix_free in (('davidson', True), ('dense', False)):
-        (e, _), warned = solve(h2, level='adc1', nroots=3, spin='singlet',
-                               matrix_free=matrix_free)
-        ok &= check(len(e) == 1 and any('fewer than nroots' in str(w.message)
-                                        for w in warned),
-                    f'{path}: a channel smaller than nroots warns and returns '
-                    'what it holds', f'{len(e)} root(s), {len(warned)} warning(s)')
+        try:
+            solve(h2, level='adc1', nroots=3, spin='singlet', matrix_free=matrix_free)
+            raised = 'no error'
+        except ValueError as exc:
+            raised = str(exc)
+        ok &= check('fewer than nroots' in raised,
+                    f'{path}: a channel smaller than nroots is refused', raised)
     try:
         solve_ee_adc(mf, level='adc2', nroots=1, route='spinorbital',
                      return_parity=True)
@@ -246,7 +247,7 @@ def check_channel_basis():
     """Both channel bases, molecule-free: each orthonormal and inside its flip
     eigenspace, restrict the adjoint of embed, together a basis of the space."""
     try:
-        from src.SingleReference.ADC.eeADC.ee_driver import _channel_basis
+        from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis
     except ImportError as exc:
         return check(False, 'the channel bases exist', str(exc))
     ok = True
@@ -257,7 +258,7 @@ def check_channel_basis():
             n = ee_r_sigma.dimensions(no, nv, level)['nH']
             cols = []
             for sgn in (+1.0, -1.0):
-                embed, restrict, reps = _channel_basis(n, no, nv, level, sgn)
+                embed, restrict, reps = channel_basis(n, no, nv, level, sgn)
                 U = np.column_stack([embed(c) for c in np.eye(len(reps))])
                 FU = np.column_stack([ee_r_sigma.spin_flip_vector(u, no, nv, level)
                                       for u in U.T])

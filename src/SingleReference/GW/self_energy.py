@@ -1,22 +1,122 @@
-from concurrent.futures import ThreadPoolExecutor
-
+"""The Lehmann self-energy of a Casida solution: GW and its vertex corrections
+(GWGammaInf, PSDn), chosen by method name (`METHOD_REGISTRY`)."""
 import numpy as np
-from pyscf import scf, dft
-from threadpoolctl import threadpool_limits
+from src.Base.utils.parallel.threads import blas_single_threaded, row_map
+from src.Base.pyscf.pyscf_interface import spin_index
 from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
-from src.SingleReference.base import get_occ_virt_indices
-from src.Base.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
-                                QSGW_BLOCK_ELEMS, QSGW_SRG_QUAD_TOL,
-                                get_method_info)
-from src.Base.solvent_screening import solvent_static_selfenergy
-from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
-from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.Solvers.qp_equation import (solve_qp_equation_graphical,
-                                     solve_qp_equation_newton)
+from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
+                                         QSGW_BLOCK_ELEMS, QSGW_SRG_QUAD_TOL,
+                                         UHF_PSD_CHARGE_AMPLITUDE_MIN)
 
-# 'PSD3' is intentionally absent -- unimplemented, raises ValueError rather than
-# silently falling back to plain GW.
-KNOWN_VERTEX_MODES = ('GW', 'GWGammaInf', 'PSD1', 'PSD2', 'PSD4', 'PSD5', 'PSD6', 'PSD7', 'PSD8', 'PSD9')
+#: The self-energy methods by name: the vertex each applies, whether its
+#: screening is forced to the RPA Casida spectrum, and whether it needs the
+#: vertex amplitudes and the triplet channel.
+METHOD_REGISTRY = {
+    'GW':         {'vertex_mode': 'GW',         'force_rpa_casida': True,  'needs_vertex': False, 'needs_triplet': False},
+    'GW@RPA':     {'vertex_mode': 'GW',         'force_rpa_casida': True,  'needs_vertex': False, 'needs_triplet': False},
+    'GW@BSE':     {'vertex_mode': 'GW',         'force_rpa_casida': False, 'needs_vertex': False, 'needs_triplet': False},
+    'GW@TDHF':    {'vertex_mode': 'GW',         'force_rpa_casida': False, 'needs_vertex': False, 'needs_triplet': False},
+    'GWGammaInf': {'vertex_mode': 'GWGammaInf', 'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD1':       {'vertex_mode': 'PSD1',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD2':       {'vertex_mode': 'PSD2',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD4':       {'vertex_mode': 'PSD4',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD5':       {'vertex_mode': 'PSD5',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD6':       {'vertex_mode': 'PSD6',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD7':       {'vertex_mode': 'PSD7',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+    'PSD8':       {'vertex_mode': 'PSD8',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': False},
+    'PSD9':       {'vertex_mode': 'PSD9',       'force_rpa_casida': False, 'needs_vertex': True,  'needs_triplet': True},
+}
+
+
+def get_method_info(method):
+    """
+    Looks up `method` (case-insensitive) in METHOD_REGISTRY
+    """
+    key = method.upper()
+    for registered_key, info in METHOD_REGISTRY.items():
+        if registered_key.upper() == key:
+            return info
+    raise ValueError(
+        f"Unknown self-energy method '{method}'. Available: {sorted(METHOD_REGISTRY)}"
+    )
+
+
+# The registry's vertex modes; 'PSD3' is absent from it, unimplemented, and
+# raises ValueError rather than silently falling back to plain GW.
+KNOWN_VERTEX_MODES = tuple(dict.fromkeys(info['vertex_mode']
+                                         for info in METHOD_REGISTRY.values()))
+# Vertex modes whose self-energy carries a triplet-exciton sum.
+TRIPLET_VERTEX_MODES = tuple(sorted({info['vertex_mode'] for info in METHOD_REGISTRY.values()
+                                     if info['needs_triplet']}))
+
+#: Each vertex mode's self-energy as weights on its pole sums. The singlet
+#: spectrum gives, with P the spin prefactor (2 restricted, 1 unrestricted)
+#: and g the broadened denominator,
+#:     Sigma_GW  = P sum amp2^2 g          (GWGammaInf: P sum amp2 amp_L g),
+#:     Sigma_PSD = P/4 sum amp_psd^2 g,    amp_psd = 2 amp2 - amp,
+#:     Sigma_Ts  = P/2 sum amp^2 g,
+#: and _SINGLET_WEIGHTS[mode] weighs them in that order. A triplet-carrying
+#: mode then returns  scale * Sigma_singlet + w * Sigma_t  with
+#: _TRIPLET_WEIGHTS[mode] = (scale, w_restricted, w_unrestricted):
+#: restricted Sigma_t = P/2 sum amp_t^2 g over the triplet excitons;
+#: unrestricted Sigma_t = sum amp_t^2 g over the spin-flip excitons (weight one
+#: each). On a closed shell the spin-flip sum is 2/3 of the triplet term, so
+#: the restricted 3/2, 3/4, 3/4, 3/2 become 1, 1/2, 1/2, 3/4, the rest sitting
+#: in Sigma_PSD and Sigma_Ts.
+_SINGLET_WEIGHTS = {
+    'GW': (1.0,),
+    'GWGammaInf': (1.0,),
+    'PSD1': (0.0, 1.0),
+    'PSD2': (0.0, 1.0),
+    'PSD4': (0.0, 1.0),
+    'PSD5': (0.375, 0.5),
+    'PSD6': (0.5, 0.5),
+    'PSD7': (0.5, 0.5),
+    'PSD8': (0.5, 0.5, 0.5),
+    'PSD9': (0.5, 0.5, 0.5),
+}
+_TRIPLET_WEIGHTS = {
+    'PSD2': (1.0, 1.5, 1.0),
+    'PSD4': (0.5, 0.75, 0.5),
+    'PSD7': (1.0, 0.75, 0.5),
+    'PSD9': (1.0, 1.5, 0.75),
+}
+
+
+def _singlet_factors(mode, amp2, amp, mask=1.0):
+    """[(left, right, scale)]: the singlet pole sums of `mode` in
+    _SINGLET_WEIGHTS's order, each P * scale * sum left * right * g. mask
+    drops the unrestricted excitons without a charge amplitude from the PSD
+    sums (1.0 keeps all)."""
+    if mode == 'GW':
+        return [(amp2, amp2, 1.0)]
+    if mode == 'GWGammaInf':
+        return [(amp2, amp2 - 0.5 * amp, 1.0)]
+    amp_psd = (2.0 * amp2 - amp) * mask
+    out = [(amp2, amp2, 1.0), (amp_psd, amp_psd, 0.25)]
+    if len(_SINGLET_WEIGHTS[mode]) == 3:
+        amp_eff = amp * mask
+        out.append((amp_eff, amp_eff, 0.5))
+    return out
+
+
+def _combine_vertex(mode, sums, prefactor, scales, triplet):
+    """Sigma of `mode` from its pole sums: sums[k] for the singlet factors of
+    scale scales[k], then (triplet 'restricted' or 'unrestricted', else None)
+    the triplet sum."""
+    val = None
+    for c, scale, s in zip(_SINGLET_WEIGHTS[mode], scales, sums):
+        if c:
+            x = c * ((scale * prefactor) * s)
+            val = x if val is None else val + x
+    if triplet is None or mode not in _TRIPLET_WEIGHTS:
+        return val
+    k, w_restricted, w_unrestricted = _TRIPLET_WEIGHTS[mode]
+    s_t = sums[len(scales)]
+    if triplet == 'unrestricted':
+        return k * val + w_unrestricted * s_t
+    return k * val + w_restricted * ((0.5 * prefactor) * s_t)
 
 
 def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
@@ -24,8 +124,10 @@ def _pole_sums(weights, omegas, w_grid, eps, nocc_spin, eta, calc_imag,
     """sums[k, iw] = sum_{S,q} weights[k][S, q] g(w_grid[iw] - eps_q +
     sign_q Omega^(k)_S).
 
-    g is the real or imaginary part of the broadened denominator, as in
-    SelfEnergySolver._denom_grid, sign_q = +1 for q < nocc_spin and -1 otherwise.
+    g is the real part (w - P) / ((w - P)^2 + eta^2) or the imaginary part
+    -sign_q eta / ((w - P)^2 + eta^2) of the broadened denominator, with
+    w - P = w - eps_q + sign_q Omega_S, sign_q = +1 for q < nocc_spin and -1
+    otherwise.
     The exciton axis is summed in chunks of at most block_elems // (nw * norb)
     excitations, at least one, through two (nw, chunk, norb) buffers allocated
     once per call and filled in place, so a chunk costs no fresh pages. A call
@@ -120,17 +222,17 @@ def _srg_laplace_quadrature(mu_max, tol, nodes_per_panel=12, width=4.0):
 class SigmaEvaluator:
     """Sigma_pp(w) for one state, scalar or array w, from weights formed once.
 
-    Built by SelfEnergySolver.self_energy_evaluator; reproduces
-    calculate_self_energy for the same arguments to round-off. Each vertex mode
+    Built by SelfEnergySolver.self_energy_evaluator. Each vertex mode
     is a fixed linear combination of pole sums with weights amp2^2, amp2*amp_L,
     amp_psd^2, amp^2 (singlet spectrum) and amp_t^2 (triplet spectrum), so the
     combination is applied to the sums instead of per frequency.
 
     Parameters
     ----------
-    terms : list of (weight, omega) pairs
-        weight : ndarray, shape (nexciton, norb); omega : ndarray, shape
-        (nexciton,).
+    terms : list of (weight, omega) or (weight, omega, eps_k, nocc_k) tuples
+        weight : ndarray, shape (nexciton, norb_k); omega : ndarray, shape
+        (nexciton,). eps_k, nocc_k: the orbitals r the term sums over, when
+        they are not eps, nocc_spin (the unrestricted spin-flip terms).
     combine : callable
         Maps sums, ndarray shape (n_terms, nw), to Sigma(w), shape (nw,).
     eps : ndarray, shape (norb,)
@@ -144,6 +246,8 @@ class SigmaEvaluator:
         # maps the (n_terms, nw) sums to Sigma(w) of shape (nw,)
         self._weights = [t[0] for t in terms]
         self._omegas = [t[1] for t in terms]
+        self._levels = [(t[2], t[3]) if len(t) == 4 else (eps, nocc_spin)
+                        for t in terms]
         self._combine = combine
         self._eps = eps
         self._nocc_spin = nocc_spin
@@ -163,9 +267,15 @@ class SigmaEvaluator:
         float, or ndarray, shape (nw,)
         """
         scalar = np.isscalar(w)
-        sums = _pole_sums(self._weights, self._omegas, np.atleast_1d(w),
-                          self._eps, self._nocc_spin, self._eta,
-                          self._calc_imag)
+        w = np.atleast_1d(w)
+        if all(lv[0] is self._eps for lv in self._levels):
+            sums = _pole_sums(self._weights, self._omegas, w, self._eps,
+                              self._nocc_spin, self._eta, self._calc_imag)
+        else:
+            sums = np.concatenate([
+                _pole_sums([wt], [om], w, eps_k, nocc_k, self._eta, self._calc_imag)
+                for wt, om, (eps_k, nocc_k) in zip(self._weights, self._omegas,
+                                                   self._levels)])
         val = self._combine(sums)
         return float(val[0]) if scalar else val
 
@@ -177,9 +287,11 @@ class SigmaEvaluator:
         if self._calc_imag:
             raise ValueError("poles() is the real part's pole representation")
         coef = self._combine(np.eye(self.n_terms))
-        sign = np.where(np.arange(len(self._eps)) < self._nocc_spin, 1.0, -1.0)
         res = [c * wt for c, wt in zip(coef, self._weights)]
-        pol = [self._eps[None, :] - sign[None, :] * om[:, None] for om in self._omegas]
+        pol = []
+        for om, (eps_k, nocc_k) in zip(self._omegas, self._levels):
+            sign = np.where(np.arange(len(eps_k)) < nocc_k, 1.0, -1.0)
+            pol.append(eps_k[None, :] - sign[None, :] * om[:, None])
         return (np.concatenate([r.ravel() for r in res]),
                 np.concatenate([q.ravel() for q in pol]))
 
@@ -219,129 +331,25 @@ class SelfEnergySolver(AmplitudeGenerator):
     def _get_occ_virt_indices(self, eps, nocc):
         return get_occ_virt_indices(eps, nocc)
 
-    def _denom_grid(self, w, eps, nocc_spin, eigenvalues_casida, calc_imag):
-        """Vectorized (nexciton, norb) energy-denominator grid: denom[S,i] = f(w - eps[i] + sign(i)*Omega[S]), sign=+1 iff i<nocc_spin."""
-        norb = len(eps)
-        sign = np.where(np.arange(norb) < nocc_spin, 1.0, -1.0)
-        energy = w - eps[None, :] + sign[None, :] * eigenvalues_casida[:, None]
-        if calc_imag:
-            return -sign[None, :] * self.eta / (energy**2 + self.eta**2)
-        return energy / (energy**2 + self.eta**2)
+    def _spin(self, nocc, spin_channel):
+        """(eps, nocc_spin, prefactor) of one spin channel: the unrestricted
+        channel's own orbitals at weight 1, the restricted ones at 2."""
+        if self.spin_mode == 'unrestricted':
+            eps = (self.eps_a, self.eps_b)[spin_index(spin_channel)]
+            return eps, nocc[spin_index(spin_channel)], 1.0
+        return self.eps, nocc, 2.0
 
     def calculate_self_energy(self, p_state, freq, nocc, eigenvalues_casida, chiXYa, chiXYb=None,
                               eigenvalues_casida_t=None, chiXYb_t=None, spin_channel='alpha', vertex_mode='GW',
                               calc_imag=False):
-        """Diagonal self-energy Sigma_pp(omega) for a single frequency or grid; vertex_mode: 'GW', 'GWGammaInf', 'PSD1'-'PSD9'."""
-        is_scalar = np.isscalar(freq)
-        freq_grid = np.atleast_1d(freq)
-        
-        if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
-            prefactor = 1.0
-        else:
-            eps = self.eps
-            nocc_spin = nocc
-            prefactor = 2.0
-            
-        norb = len(eps)
-        nexciton = len(eigenvalues_casida)
-        
-        if chiXYa.ndim == 2:
-            amp2 = chiXYa
-        else:
-            amp2 = chiXYa[:, :, p_state]
-            
-        if chiXYb is not None:
-            if chiXYb.ndim == 2:
-                amp = chiXYb
-            else:
-                amp = chiXYb[:, :, p_state]
-        else:
-            amp = None
-            
-        if vertex_mode not in KNOWN_VERTEX_MODES:
-            raise ValueError(
-                f"Unknown vertex_mode '{vertex_mode}'; expected one of {KNOWN_VERTEX_MODES}."
-            )
+        """Diagonal self-energy Sigma_pp(omega) for a single frequency or grid; vertex_mode: 'GW', 'GWGammaInf', 'PSD1'-'PSD9'.
 
-        sigma_grid = []
-        for w in freq_grid:
-            denom = self._denom_grid(w, eps, nocc_spin, eigenvalues_casida, calc_imag)
-
-            if vertex_mode == 'GW' or amp is None:
-                val = prefactor * np.sum((amp2**2) * denom)
-            elif vertex_mode == 'GWGammaInf':
-                amp_L = amp2 - 0.5 * amp
-                val = prefactor * np.sum(amp2 * amp_L * denom)
-            else:
-                # PSD1/2/4/5/6/7/8/9 all build on the plain-GW sum and the
-                # vertex-corrected "2*amp2-amp" sum; computed once here.
-                amp_psd = 2.0 * amp2 - amp
-                if self.spin_mode == 'unrestricted':
-                    mask = (np.linalg.norm(amp2, axis=1) > 1e-5)[:, None]
-                    amp_psd = amp_psd * mask
-                sigmaGW = prefactor * np.sum((amp2**2) * denom)
-                sigmaPSDI = 0.25 * prefactor * np.sum(amp_psd * amp_psd * denom)
-
-                if vertex_mode in ('PSD1', 'PSD2', 'PSD4'):
-                    val = sigmaPSDI
-                elif vertex_mode == 'PSD5':
-                    val = 0.5 * (0.75 * sigmaGW + sigmaPSDI)
-                elif vertex_mode in ('PSD6', 'PSD7'):
-                    val = 0.5 * (sigmaGW + sigmaPSDI)
-                else:  # PSD8, PSD9
-                    amp_eff = amp * mask if self.spin_mode == 'unrestricted' else amp
-                    sigmaTs = 0.5 * prefactor * np.sum(amp_eff * amp_eff * denom)
-                    val = 0.5 * (sigmaGW + sigmaPSDI + sigmaTs)
-
-            if eigenvalues_casida_t is not None and chiXYb_t is not None:
-                if self.spin_mode == 'unrestricted':
-                    omega_t_ba, omega_t_ab = eigenvalues_casida_t
-                    chi_t_ba, chi_t_ab = chiXYb_t
-                    
-                    def compute_channel_sigmaTt(omega_t, amp_t_raw):
-                        if amp_t_raw.ndim == 2:
-                            amp_t = amp_t_raw
-                        else:
-                            amp_t = amp_t_raw[:, :, p_state]
-                        denom_t = self._denom_grid(w, eps, nocc_spin, omega_t, calc_imag)
-                        return (0.5 * prefactor) * np.sum((amp_t**2) * denom_t)
-                        
-                    sigmaTt_ba = compute_channel_sigmaTt(omega_t_ba, chi_t_ba)
-                    sigmaTt_ab = compute_channel_sigmaTt(omega_t_ab, chi_t_ab)
-                    if vertex_mode == 'PSD2':
-                        val += 1.0 * (sigmaTt_ba + sigmaTt_ab)
-                    elif vertex_mode == 'PSD4':
-                        val = 0.5 * val + 0.5 * (sigmaTt_ba + sigmaTt_ab)
-                    elif vertex_mode == 'PSD7':
-                        val += 0.5 * (sigmaTt_ba + sigmaTt_ab)
-                    elif vertex_mode == 'PSD9':
-                        val += 1.0 * (sigmaTt_ba + sigmaTt_ab)
-                else:
-                    if chiXYb_t.ndim == 2:
-                        amp_t = chiXYb_t
-                    else:
-                        amp_t = chiXYb_t[:, :, p_state]
-                    denom_t = self._denom_grid(w, eps, nocc_spin, eigenvalues_casida_t, calc_imag)
-                    sigmaTt = (0.5 * prefactor) * np.sum((amp_t**2) * denom_t)
-                    
-                    if vertex_mode == 'PSD2':
-                        val += 1.5 * sigmaTt
-                    elif vertex_mode == 'PSD4':
-                        val = 0.5 * val + 0.75 * sigmaTt
-                    elif vertex_mode == 'PSD7':
-                        val += 0.75 * sigmaTt
-                    elif vertex_mode == 'PSD9':
-                        val += 1.5 * sigmaTt
-                
-            sigma_grid.append(val)
-            
-        if is_scalar:
-            return sigma_grid[0]
-        else:
-            return np.array(sigma_grid)
+        `self_energy_evaluator` with the same arguments, evaluated at freq.
+        """
+        return self.self_energy_evaluator(
+            p_state, nocc, eigenvalues_casida, chiXYa, chiXYb,
+            eigenvalues_casida_t, chiXYb_t, spin_channel, vertex_mode,
+            calc_imag)(freq)
 
     def self_energy_evaluator(self, p_state, nocc, eigenvalues_casida, chiXYa,
                               chiXYb=None, eigenvalues_casida_t=None,
@@ -369,147 +377,82 @@ class SelfEnergySolver(AmplitudeGenerator):
         -------
         SigmaEvaluator
         """
-        if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
-            nocc_a, nocc_b = nocc
-            nocc_spin = nocc_a if spin_channel == 'alpha' else nocc_b
-            prefactor = 1.0
-        else:
-            eps = self.eps
-            nocc_spin = nocc
-            prefactor = 2.0
-        if vertex_mode not in KNOWN_VERTEX_MODES:
-            raise ValueError(
-                f"Unknown vertex_mode '{vertex_mode}'; expected one of "
-                f"{KNOWN_VERTEX_MODES}."
-            )
+        eps, nocc_spin, prefactor = self._spin(nocc, spin_channel)
+        _require_vertex_inputs(vertex_mode, chiXYb, eigenvalues_casida_t,
+                               chiXYb_t)
         amp2 = chiXYa if chiXYa.ndim == 2 else chiXYa[:, :, p_state]
         amp = None
         if chiXYb is not None:
             amp = chiXYb if chiXYb.ndim == 2 else chiXYb[:, :, p_state]
-        om = eigenvalues_casida
-
-        terms = []
-        if vertex_mode == 'GW' or amp is None:
-            terms.append((amp2**2, om))
-            singlet = lambda s: prefactor * s[0]
-        elif vertex_mode == 'GWGammaInf':
-            terms.append((amp2 * (amp2 - 0.5 * amp), om))
-            singlet = lambda s: prefactor * s[0]
-        else:
-            amp_psd = 2.0 * amp2 - amp
+        # Unrestricted, the spin-conserving excitons hold the singlets and the
+        # M_s = 0 triplet components. The triplet modes keep them all (their
+        # spin-flip sum carries M_s = +-1); the singlet-only modes drop the
+        # excitons without a charge amplitude.
+        mask = 1.0
+        if (self.spin_mode == 'unrestricted' and vertex_mode.startswith('PSD')
+                and vertex_mode not in TRIPLET_VERTEX_MODES):
+            mask = (np.linalg.norm(amp2, axis=1)
+                    > UHF_PSD_CHARGE_AMPLITUDE_MIN)[:, None]
+        factors = _singlet_factors(vertex_mode, amp2, amp, mask)
+        terms = [(left * right, eigenvalues_casida) for left, right, _ in factors]
+        scales = [scale for _, _, scale in factors]
+        triplet = None
+        if eigenvalues_casida_t is not None and chiXYb_t is not None:
+            amp_t = chiXYb_t if chiXYb_t.ndim == 2 else chiXYb_t[:, :, p_state]
             if self.spin_mode == 'unrestricted':
-                mask = (np.linalg.norm(amp2, axis=1) > 1e-5)[:, None]
-                amp_psd = amp_psd * mask
-            terms.append((amp2**2, om))               # sigmaGW / prefactor
-            # sigmaPSDI / (0.25 prefactor)
-            terms.append((amp_psd * amp_psd, om))
-            if vertex_mode in ('PSD8', 'PSD9'):
-                unres = self.spin_mode == 'unrestricted'
-                amp_eff = amp * mask if unres else amp
-                terms.append((amp_eff * amp_eff, om))  # sigmaTs / (0.5 prefactor)
-
-            def singlet(s, mode=vertex_mode):
-                sigma_gw = prefactor * s[0]
-                sigma_psdi = 0.25 * prefactor * s[1]
-                if mode in ('PSD1', 'PSD2', 'PSD4'):
-                    return sigma_psdi
-                if mode == 'PSD5':
-                    return 0.5 * (0.75 * sigma_gw + sigma_psdi)
-                if mode in ('PSD6', 'PSD7'):
-                    return 0.5 * (sigma_gw + sigma_psdi)
-                return 0.5 * (sigma_gw + sigma_psdi + 0.5 * prefactor * s[2])
-
-        n_singlet = len(terms)
-        triplet = eigenvalues_casida_t is not None and chiXYb_t is not None
-        if triplet:
-            if self.spin_mode == 'unrestricted':
-                for om_t, amp_t_raw in zip(eigenvalues_casida_t, chiXYb_t):
-                    amp_t = (amp_t_raw if amp_t_raw.ndim == 2
-                            else amp_t_raw[:, :, p_state])
-                    terms.append((amp_t**2, om_t))
+                # spin-flip excitons: r runs over the other spin's orbitals
+                triplet = 'unrestricted'
+                eps_t = (self.eps_b, self.eps_a)[spin_index(spin_channel)]
+                nocc_t = (nocc[1], nocc[0])[spin_index(spin_channel)]
+                terms.append((amp_t**2, eigenvalues_casida_t, eps_t, nocc_t))
             else:
-                amp_t = chiXYb_t if chiXYb_t.ndim == 2 else chiXYb_t[:, :, p_state]
+                triplet = 'restricted'
                 terms.append((amp_t**2, eigenvalues_casida_t))
 
-        unrestricted = self.spin_mode == 'unrestricted'
-
-        def combine(s, mode=vertex_mode, unrestricted=unrestricted):
-            val = singlet(s)
-            if not triplet:
-                return val
-            if unrestricted:
-                sigma_tt = (0.5 * prefactor) * (s[n_singlet] + s[n_singlet + 1])
-                if mode == 'PSD2':
-                    return val + 1.0 * sigma_tt
-                if mode == 'PSD4':
-                    return 0.5 * val + 0.5 * sigma_tt
-                if mode == 'PSD7':
-                    return val + 0.5 * sigma_tt
-                if mode == 'PSD9':
-                    return val + 1.0 * sigma_tt
-                return val
-            sigma_tt = (0.5 * prefactor) * s[n_singlet]
-            if mode == 'PSD2':
-                return val + 1.5 * sigma_tt
-            if mode == 'PSD4':
-                return 0.5 * val + 0.75 * sigma_tt
-            if mode == 'PSD7':
-                return val + 0.75 * sigma_tt
-            if mode == 'PSD9':
-                return val + 1.5 * sigma_tt
-            return val
+        def combine(s, mode=vertex_mode):
+            return _combine_vertex(mode, s, prefactor, scales, triplet)
 
         return SigmaEvaluator(terms, combine, eps, nocc_spin, self.eta, calc_imag)
 
     def calculate_self_energy_matrix(self, nocc, eigenvalues_casida, chiXYa, chiXYb=None, eigenvalues=None, vertex_mode='GW'):
-        """Full self-energy matrix at the QP energies (eigenvalues), symmetrized."""
-        if eigenvalues is None:
-            eigenvalues = self.eps
-            
+        """Full self-energy matrix at the QP energies (eigenvalues), symmetrized:
+        Sigma_qp = (M_qp + M_pq) / 2 with M_qp the vertex mode's pole sums
+        sum_Sr left_Srq right_Srp g(eps_p - eps_r + s_r Omega_S) under the
+        weights of `self_energy_evaluator`, whose Sigma_pp(eps_p) is its diagonal.
+
+        chiXYa, chiXYb: (nexciton, norb, nmo). The modes without a triplet-exciton
+        sum; unrestricted (one spin channel's amplitudes, nocc and eigenvalues)
+        GW and GWGammaInf only.
+
+        Read by the tests alone: the dense matrix is the oracle of the static
+        self-energy builders.
+        """
+        _require_vertex_inputs(vertex_mode, chiXYb)
+        if vertex_mode in TRIPLET_VERTEX_MODES:
+            raise ValueError(f'the self-energy matrix has no triplet-exciton sum and '
+                             f'does not serve vertex_mode={vertex_mode!r}')
         if self.spin_mode == 'unrestricted':
-            eps = eigenvalues
-            nocc_spin = nocc
-            prefactor = 0.5
-        else:
-            eps = eigenvalues
-            nocc_spin = nocc
+            if vertex_mode not in ('GW', 'GWGammaInf'):
+                raise NotImplementedError(
+                    f'the unrestricted self-energy matrix serves GW and GWGammaInf, '
+                    f'not {vertex_mode!r}')
+            if eigenvalues is None:
+                raise ValueError('the unrestricted self-energy matrix needs the '
+                                 'spin channel\'s eigenvalues')
             prefactor = 1.0
-            
-        nmo = len(eps)
-        nexciton = len(eigenvalues_casida)
-        
-        sign = np.zeros(nmo)
-        for i in range(nmo):
-            sign[i] = 1.0 if i < nocc_spin else -1.0
-            
-        eps_p = eps[None, None, :]
-        eps_r = eps[None, :, None]
-        sign_r_omega_S = (sign[:, None] * eigenvalues_casida[None, :]).T[:, :, None]
-        
-        energy = eps_p - eps_r + sign_r_omega_S
-        denom = energy / (energy**2 + self.eta**2)
-        
-        if vertex_mode == 'GW' or chiXYb is None:
-            chi_T = chiXYa * denom
-            tmp = np.einsum('Srq, Srp -> qp', chiXYa, chi_T)
-        elif vertex_mode == 'GWGammaInf':
-            chi_T = (chiXYa - 0.5 * chiXYb) * denom
-            tmp = np.einsum('Srq, Srp -> qp', chiXYa, chi_T)
-        elif vertex_mode in ['PSD1', 'PSD2', 'PSD4']:
-            chi_T = (2.0 * chiXYa - chiXYb) * denom
-            tmp = 0.5 * np.einsum('Srq, Srp -> qp', chi_T, chi_T)
-        elif vertex_mode == 'PSD5':
-            tmp_gw = np.einsum('Srq, Srp -> qp', chiXYa, chiXYa * denom)
-            amp_psd = 2.0 * chiXYa - chiXYb
-            tmp_psdi = 0.5 * np.einsum('Srq, Srp -> qp', amp_psd, amp_psd * denom)
-            tmp = 0.5 * (tmp_gw + tmp_psdi)
         else:
-            chi_T = chiXYa * denom
-            tmp = np.einsum('Srq, Srp -> qp', chiXYa, chi_T)
-            
-        self_energy_matrix = prefactor * (tmp + tmp.T)
-        return self_energy_matrix
+            prefactor = 2.0
+        eps = self.eps if eigenvalues is None else eigenvalues
+        sign = np.where(np.arange(len(eps)) < nocc, 1.0, -1.0)
+        energy = (eps[None, None, :] - eps[None, :, None]
+                  + (sign[None, :] * eigenvalues_casida[:, None])[:, :, None])
+        denom = energy / (energy**2 + self.eta**2)
+        factors = _singlet_factors(vertex_mode, chiXYa, chiXYb)
+        sums = [np.einsum('Srq, Srp -> qp', left, right * denom)
+                for left, right, _ in factors]
+        m = _combine_vertex(vertex_mode, sums, prefactor,
+                            [scale for _, _, scale in factors], None)
+        return 0.5 * (m + m.T)
 
     def static_self_energy_matrix(self, nocc, eigenvalues_casida, rho, eigenvalues=None,
                                   flow=None, block_elems=QSGW_BLOCK_ELEMS,
@@ -523,7 +466,7 @@ class SelfEnergySolver(AmplitudeGenerator):
             mode A (flow None):
                 Σ~_pq = ½ [Σ_pq(ε_p) + Σ_pq(ε_q)]
                       = 2 sum_Sr χ_Srp χ_Srq ½ [g(Δ_Srp) + g(Δ_Srq)],
-                g(Δ) = Δ / (Δ² + η²), the real part of _denom_grid's denominator;
+                g(Δ) = Δ / (Δ² + η²), the real part of the broadened denominator;
             SRG (flow = s, in Hartree^-2):
                 Σ~_pq(s) = 2 sum_Sr χ_Srp χ_Srq K(Δ_Srp, Δ_Srq),
                 K(a, b) = (a + b) / (a² + b²) [1 - exp(-(a² + b²) s)].
@@ -558,7 +501,7 @@ class SelfEnergySolver(AmplitudeGenerator):
             Ω_S, Hartree.
         rho : ndarray, shape (naux, nexciton), index order (P, S)
             The DF transition density ρ_PS = sum_ia B_Pia (X+Y)_ia,S, in whichever
-            orbital basis the Casida problem was solved (_rho_a_df); the DF
+            orbital basis the Casida problem was solved (rho_a_df); the DF
             factors of this solver set the basis of the result.
         eigenvalues : ndarray, shape (nmo,), optional
             ε, the poles and evaluation points; default this solver's eps.
@@ -646,16 +589,33 @@ class SelfEnergySolver(AmplitudeGenerator):
             tmp += accumulate(bounds)
         else:
             shares = [bounds[i::n_workers] for i in range(n_workers)]
-            with threadpool_limits(limits=1, user_api='blas'):
-                with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                    for part in pool.map(accumulate, shares):
-                        tmp += part
+            # one share per worker of the process's row pool, BLAS at one
+            # thread under it, the parts added in share order
+            with blas_single_threaded(min_threads=1):
+                parts = row_map(lambda r0, r1: [accumulate(shares[i])
+                                                for i in range(r0, r1)],
+                                len(shares), n_workers)
+            for chunk in parts:
+                for part in chunk:
+                    tmp += part
         return tmp + tmp.T
 
     def calculate_self_energy_diagonal_batch(self, freq, nocc, eigenvalues_casida, chiXYa,
                                               chiXYb=None, spin_channel='alpha', vertex_mode='GW',
                                               calc_imag=False):
-        """Vectorized batch counterpart to calculate_self_energy: Sigma_pp(freq[p]) for every p at once (freq is length-norb)."""
+        """Vectorized batch counterpart to calculate_self_energy: Sigma_pp(freq[p]) for every p at once (freq is length-norb).
+
+        Restricted spin and the vertex modes without a triplet-exciton sum only.
+
+        Read by the tests alone: the vectorized oracle of the per-state scan.
+        """
+        if self.spin_mode != 'restricted':
+            raise NotImplementedError('the batch self-energy is restricted-spin only')
+        if vertex_mode not in KNOWN_VERTEX_MODES or vertex_mode in TRIPLET_VERTEX_MODES:
+            served = [m for m in KNOWN_VERTEX_MODES if m not in TRIPLET_VERTEX_MODES]
+            raise ValueError(f"the batch self-energy has no triplet-exciton sum and serves "
+                             f"vertex_mode in {served}, not {vertex_mode!r}")
+        _require_vertex_inputs(vertex_mode, chiXYb)
         eps = self.eps
         nocc_spin = nocc
         prefactor = 2.0
@@ -669,153 +629,18 @@ class SelfEnergySolver(AmplitudeGenerator):
         else:
             denom = energy / (energy**2 + self.eta**2)
 
-        amp2 = chiXYa
-        if vertex_mode == 'GW' or chiXYb is None:
-            val = prefactor * np.einsum('Srp,Srp->p', amp2**2, denom)
-        elif vertex_mode == 'GWGammaInf':
-            amp_L = amp2 - 0.5 * chiXYb
-            val = prefactor * np.einsum('Srp,Srp->p', amp2 * amp_L, denom)
-        else:
-            amp_psd = 2.0 * amp2 - chiXYb
-            sigmaGW = prefactor * np.einsum('Srp,Srp->p', amp2**2, denom)
-            sigmaPSDI = 0.25 * prefactor * np.einsum('Srp,Srp->p', amp_psd**2, denom)
-            if vertex_mode in ('PSD1', 'PSD2', 'PSD4'):
-                val = sigmaPSDI
-            elif vertex_mode == 'PSD5':
-                val = 0.5 * (0.75 * sigmaGW + sigmaPSDI)
-            elif vertex_mode in ('PSD6', 'PSD7'):
-                val = 0.5 * (sigmaGW + sigmaPSDI)
-            else:
-                sigmaTs = 0.5 * prefactor * np.einsum('Srp,Srp->p', chiXYb**2, denom)
-                val = 0.5 * (sigmaGW + sigmaPSDI + sigmaTs)
-        return val
-
-    def calculate_sigma_hx(self, mol, mf, dm, mo_coeff):
-        """HF contribution beyond kinetic/external energy (Sigma_Hx = V_H + V_x) in the MO basis, for a given density matrix."""
-        V_Hx = mf.get_veff(mol, dm)
-        if self.spin_mode == 'unrestricted':
-            mo_coeff_a, mo_coeff_b = mo_coeff
-            V_Hx_a, V_Hx_b = V_Hx
-            V_Hx_mo_a = mo_coeff_a.T @ V_Hx_a @ mo_coeff_a
-            V_Hx_mo_b = mo_coeff_b.T @ V_Hx_b @ mo_coeff_b
-            return V_Hx_mo_a, V_Hx_mo_b
-        else:
-            V_Hx_mo = mo_coeff.T @ V_Hx @ mo_coeff
-            return V_Hx_mo
-
-    def solve_quasiparticle_energy(self, p_state, nocc, vertex_mode='GW', W_rpa=None, w_aux=None, triplet=False, solver_mode='newton', mol=None, mf=None):
-        """Solve the QP equation for a target MO state (Newton or graphical solver_mode; DFT/HF via xc_correction)."""
-
-        if self.spin_mode == 'unrestricted':
-            raise NotImplementedError("High-level solve_quasiparticle_energy is currently only implemented for restricted spin.")
-
-        method_info = get_method_info(vertex_mode)
-
-        eps = self.eps
-        eri = self.eri_chemist
-        coeff = self.df_coeff
-        norb = len(eps)
-        
-        xc_correction = 0.0
-        if mf is not None:
-            # First-order reaction field of an attached solvent screening (None
-            # in the gas phase) -- see src/Base/solvent_screening.py.
-            sigma_solvent = solvent_static_selfenergy(mf, mol)
-            if sigma_solvent is not None:
-                if isinstance(sigma_solvent, tuple):
-                    raise NotImplementedError(
-                        "solvent screening through solve_quasiparticle_energy "
-                        "is restricted-only, like the rest of this method")
-                xc_correction += sigma_solvent[p_state, p_state]
-        if mf is not None and mol is not None and hasattr(mf, 'xc'):
-            dm = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
-            V_Hxc = mf.get_veff(mol, dm)
-            if isinstance(mf, (scf.uhf.UHF, dft.uks.UKS)):
-                mf_hf = scf.UHF(mol)
-            else:
-                mf_hf = scf.RHF(mol)
-            
-            V_Hxc_mo = mf.mo_coeff.T @ V_Hxc @ mf.mo_coeff
-            V_Hx_mo = self.calculate_sigma_hx(mol, mf_hf, dm, mf.mo_coeff)
-            xc_correction += V_Hx_mo[p_state, p_state] - V_Hxc_mo[p_state, p_state]
-        
-        lr_solver = LinearResponseSolver(eps, coeff_df=coeff, eri_chemist=eri, spin_mode=self.spin_mode, eta=self.eta)
-
-        if w_aux is None:
-            w_aux = lr_solver.static_screening_aux(nocc)
-
-        if not method_info['force_rpa_casida']:
-            if W_rpa is None:
-                if coeff is not None:
-                    W_rpa = w_aux
-                else:
-                    occ, virt = lr_solver._get_occ_virt_indices(eps, nocc)
-                    n_pair = len(occ) * len(virt)
-                    d = np.array([eps[a] - eps[i] for i in occ for a in virt])
-                    f = lr_solver._get_f_rpa(d, 0.0, is_imaginary=False)
-                    chi0 = np.diag(2.0 * f)
-                    
-                    V_trans = eri[np.ix_(occ, virt, occ, virt)].reshape(n_pair, n_pair)
-                    chi = chi0 @ np.linalg.inv(np.eye(n_pair) - V_trans @ chi0)
-                    
-                    eri_ov = eri[np.ix_(occ, virt)].reshape(n_pair, norb, norb)
-                    tmp = chi @ eri_ov.reshape(n_pair, -1)
-                    W_rpa = eri + np.einsum('Spq, Srs -> pqrs', eri_ov, tmp.reshape(n_pair, norb, norb))
-
-        need_triplet = False
-        if method_info['force_rpa_casida'] and w_aux is None:
-            A_rpa, B_rpa = lr_solver.build_casida_matrices(nocc, lBSE=False)
-            omega, X, Y = CasidaSolver(A_rpa, B_rpa).solve()
-            chi_a = self.get_chi_a(nocc, X, Y, p_state=p_state)
-            
-            func = lambda w: w - eps[p_state] - xc_correction - self.calculate_self_energy(
-                p_state, w, nocc, omega, chi_a, None, vertex_mode='GW'
-            )
-        else:
-            A_s, B_s = lr_solver.build_casida_matrices(nocc, lBSE=True, W_aux=w_aux, triplet=False)
-            omega_s, X_s, Y_s = CasidaSolver(A_s, B_s).solve()
-            chi_a_s = self.get_chi_a(nocc, X_s, Y_s, p_state=p_state)
-            chi_b_s_vertex = self.get_chi_b_vertex(nocc, X_s, Y_s, eri_w=W_rpa, p_state=p_state)
-            
-            if not method_info['needs_vertex']:
-                func = lambda w: w - eps[p_state] - xc_correction - self.calculate_self_energy(
-                    p_state, w, nocc, omega_s, chi_a_s, None, vertex_mode='GW'
-                )
-            elif vertex_mode == 'GWGammaInf':
-                func = lambda w: w - eps[p_state] - xc_correction - self.calculate_self_energy(
-                    p_state, w, nocc, omega_s, chi_a_s, chi_b_s_vertex, vertex_mode=vertex_mode
-                )
-            else:
-                need_triplet = triplet or method_info['needs_triplet']
-                if need_triplet:
-                    A_t, B_t = lr_solver.build_casida_matrices(nocc, lBSE=True, W_aux=w_aux, triplet=True)
-                    omega_t, X_t, Y_t = CasidaSolver(A_t, B_t).solve()
-                    chi_b_t_vertex = self.get_chi_b_vertex(nocc, X_t, Y_t, eri_w=W_rpa, p_state=p_state)
-                    
-                    func = lambda w: w - eps[p_state] - xc_correction - self.calculate_self_energy(
-                        p_state, w, nocc, omega_s, chi_a_s, chi_b_s_vertex,
-                        eigenvalues_casida_t=omega_t, chiXYb_t=chi_b_t_vertex,
-                        vertex_mode=vertex_mode
-                    )
-                else:
-                    func = lambda w: w - eps[p_state] - xc_correction - self.calculate_self_energy(
-                        p_state, w, nocc, omega_s, chi_a_s, chi_b_s_vertex,
-                        vertex_mode=vertex_mode
-                    )
-                    
-        if solver_mode == 'graphical':
-            qp = solve_qp_equation_graphical(func, eps[p_state])
-        else:
-            qp = solve_qp_equation_newton(func, eps[p_state])
-            
-        return qp
+        factors = _singlet_factors(vertex_mode, chiXYa, chiXYb)
+        sums = [np.einsum('Srp,Srp->p', left * right, denom)
+                for left, right, _ in factors]
+        return _combine_vertex(vertex_mode, sums, prefactor,
+                               [scale for _, _, scale in factors], None)
 
     def calculate_spectral_function(self, p_state, omega_grid, nocc, eigenvalues_casida, chiXYa, chiXYb=None, 
                                     eigenvalues_casida_t=None, chiXYb_t=None, spin_channel='alpha', vertex_mode='GW',
                                     V_xc_mo=0.0):
         """Spectral function A(omega) on a frequency grid for a target MO state."""
         if self.spin_mode == 'unrestricted':
-            eps = self.eps_a if spin_channel == 'alpha' else self.eps_b
+            eps = (self.eps_a, self.eps_b)[spin_index(spin_channel)]
         else:
             eps = self.eps
             
@@ -835,3 +660,21 @@ class SelfEnergySolver(AmplitudeGenerator):
         spectral_function = -sigma_im / (np.pi * denom)
         
         return spectral_function, sigma_re, sigma_im
+
+
+def _require_vertex_inputs(vertex_mode, amplitudes, eigenvalues_t=None,
+                           amplitudes_t=None):
+    """Refuse a vertex mode that is unknown or lacks what its sum reads:
+    without the vertex amplitudes the sum is plain GW, and without the triplet
+    excitons a triplet-carrying mode drops that term."""
+    if vertex_mode not in KNOWN_VERTEX_MODES:
+        raise ValueError(
+            f"Unknown vertex_mode '{vertex_mode}'; expected one of {KNOWN_VERTEX_MODES}."
+        )
+    if vertex_mode != 'GW' and amplitudes is None:
+        raise ValueError(f"vertex_mode={vertex_mode!r} needs the vertex amplitudes chiXYb; "
+                         f"without them the sum is plain GW")
+    if vertex_mode in TRIPLET_VERTEX_MODES and (eigenvalues_t is None
+                                                 or amplitudes_t is None):
+        raise ValueError(f"vertex_mode={vertex_mode!r} carries a triplet-exciton term; "
+                         f"hand eigenvalues_casida_t and chiXYb_t, or the sum drops it")

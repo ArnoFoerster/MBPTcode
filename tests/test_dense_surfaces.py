@@ -21,26 +21,30 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
+from tests.pins import assert_same
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import GroundState
-from src.Base.environment import PointCharges, attach_environment
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening)
-from src.Base.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+from src.environments.environment import PointCharges
+from src.Base.environment_seam import attach_environment
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening)
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
                                SCF_DIFFERENTIABLE_GRAD_TOL,
                                SCF_ENERGY_CONV_TOL,
                                SCF_ENERGY_GRAD_TOL,
                                XC_SHIFT_GRADIENT_TOL)
-from src.gradients import dense_surfaces
-from src.gradients.dense_surfaces import (DenseBSESurface, DenseRPASurface,
+from src.gradients.gwbse import dense_surfaces
+from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
                                                 QuasiparticleSurface,
                                                 kohn_sham_gradient_correction,
                                                 mo_eri)
-from src.gradients.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
-                                               QPqbAdjoint as QPqb)
-from src.properties.optimize import MeanFieldSurface
-from src.properties.surface import (FiniteDifferenceGradient,
-                                    PotentialEnergySurface)
+from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
+                                                     QPqbAdjoint as QPqb)
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.surface import (FiniteDifferenceGradient,
+                                   PotentialEnergySurface)
 
 #: A two-point central difference has an O(h^2) truncation error, so comparing
 #: at ONE step size cannot tell a correct gradient from one that is wrong by
@@ -105,8 +109,8 @@ def rhf(mol):
     virtual Fock block vanishes, so a loose SCF biases the force rather than
     degrading it gracefully."""
     mf = scf.RHF(mol)
-    mf.conv_tol = 1e-14
-    mf.conv_tol_grad = 1e-11
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
     mf.max_cycle = 200
     mf.kernel()
     return mf
@@ -161,7 +165,7 @@ def test_a_hartree_fock_reference_is_not_read_as_a_kohn_sham_one():
 
     H2/sto-3g cannot see this. At two basis functions the shift cancels to
     exactly 0.0 and the guard stays quiet whichever way it is written, which is
-    how the defect passed a suite that exercised this path. Water is the
+    how a defect passes a suite that exercises this path. Water is the
     smallest case here whose round-off is real.
     """
     mol = water()
@@ -331,7 +335,8 @@ def test_repairing_e0_leaves_a_hartree_fock_reference_bit_identical():
     numbers. It is identically zero there, and `assert ==` rather than a
     tolerance is the point: a reference that moved by even a rounding would
     move all of those at once."""
-    from src.gradients.isdf_derivatives import exx_double_counting
+    from src.SingleReference.LinearResponse.rpa_energy import (
+        exx_double_counting)
 
     mol = water()
     assert exx_double_counting(rhf(mol), mol) == 0.0
@@ -368,7 +373,7 @@ def test_the_energy_threshold_does_not_move_an_excitation_energy():
                                         SCF_ENERGY_GRAD_TOL))
     a = tight._solve(mol, tight.scf_factory(mol))[0].Omega
     b = loose._solve(mol, loose.scf_factory(mol))[0].Omega
-    worst = np.max(np.abs(np.asarray(a) - np.asarray(b))) * HARTREE_TO_EV * 1e3
+    worst = np.max(np.abs(np.asarray(a) - np.asarray(b))) * HARTREE_TO_MEV
     assert worst < 0.05, (
         f'the energy threshold moved an excitation energy by {worst:.4f} meV; '
         f'it is meant to be invisible to everything but the wall clock')
@@ -534,8 +539,8 @@ def test_a_solvated_mean_field_is_refused_wherever_e_c_is_reported():
     """The dense (pq|rs) is the BARE interaction and consults no environment,
     so E_c^dRPA off it is a different functional from the one the cubic chain
     builds on the SAME mean field -- 5.3 mHa apart for water in water, against
-    the 1e-4 Ha a relaxed geometry needs. Computing it silently is the defect;
-    refusing is the fix.
+    the 1e-4 Ha a relaxed geometry needs. Computing it silently is wrong;
+    the guard refuses.
 
     The guard is asserted through the mean field passed to the energy, not
     through the stored factory, because that is the path a dense-versus-cubic
@@ -566,18 +571,21 @@ def test_the_refusal_spares_everything_that_carries_no_correlation_energy():
     """
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     gas = DenseRPASurface(mol, rhf).total_energy(mol)
-    assert gas == DenseRPASurface(mol, rhf).total_energy(mol, rhf(mol))
+    # each surface runs its own SCF: the same energy to a few ulp, not bitwise
+    assert_same(DenseRPASurface(mol, rhf).total_energy(mol, rhf(mol)),
+                gas, quantity='energy', label='gas, mean field handed')
     assert np.isfinite(DenseRPASurface(mol, rhf).total_gradient(mol)[1])
 
     charges = attach_environment(rhf(mol), PointCharges([[0.0, 0.0, 5.0]],
                                                         [0.4]))
-    assert DenseRPASurface(mol, rhf).total_energy(mol, charges) == gas, (
-        'a fixed charge screens nothing, so the bare (pq|rs) is right for it')
+    # a fixed charge screens nothing, so the bare (pq|rs) is right for it
+    assert_same(DenseRPASurface(mol, rhf).total_energy(mol, charges),
+                gas, quantity='energy', label='fixed point charges')
 
     pcm, _ = solvated_pair(mol)
     tda = QuasiparticleSurface(mol, rhf, screening='tda')
     assert np.isfinite(tda.total_energy(mol, pcm))
-    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation_energy(mol,
+    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation(mol,
                                                                        pcm))
 
 
@@ -610,12 +618,13 @@ def test_a_solvated_mean_field_is_refused_wherever_a_force_is_reported():
 
 
 def test_the_excitation_energy_is_the_one_the_gradient_reports():
-    """`excitation_energy` reads Omega without a force, and it is the same
-    Omega `excitation_gradient` returns, bit for bit."""
+    """`excitation` reads Omega without a force, and it is the same
+    Omega `excitation_gradient` returns, bit for bit on the BLAS the pin files
+    record (two evaluations, each its own SCF; energy class bar elsewhere)."""
     mol = h2()
     surface = DenseBSESurface(mol, scf=rhf)
-    assert (surface.excitation_energy(mol)
-            == surface.excitation_gradient(mol)[1])
+    assert_same(surface.excitation(mol),
+                surface.excitation_gradient(mol)[1])
 
 
 def test_a_triplet_surface_is_its_own_derivative_and_is_not_the_singlet():
@@ -663,7 +672,9 @@ def df_rhf(auxbasis):
     """`rhf` density-fitted in `auxbasis`."""
     def factory(mol):
         mf = scf.RHF(mol).density_fit(auxbasis=auxbasis)
-        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+        mf.conv_tol = SCF_TIGHT_CONV_TOL
+        mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+        mf.max_cycle = 200
         mf.kernel()
         return mf
     return factory
@@ -718,7 +729,10 @@ def test_matched_integrals_keep_their_force(monkeypatch):
     guarded = exact.total_gradient(mol)[0]
     monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
                         lambda *a, **k: None)
-    assert np.array_equal(guarded, exact.total_gradient(mol)[0])
+    # the second call solves its own SCF: bit for bit on the recording BLAS,
+    # the gradient class bar on another
+    assert_same(guarded, exact.total_gradient(mol)[0], quantity='gradient',
+                label='guarded against unguarded')
 
 
 @pytest.mark.parametrize('cls', ['rpa', 'qp'])
@@ -746,4 +760,7 @@ def test_the_exact_tensor_surfaces_refuse_a_fitted_mean_field(cls,
     guarded = exact.total_gradient(mol)[0]
     monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
                         lambda *a, **k: None)
-    assert np.array_equal(guarded, exact.total_gradient(mol)[0])
+    # the second call solves its own SCF: bit for bit on the recording BLAS,
+    # the gradient class bar on another
+    assert_same(guarded, exact.total_gradient(mol)[0], quantity='gradient',
+                label='guarded against unguarded')

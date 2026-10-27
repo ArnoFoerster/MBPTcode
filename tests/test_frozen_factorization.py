@@ -1,15 +1,16 @@
 """One factorization, shared by several chains, instead of one per chain.
 
 `separable_factors` is deterministic given its settings, so two chains handed
-matching keywords already produce bitwise identical factors -- they simply pay
+matching keywords already produce the same factors to a few ulp -- they simply pay
 for them twice. This object makes the sharing STRUCTURAL rather than a property
 of the caller remembering to pass the same keywords, and halves the cost of any
 composed surface.
 
-THE GATE IS BITWISE EQUALITY, NOT A FINITE DIFFERENCE. A re-measured FD at 1e-8
-would silently accept a divergence; bitwise catches any setting that quietly
-stopped being shared. If it is ever not bitwise, that is a bug to find rather
-than a number to re-baseline.
+THE GATE IS A FEW ULP (`assert_same`), NOT A FINITE DIFFERENCE. A re-measured
+FD at 1e-8 would silently accept a divergence; a few ulp catches any setting
+that quietly stopped being shared (two products of the same arrays may still
+move a last bit). If it ever fails, that is a bug to
+find rather than a number to re-baseline.
 
 The quadratures are deliberately NOT here: the correlation energy integrates
 chi0 over frequency and the self-energy over imaginary time, different
@@ -17,20 +18,16 @@ integrands with no reason to share a grid.
 """
 import numpy as np
 import pytest
-from pyscf import gto, scf
+from pyscf import gto
 
-from src.Base.constants import BOHR_TO_ANGSTROM
-from src.gradients import factor_chain as fc_module
-from src.gradients.factor_chain import FactorChain, FrozenFactorization
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-
-
-def rhf(mol):
-    mf = scf.RHF(mol)
-    mf.conv_tol = 1e-13
-    mf.conv_tol_grad = 1e-11
-    mf.kernel()
-    return mf
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.numerics import Numerics
+from src.gradients.rpa import factor_chain as fc_module
+from src.gradients.rpa.factor_chain import FactorChain, FrozenFactorization
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
+from tests.pins import assert_same
+from tests.reference_scf import rhf_tight_default_cycles
 
 
 @pytest.fixture(scope='module')
@@ -52,9 +49,9 @@ def displaced(mol):
 
 
 def test_a_chain_with_no_factorization_builds_its_own(mol):
-    """The default path: a chain handed no factorization builds its own and
+    """The default path: a chain given no factorization constructs its own and
     owns it."""
-    chain = RPAGroundStateChain(mol, rhf)
+    chain = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)}))
     assert isinstance(chain.factorization, FrozenFactorization)
     assert chain.basis == chain.factorization.basis
     assert chain.radii is chain.factorization.radii
@@ -64,9 +61,9 @@ def test_a_chain_with_no_factorization_builds_its_own(mol):
 def test_two_chains_on_one_factorization_share_the_arrays(mol):
     """Not equal -- the SAME objects, which is what makes the factors bitwise
     identical rather than merely close."""
-    shared = FrozenFactorization(mol)
-    a = RPAGroundStateChain(mol, rhf, factorization=shared)
-    b = RPAGroundStateChain(mol, rhf, factorization=shared)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
     assert a.radii is b.radii is shared.radii
     assert a.pts_local is b.pts_local
     assert a.frames is b.frames
@@ -77,31 +74,34 @@ def test_two_chains_on_one_factorization_share_the_arrays(mol):
 def test_shared_factors_are_bitwise_identical_at_a_displaced_geometry(mol, displaced):
     """The gate. At the reference the two agree by construction, so the
     measurement has to be made where they could differ."""
-    shared = FrozenFactorization(mol)
-    a = RPAGroundStateChain(mol, rhf, factorization=shared)
-    b = RPAGroundStateChain(mol, rhf, factorization=shared)
-    mf = rhf(displaced)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
+    mf = rhf_tight_default_cycles(displaced)
     xa, da, epsa, _, crda, _ = a.factors_at(displaced, mf)
     xb, db, epsb, _, crdb, _ = b.factors_at(displaced, mf)
-    assert np.array_equal(crda, crdb), 'interpolation points'
-    assert np.array_equal(xa, xb), 'X_mo'
+    assert_same(crda, crdb, unit='1', quantity='root',
+                label='interpolation points')
+    assert_same(xa, xb, unit='1', quantity='root', label='X_mo')
     # D moves first if a fit setting quietly stops being shared
-    assert np.array_equal(da, db), 'D'
+    assert_same(da, db, unit='1', quantity='root', label='D')
+    # the one mean field's orbital energies, read twice
     assert np.array_equal(epsa, epsb), 'eps'
 
 
 def test_an_unshared_pair_also_agrees_today_but_is_not_guaranteed_to(mol, displaced):
     """The premise behind the change: sharing is a COST optimization, not a
-    physics fix. Two chains with matching settings already agree bitwise, which
+    physics fix. Two chains with matching settings already agree to a few ulp, which
     is why the shared object may not alter any number."""
-    a = RPAGroundStateChain(mol, rhf)
-    b = RPAGroundStateChain(mol, rhf)
-    mf = rhf(displaced)
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)}))
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)}))
+    mf = rhf_tight_default_cycles(displaced)
     xa, da, _, _, crda, _ = a.factors_at(displaced, mf)
     xb, db, _, _, crdb, _ = b.factors_at(displaced, mf)
-    assert np.array_equal(crda, crdb)
-    assert np.array_equal(xa, xb)
-    assert np.array_equal(da, db)
+    assert_same(crda, crdb, unit='1', quantity='root',
+                label='interpolation points')
+    assert_same(xa, xb, unit='1', quantity='root', label='X_mo')
+    assert_same(da, db, unit='1', quantity='root', label='D')
 
 
 def test_the_shared_factorization_is_built_once_not_per_chain(mol, monkeypatch):
@@ -116,15 +116,15 @@ def test_the_shared_factorization_is_built_once_not_per_chain(mol, monkeypatch):
 
     monkeypatch.setattr(fc_module, 'runtime_atomic_radii', counted)
 
-    shared = FrozenFactorization(mol)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
     once = calls['n']
-    RPAGroundStateChain(mol, rhf, factorization=shared)
-    RPAGroundStateChain(mol, rhf, factorization=shared)
+    RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
+    RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
     assert calls['n'] == once, 'a shared factorization must not re-optimize radii'
 
     calls['n'] = 0
-    RPAGroundStateChain(mol, rhf)
-    RPAGroundStateChain(mol, rhf)
+    RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)}))
+    RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)}))
     assert calls['n'] == 2 * once, 'unshared chains each pay for their own'
 
 
@@ -132,21 +132,27 @@ def test_a_contradicting_setting_is_refused_not_resolved(mol):
     """Silently resolving to one side would hand the caller a functional it did
     not ask for, with every number downstream wrong for a reason nothing
     reports."""
-    shared = FrozenFactorization(mol, n_start=1)
+    shared = FrozenFactorization(mol, Numerics(isdf={'n_start': 1, 'counts': g1(mol)}))
     with pytest.raises(ValueError, match='shared factorization was built for'):
-        RPAGroundStateChain(mol, rhf, factorization=shared, n_start=3)
-    with pytest.raises(ValueError, match='shared factorization was built for'):
-        RPAGroundStateChain(mol, rhf, factorization=shared, frames='continued')
+        RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared, numerics=Numerics(isdf={'n_start': 3}))
+
+
+def test_continued_frames_are_retired(mol):
+    """The frames are frozen in the molecule and turn with it: frames
+    re-derived per geometry (`frames='continued'`) are refused,
+    on the factorization and on every chain."""
+    with pytest.raises(TypeError, match='frames'):
+        FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}), frames='continued')
+    with pytest.raises(TypeError, match='frames'):
+        RPAGroundStateChain(mol, rhf_tight_default_cycles, frames='continued', numerics=Numerics(isdf={'counts': g1(mol)}))
 
 
 def test_settings_that_agree_are_accepted(mol):
     """The refusal must not fire on a caller who passes the same values
     explicitly -- that is a legitimate way to write it."""
-    shared = FrozenFactorization(mol)
-    chain = RPAGroundStateChain(mol, rhf, factorization=shared,
-                                basis=shared.basis, auxbasis=shared.auxbasis,
-                                n_start=shared.n_start,
-                                frames=shared.frames_mode)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    chain = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared,
+                                numerics=Numerics(isdf={'basis': shared.basis, 'auxbasis': shared.auxbasis, 'n_start': shared.n_start}))
     assert chain.factorization is shared
 
 
@@ -154,23 +160,24 @@ def test_the_quadrature_is_not_part_of_the_factorization(mol):
     """Two chains may share a factorization and still integrate differently:
     the correlation energy's frequency grid and the self-energy's imaginary-time
     grid are quadrature for different integrands."""
-    shared = FrozenFactorization(mol)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
     assert not hasattr(shared, 'ntau')
     assert not hasattr(shared, 'grid')
-    a = RPAGroundStateChain(mol, rhf, factorization=shared, ntau=12)
-    b = RPAGroundStateChain(mol, rhf, factorization=shared, ntau=14)
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared, numerics=Numerics(quadrature={'ntau_rpa': 12}))
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared, numerics=Numerics(quadrature={'ntau_rpa': 14}))
     assert a.ntau != b.ntau
     assert a.factorization is b.factorization
 
 
 def test_refreeze_can_carry_a_factorization_built_at_the_new_geometry(mol, displaced):
     """A factorization is frozen AT a geometry, so refreeze must build a NEW one
-    rather than carry the old. The keyword lets a COMPOSED surface build one at
+    rather than carry the old one. The keyword lets a COMPOSED surface build
+    one at
     the new geometry and hand it to both halves, which is the only way the
     sharing survives the first optimizer step."""
-    shared_new = FrozenFactorization(displaced)
-    a = RPAGroundStateChain(mol, rhf).refreeze(displaced, factorization=shared_new)
-    b = RPAGroundStateChain(mol, rhf).refreeze(displaced, factorization=shared_new)
+    shared_new = FrozenFactorization(displaced, Numerics(isdf={'counts': g1(displaced)}))
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)})).refreeze(displaced, factorization=shared_new)
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)})).refreeze(displaced, factorization=shared_new)
     assert a.factorization is shared_new
     assert b.factorization is shared_new
     assert a.radii is b.radii
@@ -179,7 +186,7 @@ def test_refreeze_can_carry_a_factorization_built_at_the_new_geometry(mol, displ
 def test_refreeze_without_one_behaves_as_before(mol, displaced):
     """The default must not move: every existing caller passes no factorization
     and must get a chain that builds its own at the new geometry."""
-    plain = RPAGroundStateChain(mol, rhf).refreeze(displaced)
+    plain = RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)})).refreeze(displaced)
     assert isinstance(plain.factorization, FrozenFactorization)
     assert plain.factorization.basis == plain.basis
 
@@ -197,9 +204,13 @@ def test_the_per_geometry_fit_is_paid_once_for_all_chains(mol):
     layout and carrying different continua have different D, so a cache drawn
     after the gauge would hand one chain the other's screening.
     """
-    shared = FrozenFactorization(mol)
-    a = RPAGroundStateChain(mol, rhf, factorization=shared)
-    b = RPAGroundStateChain(mol, rhf, factorization=shared)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    # one mean field for both: two SCFs differ in their last bits under a
+    # BLAS without conditional reproducibility (5e-14 Ha on a cluster's MKL),
+    # which is not what sharing the fit is asked about
+    mf = rhf_tight_default_cycles(mol)
+    a = RPAGroundStateChain(mol, rhf_tight_default_cycles, mf=mf, factorization=shared)
+    b = RPAGroundStateChain(mol, rhf_tight_default_cycles, mf=mf, factorization=shared)
 
     entered, fits = {'n': 0}, {'n': 0}
     orig_factors, orig_fit = FactorChain.factors, FrozenFactorization.shareable_factors
@@ -226,7 +237,7 @@ def test_the_per_geometry_fit_is_paid_once_for_all_chains(mol):
 
     assert entered['n'] == 2, 'the gauge is per chain and stays per chain'
     assert fits['n'] == 1, 'the shareable fit must be computed once, not twice'
-    assert ea == eb, 'sharing the fit must not change a digit'
+    assert_same(ea, eb, label='sharing the fit must not change a digit')
 
 
 def test_an_unshared_pair_still_pays_for_two_fits(mol):
@@ -244,8 +255,8 @@ def test_an_unshared_pair_still_pays_for_two_fits(mol):
 
     FrozenFactorization.shareable_factors = count_fits
     try:
-        RPAGroundStateChain(mol, rhf).total_energy()
-        RPAGroundStateChain(mol, rhf).total_energy()
+        RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)})).total_energy()
+        RPAGroundStateChain(mol, rhf_tight_default_cycles, numerics=Numerics(isdf={'counts': g1(mol)})).total_energy()
     finally:
         FrozenFactorization.shareable_factors = orig_fit
     assert fits['n'] == 2
@@ -258,8 +269,8 @@ def test_the_fit_cache_does_not_retain_dead_geometries(mol):
     environment cache cannot be fixed this way."""
     import gc
 
-    shared = FrozenFactorization(mol)
-    chain = RPAGroundStateChain(mol, rhf, factorization=shared)
+    shared = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    chain = RPAGroundStateChain(mol, rhf_tight_default_cycles, factorization=shared)
     crd = mol.atom_coords() * BOHR_TO_ANGSTROM
     for i in range(4):
         c = crd.copy()
@@ -267,7 +278,7 @@ def test_the_fit_cache_does_not_retain_dead_geometries(mol):
         m = mol.copy()
         m.set_geom_(c, unit='Angstrom')
         m.build(False, False)
-        chain.total_energy(m, rhf(m))
+        chain.total_energy(m, rhf_tight_default_cycles(m))
         del m
     gc.collect()
     assert len(shared._fit_cache) <= 2, (

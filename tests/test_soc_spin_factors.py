@@ -31,11 +31,12 @@ import pytest
 from pyscf import gto, scf
 from pyscf.x2c import sfx2c1e, x2c
 
-from src.properties.spin_orbit import (EXCITED_SPIN_FACTOR,
-                                       GROUND_SPIN_FACTOR, coupling,
-                                       ground_state_element,
+from src.properties.spin_orbit import (coupling, ground_state_element,
                                        interstate_element, soc_operator,
                                        soc_operator_mo)
+from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
+from tests.pins import assert_same
+
 
 # The PAULI matrices. h_SO's alpha^2/4 is the prefactor of sigma, not of the
 # spin operator s = sigma/2: Breit-Pauli's (alpha^2/2)(r x p).s is
@@ -276,7 +277,9 @@ def test_the_two_one_electron_routes_agree_on_a_first_row_molecule(water):
     mol, mf, _, nocc = water
     a, b = (soc_operator(mol, mf.make_rdm1(), one_electron=k)
             for k in ('x2c', 'breit-pauli'))
-    assert np.array_equal(soc_operator(mol, mf.make_rdm1()), a), 'x2c is default'
+    # two builds of one operator: to a few ulp, not bitwise
+    assert_same(soc_operator(mol, mf.make_rdm1()), a, quantity='root',
+                label='x2c is default')
     dev = abs(a - b).max() / abs(b).max()
     assert dev < 0.01, f'x2c and Breit-Pauli differ by {dev:.2%} on a C/O/H system'
     assert dev > 1e-6, 'the two routes are suspiciously identical'

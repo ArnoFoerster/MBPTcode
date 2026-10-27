@@ -1,6 +1,6 @@
 """The exact block fold of the dRPA correlation energy in a continuum.
 
-`src/gradients/solvated_rpa_energy.py` evaluates three members of one
+`src/gradients/rpa/solvated_energy.py` evaluates three members of one
 functional on ONE set of factors and ONE frequency grid: the bare interaction
 (A), today's dressed one (B), and the fold F -- the solvent's single-pole
 g(iw) = Omega_p^2/(w^2 + Omega_p^2) inside the logarithm with the BARE
@@ -12,7 +12,7 @@ Judge by OUTPUT: every check prints its measured number, and the asserts are at
 the end of each test.
 
 H2O/cc-pVDZ in water unless stated, seconds each:
-  1. g = 1 with the dressed counter-term IS `RPAGroundStateChain`, bitwise
+  1. g = 1 with the dressed counter-term IS `RPAGroundStateChain`, to a few ulp
   2. g = 0 with the bare counter-term IS the same chain without an environment,
      on the same PCM-relaxed mean field
   3. the first-order term at constant g = 1 is the closed static sum
@@ -31,18 +31,24 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import HARTREE_TO_EV, HARTREE_TO_KCAL
-from src.Base.environment import NoEnvironment
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import SolventScreening
-from src.gradients.rpa_ground_state import RPAGroundStateChain
-from src.gradients.solvated_rpa_energy import (dispersion_energy,
-                                               dynamic_screening_factor,
+from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_KCAL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.environment_seam import NoEnvironment
+from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import SolventScreening
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from src.gradients.rpa.solvated_energy import (dynamic_screening_factor,
                                                screening_matrix,
                                                solvated_correlation_energies,
                                                solvent_plasmon_energy)
-from src.gradients.space_time_adjoint import (rpa_energy_and_adjoint,
-                                              three_index_ov)
+from src.gradients.rpa.space_time_adjoint import rpa_energy_and_adjoint
+from src.SingleReference.LinearResponse.solvated_rpa_energy import (
+    solute_solvent_dispersion_energy)
+from src.SingleReference.LinearResponse.space_time import three_index_ov
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS = 'cc-pvdz'
 H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
@@ -70,7 +76,9 @@ def check(ok, label, detail=''):
 def scf_factory(mol):
     """A density-fitted RHF converged tightly enough for a frozen factorization."""
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     assert mf.converged
     return mf
@@ -80,7 +88,7 @@ def solvated_chain(solvent, atom=H2O):
     """The dRPA ground-state chain of `atom` inside a named continuum."""
     mol = gto.M(atom=atom, basis=BASIS, verbose=0)
     return RPAGroundStateChain(mol, scf_factory,
-                               environment=SolventScreening(mol, solvent=solvent))
+                               environment=SolventScreening(mol, solvent=solvent), numerics=Numerics(isdf={'counts': g1(mol)}))
 
 
 def bare_twin(chain):
@@ -94,8 +102,7 @@ def bare_twin(chain):
     return RPAGroundStateChain(mol, scf_factory, mf=mf,
                                environment=NoEnvironment(),
                                factorization=chain.factorization,
-                               ntau=chain.ntau,
-                               nfreq=len(chain.grid.omega_points))
+                               numerics=Numerics(quadrature={'ntau_rpa': chain.ntau, 'nfreq_rpa': len(chain.grid.omega_points)}))
 
 
 def static_reaction_field_sum(chain):
@@ -128,7 +135,7 @@ def correlation_solvation(solvent, atom=H2O, omega_p=None):
     """
     chain = solvated_chain(solvent, atom)
     gas = RPAGroundStateChain(gto.M(atom=atom, basis=BASIS, verbose=0),
-                              scf_factory)
+                              scf_factory, numerics=Numerics(isdf={'counts': g1(gto.M(atom=atom, basis=BASIS, verbose=0))}))
     e_gas = gas.correlation_energy()
     res = solvated_correlation_energies(chain, omega_p=omega_p)
     return ((chain.mf0.e_tot - gas.mf0.e_tot) * HARTREE_TO_KCAL,
@@ -139,12 +146,14 @@ def correlation_solvation(solvent, atom=H2O, omega_p=None):
 
 
 def test_dressed_limit_is_todays_chain():
-    """g = 1 with the dressed counter-term reproduces E_c bitwise."""
+    """g = 1 with the dressed counter-term reproduces E_c to a few ulp (two
+    computations)."""
     chain = solvated_chain('water')
     res = solvated_correlation_energies(chain)
     today = chain.correlation_energy()
     delta = abs(res.dressed - today)
-    ok = check(delta == 0.0, 'g = 1 is RPAGroundStateChain.correlation_energy',
+    ok = check(matches(res.dressed, today, RECORDING_BLAS),
+               'g = 1 is RPAGroundStateChain.correlation_energy',
                f'{res.dressed:.12f} vs {today:.12f}, |diff| {delta:.1e}')
     assert delta < 1e-12
     assert ok
@@ -189,7 +198,8 @@ def test_first_order_term_is_the_static_born_sum():
     """
     chain = solvated_chain('water')
     res = solvated_correlation_energies(chain)
-    quadrature = dispersion_energy(res.traces, chain.grid, ADIABATIC_OMEGA_P)
+    quadrature = solute_solvent_dispersion_energy(res.traces, chain.grid,
+                                                  ADIABATIC_OMEGA_P)
     closed = static_reaction_field_sum(chain)
     rel = abs(quadrature - closed) / abs(closed)
     ok = check(rel < 1e-6, 'first order at g = 1 is sum_ia <ia|vtilde|ia>',
@@ -212,7 +222,8 @@ def test_dispersion_limits_and_the_fold_identity():
     # the pole energy enters only through g, which rises monotonically with it,
     # so the term deepens with Omega_p and goes to zero with the oscillator
     # strength the model gives the solvent
-    small = [dispersion_energy(res.traces, chain.grid, w / HARTREE_TO_EV)
+    small = [solute_solvent_dispersion_energy(res.traces, chain.grid,
+                                              w / HARTREE_TO_EV)
              for w in (1e-4, 1e-3, 1e-2)]
     monotone = all(0.0 >= small[i] > small[i + 1] for i in range(len(small) - 1))
     ok &= check(monotone and abs(small[-1]) < abs(res.dispersion),
@@ -221,7 +232,8 @@ def test_dispersion_limits_and_the_fold_identity():
 
     adiabatic = solvated_correlation_energies(chain, omega_p=ADIABATIC_OMEGA_P)
     identity = abs(adiabatic.fold - res.dressed
-                   - dispersion_energy(res.traces, chain.grid, ADIABATIC_OMEGA_P))
+                   - solute_solvent_dispersion_energy(res.traces, chain.grid,
+                                                      ADIABATIC_OMEGA_P))
     ok &= check(identity < 1e-9,
                 'F(Omega_p -> inf) = B + dispersion(g = 1)',
                 f'residual {identity:.1e} Ha')
@@ -288,7 +300,7 @@ def test_toluene_solvation_sign():
 
 def test_the_new_terms_leave_the_default_gradient_alone():
     """S = I and C = I is the interaction this route has always used, so the
-    reverse pass through the new branch has to reproduce it BITWISE -- a
+    reverse pass through the new branch has to reproduce it to a few ulp -- a
     gradient that merely agreed to 1e-12 would be a second implementation of
     the same functional, and the fold's own gate could not tell a sign error in
     it from quadrature."""
@@ -301,24 +313,26 @@ def test_the_new_terms_leave_the_default_gradient_alone():
     e0, eps0, x0, d0, fold0 = rpa_energy_and_adjoint(*args, want_grad=True)
     ok = check(fold0 is None, 'the default route carries no fold adjoint')
     # g == 1 makes S = I without taking the default branch: same functional,
-    # same arithmetic, so the whole reverse pass has to be bitwise identical.
+    # same arithmetic, so the whole reverse pass has to be the same to a few
+    # ulp (a second call).
     e, eps_b, x_b, d_b, fold = rpa_energy_and_adjoint(
         *args, want_grad=True, screening=(n_mat, np.ones(chain.grid.nfreq)))
-    ok &= check(e == e0 and np.array_equal(eps_b, eps0)
-                and np.array_equal(x_b, x0) and np.array_equal(d_b, d0),
-                'g == 1 is the default, bitwise')
+    ok &= check(matches(e, e0, RECORDING_BLAS)
+                and all(matches(a, b, RECORDING_BLAS, quantity='gradient')
+                        for a, b in ((eps_b, eps0), (x_b, x0), (d_b, d0))),
+                'g == 1 is the default, to a few ulp')
     ok &= check(fold is not None, 'g == 1 still reports its own adjoint')
     # C = I is the same NUMBER by a different summation -- Tr(I c) as a full
     # contraction rather than a diagonal sum -- so its energy agrees to
-    # rounding and not to the bit. The adjoints it returns are bitwise, which
+    # rounding and not to the bit. The adjoints it returns agree to a few ulp, which
     # is the half that a sign error would break.
     e, eps_b, x_b, d_b, fold = rpa_energy_and_adjoint(*args, want_grad=True,
                                                       counter_term=eye)
     ok &= check(abs(e - e0) < 1e-13 * abs(e0), 'C == I is the default energy',
                 f'relative difference {abs(e - e0) / abs(e0):.2e}')
-    ok &= check(np.array_equal(eps_b, eps0) and np.array_equal(x_b, x0)
-                and np.array_equal(d_b, d0),
-                'C == I leaves the factor adjoints bitwise')
+    ok &= check(all(matches(a, b, RECORDING_BLAS, quantity='gradient')
+                    for a, b in ((eps_b, eps0), (x_b, x0), (d_b, d0))),
+                'C == I leaves the factor adjoints to a few ulp')
     assert ok
 
 
@@ -333,8 +347,9 @@ def test_the_folded_gradient_matches_finite_difference():
     everywhere it enters, the orbital response included.
     """
     chain = solvated_chain('water')
-    folded = RPAGroundStateChain(chain.mol0, scf_factory, auxbasis='cc-pvdz-ri',
-                                 environment=chain.environment, fold=True)
+    folded = RPAGroundStateChain(chain.mol0, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(chain.mol0)},
+                                                                            solvent={'fold': True}),
+                                 environment=chain.environment)
     g_fold, _, _ = folded.correlation_gradient()
     g_plain, _, _ = chain.correlation_gradient()
     x0 = folded.mol0.atom_coords()
@@ -371,8 +386,9 @@ def test_the_fold_gradient_needs_the_environments_own_derivative():
     not handed a gas-phase-shaped force: the whole new term IS the environment
     moving."""
     chain = solvated_chain('water')
-    folded = RPAGroundStateChain(chain.mol0, scf_factory, auxbasis='cc-pvdz-ri',
-                                 environment=chain.environment, fold=True)
+    folded = RPAGroundStateChain(chain.mol0, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(chain.mol0)},
+                                                                            solvent={'fold': True}),
+                                 environment=chain.environment)
     folded.environment.differentiable = False
     try:
         with pytest.raises(NotImplementedError, match='refuses forces'):
@@ -407,7 +423,7 @@ def test_the_solvent_carries_its_own_pole_energy():
 def test_an_environment_that_does_not_respond_is_adiabatic():
     """g is part of the contract, and an environment with no dynamics of its
     own returns 1: fixed charges do not respond at any frequency."""
-    from src.Base.environment import PointCharges
+    from src.environments.environment import PointCharges
     w = np.array([0.0, 1.0, 100.0])
     for env in (NoEnvironment(), PointCharges([[0.0, 0.0, 3.0]], [1.0])):
         assert env.dynamic_factor(w) == pytest.approx(1.0)
@@ -424,11 +440,15 @@ def test_the_fold_is_off_by_default_and_exact_when_asked_for():
     surface rather than the electrostatic cavity.
     """
     chain = solvated_chain('water')
-    folded = RPAGroundStateChain(chain.mol0, scf_factory, auxbasis='cc-pvdz-ri',
-                                 environment=chain.environment, fold=True)
+    folded = RPAGroundStateChain(chain.mol0, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(chain.mol0)},
+                                                                            solvent={'fold': True}),
+                                 environment=chain.environment)
     ref = solvated_correlation_energies(chain)
-    assert chain.correlation_energy() == ref.dressed          # bitwise
-    assert folded.correlation_energy() == ref.fold            # bitwise
+    # the chain's E_c and the three-functional evaluation: two computations
+    assert_same(chain.correlation_energy(), ref.dressed, label='dressed')
+    # `folded` converges its own SCF: to a few ulp, never bitwise across two
+    # SCF runs
+    assert_same(folded.correlation_energy(), ref.fold, label='fold')
     # the two static members bracket any consistent member of the family;
     # the fold is outside because its counter-term is deliberately unmatched
     lo, hi = sorted((ref.bare, ref.dressed))
@@ -441,9 +461,9 @@ def test_refreeze_carries_the_fold_and_the_radii():
     surface that quietly unfolds, or a tailored grid that reverts to the atomic
     optimizer's."""
     chain = solvated_chain('water')
-    folded = RPAGroundStateChain(chain.mol0, scf_factory, auxbasis='cc-pvdz-ri',
-                                 environment=chain.environment, fold=True,
-                                 radii=chain.factorization.radii)
+    folded = RPAGroundStateChain(chain.mol0, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'radii': chain.factorization.radii},
+                                                                            solvent={'fold': True}),
+                                 environment=chain.environment)
     fresh = folded.refreeze(folded.mol0)
     ok = check(fresh.fold, 'the refrozen chain still folds')
     ok &= check(fresh.factorization.radii_tag == folded.factorization.radii_tag,
@@ -456,9 +476,12 @@ def test_refreeze_carries_the_fold_and_the_radii():
 def test_the_gas_phase_never_sees_the_fold():
     """No environment, nothing to dress: asking for the fold changes nothing."""
     mol = gto.M(atom=H2O, basis='cc-pvdz', verbose=0)
-    plain = RPAGroundStateChain(mol, scf_factory, auxbasis='cc-pvdz-ri')
-    asked = RPAGroundStateChain(mol, scf_factory, auxbasis='cc-pvdz-ri', fold=True)
-    assert asked.correlation_energy() == plain.correlation_energy()
+    plain = RPAGroundStateChain(mol, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(mol)}))
+    asked = RPAGroundStateChain(mol, scf_factory, numerics=Numerics(isdf={'auxbasis': 'cc-pvdz-ri', 'counts': g1(mol)},
+                                                                    solvent={'fold': True}))
+    # two chains, each on its own SCF: to a few ulp, not bitwise
+    assert_same(asked.correlation_energy(), plain.correlation_energy(),
+                label='gas-phase fold')
     # and a force is not refused, because no new term is active
     asked.correlation_gradient()
 

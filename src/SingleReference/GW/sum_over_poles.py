@@ -18,7 +18,7 @@ which, put into the frequency convolution, integrates in closed form to
                       + sum_{a,m} A^pa_m / (omega - eps_a - Om_m) .
 
 The omega dependence is then analytic: no argument of W depends on omega, so
-the screening is never evaluated off the imaginary axis, the Newton iteration
+the screening is never evaluated off the imaginary axis, the bracketed root search
 costs nothing after the fit, and there is no residue SET whose membership can
 change along a nuclear coordinate.
 
@@ -27,7 +27,7 @@ wc[k, q] = Bp[:,q]^T [W(i.nu_k) - I] Bp[:,q], which the integral term already
 builds, so it costs no screening evaluation of its own. With the Om_m FROZEN
 after `fit_poles`, A = F^+ wc is a fixed LINEAR map of that data, which is what
 makes the adjoint of the whole route that map transposed
-(`gradients.sum_over_poles_adjoint`).
+(`gradients.gwbse.sum_over_poles_adjoint`).
 
 THE WALL. Eq. (27) of the pole paper: the denominators stay bounded away from
 zero only while |eps_q - omega| < Om_1, the lowest true neutral excitation, for
@@ -46,12 +46,16 @@ import warnings
 import numpy as np
 import scipy.linalg
 
-from src.Base.constants import (QP_CD_NEWTON_MAX_ITER, QP_CD_NEWTON_TOL,
-                                SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
-                                SOP_FIT_STRIDE, SOP_N_POLES,
-                                SOP_POLE_MERGE_TOL)
-from src.SingleReference.GW.contour_deformation import residue_set
-from src.SingleReference.GW.real_screening import ov_energies
+from src.Base.numerical_flags import flag
+from src.Base.numerics.constants import (QP_ROOT_TOL,
+                                         QP_SUBSPACE_MAX_ITER, QP_SUBSPACE_TOL,
+                                         SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
+                                         SOP_FIT_STRIDE, SOP_N_POLES,
+                                         SOP_POLE_MERGE_TOL)
+from src.SingleReference.GW.real_screening import residue_set
+from src.Base.orbital_spaces import ov_energies
+from src.Solvers.qp_equation import (solve_qp_equation_poles,
+                                     solve_qp_hamiltonian)
 
 
 def initial_poles(n_poles, gap, e_max):
@@ -97,6 +101,10 @@ def pole_amplitudes(wc, poles, nu_points, rcond=SOP_FIT_RCOND):
     return pole_pseudoinverse(nu_points, poles, rcond) @ np.asarray(wc, float)
 
 
+class VectorFitFallback(RuntimeWarning):
+    """The vector-fitting least squares fell back to another LAPACK driver."""
+
+
 def _vector_fit_lstsq(block, rhs):
     """The vector-fitting least squares, by LAPACK gelsd; by gelss where
     gelsd's SVD does not converge, which it can on finite, well-scaled
@@ -108,9 +116,10 @@ def _vector_fit_lstsq(block, rhs):
     # numpy's rcond=None cut, so a rank-deficient block keeps its rank
     cut = np.finfo(float).eps * max(block.shape)
     for driver, what in (('gelss', 'QR-iteration SVD'), ('gelsy', 'pivoted QR')):
-        warnings.warn(f'vector fitting: the least squares failed on a '
-                      f'{block.shape} block ({failed}); solved by {driver} '
-                      f'({what}) instead', RuntimeWarning, stacklevel=3)
+        flag('vector_fit_lstsq_fallback',
+             f'vector fitting: the least squares failed on a {block.shape} '
+             f'block ({failed}); solved by {driver} ({what}) instead',
+             VectorFitFallback, stacklevel=3)
         try:
             return scipy.linalg.lstsq(block, rhs, cond=cut,
                                       lapack_driver=driver)[0]
@@ -253,22 +262,37 @@ def compressible(omega, eps, nocc, pair_energies=None):
     """
     limit = float((ov_energies(eps, nocc) if pair_energies is None
                    else np.asarray(pair_energies, float)).min())
+    return pole_condition(omega, eps, nocc, limit)
+
+
+def pole_condition(omega, eps, nocc, limit):
+    """(ok, reach) of Eq. (27) at omega against Om_1 = limit: reach is the
+    worst pole the contour sweeps in units of limit, ok is reach < 1."""
     swept = residue_set(eps, nocc, omega)
     reach = max((abs(eps[q] - omega) for q, _ in swept), default=0.0) / limit
     return bool(reach < 1.0), float(reach)
 
 
-def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True):
+def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True, out=None):
     """Sigma^c_pp(omega) from the pole model -- closed form, no screening call.
 
-    check: refuse the states the compression condition excludes
+    check: warn about the states the compression condition excludes
            (`compressible`) and the near-resonant models `pole_clearance`
            catches. Beyond the wall the error scatters with M rather than
            falling, so a converged-looking value at one M means nothing.
+    out: a dict that receives each warned condition by name (refuse inputs,
+    warn numerics): 'compression_excluded'
+         (the reach, in gaps) and 'resonant' (the clearance), for the
+         caller's record; the value returned does not depend on it.
+
+    Read by the tests alone: the closed form the pole-model route and its
+    adjoint are gated against.
     """
     if check:
         ok, reach = compressible(omega, eps, nocc)
         if not ok:
+            if out is not None:
+                out['compression_excluded'] = reach
             warnings.warn(
                 f'omega = {omega:.4f} sweeps a pole {reach:.2f} gaps '
                 f'away, so Eq. (27) excludes this state from '
@@ -277,6 +301,8 @@ def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True):
                 RuntimeWarning, stacklevel=2)
         clear = pole_clearance(omega, poles, eps, nocc)
         if clear < SOP_CLEARANCE_MIN:
+            if out is not None:
+                out['resonant'] = float(clear)
             warnings.warn(
                 f'the pole model is resonant at omega = {omega:.4f}: its '
                 f'closest denominator is {clear:.2g} of the lowest auxiliary '
@@ -290,42 +316,34 @@ def sigma_sop_slope(omega, amplitudes, poles, eps, nocc):
 
     Contour deformation pays a W build and a solve per residue for this; here
     it is the same sum with squared denominators.
+
+    Read by the tests alone, beside `sigma_sop`.
     """
     return -float(np.sum(np.asarray(amplitudes, float).T
                          / denominators(omega, poles, eps, nocc) ** 2))
 
 
 def qp_energy_sop(p, amplitudes, poles, eps, nocc, xc_correction=0.0,
-                  tol=QP_CD_NEWTON_TOL, max_iter=QP_CD_NEWTON_MAX_ITER,
-                  w0=None):
+                  tol=QP_ROOT_TOL, follow=None, branch=None):
     """(eps^QP_p, Z_p) from w = eps_p + <Sigma_x - v_xc> + Sigma^c(w).
 
-    Newton with the closed-form slope. There is no pole guard and no residue
-    set to re-decide: the model has no pole ON the real axis where the
-    quasiparticle lives, so nothing here has to be frozen for a gradient. What
-    can still fail is the compression condition, which `pole_clearance` reports
-    and which no iteration repairs.
-
-    This is NOT `Solvers.qp_equation.solve_qp_equation_newton_guarded`: there is
-    no pole on the real axis to guard the iterate against, and the residual is
-    spelled in the model's own order, eps_p + xc + Sigma - w, which is that
-    solver's negated step to within a last-bit rounding the frozen numbers of
-    this route are pinned to.
+    The model's Sigma^c is a sum of known poles (`pole_denominators`), so
+    every root is bracketed between neighbouring poles and the one of largest
+    Z is the quasiparticle (`Solvers.qp_equation.solve_qp_equation_poles`):
+    no seed, the same rule at every geometry, intervals no bound lets beat the
+    best Z skipped. follow: a walk's previous root and the labels of its
+    poles, (w, (lo, hi)), followed between the same two poles whatever its
+    weight (`find_qp_root`); branch: a dict that receives the labels of the
+    root kept and its branch (`solve_qp_equation_poles`). A label is a
+    pole's index in amplitudes.T.ravel(): orbital s and pole m of the model
+    are s * n_poles + m. What can still fail is the compression condition, which
+    `pole_clearance` reports and which no root search repairs.
     """
-    w = float(eps[p] if w0 is None else w0)
-    for _ in range(int(max_iter)):
-        s = sigma_sop(w, amplitudes, poles, eps, nocc, check=False)
-        slope = sigma_sop_slope(w, amplitudes, poles, eps, nocc)
-        step = (eps[p] + xc_correction + s - w) / (1.0 - slope)
-        w += step
-        if abs(step) < tol:
-            break
-    else:
-        warnings.warn(f'the quasiparticle Newton for orbital {p} did not '
-                      f'converge to {tol:g} in {max_iter} steps',
-                      RuntimeWarning, stacklevel=2)
-    slope = sigma_sop_slope(w, amplitudes, poles, eps, nocc)
-    return w, 1.0 / (1.0 - slope)
+    num = np.asarray(amplitudes, float).T.ravel()
+    pol = pole_denominators(poles, eps, nocc).ravel()
+    return solve_qp_equation_poles(num, pol, float(eps[p] + xc_correction),
+                                   tol=tol, label=f'orbital {p}',
+                                   follow=follow, out=branch)
 
 
 def sop_from_wc(wc, nu_points, eps, nocc, n_poles=SOP_N_POLES, relocate=True,
@@ -347,3 +365,102 @@ def sop_from_wc(wc, nu_points, eps, nocc, n_poles=SOP_N_POLES, relocate=True,
         poles = fit_poles(wc, nu_points, poles, stride=stride,
                           bounds=(gap, top), state=state)
     return poles, pole_amplitudes(wc, poles, nu_points)
+
+
+def pole_denominators(poles, eps, nocc):
+    """d[s, m], where each auxiliary pole of Sigma^c sits on the real axis:
+    eps_s - Om_m for occupied s, eps_s + Om_m for virtual s, so that
+    Sigma^c(omega) = sum_sm A_sm / (omega - d_sm)."""
+    sign = np.where(np.arange(len(eps)) < nocc, 1.0, -1.0)
+    return (np.asarray(eps, float)[:, None]
+            - sign[:, None] * np.asarray(poles, float)[None, :])
+
+
+def subspace_residues(wc, poles, nu_points):
+    """A[x, a, b], x = (s, m) s-major, of a subspace on ONE set of poles.
+
+    wc: {(a, b): wc_ab} for a <= b positions in the subspace, each (nfreq,
+    norb), B_a^T [W(i.nu) - I] B_b column by column. The amplitudes are the
+    fixed linear map F^+ of every element, so A is the pole model of the
+    subspace's Sigma^c as an operator: rotating the orbitals rotates A.
+    """
+    n = 1 + max(b for _, b in wc)
+    pinv = pole_pseudoinverse(nu_points, poles)
+    first = next(iter(wc.values()))
+    out = np.zeros((first.shape[1] * len(poles), n, n))
+    for (a, b), w in wc.items():
+        amp = (pinv @ np.asarray(w, float)).T.ravel()
+        out[:, a, b] = amp
+        out[:, b, a] = amp
+    return out
+
+
+def _resolvent_terms(h, amp, d):
+    """(e, U, r, U^T A U) of H: its eigenpairs, r[x, k] = 1/(e_k - d_x) and
+    the residues in its eigenbasis."""
+    e, u = np.linalg.eigh(h)
+    r = 1.0 / (e[None, :] - np.asarray(d, float).ravel()[:, None])
+    return e, u, r, u.T @ amp @ u
+
+
+def subspace_self_energy_jacobian(r, at):
+    """J[(k, l), (a, b)], the derivative of Sigma^c[H] on H in H's eigenbasis,
+    from dR_x = -R_x dH R_x: delta_ak T1[k, l, b] + delta_bl T2[k, l, a] with
+    T1 = -1/2 sum_x r_xk r_xb A_x,bl and T2 = -1/2 sum_x A_x,ka r_xa r_xl."""
+    n = r.shape[1]
+    t1 = -0.5 * np.einsum('xk,xb,xbl->klb', r, r, at)
+    t2 = -0.5 * np.einsum('xka,xa,xl->kla', at, r, r)
+    jac = np.zeros((n, n, n, n))
+    for k in range(n):
+        jac[k, :, k, :] += t1[k]
+    for l in range(n):
+        jac[:, l, :, l] += t2[:, l, :]
+    return jac.reshape(n * n, n * n)
+
+
+def subspace_hamiltonian(e0, amp, d, seed, tol=QP_SUBSPACE_TOL,
+                         max_iter=QP_SUBSPACE_MAX_ITER):
+    """(H, iterations, converged): the quasiparticle Hamiltonian of one
+    subspace at self-consistency,
+
+        H = e0 + 1/2 sum_x [(H - d_x)^-1 A_x + A_x (H - d_x)^-1] ,
+
+    e0 = F + Sigma_x - v_xc on the subspace (with Sigma^env in a continuum),
+    A the residues on the subspace's common poles (`subspace_residues`), d
+    their positions (`pole_denominators`). In H's eigenbasis element kl is
+    [Sigma^c_kl(e_k) + Sigma^c_kl(e_l)] / 2: the symmetrized quasiparticle
+    self-consistent form (Faleev, van Schilfgaarde and Kotani, Phys. Rev. B
+    70, 126406 (2004), Eq. (2)) restricted to the subspace, on the G0W0
+    self-energy. Every term is an operator on the subspace and Sigma^c is
+    taken at the eigenvalues, never at an orbital's own root, so U^T H U is
+    the H of the rotated basis U: the eigenvalues do not depend on how the
+    orbitals of a near-degenerate group rotate into each other. A subspace
+    of one orbital is the diagonal equation w = e0 + Sigma^c(w).
+
+    Solved by Newton from `seed` (`Solvers.qp_equation.solve_qp_hamiltonian`),
+    (1 - J) dH = e0 + Sigma^c[H] - H with J the derivative of Sigma^c[H]
+    (`subspace_self_energy_jacobian`).
+    """
+    e0 = np.asarray(e0, float)
+    n = len(e0)
+
+    def newton_step(h):
+        e, u, r, at = _resolvent_terms(h, amp, d)
+        g = 0.5 * (np.einsum('xkl,xk->kl', at, r)
+                   + np.einsum('xkl,xl->kl', at, r))
+        res = u.T @ e0 @ u + g - np.diag(e)
+        res = 0.5 * (res + res.T)
+        jac = subspace_self_energy_jacobian(r, at)
+        step = np.linalg.solve(np.eye(n * n) - jac, res.ravel()).reshape(n, n)
+        h = h + u @ (0.5 * (step + step.T)) @ u.T
+        return 0.5 * (h + h.T), float(np.abs(res).max())
+
+    return solve_qp_hamiltonian(newton_step, seed, tol=tol, max_iter=max_iter)
+
+
+def subspace_pole_strengths(h, amp, d):
+    """Z_k = [1 - <k| dSigma^c/domega (e_k) |k>]^-1 for each eigenvector k of
+    the subspace's H: a quasiparticle when it lies in (0, 1]."""
+    _, _, r, at = _resolvent_terms(h, amp, d)
+    slope = -np.einsum('xkk,xk->k', at, r ** 2)
+    return 1.0 / (1.0 - slope)

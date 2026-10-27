@@ -12,7 +12,7 @@ Checks:
   4. overlap_pick follows an interior root instead of the lowest
   5. ee-ADC matrix-free == dense, including the singlet/triplet channels,
      each solved in its flip-pair basis
-  6. charged ADC matrix-free == dense, and last_result['converged'] is the
+  6. charged ADC matrix-free == dense, and last_result['conv'] is the
      solver's own flag rather than a hardcoded all-True
 """
 import os
@@ -26,7 +26,7 @@ from pyscf import gto, scf
 
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 from src.SingleReference.ADC import ADCSolver
-from src.SingleReference.ADC.eeADC.ee_driver import solve_ee_adc
+from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 
 H2O = 'O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471'
 
@@ -162,8 +162,8 @@ def check_charged_adc_matrix_free_matches_dense():
     target = float(e_dense[int(np.argmax(np.abs(vec[homo, :])))])
 
     solver = ADCSolver(mf, level='adc3', matrix_free=True)
-    e_iter, _ = solver.solve(nroots=1, conv_tol=1e-8)
-    conv = solver.last_result['converged']
+    e_iter, _ = solver.solve(nroots=1, tol=1e-8)
+    conv = solver.last_result['conv']
     d = abs(target - float(e_iter[0]))
     ok = d < 1e-8 and bool(np.all(conv))
     print(f"charged ADC(3) dense HOMO pole vs root-following Davidson: {d:.2e} "
@@ -177,9 +177,9 @@ def check_charged_adc_matrix_free_matches_dense():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         _, _, _, starved = davidson_follow(lambda v: A @ v, dg, 200, 10, 0,
-                                           ref, 1, conv_tol=1e-12, max_cycle=1)
+                                           ref, 1, tol=1e-12, max_cycle=1)
         _, _, _, healthy = davidson_follow(lambda v: A @ v, dg, 200, 10, 0,
-                                           ref, 1, conv_tol=1e-8)
+                                           ref, 1, tol=1e-8)
     ok2 = not bool(np.all(starved)) and bool(np.all(healthy))
     print(f"   davidson_follow's flag distinguishes the two: starved="
           f"{bool(np.all(starved))} healthy={bool(np.all(healthy))}: "

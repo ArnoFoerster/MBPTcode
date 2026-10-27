@@ -35,15 +35,15 @@ import numpy as np
 import pytest
 from pyscf import gto, lib, scf
 
-from src.Base.constants import CD_NFREQ
-from src.Base.utils.grids import gap_scaled_w0, gauss_legendre_grid
+from src.Base.numerics.constants import CD_NFREQ
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.SingleReference.GW.contour_deformation import (cd_integral_weights,
                                                         residue_set, sigma_cd,
                                                         sigma_cd_slope,
                                                         wc_explicit)
-from src.SingleReference.GW.real_screening import (ExplicitRealScreening,
-                                                   ov_energies)
-from src.gradients.contour_deformation_adjoint import sigma_cd_backward
+from src.SingleReference.GW.real_screening import ExplicitRealScreening
+from src.Base.orbital_spaces import ov_energies
+from src.gradients.gwbse.contour_deformation_adjoint import sigma_cd_backward
 
 #: Distances from the orbital energy, both sides, from just outside the
 #: residue term's on-contour band (1e-10) to where nothing is singular.

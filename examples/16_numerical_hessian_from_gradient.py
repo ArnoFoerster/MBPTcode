@@ -21,7 +21,7 @@ from pyscf.hessian import thermo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_CM
+from src.Base.numerics.constants import HARTREE_TO_CM
 from src.properties.hessian import numerical_hessian
 from src.properties.vibronic import normal_modes
 
@@ -31,7 +31,7 @@ mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
 
 def factory(m):
     mf = scf.RHF(m)
-    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     return mf
 

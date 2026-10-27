@@ -1,7 +1,8 @@
-# GENERATED CODE -- restricted (spin-blocked) 1-RDM oo/vv/ov/vo blocks,
-# _aa only (off-diagonal spin blocks vanish; final spatial density is
-# 2x this block). Includes full Lambda1/Lambda2/Lambda3 feedback.
-# Do not edit by hand.
+# GENERATED CODE -- do not edit by hand.
+# Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
+# Restricted 1-RDM oo/vv/ov/vo blocks, _aa only (off-diagonal spin blocks vanish; the spatial density is
+# 2x this block), with the full Lambda1/Lambda2/Lambda3 feedback.
+# See that module's docstring for the equations/conventions.
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 
@@ -19,19 +20,19 @@ def d1_oo_aa(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab, t3_a
     d1_oo -= 0.5 * _tmp3
     d1_oo -= 0.5 * _tmp3
     _tmp4 = einsum('ijncba,cbaijm->mn', l3_aaaaaa, t3_aaaaaa, optimize=True)
-    d1_oo -= 0.0833333 * _tmp4
+    d1_oo -= 0.0833333333333333 * _tmp4
     _tmp5 = einsum('injcba,cbaimj->mn', l3_aabaab, t3_aabaab, optimize=True)
-    d1_oo -= 0.0833333 * _tmp5
-    d1_oo -= 0.0833333 * _tmp5
-    d1_oo -= 0.0833333 * _tmp5
+    d1_oo -= 0.0833333333333333 * _tmp5
+    d1_oo -= 0.0833333333333333 * _tmp5
+    d1_oo -= 0.0833333333333333 * _tmp5
     _tmp6 = einsum('njicba,cbamji->mn', l3_aabaab, t3_aabaab, optimize=True)
-    d1_oo -= 0.0833333 * _tmp6
-    d1_oo -= 0.0833333 * _tmp6
-    d1_oo -= 0.0833333 * _tmp6
+    d1_oo -= 0.0833333333333333 * _tmp6
+    d1_oo -= 0.0833333333333333 * _tmp6
+    d1_oo -= 0.0833333333333333 * _tmp6
     _tmp7 = einsum('njicba,cbamji->mn', l3_abbabb, t3_abbabb, optimize=True)
-    d1_oo -= 0.0833333 * _tmp7
-    d1_oo -= 0.0833333 * _tmp7
-    d1_oo -= 0.0833333 * _tmp7
+    d1_oo -= 0.0833333333333333 * _tmp7
+    d1_oo -= 0.0833333333333333 * _tmp7
+    d1_oo -= 0.0833333333333333 * _tmp7
     return d1_oo
 
 
@@ -46,18 +47,18 @@ def d1_vv_aa(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab, t3_a
     d1_vv += 0.5 * _tmp2
     d1_vv += 0.5 * _tmp2
     _tmp3 = einsum('ijkeba,fbaijk->ef', l3_aaaaaa, t3_aaaaaa, optimize=True)
-    d1_vv += 0.0833333 * _tmp3
+    d1_vv += 0.0833333333333333 * _tmp3
     _tmp4 = einsum('ijkeba,fbaijk->ef', l3_aabaab, t3_aabaab, optimize=True)
-    d1_vv += 0.0833333 * _tmp4
-    d1_vv += 0.0833333 * _tmp4
-    d1_vv += 0.0833333 * _tmp4
-    d1_vv += 0.0833333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp4
     _tmp5 = einsum('ijkeba,fbaijk->ef', l3_abbabb, t3_abbabb, optimize=True)
-    d1_vv += 0.0833333 * _tmp5
-    d1_vv += 0.0833333 * _tmp4
-    d1_vv += 0.0833333 * _tmp4
-    d1_vv += 0.0833333 * _tmp5
-    d1_vv += 0.0833333 * _tmp5
+    d1_vv += 0.0833333333333333 * _tmp5
+    d1_vv += 0.0833333333333333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp4
+    d1_vv += 0.0833333333333333 * _tmp5
+    d1_vv += 0.0833333333333333 * _tmp5
     return d1_vv
 
 
@@ -91,32 +92,32 @@ def d1_ov_aa(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, t3_aaaaaa, t3_aabaab, t3_a
     d1_ov -= 0.5 * _tmp10
     d1_ov -= 0.5 * _tmp10
     _tmp11 = einsum('ijkcba,cbaijm,ek->me', l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp11
+    d1_ov -= 0.0833333333333333 * _tmp11
     _tmp12 = einsum('ikjcba,cbaimj,ek->me', l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp12
-    d1_ov -= 0.0833333 * _tmp12
-    d1_ov -= 0.0833333 * _tmp12
+    d1_ov -= 0.0833333333333333 * _tmp12
+    d1_ov -= 0.0833333333333333 * _tmp12
+    d1_ov -= 0.0833333333333333 * _tmp12
     _tmp13 = einsum('kjicba,cbamji,ek->me', l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp13
-    d1_ov -= 0.0833333 * _tmp13
-    d1_ov -= 0.0833333 * _tmp13
+    d1_ov -= 0.0833333333333333 * _tmp13
+    d1_ov -= 0.0833333333333333 * _tmp13
+    d1_ov -= 0.0833333333333333 * _tmp13
     _tmp14 = einsum('kjicba,cbamji,ek->me', l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp14
-    d1_ov -= 0.0833333 * _tmp14
-    d1_ov -= 0.0833333 * _tmp14
+    d1_ov -= 0.0833333333333333 * _tmp14
+    d1_ov -= 0.0833333333333333 * _tmp14
+    d1_ov -= 0.0833333333333333 * _tmp14
     _tmp15 = einsum('ijkcba,ebaijk,cm->me', l3_aaaaaa, t3_aaaaaa, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp15
+    d1_ov -= 0.0833333333333333 * _tmp15
     _tmp16 = einsum('ijkcba,ebaijk,cm->me', l3_aabaab, t3_aabaab, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp16
-    d1_ov -= 0.0833333 * _tmp16
-    d1_ov -= 0.0833333 * _tmp16
-    d1_ov -= 0.0833333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp16
     _tmp17 = einsum('ijkcba,ebaijk,cm->me', l3_abbabb, t3_abbabb, t1_aa, optimize=True)
-    d1_ov -= 0.0833333 * _tmp17
-    d1_ov -= 0.0833333 * _tmp16
-    d1_ov -= 0.0833333 * _tmp16
-    d1_ov -= 0.0833333 * _tmp17
-    d1_ov -= 0.0833333 * _tmp17
+    d1_ov -= 0.0833333333333333 * _tmp17
+    d1_ov -= 0.0833333333333333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp16
+    d1_ov -= 0.0833333333333333 * _tmp17
+    d1_ov -= 0.0833333333333333 * _tmp17
     _tmp18 = einsum('ia,am,ei->me', l1_aa, t1_aa, t1_aa, optimize=True)
     d1_ov -= 1 * _tmp18
     _tmp19 = einsum('ijkcba,baim,ecjk->me', l3_aaaaaa, t2_aaaa, t2_aaaa, optimize=True)

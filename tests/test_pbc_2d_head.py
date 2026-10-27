@@ -1,4 +1,4 @@
-"""The 2D head restored, as an alternative to damping on a slab.
+"""The 2D head, as an alternative to damping on a slab.
 
 pyscf's `dimension=2` kernel puts `coulG[G=0] = -pi L_z^2 / 2`, the only
 negative entry in the whole kernel, and that single value is what makes the
@@ -18,17 +18,16 @@ refining the in-plane k-mesh FORCES a taller vacuum -- measured with this
 repo's own `nyquist_params`/`damping_support`, MoS2 needs 24.6 A of cell height
 at 12x12 and 61.6 A at 30x30. The z FFT mesh grows with L_z at fixed cutoff, so
 every grid-touching step (the ISDF fit, `coulomb_matrix_q`) then goes as N_k^3
-in-plane instead of N_k^2. Restoring the head removes the reason for damping
+in-plane instead of N_k^2. Keeping the head removes the reason for damping
 and with it that coupling.
 
 THE TWO ROUTES WANT OPPOSITE THINGS, which is the part worth remembering:
-damping needs the vacuum TALL relative to the mesh; the restored head needs the
+damping needs the vacuum TALL relative to the mesh; the head needs the
 mesh FINE relative to the vacuum (R < 8/L_z). Production wants fine meshes, so
 the trade is favourable -- but the head route genuinely fails on a coarse mesh
 over a tall cell, and it raises there rather than returning an indefinite
 metric.
 
-The numbers below were measured before the head was implemented.
 """
 import os
 import sys
@@ -105,7 +104,7 @@ def test_the_normalization_carries_exactly_one_factor_of_L():
     assert abs((v_sa + np.pi * L ** 2 / 2) * q / (2 * np.pi * L) - 1) < 1e-7
 
 
-# --- the fix ----------------------------------------------------------------
+# --- the head ---------------------------------------------------------------
 
 def test_restored_head_makes_the_metric_psd_without_damping():
     """THE GATE: no damping, no assert_damping_fits, and the metric is accepted."""

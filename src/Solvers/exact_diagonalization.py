@@ -10,8 +10,9 @@ import math
 
 import numpy as np
 
-from src.Base.pyscf_interface import (embed_spatial_eri_in_spin_orbitals,
-                                      get_antisymmetrized_integrals)
+from src.Base.pyscf.pyscf_interface import (embed_spatial_eri_in_spin_orbitals,
+                                            get_antisymmetrized_integrals,
+                                            spin_orbital_one_body)
 
 
 def spatial_to_spin_orbitals(g_eff, n_spatial_orbs):
@@ -26,11 +27,7 @@ def spatial_to_spin_orbitals(g_eff, n_spatial_orbs):
     if 0 in g_eff:
         g_spin[0] = g_eff[0]
     if 1 in g_eff:
-        h1_spatial = g_eff[1]
-        h1_spin = np.zeros((n_spin, n_spin))
-        h1_spin[0::2, 0::2] = h1_spatial
-        h1_spin[1::2, 1::2] = h1_spatial
-        g_spin[1] = h1_spin
+        g_spin[1] = spin_orbital_one_body(g_eff[1])
     if 2 in g_eff:
         g_spin[2] = get_antisymmetrized_integrals(
             embed_spatial_eri_in_spin_orbitals(g_eff[2]))

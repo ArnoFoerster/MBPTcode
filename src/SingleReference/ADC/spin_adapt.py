@@ -24,7 +24,7 @@ the subspace-invariance identity ||H T - T (T^T H T)|| ~ 0 (see tests).
 
 Convention notes (locked in by the invariance test, not by trust):
 - interleaved spin orbitals, alpha=even (Sz=+1/2), beta=odd -- matching
-  ADCSolverRestricted._get_spin_orbital_solver's np.repeat embedding.
+  ADCSolverRestricted.spin_orbital_solver's np.repeat embedding.
 - config -> Fock-state map (operator strings applied right-to-left to
   |HF>): 2h1p (i<j, a): a+_a a_j a_i; 2p1h (i, a<b): a+_a a+_b a_i;
   3h2p (i<j<k, a<b): a+_a a+_b a_k a_j a_i; 3p2h (i<j, a<b<c):
@@ -35,10 +35,11 @@ Convention notes (locked in by the invariance test, not by trust):
 """
 import numpy as np
 
-from src.Base.utils.linearAlgebra.diagonalization import eigh_symmetric
+from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
 from scipy import sparse
 
 from src.SingleReference.ADC import base  # module import: base.py imports this file
+from src.SingleReference.ADC.adc_utils import NoccCache
 
 
 # =====================================================================
@@ -86,7 +87,7 @@ def det_sz(det):
     return sz
 
 
-def _apply_S2(det, norb_spatial):
+def apply_S2(det, norb_spatial):
     """S^2 |det> = S-S+|det> + Sz(Sz+1)|det>, exactly, as a dict
     {det': coefficient}. S+ = sum_p a+_{2p} a_{2p+1} (alpha=even)."""
     out = {}
@@ -136,13 +137,13 @@ def _class_configs(solver, nocc, cls):
     """The solver's config list for `cls` as an (ncfg, k) int array of spin
     orbital indices, in the solver's own ordering."""
     if cls == '2h1p':
-        return np.stack(solver._configs_2h1p(nocc), axis=1)
+        return np.stack(solver.configs_2h1p(nocc), axis=1)
     if cls == '2p1h':
-        return np.stack(solver._configs_2p1h(nocc), axis=1)
+        return np.stack(solver.configs_2p1h(nocc), axis=1)
     if cls == '3h2p':
-        return np.stack(solver._configs_3h2p(nocc), axis=1)
+        return np.stack(solver.configs_3h2p(nocc), axis=1)
     if cls == '3p2h':
-        return np.stack(solver._configs_3p2h(nocc), axis=1)
+        return np.stack(solver.configs_3p2h(nocc), axis=1)
     raise ValueError(cls)
 
 
@@ -220,7 +221,7 @@ def build_class_T(solver, nocc, cls, memoize=True):
     starts = np.where(newgrp)[0]
     ends = np.append(starts[1:], len(gorder))
     groups_list = [gorder[s:e] for s, e in zip(starts, ends)]
-    groups_list.sort(key=lambda m: m[0])   # legacy order: by smallest member
+    groups_list.sort(key=lambda m: m[0])   # order: by smallest member
 
     # K (orbital-energy sum) per config -- same for all members of a group
     if cls == '2h1p':
@@ -267,7 +268,7 @@ def build_class_T(solver, nocc, cls, memoize=True):
             n = len(sub)
             S2 = np.zeros((n, n))
             for s_col in range(n):
-                for d2, coef in _apply_S2(dets_sub[s_col], norb_spatial).items():
+                for d2, coef in apply_S2(dets_sub[s_col], norb_spatial).items():
                     r = index.get(d2)
                     if r is not None:
                         # states are sign_c * |det_c>
@@ -375,7 +376,7 @@ class _LazyT:
 # CSF-basis solver adapter
 # =====================================================================
 
-class ADCSolverCSF:
+class ADCSolverCSF(NoccCache):
     """Spin-adapted (doublet-CSF-basis) front-end for a spin-orbital solver:
     exposes norb (SPATIAL), dimensions/dimensions_adc4 (CSF sizes, ~4x
     smaller per class), and build_supermatrix/solve/build_matrix_free_operator
@@ -395,23 +396,11 @@ class ADCSolverCSF:
         self.norb = spin_solver.norb // 2
         self._cache = {}
 
-    def _cached(self, name, nocc, compute_fn):
-        key = (name, nocc)
-        if key not in self._cache:
-            self._cache[key] = compute_fn()
-        return self._cache[key]
-
     def _T(self, nocc):
         """Lazy per-class isometry view (see _LazyT) -- classes are built on
         first access, so e.g. a plain-ADC(3) solve never constructs the
         3h2p/3p2h pieces."""
         return self._cached('T', nocc, lambda: _LazyT(self.spin, nocc))
-
-    @staticmethod
-    def _embed_sc(static_correction):
-        if static_correction is None:
-            return None
-        return base.ADCSolverRestricted._embed_static_correction_spin(static_correction)
 
     # ---------------- dimensions ----------------
 
@@ -457,7 +446,7 @@ class ADCSolverCSF:
         # direction (unit z_p at each alpha orbital), norb (spatial) calls
         # total -- this is the dense/validation seed path, not the hot
         # matrix-free one.
-        ing = self.spin._build_matrix_free_ingredients(nocc)
+        ing = self.spin.matrix_free_ingredients(nocc)
         iu, ju, au, bu = ing['iu'], ing['ju'], ing['au'], ing['bu']
         nvirt = ing['nvirt']
         alpha_orbs = np.arange(0, self.spin.norb, 2)
@@ -513,7 +502,8 @@ class ADCSolverCSF:
         T = self._T(nocc)
         T_SD = T['SD']
         aop_spin, _, _ = self.spin.build_matrix_free_operator(
-            nocc, static_correction=self._embed_sc(static_correction))
+            nocc, static_correction=base.ADCSolverRestricted.embed_static_correction_spin(
+                static_correction))
 
         def aop(z):
             return T_SD.T @ aop_spin(T_SD @ z)
@@ -587,7 +577,7 @@ class ADCSolverCSF:
         """First-order C block in the CSF basis (T_cls^T C_spin T_cls),
         cached -- ~16x smaller than the spin-orbital block and assembled
         without ever forming it (build_supermatrix's dense CSF assembly)."""
-        block_fn = (self.spin._C_2h1p_block if cls == '2h1p'
-                    else self.spin._C_2p1h_block)
+        block_fn = (self.spin.C_2h1p_block if cls == '2h1p'
+                    else self.spin.C_2p1h_block)
         return self._cached(f'_C1st_csf_{cls}', nocc,
                             lambda: self._sandwich(nocc, cls, cls, block_fn))

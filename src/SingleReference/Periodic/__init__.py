@@ -11,11 +11,8 @@ TWO FACTORIZATIONS, with different ceilings:
   * ISDF / THC -- `pbc_isdf`, `pbc_isdf_rpa`, `pbc_isdf_gw`. Separable in the
     k-index, so the same object is O(nkpts). This is the production route.
 
-The two THC entry points are re-exported here because the conventions BETWEEN
-their steps (which range fits which transform, which frequencies Pi must be
-built on) are not guessable and should not be reassembled by callers.
+The two THC entry points are `pbc_isdf_rpa.rpa_ecorr_thc` and
+`pbc_isdf_gw.qp_energy_thc`: call them rather than reassembling their steps,
+since the conventions between the steps (which range fits which transform,
+which frequencies Pi must be built on) are not guessable.
 """
-from src.SingleReference.Periodic.pbc_isdf_gw import qp_energy_thc
-from src.SingleReference.Periodic.pbc_isdf_rpa import rpa_ecorr_thc
-
-__all__ = ['rpa_ecorr_thc', 'qp_energy_thc']

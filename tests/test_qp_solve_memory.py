@@ -23,7 +23,7 @@ compared with what the solve is built to hold:
   * no (ntau, naux, naux) temporary: every tensordot of the reverse pass
     returns at most one auxiliary row's worth, (max(nfreq, ntau), naux) --
     the fold of each frequency block into projbar is one row at a time
-    (`ProjRows.fold`), where it was one whole-array product per block;
+    (`ProjRows.fold`), not one whole-array product per block;
   * over 2, 3 and 8 simulated ranks, proj(tau) and projbar are each rank's
     auxiliary ROWS (`ProjRows`): no rank holds a whole (ntau, naux, naux)
     array at any line, the forward holds one row block and the reverse two,
@@ -46,14 +46,19 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-import src.gradients.qp_space_time as qp_space_time
-import src.gradients.space_time_adjoint as space_time_adjoint
-from src.Base.constants import EXPLICIT_RESIDUE_MAX_GB
-from src.Base.utils.mpi_grid import contiguous_block, run_simulated
+import src.gradients.gwbse.qp_space_time as qp_space_time
+import src.gradients.rpa.space_time_adjoint as space_time_adjoint
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+                                         SCF_TIGHT_CONV_TOL)
+from src.Base.utils.parallel.mpi_grid import contiguous_block
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse import space_time as ls_space_time
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, polarizability_projected_sweep)
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse.excited_state import ExcitedStateChain
+from tests.isdf_test_grid import g1_numerics
 
 BASIS = 'cc-pvdz'
 MOLS = {
@@ -75,7 +80,9 @@ SIZES = [2, 3, 8]
 
 def scf_factory(mol):
     mf = scf.RHF(mol).density_fit(auxbasis=BASIS + '-ri')
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-14, 1e-11, 200
+    mf.conv_tol = SCF_TIGHT_CONV_TOL
+    mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
+    mf.max_cycle = 200
     mf.kernel()
     return mf
 
@@ -194,13 +201,13 @@ SOLVE_FILES = frozenset(m.__file__ for m in (qp_space_time, space_time_adjoint,
 def system(request):
     mol = gto.M(atom=MOLS[request.param], basis=BASIS, verbose=0)
     mf = scf_factory(mol)
-    ch = ExcitedStateChain(mol, scf_factory, mf=mf, solver='davidson',
-                           nroots=5)
+    ch = ExcitedStateChain(
+        mol, scf_factory, mf=mf, numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'nroots': 5})))
     x_mo, d, eps = ch.factors_at(mol, mf)[:3]
     nocc = ch.nocc
-    states = np.union1d(ch.qp_set, [nocc - 3])
+    states = np.union1d(ch.resolved.qp_set, [nocc - 3])
     return dict(x_mo=x_mo, d=d, eps=eps, nocc=nocc, states=states,
-                grid=ch.gw_grid, nu=ch.nu, wt=ch.wt,
+                grid=ch.conventions.gw_grid, nu=ch.conventions.nu, wt=ch.conventions.wt,
                 mu=0.5 * (eps[nocc - 1] + eps[nocc]))
 
 

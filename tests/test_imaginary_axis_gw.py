@@ -5,9 +5,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from pyscf import gto, scf, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
-from src.Base.constants import HARTREE_TO_EV
+from src.Base.numerics.constants import HARTREE_TO_EV
 
 benzene_geom = """
 C  0.000  1.396  0.000
@@ -26,8 +27,7 @@ H -2.147  1.240  0.000
 
 if __name__ == '__main__':
     # w0 defaults to gap_scaled_w0 (None) throughout -- a fixed w0 needs a
-    # much larger nfreq to converge on small-gap systems like benzene (see
-    # tests/converge_nfreq_benzene notes in the density-matrix session log);
+    # much larger nfreq to converge on small-gap systems like benzene;
     # gap-scaled w0 gets sub-meV/few-meV agreement even at nfreq=20.
     cases = [
         ('HF/6-31g HOMO', 'H 0 0 0; F 0 0 0.9', '6-31g', 'homo', 30),
@@ -47,7 +47,7 @@ if __name__ == '__main__':
         p_state = nocc - 1 if which == 'homo' else nocc
 
         qp_analytic = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA', df=True, state=p_state)
-        qp_ac = solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, nfreq=nfreq) * HARTREE_TO_EV
+        qp_ac = solve_qp_energy_imaginary_axis(mf, mol, nocc, p_state, numerics=Numerics(imagfreq={'nfreq': nfreq})) * HARTREE_TO_EV
 
         diff_mev = (qp_ac - qp_analytic) * 1000
         ok = abs(diff_mev) < 2.0

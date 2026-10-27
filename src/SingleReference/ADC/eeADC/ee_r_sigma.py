@@ -24,18 +24,14 @@ spin-flip involution `spin_flip_vector` splits them (singlet = +1, triplet =
 """
 import numpy as np
 
+from src.Base.pyscf.pyscf_interface import get_coulomb_exchange_diagonals
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_en as _en
+from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 
-LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3', 'gf2')
-# gf2: the symmetrised one-doubles-set GF2 supermatrix of Monino and Loos,
-# J. Chem. Phys. 159, 034105 (2023), eq 53: ADC(2)'s coupling and bare doubles
-# diagonal under the first-order singles block A^HF (eq 54a), i.e. ADC(2)
-# without the three static second-order singles terms of eq 57; HF energies.
-_BLOCK_ORDERS = {'adc1': (1, None, None), 'adc2': (2, 1, 0),
-                 'adc2x': (2, 1, 1), 'adc3': (3, 2, 1), 'gf2': (1, 1, 0)}
+LEVELS = ee_utils.LEVELS               # gf2: see ee_utils.BLOCK_ORDERS
 SCALE = 2.0                                    # ee_utils.PAPER_DOUBLES_SCALE
 
 
@@ -63,25 +59,6 @@ def _slices(d):
     return [slice(o[k], o[k + 1]) for k in range(5)]
 
 
-def _expand_same(v, no, nv):
-    """unique (i<j, a<b) coefficients -> full antisymmetric spatial tensor."""
-    iu, ju = np.triu_indices(no, k=1)
-    au, bu = np.triu_indices(nv, k=1)
-    T = np.zeros((no, no, nv, nv))
-    blk = v.reshape(len(iu), len(au))
-    T[iu[:, None], ju[:, None], au[None, :], bu[None, :]] = blk
-    T[ju[:, None], iu[:, None], au[None, :], bu[None, :]] = -blk
-    T[iu[:, None], ju[:, None], bu[None, :], au[None, :]] = -blk
-    T[ju[:, None], iu[:, None], bu[None, :], au[None, :]] = blk
-    return T
-
-
-def _restrict_same(T, no, nv):
-    iu, ju = np.triu_indices(no, k=1)
-    au, bu = np.triu_indices(nv, k=1)
-    return T[iu[:, None], ju[:, None], au[None, :], bu[None, :]].ravel()
-
-
 def to_blocks(v, no, nv, level='adc3', parity=None):
     """flat vector -> (singles SB, doubles SB) in the paper's tensor scaling.
     parity: +1 or -1 when v is a flip eigenvector (spin_flip_vector) of that
@@ -92,9 +69,9 @@ def to_blocks(v, no, nv, level='adc3', parity=None):
             parity=parity)
     if not d['doubles']:
         return y1, SB()
-    Yaa = _expand_same(v[da], no, nv) / SCALE
+    Yaa = ee_utils.unfold_doubles(v[da], no, no + nv) / SCALE
     if parity is None:
-        Ybb = _expand_same(v[db], no, nv) / SCALE
+        Ybb = ee_utils.unfold_doubles(v[db], no, no + nv) / SCALE
     else:
         Ybb = Yaa if parity > 0 else -Yaa
     Yab = v[dm].reshape(no, no, nv, nv) / SCALE
@@ -137,7 +114,7 @@ def from_blocks(w1, W, no, nv, level='adc3', parity=None):
             out.append(parity * out[-1])
             continue
         T = W.get(key)
-        out.append(SCALE * _restrict_same(T if T is not None else zz, no, nv))
+        out.append(SCALE * ee_utils.fold_doubles(T if T is not None else zz, no, no + nv))
     T = W.get('abab')
     out.append(SCALE * (T if T is not None else zz).ravel())
     return np.concatenate(out)
@@ -186,13 +163,6 @@ def flip_symmetric(x):
     return x
 
 
-def _ingredients(cache, make_gb, make_vk):
-    cache = new_cache() if cache is None else cache
-    if 'gb' not in cache:
-        cache['gb'] = make_gb()
-        cache['vk'] = make_vk()
-    return cache['gb'], cache['vk'], cache
-
 def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
                    cache=None, parity=None):
     """(aop, diag, dims) from SPATIAL orbital energies `eps` and the spatial
@@ -209,30 +179,25 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
         raise ValueError(f'level={level!r}; expected one of {LEVELS}')
     no, norb = nocc_spatial, len(eps)
     nv = norb - no
-    o_ss, o_sd, o_dd = _BLOCK_ORDERS[level]
+    o_ss, o_sd, o_dd = ee_utils.BLOCK_ORDERS[level]
     d = dimensions(no, nv, level)
 
-    gb, vk, cache = _ingredients(cache, lambda: _sb.g_blocks_sb(V, no, norb),
+    gb, vk, cache = _eq.cached_ingredients(cache, lambda: _sb.g_blocks_sb(V, no, norb),
                                  lambda: None)
-    eo, ev = eps[:no], eps[no:]
-    d_ijab = (ev[None, None, :, None] + ev[None, None, None, :]
-              - eo[:, None, None, None] - eo[None, :, None, None])
-    d_ia = 2.0 * (eo[:, None] - ev[None, :])
-    d_ph = np.broadcast_to((ev[None, :] - eo[:, None])[:, :, None, None],
-                           (no, nv, no, nv))
+    d_ijab, d_ia, d_ph = ee_utils.orbital_denominators(eps, no)
 
     be = _eq.SPIN_BLOCKED
-    order = {'adc1': 1, 'adc2': 2, 'adc2x': 2, 'adc3': 3, 'gf2': 1}[level]
+    order = ee_utils.AMPLITUDE_ORDER[level]
     if en_dress is None:
         d_amp, d_ia_amp, en_shift = d_ijab, d_ia, None
     else:
         d_amp, d_ia_amp = _en.en_denominators_spin_free(
-            eps, *_en.jk_from_V(V), no, nv, en_dress)
+            eps, *get_coulomb_exchange_diagonals(V), no, nv, en_dress)
         # what the EN denominator has resummed, so amplitudes() can
         # take it back out of the t2^(2) numerator and not count the
         # diagonal ladder twice (see ee_equations.amplitudes)
         en_shift = _en.shift_from_denominators(d_amp, d_ijab)
-    amps, zint, rho = _amplitudes_cached(cache, be, gb, d_amp, d_ia_amp,
+    amps, zint, rho = _eq.cached_amplitudes(cache, be, gb, d_amp, d_ia_amp,
                                          order, vk, en_shift)
     M = _eq.m_ss(be, gb, o_ss, amps, zint, rho, d_ph, no, nv)
     # NOT spin-diagonal: the aabb block of M_ia,jb is the exchange term that
@@ -259,33 +224,6 @@ def build_operator(eps, V, nocc_spatial, level='adc3', en_dress=None,
     return aop, diag, d
 
 
-def _amplitudes_cached(cache, be, gb, d_amp, d_ia_amp, order, vk,
-                       en_shift=None):
-    """Amplitudes/Z/density at the REQUESTED order, cached and upgraded.
-
-    Order 3 is a superset of order 2, so a cell running ADC(2), ADC(2)-x and
-    ADC(3) still pays for the third-order ingredients once. But it must not
-    pay for them when nothing asks: ADC(2) uses t^(1) alone, and computing at
-    order 3 regardless pulls in t^(2) -- whose numerator contains the
-    particle ladder -- plus the whole Z set, three of which (Z1, Z6, Z7) are
-    ovvv-sized. That is the dominant cost of the run, incurred for terms
-    ADC(2) never contracts. An ADC(2)-only sweep of the database is a factor
-    of several cheaper for this one line.
-
-    The cache records the order it holds and recomputes only to go UP."""
-    if order < 2:
-        return None, None, None
-    if cache.get('order', 0) < order:
-        cache['amps'] = _eq.amplitudes(be, gb, d_amp, d_ia_amp, order, vk=vk,
-                                       en_shift=en_shift)
-        cache['rho'] = _eq.density2(be, cache['amps'])
-        # Z is third-order content only, and the expensive part of it
-        cache['zint'] = (_eq.z_intermediates(be, gb, cache['amps'], vk=vk)
-                         if order >= 3 else None)
-        cache['order'] = order
-    return cache['amps'], cache['zint'], cache['rho']
-
-
 def _diagonal(eps, V, no, nv, M, o_dd):
     """Exact operator diagonal, per spin block, for the preconditioner.
 
@@ -306,8 +244,7 @@ def diagonal_from_JK(eps, J, K, no, nv, M, o_dd):
         return np.concatenate(parts)
     eo, ev = eps[:no], eps[no:]
     o, v = slice(0, no), slice(no, no + nv)
-    base = (ev[None, None, :, None] + ev[None, None, None, :]
-            - eo[:, None, None, None] - eo[None, :, None, None])
+    base = ee_utils.excitation_denominator((eo, eo), (ev, ev))
 
     def block(si, sj, sa, sb):
         D = base.copy()
@@ -323,7 +260,7 @@ def diagonal_from_JK(eps, J, K, no, nv, M, o_dd):
             D = D - (J_ov - (si == sb) * K_ov)[:, None, None, :]
         return D
 
-    parts.append(_restrict_same(block(0, 0, 0, 0), no, nv))
-    parts.append(_restrict_same(block(1, 1, 1, 1), no, nv))
+    parts.append(ee_utils.fold_doubles(block(0, 0, 0, 0), no, no + nv))
+    parts.append(ee_utils.fold_doubles(block(1, 1, 1, 1), no, no + nv))
     parts.append(block(0, 1, 0, 1).ravel())
     return np.concatenate(parts)

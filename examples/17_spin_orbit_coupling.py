@@ -7,6 +7,8 @@ Both states can still be spin-orbit coupled, mediated through higher-lying
 excited states. This coupling is mediated through vibrational modes.
 
     python examples/17_spin_orbit_coupling.py
+
+It runs for more than five minutes on two threads.
 """
 import logging
 import os
@@ -16,14 +18,14 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_CM
+from src.Base.numerics.constants import HARTREE_TO_CM
 from src.Base.declaration import Excitation, GroundState
 from src.properties.excitations import SurfaceSpec, calc_adiabatic_gap
 from src.properties.optimize import relax_ground_state
-from src.properties.spin_orbit import (promoting_mode_couplings,
-                                       spin_orbit_couplings)
-from src.properties.vibronic import normal_modes
-from src.SingleReference.LinearResponse.bse import solve_bse
+from src.properties.spin_orbit import spin_orbit_couplings
+from src.properties.vibronic import normal_modes, promoting_mode_couplings
+from src.Base.numerics.numerics import Numerics
+from src.SingleReference.BSE.solve import solve_bse
 
 mol = gto.M(atom='C 0 0 0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588',
             basis='aug-cc-pvdz', verbose=0)
@@ -31,7 +33,7 @@ mol = gto.M(atom='C 0 0 0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588',
 
 def factory(m):
     mf = scf.RHF(m)
-    mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-10
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-11, 200
     mf.kernel()
     return mf
 
@@ -40,8 +42,10 @@ def socme_at(m, nroots_t=1):
     """The (2, nroots_t) |<S_I|H_SO|T_J>| table at geometry `m`, S1 vs T1..Tn."""
     mf = factory(m)
     nocc = m.nelectron // 2
-    singlet = solve_bse(mf, mol=m, nroots=1, solver='dense', integrals='full',spin='singlet')[:3]
-    triplet = solve_bse(mf, mol=m, nroots=nroots_t, solver='dense',integrals='full', spin='triplet')[:3]
+    singlet = solve_bse(mf, mol=m, numerics=Numerics(bse={'nroots': 1}),
+                        solver='dense', integrals='full', spin='singlet')[:3]
+    triplet = solve_bse(mf, mol=m, numerics=Numerics(bse={'nroots': nroots_t}),
+                        solver='dense', integrals='full', spin='triplet')[:3]
     return spin_orbit_couplings(mf, m, nocc, singlet, triplet)['socme']
 
 # specify the PES

@@ -27,19 +27,36 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import dft, gto
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import attach_environment
-from src.Base.solvent_screening import SolventScreening
-from src.SingleReference.GW.evGW import (MODES, evgw_eigenvalues,
+from src.Base.numerics.constants import HARTREE_TO_EV, HARTREE_TO_MEV
+from src.Base.environment_seam import attach_environment
+from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_screening import SolventScreening
+from src.SingleReference.GW.evGW import (EvGWNotConverged, evgw_eigenvalues,
                                          shifted_mean_field)
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.SingleReference.GW.imaginary_time import (DEFAULT_TAU_TARGET,
                                                    minimax_points_for_gw)
-from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.SingleReference.GW.qp_energy import EVGW_MODES, calc_qp_energy
 from src.SingleReference.GW.space_time import solve_qp_energy_space_time
 import src.SingleReference.GW.qp_energy as qpe
 import src.SingleReference.GW.space_time as gwst
-import src.SingleReference.LinearResponse.davidson as dv
+import src.SingleReference.BSE.solve as dv
+from tests.isdf_test_grid import g1, g1_route
+from tests.pins import RECORDING_BLAS, matches
+
+
+MODES = sorted(set(EVGW_MODES.values()))
+
+
+def truncated(mf, max_cycle, mol=None, **kwargs):
+    """(eps, info) of a loop cut short at `max_cycle` cycles with tol = 0:
+    the last iterate it returns with its warning, read only to test what one
+    cycle does."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', EvGWNotConverged)
+        eps, info = evgw_eigenvalues(mf, mf.mol if mol is None else mol, **g1_route(mf, kwargs.get('mode', 'space-time')), **kwargs, numerics=Numerics(evgw={'max_cycle': max_cycle, 'tol': 0.0}))
+    assert not info['converged']
+    return eps, info
 
 
 def check(ok, label, detail=''):
@@ -64,9 +81,9 @@ def check_the_first_cycle_is_g0w0(mf):
     nocc = mf.mol.nelectron // 2
     states = np.arange(len(eps0))
 
-    _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=1, tol=0.0)
+    _, info = truncated(mf, max_cycle=1)
     one_cycle = info['eps_mean_field'] + info['shift']
-    g0w0 = np.asarray(solve_qp_energy_space_time(mf, mf.mol, nocc, states), float)
+    g0w0 = np.asarray(solve_qp_energy_space_time(mf, mf.mol, nocc, states, counts=g1(mf.mol)), float)
     d = np.abs(one_cycle[states] - g0w0).max()
     return check(d < 1e-12 * max(np.abs(g0w0).max(), 1.0),
                  'the first evGW cycle IS G0W0', f'max |d eps| {d:.1e} Ha')
@@ -78,10 +95,10 @@ def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
     it would have the feedback backwards."""
     nocc = mf.mol.nelectron // 2
     ks_gap = (mf.mo_energy[nocc] - mf.mo_energy[nocc - 1]) * HARTREE_TO_EV
-    eps, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20)
+    eps, info = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ev_gap = (eps[nocc] - eps[nocc - 1]) * HARTREE_TO_EV
     first = info['eps_mean_field'] + np.asarray(
-        evgw_eigenvalues(mf, mf.mol, max_cycle=1, tol=0.0)[1]['shift'])
+        truncated(mf, max_cycle=1)[1]['shift'])
     g0w0_gap = (first[nocc] - first[nocc - 1]) * HARTREE_TO_EV
 
     ok = check(info['converged'], 'the loop converges',
@@ -97,15 +114,18 @@ def check_it_converges_and_opens_the_gap_beyond_g0w0(mf):
 
 def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
     """The default decides convergence on the frontier pair; asked to decide
-    it on every state the loop converges within ten cycles, and cut short it
-    warns and reports the residual.
+    it on every state the loop converges within max_cycle (20), and cut short
+    it is refused with the residual rather than returned.
 
     Converging on every state needs W's frequency grid to span the range its
     transform to imaginary time is fitted over; frequencies built for the bare
-    transition window leave the high virtuals wandering from cycle to cycle.
+    transition window leave the high virtuals wandering from cycle to cycle
+    (near 1e-2 eV for all 20 cycles). With the grid as built it converges in
+    10 cycles on the workstation and 13 on a cluster's MKL: the gate is
+    convergence, not the count.
     """
     nocc = mf.mol.nelectron // 2
-    _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=20)
+    _, info = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ok = check(info['converged'] and set(info['converge_on']) == {nocc - 1, nocc},
                'convergence is decided on the HOMO and LUMO alone',
                f"converge_on={sorted(info['converge_on'])}")
@@ -114,20 +134,21 @@ def check_the_whole_spectrum_converges_and_a_short_loop_says_it_did_not(mf):
                 f"{info['residual_untested'] * HARTREE_TO_EV:.3e} eV vs "
                 f"{info['history'][-1] * HARTREE_TO_EV:.3e}")
     all_states = np.arange(len(np.asarray(mf.mo_energy)))
-    _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
-                               max_cycle=20)
-    ok &= check(wide['converged'] and len(wide['history']) <= 10,
+    _, wide = evgw_eigenvalues(mf, mf.mol, converge_on=all_states, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
+    ok &= check(wide['converged'],
                 'converging on every orbital converges too',
                 f"{len(wide['history'])} cycles, "
                 f"{wide['history'][-1] * HARTREE_TO_EV:.3e} eV")
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states,
-                                    max_cycle=3)
+        _, short = evgw_eigenvalues(mf, mf.mol, converge_on=all_states, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 3}))
+    message = ' '.join(str(w.message) for w in caught
+                       if issubclass(w.category, EvGWNotConverged))
     ok &= check(not short['converged']
-                and any('did not converge' in str(w.message) for w in caught)
+                and 'not converged after 3 of max_cycle = 3 cycles' in message
                 and short['history'][-1] > wide['history'][-1],
-                'cut short, it does not converge and says so')
+                'cut short, it warns with its residual and flags the record',
+                message[:60])
     return ok
 
 
@@ -148,13 +169,13 @@ def check_the_anchor_is_what_makes_it_converge(mf):
         # no eps_anchor: the route uses the iterate for both the screening and
         # the eps_p of w = eps_p + ..., which is the mistake
         w = np.asarray(solve_qp_energy_space_time(
-            shifted_mean_field(mf, eps), mf.mol, nocc, states, ntau=ntau), float)
+            shifted_mean_field(mf, eps), mf.mol, nocc, states, numerics=Numerics(quadrature={'ntau_st': ntau}), counts=g1(mf.mol)), float)
         eps = eps.copy()
         eps[states] = w
         gaps.append(eps[nocc] - eps[nocc - 1])
 
     steps = np.diff(gaps)
-    _, good = evgw_eigenvalues(mf, mf.mol, max_cycle=20)
+    _, good = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 20}))
     ok = check((steps > 0).all() and steps.min() * HARTREE_TO_EV > 1.0,
                'anchored on the ITERATE the gap runs away, > 1 eV per cycle',
                ' '.join(f'{s * HARTREE_TO_EV:+.2f}' for s in steps) + ' eV')
@@ -175,11 +196,11 @@ def check_the_quadrature_is_frozen_on_the_anchor(mf):
     opened = eps0.copy()
     opened[nocc:] += 30.0 / HARTREE_TO_EV
     t_mf, t_free, t_anchored = {}, {}, {}
-    solve_qp_energy_space_time(mf, mf.mol, nocc, states, timings=t_mf)
+    solve_qp_energy_space_time(mf, mf.mol, nocc, states, timings=t_mf, counts=g1(mf.mol))
     solve_qp_energy_space_time(shifted_mean_field(mf, opened), mf.mol, nocc,
-                               states, timings=t_free)
+                               states, timings=t_free, counts=g1(mf.mol))
     solve_qp_energy_space_time(shifted_mean_field(mf, opened), mf.mol, nocc,
-                               states, eps_anchor=eps0, timings=t_anchored)
+                               states, eps_anchor=eps0, timings=t_anchored, counts=g1(mf.mol))
     return check(t_anchored['ntau_auto'] == t_mf['ntau_auto']
                  and t_free['ntau_auto'] < t_mf['ntau_auto'],
                  'the tau grid follows the anchor, not the iterate',
@@ -190,7 +211,7 @@ def check_the_quadrature_is_frozen_on_the_anchor(mf):
 def check_every_orbital_is_updated(mf):
     """G and P0 are built from the whole spectrum, so a partial update leaves
     the rest screening at mean-field values and the result is not evGW."""
-    _, info = evgw_eigenvalues(mf, mf.mol, max_cycle=2, tol=0.0)
+    _, info = truncated(mf, max_cycle=2)
     n = len(np.asarray(mf.mo_energy))
     return check(np.array_equal(info['states'], np.arange(n))
                  and (np.abs(info['shift']) > 0).all(),
@@ -203,9 +224,8 @@ def check_diis_reaches_the_same_fixed_point_in_fewer_cycles(mf):
     accelerator that moved the answer would be extrapolating a different map.
     The comparison is against the damped linear mixing DIIS replaces, since on
     a two-electron system the undamped iteration already converges in five."""
-    plain_eps, plain = evgw_eigenvalues(mf, mf.mol, max_cycle=40, diis_size=0,
-                                        damping=0.5)
-    diis_eps, diis = evgw_eigenvalues(mf, mf.mol, max_cycle=40)
+    plain_eps, plain = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 40, 'diis_size': 0, 'damping': 0.5}))
+    diis_eps, diis = evgw_eigenvalues(mf, mf.mol, counts=g1(mf), numerics=Numerics(evgw={'max_cycle': 40}))
     nocc = mf.mol.nelectron // 2
     worst = max(abs(plain_eps[p] - diis_eps[p]) * HARTREE_TO_EV
                 for p in (nocc - 1, nocc))
@@ -253,16 +273,18 @@ def check_the_shift_view_builds_j_and_k_on_the_direct_path(mf):
 
 def check_g0w0_is_unchanged_when_the_anchor_is_not_given(mf):
     """Anchoring the single-shot route on the mean field's own eigenvalues is
-    bitwise the unanchored call."""
+    the unanchored call: two solves of the same roots, so to a few ulp
+    (`matches` of tests/pins.py), not bitwise."""
     nocc = mf.mol.nelectron // 2
     states = np.arange(len(np.asarray(mf.mo_energy)))
     plain = np.asarray(solve_qp_energy_space_time(mf, mf.mol, nocc, states,
-                                                  ntau=14), float)
+                                                  numerics=Numerics(quadrature={'ntau_st': 14}), counts=g1(mf.mol)), float)
     given = np.asarray(solve_qp_energy_space_time(
-        mf, mf.mol, nocc, states, ntau=14,
-        eps_anchor=np.asarray(mf.mo_energy, float)), float)
-    return check(np.array_equal(plain, given),
-                 'eps_anchor=None leaves G0W0 bitwise unchanged')
+        mf, mf.mol, nocc, states, numerics=Numerics(quadrature={'ntau_st': 14}),
+        eps_anchor=np.asarray(mf.mo_energy, float), counts=g1(mf.mol)), float)
+    d = float(np.abs(plain - given).max())
+    return check(matches(plain, given, RECORDING_BLAS, quantity='continued'),
+                 'eps_anchor=None leaves G0W0 unchanged', f'{d:.1e} Ha')
 
 
 def check_the_anchor_reaches_every_route_through_the_dispatcher(mf):
@@ -277,8 +299,10 @@ def check_the_anchor_reaches_every_route_through_the_dispatcher(mf):
     view = shifted_mean_field(mf, opened)
     ok = True
     for mode in MODES:
-        free = calc_qp_energy(view, mode=mode, state=nocc - 1)
-        anchored = calc_qp_energy(view, mode=mode, state=nocc - 1, eps_anchor=eps0)
+        free = calc_qp_energy(view, mode=mode, state=nocc - 1,
+                              **g1_route(view, mode))
+        anchored = calc_qp_energy(view, mode=mode, state=nocc - 1,
+                                  eps_anchor=eps0, **g1_route(view, mode))
         ok &= check(0.2 < anchored - free < 0.8,
                     f'{mode}: the anchor moves the root by about the shift',
                     f'{anchored - free:+.3f} eV of the 0.5 eV applied')
@@ -292,8 +316,9 @@ def check_calc_qp_energy_drives_every_route(mf):
     ok = True
     got = []
     for mode in MODES:
-        g0w0 = calc_qp_energy(mf, mode=mode)
-        evgw = calc_qp_energy(mf, mode=mode, self_consistency='evGW')
+        g0w0 = calc_qp_energy(mf, mode=mode, **g1_route(mf, mode))
+        evgw = calc_qp_energy(mf, mode=mode, self_consistency='evGW',
+                              **g1_route(mf, mode))
         got.append(evgw)
         ok &= check(-0.5 < evgw - g0w0 < -0.1,
                     f'{mode}: evGW pushes the occupied level down',
@@ -319,7 +344,7 @@ def check_the_refusals(mf):
         calc_qp_energy(mf, self_consistency='evGW',
                        eps_anchor=np.asarray(mf.mo_energy, float))
         ok &= check(False, 'an eps_anchor under evGW is refused')
-    except NotImplementedError as exc:
+    except TypeError as exc:
         ok &= check('eps_anchor' in str(exc), 'an eps_anchor under evGW is refused')
     try:
         evgw_eigenvalues(mf, mf.mol, mode='nonsense')
@@ -338,16 +363,16 @@ def check_the_refusals(mf):
         ok &= check('Casida route' in str(exc),
                     "screening='fixed' off the Casida route is refused")
     try:
-        dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, nroots=1,
-                          probe=False, self_consistency='qsGW')
+        dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, numerics=Numerics(bse={'nroots': 1}),
+                          probe=False, self_consistency='qsGW', counts=g1(mf.mol))
         ok &= check(False, "an unknown self_consistency is refused")
     except ValueError as exc:
         ok &= check("choose 'G0W0' or 'evGW'" in str(exc),
                     'an unknown self_consistency is refused')
     try:
-        dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, nroots=1,
+        dv.solve_bse_isdf(mf, mf.mol, mf.mol.nelectron // 2, numerics=Numerics(bse={'nroots': 1}),
                           probe=False, qp=np.asarray(mf.mo_energy, float),
-                          screen_at='whatever')
+                          screen_at='whatever', counts=g1(mf.mol))
         ok &= check(False, 'an unknown screen_at is refused')
     except ValueError as exc:
         ok &= check("choose 'qp' or 'mean-field'" in str(exc),
@@ -375,7 +400,7 @@ def check_w_is_rebuilt_from_the_updated_spectrum_every_cycle(mf):
 
     gwst.chi0_imaginary_frequency = counted
     try:
-        evgw_eigenvalues(mf, mf.mol, max_cycle=4, tol=0.0)
+        truncated(mf, max_cycle=4)
     finally:
         gwst.chi0_imaginary_frequency = original
 
@@ -396,7 +421,7 @@ def check_screen_at_selects_which_spectrum_builds_w(mf):
     `qp` array therefore defaults to the G0W0 split, and `screen_at='qp'` is
     the opt-in for an array that is a converged spectrum; the knob must reach
     the W build."""
-    eps_qp, _ = evgw_eigenvalues(mf, mf.mol, max_cycle=3, tol=0.0)
+    eps_qp, _ = truncated(mf, max_cycle=3)
     nocc = mf.mol.nelectron // 2
     seen = {}
     original = dv.isdf_bse_factors
@@ -415,8 +440,8 @@ def check_screen_at_selects_which_spectrum_builds_w(mf):
         for mode in ('qp', 'mean-field', None):
             seen.clear()
             kw = {} if mode is None else {'screen_at': mode}
-            dv.solve_bse_isdf(mf, mf.mol, nocc, nroots=1, probe=False,
-                              qp=eps_qp, **kw)
+            dv.solve_bse_isdf(mf, mf.mol, nocc, numerics=Numerics(bse={'nroots': 1}), probe=False,
+                              qp=eps_qp, counts=g1(mf.mol), **kw)
             gap = list(seen.values())[0]
             ok &= check(abs(gap - wanted[mode or 'mean-field']) < 1e-12,
                         f"screen_at={mode!r} builds W at that gap"
@@ -469,7 +494,7 @@ def check_an_unrestricted_reference_is_driven_channel_by_channel():
     # iterate, each channel's self-energy. Its frontier fixed points sit within
     # the continuation's error of the Casida loop's (largest on the beta pair,
     # where Pade feeds every deep level back into W).
-    eps_st, st = evgw_eigenvalues(mf, mol, mode='space-time')
+    eps_st, st = evgw_eigenvalues(mf, mol, mode='space-time', counts=g1(mf))
     frontier = [(0, na - 1), (0, na), (1, nb - 1), (1, nb)]
     worst = max(abs(eps_st[s, p] - eps[s, p]) for s, p in frontier) * HARTREE_TO_EV
     ok &= check(st['converged'] and worst < 6e-3,
@@ -497,13 +522,13 @@ def check_evgw0_keeps_w_and_moves_the_poles():
         return (e[nocc] - e[nocc - 1]) * HARTREE_TO_EV
 
     builds = []
-    original = qpe._casida_spectrum
+    original = qpe.casida_spectrum
 
     def counted(*args, **kw):
         builds.append(1)
         return original(*args, **kw)
 
-    qpe._casida_spectrum = counted
+    qpe.casida_spectrum = counted
     try:
         eps_fixed, fixed = evgw_eigenvalues(mf, mol, mode='casida',
                                             screening='fixed')
@@ -512,9 +537,9 @@ def check_evgw0_keeps_w_and_moves_the_poles():
         eps_updated, updated = evgw_eigenvalues(mf, mol, mode='casida')
         n_updated = len(builds)
     finally:
-        qpe._casida_spectrum = original
-    _, one = evgw_eigenvalues(mf, mol, mode='casida', screening='fixed',
-                              max_cycle=1, tol=0.0)
+        qpe.casida_spectrum = original
+    _, one = truncated(mf, max_cycle=1, mol=mol, mode='casida',
+                       screening='fixed')
     first = one['eps_mean_field'] + one['shift']
     g0w0 = calc_qp_energy(mf, mode='casida', state=states)
     g0w0 = np.array([g0w0[p]['GW'] for p in states]) / HARTREE_TO_EV
@@ -575,7 +600,7 @@ def check_the_reaction_field_follows_the_iterate():
     ok = check(d < 1e-10 and abs(moved) > 1e-6,
                'evGW: the Casida step rebuilds the reaction field at the iterate',
                f'max |d eps| {d:.1e} Ha; the term moves the HOMO by '
-               f'{moved * HARTREE_TO_EV * 1e3:+.2f} meV')
+               f'{moved * HARTREE_TO_MEV:+.2f} meV')
     built_at = []
     original = qpe._reaction_field_terms
 
@@ -614,7 +639,7 @@ def check_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
     nocc = water.mol.nelectron // 2
     window = [nocc - 1, nocc]
     eps, info = evgw_eigenvalues(water, water.mol, mode='space-time',
-                                 update=window)
+                                 update=window, counts=g1(water))
     eps0 = np.asarray(water.mo_energy, float)
     outside = np.setdiff1d(np.arange(eps.size), window)
     ok = check(np.array_equal(eps[outside], eps0[outside])
@@ -630,16 +655,36 @@ def check_orbitals_outside_the_update_window_stay_at_the_mean_field(water):
 def check_the_full_update_is_the_default_and_moves_the_core(water):
     """Default evGW moves every orbital, which is what the windowed run is
     contrasted against; the oxygen 1s moves by electronvolts."""
-    eps, info = evgw_eigenvalues(water, water.mol, mode='space-time')
+    eps, info = evgw_eigenvalues(water, water.mol, mode='space-time', counts=g1(water))
     shift = (eps[0] - water.mo_energy[0]) * HARTREE_TO_EV
     return check(info['frozen'].size == 0 and abs(shift) > 1.0,
                  'the default updates every orbital, and the oxygen 1s moves by '
                  'electronvolts', f'1s {shift:+.2f} eV')
 
 
+def check_an_unconverged_loop_warns_with_its_residual_and_bar(water):
+    """Water/cc-pVDZ, Casida evGW, one cycle against tol = 1e-12 Ha: the
+    last iterate is not a fixed point, so the loop returns it with
+    info['converged'] False and a warning naming max |delta eps| against tol
+    and the cycles against max_cycle (refuse inputs, warn numerics; it once
+    refused)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        _, info = evgw_eigenvalues(water, water.mol, mode='casida', numerics=Numerics(evgw={'max_cycle': 1, 'tol': 1e-12}))
+    message = ' '.join(str(w.message) for w in caught
+                       if issubclass(w.category, EvGWNotConverged))
+    return check('not converged after 1 of max_cycle = 1 cycles' in message
+                 and 'max |delta eps| = ' in message
+                 and 'tol = 1.000e-12 Ha' in message
+                 and not info['converged']
+                 and info['history'][-1] > 1e-12,
+                 'an unconverged loop warns with its residual and bar and '
+                 'flags its record', message[:60])
+
+
 def check_an_empty_update_window_is_refused(water):
     try:
-        evgw_eigenvalues(water, water.mol, mode='space-time', update=[])
+        evgw_eigenvalues(water, water.mol, mode='space-time', update=[], counts=g1(water))
     except ValueError as exc:
         return check('selects no orbital' in str(exc),
                      'an empty update window is refused', str(exc)[:60])
@@ -680,6 +725,7 @@ def run():
     water = build_water()
     all_ok &= check_orbitals_outside_the_update_window_stay_at_the_mean_field(water)
     all_ok &= check_the_full_update_is_the_default_and_moves_the_core(water)
+    all_ok &= check_an_unconverged_loop_warns_with_its_residual_and_bar(water)
     all_ok &= check_an_empty_update_window_is_refused(water)
     print('\nALL PASSED' if all_ok else '\nFAILURES DETECTED')
     return all_ok

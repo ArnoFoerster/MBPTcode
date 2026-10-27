@@ -3,12 +3,13 @@ combinations, pair unfolds, DF block gathers, streaming amplitude-chunk
 generators, and the unstreamed U-block fallback builder shared by both
 sigma route modules."""
 import math
+from collections import namedtuple
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.SingleReference.common.eri_blocks import g_slice_df
 from src.SingleReference.ADC.adc_utils import (
-    _g_slice_df, _g_diag_df, _g_diag_mid_df, _g_diag_outer_df,
-    _b_factor, _b_q_chunk, _b_chunk_einsum)
+    g_diag_df, b_chunk_einsum)
 
 
 def dimensions(norb, nocc):
@@ -26,7 +27,7 @@ def dimensions(norb, nocc):
             'nH': norb + n2h1p + n2p1h}
 
 
-def _no_u_blocks(norb, O, V, nP_o, nP_v):
+def no_u_blocks(norb, O, V, nP_o, nP_v):
     """The six U-block pieces of _build_u_blocks_* identically zero: the
     operator then carries F and the satellite block K + C alone, with no
     coupling work per matvec (Faddeev-ADC(3) applies its own U)."""
@@ -38,7 +39,7 @@ def _no_u_blocks(norb, O, V, nP_o, nP_v):
             lambda z_p: (np.zeros((O, nP_v)), np.zeros((O, nP_v))))
 
 
-def _u2_spin_amplitudes(g_num, g_num_T, dens, layout):
+def u2_spin_amplitudes(g_num, g_num_T, dens, layout):
     """(t_same, t_opp): the same-spin (aaaa) and opposite-spin (abab) T2^(1)
     amplitudes for one denominator layout, each with its OWN EN-dressed
     denominator:
@@ -63,7 +64,7 @@ def _u2_spin_amplitudes(g_num, g_num_T, dens, layout):
     return (g_num - g_num_T) / D_same, t_opp
 
 
-def _u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p):
+def u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p):
     """The three z_p-contracted DF intermediates the U_2p1h adjoint needs.
 
     Every term of u_IIp_full/u_IIIp_full carries the orbital index p on exactly
@@ -91,7 +92,7 @@ def _u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p):
     return gz, gzr, gzm
 
 
-def _u_2p1h_unfold(z, iu_v, ju_v, O, V, anti):
+def u_2p1h_unfold(z, iu_v, ju_v, O, V, anti):
     """(O,nP_v) pair-packed trial vector -> full (O,V,V), antisymmetric or
     symmetric in (a,b). Every term of u_IIp_full is exactly antisymmetric in
     (a,b) and every term of u_IIIp_full exactly symmetric (unaffected by EN
@@ -108,9 +109,9 @@ def _u_2p1h_unfold(z, iu_v, ju_v, O, V, anti):
     return Z
 
 
-def _u_2h1p_unfold(z, iu_o, ju_o, O, V, anti):
+def u_2h1p_unfold(z, iu_o, ju_o, O, V, anti):
     """(nP_o,V) pair-packed 2h1p trial vector -> full (O,O,V), antisymmetric or
-    symmetric in the OCCUPIED pair -- the 2h1p mirror of _u_2p1h_unfold.
+    symmetric in the OCCUPIED pair -- the 2h1p mirror of u_2p1h_unfold.
 
     Every term of u_II is exactly antisymmetric in (i,j) and every term of
     u_III exactly symmetric. The load-bearing identities:
@@ -136,7 +137,7 @@ def _u_2h1p_unfold(z, iu_o, ju_o, O, V, anti):
     return Z
 
 
-def _u_I_ring_contract_df(Bo_full, Bv_full, Boo, Bvo, W1, W2, q_chunk=8):
+def u_I_ring_contract_df(Bo_full, Bv_full, Boo, Bvo, W1, W2, q_chunk=8):
     """U_I's two U^(2) ring terms straight from the DF factors, so that the
     (V,O,norb,O)-shaped g_vopo/g_voho need not exist:
 
@@ -166,12 +167,12 @@ def _u_I_ring_contract_df(Bo_full, Bv_full, Boo, Bvo, W1, W2, q_chunk=8):
     return term1, term2
 
 
-def _dress_is_streamable(dress):
-    """Whether a u2_denom_dress dict is one _u2_2h1p_amplitude_chunks/
-    _u2_2p1h_amplitude_chunks (and hence the whole U-block streaming path)
+def dress_is_streamable(dress):
+    """Whether a u2_denom_dress dict is one u2_2h1p_amplitude_chunks/
+    u2_2p1h_amplitude_chunks (and hence the whole U-block streaming path)
     can represent: None/falsy (bare) or hh/pp-only with spin_adapted=True
     (the default). 'hp' and spin-resolved (spin_adapted=False) dressing are
-    excluded -- see the banner comment above _u2_2h1p_amplitude_chunks."""
+    excluded -- see the banner comment above u2_2h1p_amplitude_chunks."""
     if not dress:
         return True
     if dress.get('hp', False):
@@ -179,7 +180,134 @@ def _dress_is_streamable(dress):
     return dress.get('spin_adapted', True)
 
 
-def _build_g_blocks_df(B, O, V, norb, need_vvvv=True, need_vv_pv_vp=True, need_vv_pp=True,
+CSF_LAYOUT_FIELDS = ('O', 'V', 'eps_o', 'eps_v', 's32', 's12', 's2', 's3',
+                     'nI', 'nII', 'nIII', 'n2h1p', 'nIp', 'nIIp', 'nIIIp', 'nH', 'nP_o', 'nP_v',
+                     'oI', 'oII', 'oIII', 'oIp', 'oIIp', 'oIIIp',
+                     'iu_o', 'ju_o', 'iu_v', 'ju_v', 'oidx', 'vidx_local', 'vidx_abs')
+class CSFLayout(namedtuple('CSFLayout', CSF_LAYOUT_FIELDS)):
+    def take(self, names):
+        """The fields named in the space-separated `names`, in that order."""
+        return tuple(getattr(self, n) for n in names.split())
+
+
+def csf_layout(s, nocc):
+    """The restricted CSF space every hand-written restricted route indexes:
+    O/V, the occupied and virtual energies, the spin-coupling factors
+    sqrt(3/2), sqrt(1/2), sqrt(2), sqrt(3), the class dimensions and offsets of
+    {orbital} + {2h1p I/II/III} + {2p1h I'/II'/III'}, the i<j / a<b pair
+    indices and the occupied, local virtual and absolute virtual orbital
+    indices."""
+    norb = s.norb
+    O, V = nocc, norb - nocc
+    d = s.dimensions(nocc)
+    nI, nII, nIII, n2h1p = d['nI'], d['nII'], d['nIII'], d['n2h1p']
+    nIp, nIIp, nIIIp = d['nIp'], d['nIIp'], d['nIIIp']
+    oI = norb
+    oII = oI + nI
+    oIIp = norb + n2h1p + nIp
+    iu_o, ju_o = np.triu_indices(O, k=1)
+    iu_v, ju_v = np.triu_indices(V, k=1)
+    return CSFLayout(O, V, s.eps[:O], s.eps[O:], math.sqrt(1.5), math.sqrt(0.5),
+                     math.sqrt(2.0), math.sqrt(3.0), nI, nII, nIII, n2h1p, nIp, nIIp,
+                     nIIIp, d['nH'],
+                     O * (O - 1) // 2, V * (V - 1) // 2,
+                     oI, oII, oII + nII, norb + n2h1p, oIIp, oIIp + nIIp,
+                     iu_o, ju_o, iu_v, ju_v, np.arange(O), np.arange(V),
+                     np.arange(O, norb))
+
+
+def unfold_pair(Vmat, iu, ju, O_, Vv):
+    """(n_pair, Vv) on the i<j pairs -> the antisymmetric (O_, O_, Vv) array."""
+    Vfull = np.zeros((O_, O_, Vv))
+    Vfull[iu, ju, :] = Vmat
+    Vfull[ju, iu, :] = -Vmat
+    return Vfull
+
+
+def upper_pair(Vmat, iu, ju, O_, Vv):
+    """(n_pair, Vv) on the i<j pairs -> (O_, O_, Vv), zero below the diagonal."""
+    Vup = np.zeros((O_, O_, Vv))
+    Vup[iu, ju, :] = Vmat
+    return Vup
+
+
+# The 2p1h class blocks the two hand-written restricted matrix-free routes
+# (adc_r_sigma_full, dense integrals; adc_r_sigma_df, DF) share. Apps are the
+# (App1, App2, App3, App4) contractions of a virtual-pair amplitude with
+# g_ovov/g_ovvo, Term0 the pp-ladder product, each in the route's own integrals.
+
+def upper_virtual_pair(Vmat, iu, ju, O_, Vv):
+    """(O_, n_pair) on the a<b pairs -> (O_, Vv, Vv), zero below the diagonal."""
+    Vup = np.zeros((O_, Vv, Vv))
+    Vup[:, iu, ju] = Vmat
+    return Vup
+
+
+def c_ip_ip(Vmat, g_aabb, inner_Ip):
+    """The I'-I' block on an (O, V) amplitude."""
+    term1 = np.einsum('ic,ac->ia', Vmat, g_aabb, optimize=True)
+    term2 = np.einsum('iak,ka->ia', inner_Ip, Vmat, optimize=True)
+    return term1 + term2
+
+
+def c_iip_iip(Term0, Apps, iu, ju):
+    """The II'-II' block: Term0 plus the Apps of the II' amplitude."""
+    App1, App2, App3, App4 = Apps
+    A, B = iu, ju
+    return (Term0 - App3[:, A, B] + App1[:, A, B] + 1.5 * App2[:, B, A]
+            - App1[:, B, A] - 1.5 * App4[:, B, A] + App3[:, B, A]
+            - 1.5 * App2[:, A, B] + 1.5 * App4[:, A, B])
+
+
+def c_iiip_iiip(Term0, Apps, iu, ju):
+    """The III'-III' block: Term0 plus the Apps of the III' amplitude."""
+    App1, App2, App3, App4 = Apps
+    A, B = iu, ju
+    return (Term0 - (App1[:, A, B] + App1[:, B, A]) - (App3[:, A, B] + App3[:, B, A])
+            + 0.5 * (App2[:, A, B] + App2[:, B, A]) + 0.5 * (App4[:, A, B] + App4[:, B, A]))
+
+
+def c_iip_iiip(Apps_IIIp, iu, ju, s3):
+    """The II'-III' block from the Apps of the III' amplitude."""
+    App1, App2, App3, App4 = Apps_IIIp
+    A, B = iu, ju
+    return 0.5 * s3 * (App2[:, B, A] - App2[:, A, B]) + 0.5 * s3 * (App4[:, B, A] - App4[:, A, B])
+
+
+def c_iiip_iip(Apps_IIp, iu, ju, s3):
+    """The III'-II' block from the Apps of the II' amplitude."""
+    App1, App2, App3, App4 = Apps_IIp
+    A, B = iu, ju
+    return 0.5 * s3 * (App2[:, B, A] + App2[:, A, B]) - 0.5 * s3 * (App4[:, A, B] + App4[:, B, A])
+
+
+G_BLOCK_NAMES = ('g_oovv', 'g_vvoo', 'g_vv_pv', 'g_vv_vp', 'g_oo_po', 'g_oo_op',
+                 'g_vopo', 'g_voho', 'g_ovpv', 'g_ovvp', 'g_oo_pp', 'g_vv_pp',
+                 'g_ii', 'g_aa', 'g_voov', 'g_vovo', 'g_oooo', 'g_vvvv',
+                 'g_ovov', 'g_ovvo')
+
+
+def build_g_blocks(eri_chemist, O):
+    """The twenty named integral slices of the restricted routes, as views of
+    the dense chemist ERI in physicist order <pq|rs> (g_ii/g_aa are the
+    gathered g[i,i,:,:]/g[a,a,:,:]); build_g_blocks_df is the DF twin."""
+    norb = eri_chemist.shape[0]
+    g = eri_chemist.transpose(0, 2, 1, 3)
+    oidx, vidx_abs = np.arange(O), np.arange(O, norb)
+    return dict(
+        g_oovv=g[:O, :O, O:, O:], g_vvoo=g[O:, O:, :O, :O],
+        g_vv_pv=g[O:, O:, :, O:], g_vv_vp=g[O:, O:, O:, :],
+        g_oo_po=g[:O, :O, :, :O], g_oo_op=g[:O, :O, :O, :],
+        g_vopo=g[O:, :O, :, :O], g_voho=g[O:, :O, :O, :],
+        g_ovpv=g[:O, O:, :, O:], g_ovvp=g[:O, O:, O:, :],
+        g_oo_pp=g[:O, :O, :, :], g_vv_pp=g[O:, O:, :, :],
+        g_ii=g[oidx, oidx], g_aa=g[vidx_abs, vidx_abs],
+        g_voov=g[O:, :O, :O, O:], g_vovo=g[O:, :O, O:, :O],
+        g_oooo=g[:O, :O, :O, :O], g_vvvv=g[O:, O:, O:, O:],
+        g_ovov=g[:O, O:, :O, O:], g_ovvo=g[:O, O:, O:, :O])
+
+
+def build_g_blocks_df(B, O, V, norb, need_vvvv=True, need_vv_pv_vp=True, need_vv_pp=True,
                        need_ovpv_ovvp=True, need_oo_pp=True, need_vopo_voho=True,
                        need_oovv_vvoo=True, need_voov_vovo=True, need_ovov_ovvo=True,
                        need_oo_po_op=True, need_oooo=True):
@@ -191,8 +319,8 @@ def _build_g_blocks_df(B, O, V, norb, need_vvvv=True, need_vv_pv_vp=True, need_v
     vir = np.arange(O, norb)
     allo = np.arange(norb)
     blocks = dict(
-        g_ii=_g_diag_df(B, occ, allo, allo),
-        g_aa=_g_diag_df(B, vir, allo, allo),
+        g_ii=g_diag_df(B, occ, allo, allo),
+        g_aa=g_diag_df(B, vir, allo, allo),
     )
     # g_oo_po/g_oo_op ((O,O,norb,O)) and g_oooo (O^4) are the last rank-4
     # integrals on the streamed DF path: the U-side g_klpi terms go
@@ -200,51 +328,51 @@ def _build_g_blocks_df(B, O, V, norb, need_vvvv=True, need_vv_pv_vp=True, need_v
     # _build_u_blocks_streamed) and the C-side g_oooo terms through
     # _oooo_contract_df.
     if need_oo_po_op:
-        blocks['g_oo_po'] = _g_slice_df(B, occ, occ, allo, occ)
-        blocks['g_oo_op'] = _g_slice_df(B, occ, occ, occ, allo)
+        blocks['g_oo_po'] = g_slice_df(B, occ, occ, allo, occ)
+        blocks['g_oo_op'] = g_slice_df(B, occ, occ, occ, allo)
     if need_oooo:
-        blocks['g_oooo'] = _g_slice_df(B, occ, occ, occ, occ)
+        blocks['g_oooo'] = g_slice_df(B, occ, occ, occ, occ)
     # g_voov/g_vovo (2h1p) and g_ovov/g_ovvo (2p1h) are (V,O,O,V)/(O,V,V,O),
     # the last O^2V^2 arrays standing on the streamed C-block path: nothing
     # reads the full arrays there -- the C-block appliers rebuild
     # occupied-chunk slices directly from B via _c2h1p_df_chunks/
     # _c2p1h_df_chunks, and the small diagonal pieces (C_I_I/C_Ip_Ip) go
-    # through _g_diag_mid_df/_g_diag_outer_df instead.
+    # through g_diag_mid_df/g_diag_outer_df instead.
     if need_voov_vovo:
-        blocks['g_voov'] = _g_slice_df(B, vir, occ, occ, vir)
-        blocks['g_vovo'] = _g_slice_df(B, vir, occ, vir, occ)
+        blocks['g_voov'] = g_slice_df(B, vir, occ, occ, vir)
+        blocks['g_vovo'] = g_slice_df(B, vir, occ, vir, occ)
     if need_ovov_ovvo:
-        blocks['g_ovov'] = _g_slice_df(B, occ, vir, occ, vir)
-        blocks['g_ovvo'] = _g_slice_df(B, occ, vir, vir, occ)
+        blocks['g_ovov'] = g_slice_df(B, occ, vir, occ, vir)
+        blocks['g_ovvo'] = g_slice_df(B, occ, vir, vir, occ)
     # g_oovv/g_vvoo (O,O,V,V)/(V,V,O,O): the streamed bare-DF path never
     # reads either -- U_I/U_Ip's ring construction and the apply_U_2h1p/
     # apply_U_2p1h closures rebuild occupied-chunk slices of them directly
-    # from B via _u2_2h1p_amplitude_chunks/_u2_2p1h_amplitude_chunks instead.
+    # from B via u2_2h1p_amplitude_chunks/u2_2p1h_amplitude_chunks instead.
     if need_oovv_vvoo:
-        blocks['g_oovv'] = _g_slice_df(B, occ, occ, vir, vir)
-        blocks['g_vvoo'] = _g_slice_df(B, vir, vir, occ, occ)
+        blocks['g_oovv'] = g_slice_df(B, occ, occ, vir, vir)
+        blocks['g_vvoo'] = g_slice_df(B, vir, vir, occ, occ)
     # g_oo_pp feeds only U_II/U_III's bare g_ijpa/g_ijap_T; g_vopo/g_voho
     # only the U^(2) ring terms of U_I/U_II/U_III. All three vanish once
-    # U_II/U_III are matrix-free and U_I goes through _u_I_ring_contract_df.
+    # U_II/U_III are matrix-free and U_I goes through u_I_ring_contract_df.
     if need_oo_pp:
-        blocks['g_oo_pp'] = _g_slice_df(B, occ, occ, allo, allo)
+        blocks['g_oo_pp'] = g_slice_df(B, occ, occ, allo, allo)
     if need_vopo_voho:
-        blocks['g_vopo'] = _g_slice_df(B, vir, occ, allo, occ)
-        blocks['g_voho'] = _g_slice_df(B, vir, occ, occ, allo)
+        blocks['g_vopo'] = g_slice_df(B, vir, occ, allo, occ)
+        blocks['g_voho'] = g_slice_df(B, vir, occ, occ, allo)
     if need_ovpv_ovvp:
-        blocks['g_ovpv'] = _g_slice_df(B, occ, vir, allo, vir)
-        blocks['g_ovvp'] = _g_slice_df(B, occ, vir, vir, allo)
+        blocks['g_ovpv'] = g_slice_df(B, occ, vir, allo, vir)
+        blocks['g_ovvp'] = g_slice_df(B, occ, vir, vir, allo)
     if need_vv_pv_vp:
-        blocks['g_vv_pv'] = _g_slice_df(B, vir, vir, allo, vir)
-        blocks['g_vv_vp'] = _g_slice_df(B, vir, vir, vir, allo)
+        blocks['g_vv_pv'] = g_slice_df(B, vir, vir, allo, vir)
+        blocks['g_vv_vp'] = g_slice_df(B, vir, vir, vir, allo)
     if need_vv_pp:
-        blocks['g_vv_pp'] = _g_slice_df(B, vir, vir, allo, allo)
+        blocks['g_vv_pp'] = g_slice_df(B, vir, vir, allo, allo)
     if need_vvvv:
-        blocks['g_vvvv'] = _g_slice_df(B, vir, vir, vir, vir)
+        blocks['g_vvvv'] = g_slice_df(B, vir, vir, vir, vir)
     return blocks
 
 
-def _u_pv_vp_contract_df(Bv_full, Bv_vv, X, x_letters, out_letters, q_chunk=32):
+def u_pv_vp_contract_df(Bv_full, Bv_vv, X, x_letters, out_letters, q_chunk=32):
     """Direct DF replacement for the pair
     einsum(f'{x_letters}cd,cdpa->{out_letters}pa', X, g_vv_pv),
     einsum(f'{x_letters}cd,cdap->{out_letters}pa', X, g_vv_vp)
@@ -269,7 +397,7 @@ def _u_pv_vp_contract_df(Bv_full, Bv_vv, X, x_letters, out_letters, q_chunk=32):
     return term_pv, term_vp
 
 
-def _u_Ip_pv_vp_contract_df(Bo_full, Bv_pp, Bov_full, Bv_full, W1p, W2p, q_chunk=32):
+def u_Ip_pv_vp_contract_df(Bo_full, Bv_pp, Bov_full, Bv_full, W1p, W2p, q_chunk=32):
     """
     Direct DF replacement for U_Ip's pair of ring contractions
 
@@ -303,101 +431,7 @@ def _u_Ip_pv_vp_contract_df(Bo_full, Bv_pp, Bov_full, Bv_full, W1p, W2p, q_chunk
     return term1, term2
 
 
-# ===================== S4: occupied-index streaming (bare + hh/pp-dressed EN) =====================
-# The amplitudes below (each O^2V^2, held live for the whole aop lifetime)
-# are built chunk by chunk, streaming over one occupied axis, never as full
-# arrays. Bare EN: D is a trivial broadcast, so streaming is free. Dressed
-# hh/pp (spin_adapted=True, production): the shift is a sum of broadcasts of
-# small (O,O)/(V,V) matrices, equally separable, so chunking is just slicing
-# their matching axis. 'hp' and determinant-wise (spin_adapted=False) EN are
-# EXCLUDED here -- their shifts don't reduce to a small-matrix broadcast per
-# axis, so callers must not pass them through dh/dp.
-def _u2_2h1p_amplitude_chunks(B, O, V, norb, eps_o, eps_v, chunk_size, dh=None, dp=None):
-    """Yields (lo, hi, t_same, t_opp, W1, W2, A_mix, X_ijcd) chunks, each
-    shape (hi-lo, O, V, V), streaming over the FIRST occupied axis of the
-    'ikca'/'ijcd' amplitudes (== g_oovv's own first axis).
-
-    dh/dp: optional (O,O)/(V,V) EN hh/pp shift matrices (spin_adapted,
-    restricted_channel_shifts' d_h[0]/d_p[0]); None reproduces the bare
-    denominator exactly (dh/dp=None is the previous, bare-only behavior).
-
-    Only ONE DF build per chunk: the transpose _u2_spin_amplitudes needs
-    (g_oovv.transpose(0,1,3,2), swapping the two V-sized axes) never touches
-    axis 0, so chunking axis 0 commutes with it -- unlike the 2p1h generator
-    below, whose transpose swaps the SAME two axes being chunked."""
-    occ = np.arange(O)
-    vir = np.arange(O, norb)
-    for lo in range(0, O, chunk_size):
-        hi = min(lo + chunk_size, O)
-        occ_chunk = occ[lo:hi]
-        g_chunk = _g_slice_df(B, occ_chunk, occ, vir, vir)       # (ci,O,V,V)
-        g_chunk_T = g_chunk.transpose(0, 1, 3, 2)
-        eo_chunk = eps_o[lo:hi]
-        D_ikca = (eo_chunk[:, None, None, None] + eps_o[None, :, None, None]
-                 - eps_v[None, None, :, None] - eps_v[None, None, None, :])
-        D_ijcd = (eps_v[None, None, :, None] + eps_v[None, None, None, :]
-                 - eo_chunk[:, None, None, None] - eps_o[None, :, None, None])
-        if dh is not None or dp is not None:
-            Delta = np.zeros(D_ikca.shape)
-            if dh is not None:
-                Delta = Delta + dh[lo:hi, :][:, :, None, None]
-            if dp is not None:
-                Delta = Delta + dp[None, None, :, :]
-            D_ikca = D_ikca - Delta      # 'ikca' bare_sign=+1 -> D = Dbare-Delta
-            D_ijcd = D_ijcd + Delta      # 'ijcd' bare_sign=-1 -> D = Dbare+Delta
-        t_opp = g_chunk / D_ikca
-        t_same = (g_chunk - g_chunk_T) / D_ikca
-        W1 = t_same - 2 * t_opp
-        W2 = t_opp - 2 * t_same
-        A_mix = 2 * t_same - t_opp
-        X_ijcd = g_chunk / D_ijcd
-        yield lo, hi, t_same, t_opp, W1, W2, A_mix, X_ijcd
-
-
-def _u2_2p1h_amplitude_chunks(B, O, V, norb, eps_o, eps_v, chunk_size, dh=None, dp=None):
-    """Yields (lo, hi, tp_same, tp_opp, W1p, W2p, X_abkl) chunks, each shape
-    (V, V, O, hi-lo), streaming over the LAST occupied axis (l) of the
-    'ackl'/'abkl' amplitudes -- the axis every consumer (U_Ip's ring build,
-    apply_U_2p1h_fwd/adj) treats as the batch/output index (its OWN axis3,
-    renamed 'i' at consumption).
-
-    dh/dp: same EN hh/pp shift matrices as _u2_2h1p_amplitude_chunks (see
-    its docstring for scope/exclusions); None reproduces the bare
-    denominator.
-
-    TWO DF builds per chunk, unlike the 2h1p generator's one: g_vvoo's
-    transpose swaps the SAME two occupied axes being chunked here (both
-    O-sized), so the exchange term needs its own build (g[a,c,l_chunk,k]
-    transposed back), never the full (V,V,O,O)."""
-    occ = np.arange(O)
-    vir = np.arange(O, norb)
-    for lo in range(0, O, chunk_size):
-        hi = min(lo + chunk_size, O)
-        occ_chunk = occ[lo:hi]
-        g_direct = _g_slice_df(B, vir, vir, occ, occ_chunk)                      # g[a,c,k,l_chunk]
-        g_exch = _g_slice_df(B, vir, vir, occ_chunk, occ).transpose(0, 1, 3, 2)  # g[a,c,l_chunk,k]->[a,c,k,l_chunk]
-        el_chunk = eps_o[lo:hi]
-        D_ackl = (eps_v[:, None, None, None] + eps_v[None, :, None, None]
-                 - eps_o[None, None, :, None] - el_chunk[None, None, None, :])
-        D_abkl = (eps_o[None, None, :, None] + el_chunk[None, None, None, :]
-                 - eps_v[:, None, None, None] - eps_v[None, :, None, None])
-        if dh is not None or dp is not None:
-            Delta = np.zeros(D_ackl.shape)
-            if dh is not None:
-                Delta = Delta + dh[:, lo:hi][None, None, :, :]
-            if dp is not None:
-                Delta = Delta + dp[:, :, None, None]
-            D_ackl = D_ackl + Delta      # 'ackl' bare_sign=-1 -> D = Dbare+Delta
-            D_abkl = D_abkl - Delta      # 'abkl' bare_sign=+1 -> D = Dbare-Delta
-        tp_opp = g_direct / D_ackl
-        tp_same = (g_direct - g_exch) / D_ackl
-        W1p = 2 * tp_opp - tp_same
-        W2p = 2 * tp_same - tp_opp
-        X_abkl = g_direct / D_abkl
-        yield lo, hi, tp_same, tp_opp, W1p, W2p, X_abkl
-
-
-def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
+def build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
                                Bo_full, Bv_full, Bov_full, Boo_full, Bvo_full, Bv_pp,
                                iu_o, ju_o, iu_v, ju_v, ints,
                                is_adc2x, use_materialized, w_chemist):
@@ -441,20 +475,20 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
         g_iicd = g_ii[:, O:, O:]
         X_icd = g_iicd / dens.build_icd()
         if Bv_pp is not None and w_chemist is None:
-            term_pv, term_vp = _u_pv_vp_contract_df(Bv_full, Bv_pp, X_icd, 'i', 'i')
+            term_pv, term_vp = u_pv_vp_contract_df(Bv_full, Bv_pp, X_icd, 'i', 'i')
         else:
             term_pv = np.einsum('icd,cdpa->ipa', X_icd, g_vv_pv, optimize=True)
             term_vp = np.einsum('icd,cdap->ipa', X_icd, g_vv_vp, optimize=True)
         u_I -= 0.5 * (term_pv + term_vp)
         # aaaa/abab amplitudes on 'ikca'; W1/W2/A_anti/A_mix are their
-        # unique linear combinations (see _u2_spin_amplitudes).
-        t_same, t_opp = _u2_spin_amplitudes(g_oovv, g_oovv_T, dens, 'ikca')
+        # unique linear combinations (see u2_spin_amplitudes).
+        t_same, t_opp = u2_spin_amplitudes(g_oovv, g_oovv_T, dens, 'ikca')
         W1 = t_same - 2 * t_opp                     # -(g + g^T)/D
         W2 = t_opp - 2 * t_same                     # (-g + 2g^T)/D
         # g_vopo/g_voho are skipped on the unscreened DF path; same
-        # algebra either way -- see _u_I_ring_contract_df.
+        # algebra either way -- see u_I_ring_contract_df.
         if g_vopo is None:
-            r1_I, r2_I = _u_I_ring_contract_df(Bo_full, Bv_full, Boo_full,
+            r1_I, r2_I = u_I_ring_contract_df(Bo_full, Bv_full, Boo_full,
                                                Bvo_full, W1, W2)
         else:
             r1_I = np.einsum('ikca,cipk->ipa', W1, g_vopo, optimize=True)
@@ -470,9 +504,9 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
     # (g_ijap_T[i,j] = g_ijpa[j,i]; term_vp = term_pv^T; Y_mix_2 =
     # Y_mix_1^T; the two ring terms are each other's transpose). Against
     # an unfolded trial vector Z of matching symmetry the paired terms
-    # contribute equally, so the 1/2 from _u_2h1p_unfold cancels the
+    # contribute equally, so the 1/2 from u_2h1p_unfold cancels the
     # pairing and ONE representative of each shape carries the block --
-    # see _u_2h1p_unfold. The blocks then differ only by (scale, which
+    # see u_2h1p_unfold. The blocks then differ only by (scale, which
     # amplitude the ring term uses, two signs), tabulated in _2h1p_specs.
     # As on the 2p1h side, each term carries p on exactly ONE factor, so
     # the adjoint contracts z_p in first and the norb axis never
@@ -504,7 +538,7 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
         u_III = s12 * (g_ijpa + g_ijap_T)
         if not is_adc2x:
             if Bv_pp is not None and w_chemist is None:
-                term_pv, term_vp = _u_pv_vp_contract_df(Bv_full, Bv_pp, X_ijcd, 'ij', 'ij')
+                term_pv, term_vp = u_pv_vp_contract_df(Bv_full, Bv_pp, X_ijcd, 'ij', 'ij')
             else:
                 term_pv = np.einsum('ijcd,cdpa->ijpa', X_ijcd, g_vv_pv, optimize=True)
                 term_vp = np.einsum('ijcd,cdap->ijpa', X_ijcd, g_vv_vp, optimize=True)
@@ -535,10 +569,10 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
             """y_p += U_II @ z_II + U_III @ z_III."""
             y = np.zeros(norb)
             for (sc, akey, qsign, ysign, anti), z in zip(_2h1p_specs, (z_II, z_III)):
-                Z = _u_2h1p_unfold(z, iu_o, ju_o, O, V, anti)
+                Z = u_2h1p_unfold(z, iu_o, ju_o, O, V, anti)
                 # bare 1st-order piece: g_ijpa = sum_Q B[Q,i,p] B[Q,j,a]
                 M = _cached_einsum('Qja,ija->Qi', Bov_full, Z, optimize=True)
-                y += sc * _b_chunk_einsum('Qip,Qi->p', (Bo_full, M), (True, True), Bo_full)
+                y += sc * b_chunk_einsum('Qip,Qi->p', (Bo_full, M), (True, True), Bo_full)
                 if is_adc2x:
                     continue
                 # -term_pv: g_vv_pv[c,d,p,a] = sum_Q B[Q,c,p] B[Q,d,a]
@@ -550,18 +584,18 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
                 # ring term: g_vopo[c,j,p,k] = sum_Q B[Q,c,p] B[Q,j,k]
                 S = _cached_einsum('ikca,ija->kcj', _amps_2h1p[akey], Z, optimize=True)
                 R = _cached_einsum('Qjk,kcj->Qc', Boo_full, S, optimize=True)
-                y += qsign * sc * _b_chunk_einsum('Qcp,Qc->p', (Bv_full, R), (True, True), Bv_full)
+                y += qsign * sc * b_chunk_einsum('Qcp,Qc->p', (Bv_full, R), (True, True), Bv_full)
                 # Y_mix term: g_voho[c,j,k,p] = sum_Q B[Q,c,k] B[Q,j,p]
                 S4 = _cached_einsum('ikca,ija->kcj', A_mix, Z, optimize=True)
                 R4 = _cached_einsum('Qck,kcj->Qj', Bvo_full, S4, optimize=True)
-                y += ysign * sc * _b_chunk_einsum('Qjp,Qj->p', (Bo_full, R4), (True, True), Bo_full)
+                y += ysign * sc * b_chunk_einsum('Qjp,Qj->p', (Bo_full, R4), (True, True), Bo_full)
             return y
 
         def apply_U_2h1p_adj(z_p):
             """(U_II.T @ z_p, U_III.T @ z_p), each returned as (nP_o, V)."""
-            bzo = _b_chunk_einsum('Qip,p->Qi', (Bo_full, z_p), (True, False),
+            bzo = b_chunk_einsum('Qip,p->Qi', (Bo_full, z_p), (True, False),
                                   Bo_full, (Bo_full.shape[0], O))
-            bzv = _b_chunk_einsum('Qcp,p->Qc', (Bv_full, z_p), (True, False),
+            bzv = b_chunk_einsum('Qcp,p->Qc', (Bv_full, z_p), (True, False),
                                   Bv_full, (Bv_full.shape[0], V))
             gz1 = _cached_einsum('Qi,Qja->ija', bzo, Bov_full, optimize=True)
             if not is_adc2x:
@@ -596,14 +630,14 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
         g_klpi_sym = g_oo_po + g_oo_op.transpose(0, 1, 3, 2)
         corr_kl_Ip = 0.5 * np.einsum('akl,klpi->api', X_akl, g_klpi_sym, optimize=True)
         u_Ip += corr_kl_Ip.transpose(2, 1, 0)
-        tp_same, tp_opp = _u2_spin_amplitudes(g_vvoo, g_vvoo_T, dens, 'ackl')
+        tp_same, tp_opp = u2_spin_amplitudes(g_vvoo, g_vvoo_T, dens, 'ackl')
         W1p = 2 * tp_opp - tp_same                   # (g + g^T)/D
         W2p = 2 * tp_same - tp_opp                   # (g - 2g^T)/D
         # g_ovpv/g_ovvp are skipped on the unscreened DF path (O*V^2*norb
         # sized), routed through the DF contraction instead; the two
-        # branches are the same algebra, see _u_Ip_pv_vp_contract_df.
+        # branches are the same algebra, see u_Ip_pv_vp_contract_df.
         if g_ovpv is None:
-            t1_Ip, t2_Ip = _u_Ip_pv_vp_contract_df(Bo_full, Bv_pp, Bov_full,
+            t1_Ip, t2_Ip = u_Ip_pv_vp_contract_df(Bo_full, Bv_pp, Bov_full,
                                                    Bv_full, W1p, W2p)
         else:
             t1_Ip = np.einsum('acki,kapc->api', W1p, g_ovpv, optimize=True)
@@ -615,7 +649,7 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
     # ================= U_IIp / U_IIIp -- MATRIX-FREE ==================
     # Two structural facts make the DF-contraction appliers exact (both
     # verified numerically, and both survive EN dressing -- see
-    # _u_2p1h_unfold and _u_2p1h_zparts_df):
+    # u_2p1h_unfold and u_2p1h_zparts_df):
     #   * every term of u_IIp_full is antisymmetric in (a,b) and every term
     #     of u_IIIp_full symmetric, so the pair sum becomes 1/2 * the full
     #     (a,b) sum against an unfolded trial vector, term by term;
@@ -647,8 +681,8 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
             allo = np.arange(norb)
             oidx = np.arange(O)
             vidx_abs = np.arange(O, norb)
-            g_abpi = _g_slice_df(B, vidx_abs, vidx_abs, allo, oidx)
-            g_abip_T = _g_slice_df(B, vidx_abs, vidx_abs, oidx, allo).transpose(0, 1, 3, 2)
+            g_abpi = g_slice_df(B, vidx_abs, vidx_abs, allo, oidx)
+            g_abip_T = g_slice_df(B, vidx_abs, vidx_abs, oidx, allo).transpose(0, 1, 3, 2)
         else:
             g_abpi = g_vv_pp_U[:, :, :, :O]
             g_abip_T = g_vv_pp_U[:, :, :O, :].transpose(0, 1, 3, 2)
@@ -681,29 +715,29 @@ def _build_u_blocks_unstreamed(B, O, V, norb, eps_o, eps_v, dens,
             """y_p += U_IIp @ z_IIp + U_IIIp @ z_IIIp."""
             y = np.zeros(norb)
             for (sc, gkey, akey, hsign, anti), z in zip(_2p1h_specs, (z_IIp, z_IIIp)):
-                Z = _u_2p1h_unfold(z, iu_v, ju_v, O, V, anti)
+                Z = u_2p1h_unfold(z, iu_v, ju_v, O, V, anti)
                 # bare 1st-order piece: g_abpi = sum_Q B[Q,a,p] B[Q,b,i]
                 M = _cached_einsum('Qbi,iab->Qa', Bvo_full, Z, optimize=True)
-                y += sc * _b_chunk_einsum('Qap,Qa->p', (Bv_full, M), (True, True), Bv_full)
+                y += sc * b_chunk_einsum('Qap,Qa->p', (Bv_full, M), (True, True), Bv_full)
                 if is_adc2x:
                     continue
                 P = _cached_einsum('abkl,iab->kli', X_abkl, Z, optimize=True)
                 y += 0.5 * sc * _cached_einsum('klpi,kli->p', _gk[gkey], P, optimize=True)
                 Y = _cached_einsum('acki,iab->ckib', _amps[akey], Z, optimize=True)
-                R = _b_chunk_einsum('ckib,Qbc->Qk', (Y, Bv_pp), (False, True),
+                R = b_chunk_einsum('ckib,Qbc->Qk', (Y, Bv_pp), (False, True),
                                     Bv_pp, (Bv_pp.shape[0], O))
-                y += sc * _b_chunk_einsum('Qk,Qkp->p', (R, Bo_full), (True, True), Bo_full)
+                y += sc * b_chunk_einsum('Qk,Qkp->p', (R, Bo_full), (True, True), Bo_full)
                 Y2 = _cached_einsum('acki,iab->ckib', A_mix_p, Z, optimize=True)
-                R2 = _b_chunk_einsum('ckib,Qkc->Qb', (Y2, Bov_full), (False, True),
+                R2 = b_chunk_einsum('ckib,Qkc->Qb', (Y2, Bov_full), (False, True),
                                      Bov_full, (Bov_full.shape[0], V))
-                y += hsign * sc * _b_chunk_einsum('Qb,Qbp->p', (R2, Bv_full), (True, True), Bv_full)
+                y += hsign * sc * b_chunk_einsum('Qb,Qbp->p', (R2, Bv_full), (True, True), Bv_full)
             return y
 
         def apply_U_2p1h_adj(z_p):
             """(U_IIp.T @ z_p, U_IIIp.T @ z_p), each returned as (O, nP_v)."""
             vidx_abs = np.arange(O, norb)
             oidx = np.arange(O)
-            gz, gzr, gzm = _u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p)
+            gz, gzr, gzm = u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p)
             out = []
             for sc, gkey, akey, hsign, anti in _2p1h_specs:
                 sgn = -1.0 if anti else 1.0

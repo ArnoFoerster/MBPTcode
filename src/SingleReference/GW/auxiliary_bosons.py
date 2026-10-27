@@ -29,10 +29,13 @@ standard RI basis leaves tens of meV, and the paper's even-tempered AB bases
 
 Poles and amplitudes come out in the sum-over-poles layout -- (Om_nu, |W^nu_pq|^2)
 -- so a sum-over-poles self-energy serves this route unchanged.
+
+No route calls it: it is kept as an independent G0W0 the tests gate the
+quasi-boson and pole-model routes against.
 """
 import numpy as np
 
-from src.Base.constants import AB_RCOND
+from src.Base.numerics.constants import AB_RCOND
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 
 

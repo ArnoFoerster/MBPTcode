@@ -20,15 +20,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-import pytest
 from pyscf import gto, scf, tdscf
-
-# src/properties/__init__.py imports src.properties.nonadiabatic, which
-# imports src.gradients.state_manifold; src.gradients's own __init__ imports
-# excited_state, which imports back from src.properties.nonadiabatic -- a
-# circular import that only resolves if src.gradients is already fully
-# loaded first. this is not a cycle this file introduces or is scoped to fix.
-import src.gradients  # noqa: F401,E402
 
 from src.properties import characters                              # noqa: E402
 
@@ -64,39 +56,24 @@ def _labels_equal(a, b):
         for ra, rb in zip(a, b))
 
 
-def test_moved_functions_match_recorded_baseline():
-    """orbital_irreps/root_irreps/select/impure via `characters` reproduce,
-    bitwise, the values recorded from the pre-move `state_symmetry.py`."""
-    baseline_path = os.path.join(os.environ['TMPDIR'], 'irrep_before.npz')
-    if not os.path.exists(baseline_path):
-        pytest.skip(f'no recorded baseline at {baseline_path}')
-    baseline = np.load(baseline_path, allow_pickle=True)
-
+def test_root_labels_are_the_recorded_ones():
+    """orbital_irreps/root_irreps/impure via `characters` give the labels
+    recorded on water/STO-3G/RHF TDA: each root's irrep, dominant pair, the
+    pair's irreps and purity 1, compared as labels and to 1e-8 in the weights
+    so that no BLAS's last bits decide it."""
     mol, mo_coeff, nocc, omega, X, Y = _water_sto3g_tda()
-    assert np.array_equal(mo_coeff, baseline['mo_coeff'])
-    assert np.array_equal(X, baseline['X'])
-    assert np.array_equal(Y, baseline['Y'])
-    assert np.array_equal(omega, baseline['omega'])
-
     ids, names = characters.orbital_irreps(mol, mo_coeff)
-    assert np.array_equal(ids, baseline['ids'])
-    assert names == list(baseline['names'])
-
+    assert names == ['A1', 'A1', 'B2', 'A1', 'B1', 'A1', 'B2']
     labels = characters.root_irreps(mol, mo_coeff, nocc, X, Y)
-    assert [r['irrep'] for r in labels] == list(baseline['irreps'])
-    assert np.array_equal([r['purity'] for r in labels], baseline['purity'])
-    assert np.array_equal([r['occ'] for r in labels], baseline['occ'])
-    assert np.array_equal([r['virt'] for r in labels], baseline['virt'])
-    assert [r['occ_irrep'] for r in labels] == list(baseline['occ_irrep'])
-    assert [r['virt_irrep'] for r in labels] == list(baseline['virt_irrep'])
-    assert np.array_equal([r['weight'] for r in labels], baseline['weight'])
-
-    n, _ = characters.select(mol, mo_coeff, nocc, omega, X, Y, 'A1')
-    assert n == int(baseline['n_a1'])
-
-    imp = characters.impure(labels)
-    assert [i for i, _ in imp] == list(baseline['impure_idx'])
-    assert characters.PURITY_FLOOR == float(baseline['purity_floor'])
+    got = [(r['irrep'], r['occ'], r['virt'], r['occ_irrep'], r['virt_irrep'])
+           for r in labels]
+    assert got == [('B1', 4, 5, 'B1', 'A1'), ('A2', 4, 6, 'B1', 'B2'),
+                   ('A1', 3, 5, 'A1', 'A1'), ('B2', 3, 6, 'A1', 'B2')]
+    assert np.allclose([r['purity'] for r in labels], 1.0, rtol=0, atol=1e-12)
+    assert np.allclose([r['weight'] for r in labels],
+                       [0.5 ** 0.5, 0.5 ** 0.5, 0.6861306408412536,
+                        0.6413225136882479], rtol=0, atol=1e-8)
+    assert characters.impure(labels) == []
 
 
 def test_select_by_irrep_picks_the_expected_root():

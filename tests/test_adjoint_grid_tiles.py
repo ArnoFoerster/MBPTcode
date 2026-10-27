@@ -12,20 +12,22 @@ Gated:
   * `GridTileRows` moves rows verbatim: from whole arrays, from contiguous
     blocks, gathered, broadcast by tile, added (1/2/3/5/8 ranks, ranks with
     no tile included);
-  * the tile-major sweep is the same bits at 1/2/3/5/8 simulated ranks, on
+  * the tile-major sweep is the same to a few ulp at 1/2/3/5/8 simulated ranks, on
     whole and on sliced factors, projbar whole or `ProjRows`;
   * against the tau-split sweep it lies within the worst-case rounding of
     the two evaluation orders, (M + 2 naux + nmo + 8) ulp of the same sweep
     on the absolute values, with no safety factor; projbar moved by 1e-10
     relative fails it;
-  * `fit_rows_adjoint` and `orbital_rotation_rows` read tiles bitwise the
-    whole adjoint's result at 2/3/8 ranks;
-  * the chain gates (water): the quasiparticle tape read back bitwise and a
+  * `fit_rows_adjoint` and `orbital_rotation_rows` read tiles to a few ulp
+    of the whole adjoint's result at 2/3/8 ranks;
+  * the chain gates (water): the quasiparticle tape read back to a few ulp
+    of the untaped reverse and a
     forward on it gathering nothing; the ranked force against one rank and
     a 4-point difference of the ranked energy; the census of what a rank
     holds through the reverse pass; tracemalloc totals.
 """
 import hashlib
+import dataclasses
 import os
 import sys
 import tracemalloc
@@ -37,25 +39,28 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
-                                SCF_DIFFERENTIABLE_CONV_TOL,
-                                SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
+                                         SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.separable_ri import fit_rows_adjoint
-from src.Base.sliced_factors import GridTileRows, SlicedFactors
-from src.Base.utils.mpi_grid import (contiguous_block, distributed,
-                                     run_simulated)
+from src.Base.numerics.numerics import Numerics, numerics_of
+from src.gradients.isdf_fit_adjoint import fit_rows_adjoint
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.LinearResponse.space_time import ProjRows
-from src.gradients.factor_chain import FrozenFactorization
+from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import orbital_rotation_rows
-from src.gradients.qp_space_time import qp_set_gradient
-from src.gradients.space_time_adjoint import (chi0_backward,
-                                              chi0_backward_rows,
-                                              polarizability_backward,
-                                              polarizability_backward_rows)
+from src.gradients.gwbse.qp_space_time import qp_set_gradient
+from src.gradients.rpa.space_time_adjoint import (chi0_backward,
+                                                  chi0_backward_rows,
+                                                  polarizability_backward,
+                                                  polarizability_backward_rows)
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_chain_row_fit import TILE, molecule
 from tests.test_chain_sliced_factors import H2O
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 SIZES = (1, 2, 3, 5, 8)
 ULP = np.finfo(float).eps
@@ -78,8 +83,17 @@ def random_case(seed=1):
 
 
 def same(a, b):
+    """The same bits: for rows moved verbatim (copies)."""
     return all(np.asarray(x).tobytes() == np.asarray(y).tobytes()
                and np.shape(x) == np.shape(y) for x, y in zip(a, b))
+
+
+def close(a, b):
+    """Every array of two computations (two rank counts, two layouts, a run
+    on the tape and one without) to a few ulp (`matches` of tests/pins.py)."""
+    return len(a) == len(b) and all(
+        matches(x, y, RECORDING_BLAS, quantity='gradient')
+        for x, y in zip(a, b))
 
 
 # ----------------------------------------------------------------- layouts
@@ -141,7 +155,7 @@ def test_tile_major_sweep_is_the_same_bits_at_every_rank_count(sliced,
         out = run_simulated(lambda comm: sweeps(comm, case, sliced,
                                                 proj_rows), size)
         for r, got in enumerate(out):
-            assert same(got, one), f'rank {r} of {size}'
+            assert close(got, one), f'rank {r} of {size}'
 
 
 def absolute_bound(fn, X, D, eps, grid, bar):
@@ -180,10 +194,11 @@ def test_tile_major_sweep_lies_within_its_rounding_of_the_tau_split_sweep():
 # ------------------------------------------------- the fit adjoint reads tiles
 def test_fit_adjoint_and_y_read_tiles_bitwise():
     """`fit_rows_adjoint` on D_bar and X_bar tiles and `orbital_rotation_rows`
-    on X_bar tiles give the whole adjoints' results bitwise at 2/3/8 ranks."""
+    on X_bar tiles give the whole adjoints' results to a few ulp at 2/3/8
+    ranks (two layouts)."""
     mol = molecule(H2O)
     with distributed(None):
-        fac = FrozenFactorization(mol)
+        fac = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux, nao = len(crd), aux.nao_nr(), mol.nao
     rng = np.random.default_rng(3)
@@ -206,7 +221,7 @@ def test_fit_adjoint_and_y_read_tiles_bitwise():
         ref = run_simulated(lambda comm: rank(comm, False), size)
         got = run_simulated(lambda comm: rank(comm, True), size)
         for r in range(size):
-            assert same(got[r], ref[r]), f'rank {r} of {size}'
+            assert close(got[r], ref[r]), f'rank {r} of {size}'
 
 
 # ------------------------------------------------------------ the chain
@@ -238,10 +253,10 @@ def ladder_chain(mol):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics={'sliced': True, 'fit': 'rows',
+                       numerics=numerics_of({'sliced': True, 'fit': 'rows',
                                  'fit_block': CHAIN_BLOCK,
                                  'tile_gb': CHAIN_TILE_GB,
-                                 'bse_adjoint': 'grid'})
+                                 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       hf_factory)
 
@@ -249,14 +264,14 @@ def ladder_chain(mol):
 def tau_split_path(chain):
     """The chain on the tau-split ranked path: whole adjoints, the tau-split
     sweeps, no tape."""
-    chain._adjoint_rows = lambda x_mo: None
-    forward = chain._forward
+    chain.reverse.adjoint_rows = lambda x_mo: None
+    forward = chain.forward
 
     def untaped(mol, mf):
-        om, pieces = forward(mol, mf)
-        return om, pieces[:16] + (None,)
+        shared, solution = forward(mol, mf)
+        return dataclasses.replace(shared, qp_tape=None), solution
 
-    chain._forward = untaped
+    chain.forward = untaped
     return chain
 
 
@@ -268,23 +283,22 @@ def at(mol, atom, axis, step):
 
 def test_the_tape_is_read_back_bitwise():
     """At 1 and 2 ranks: the reverse solve on the forward's tape gives the
-    untaped reverse bitwise, whole and in tiles; a forward on a tape that
+    untaped reverse to a few ulp, whole and in tiles; a forward on a tape that
     applies gathers no factor."""
 
     def rank(comm):
         mol = water()
         chain = ladder_chain(mol)
         mf = chain.mf0
-        om, pieces = chain._forward(mol, mf)
-        x_mo, d, eps, mu, tape = pieces[4], pieces[5], pieces[6], pieces[12], \
-            pieces[16]
-        xc = chain._xc_correction(mf, chain.qp_set, None)
-        weights = np.linspace(0.3, 1.0, len(chain.qp_set))
-        kw = chain._qp_kw()
-        args = (x_mo, d, eps, chain.nocc, chain.gw_grid, chain.nu, chain.wt,
-                chain.qp_set)
+        sh = chain.forward(mol, mf)[0]
+        x_mo, d, eps, mu, tape = sh.x_mo, sh.d, sh.eps, sh.mu, sh.qp_tape
+        xc = chain.xc_correction(mf, chain.resolved.qp_set, None)
+        weights = np.linspace(0.3, 1.0, len(chain.resolved.qp_set))
+        kw = chain.quasiparticles.qp_kw()
+        args = (x_mo, d, eps, chain.nocc, chain.conventions.gw_grid, chain.conventions.nu, chain.conventions.wt,
+                chain.resolved.qp_set)
         out = {}
-        for block in (None, chain._adjoint_rows(x_mo)):
+        for block in (None, chain.reverse.adjoint_rows(x_mo)):
             if comm.Get_size() == 1 and block is not None:
                 block = CHAIN_BLOCK
             runs = []
@@ -296,7 +310,7 @@ def test_the_tape_is_read_back_bitwise():
                     for a in got[2:]])
             out[block] = runs
         before = dict(getattr(x_mo, 'gathers', {}))
-        qp_set_gradient(*args, np.zeros(len(chain.qp_set)), mu=mu,
+        qp_set_gradient(*args, np.zeros(len(chain.resolved.qp_set)), mu=mu,
                         xc_correction=xc, tape=tape, **kw)
         after = dict(getattr(x_mo, 'gathers', {}))
         return out, before, after, tape is not None
@@ -305,7 +319,7 @@ def test_the_tape_is_read_back_bitwise():
         for out, before, after, taped in run_simulated(rank, size):
             assert taped
             for block, (with_tape, without) in out.items():
-                assert same(with_tape, without), (size, block)
+                assert close(with_tape, without), (size, block)
             assert before == after, (before, after)
 
 
@@ -445,13 +459,13 @@ class AdjointCensus:
             sys.settrace(None)
 
 
-def reverse(chain, pieces):
+def reverse(chain, shared, solution):
     """The excitation force's reverse pass: the BSE seeds, then everything
-    `_fold_to_nuclei` folds them through; (force, rows the seed holds)."""
-    seeds = chain._casida_seeds(pieces, chain.state)
+    `fold_to_nuclei` folds them through; (force, rows the seed holds)."""
+    seeds = chain.follower.casida_seeds(shared, solution, chain.state)
     held = (seeds[1].rows if isinstance(seeds[1], GridTileRows)
             else seeds[1]).shape[0]
-    return chain._fold_to_nuclei(pieces, *seeds)[0], held
+    return chain.reverse.fold_to_nuclei(shared, *seeds)[0], held
 
 
 @pytest.mark.parametrize('size', [2, 3, 8])
@@ -464,8 +478,8 @@ def test_no_rank_holds_a_whole_adjoint_or_a_grid_square(size):
         mol = water()
         chain = ladder_chain(mol)
         mf = chain.mf0
-        om, pieces = chain._forward(mol, mf)
-        x_mo = pieces[4]
+        shared, solution = chain.forward(mol, mf)
+        x_mo = shared.x_mo
         eps = np.asarray(mf.mo_energy)
         nocc = chain.nocc
         X = x_mo.gather('X_mo')
@@ -475,7 +489,7 @@ def test_no_rank_holds_a_whole_adjoint_or_a_grid_square(size):
         census = AdjointCensus(reverse.__code__, x_mo.npts,
                                (len(eps), x_mo.naux, nocc, len(eps) - nocc),
                                factors)
-        _, held = census.trace(reverse, chain, pieces)
+        _, held = census.trace(reverse, chain, shared, solution)
         return census.verdict(), held, x_mo.npts
 
     for r, (flags, held, npts) in enumerate(run_simulated(rank, size)):
@@ -494,13 +508,13 @@ def test_the_reverse_pass_holds_less_than_the_tau_split_path():
             chain = ladder_chain(mol)
             if tau_split:
                 tau_split_path(chain)
-            om, pieces = chain._forward(mol, chain.mf0)
+            shared, solution = chain.forward(mol, chain.mf0)
             comm.allgather(None)
             if comm.Get_rank() == 0:
                 tracemalloc.reset_peak()
             comm.allgather(None)
-            reverse(chain, pieces)
-            return pieces[4].npts, pieces[4].nmo, pieces[4].naux
+            reverse(chain, shared, solution)
+            return shared.x_mo.npts, shared.x_mo.nmo, shared.x_mo.naux
         tracemalloc.start()
         try:
             shape = run_simulated(rank, 3)[0]

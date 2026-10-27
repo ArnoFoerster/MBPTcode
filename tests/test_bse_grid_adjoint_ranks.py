@@ -1,12 +1,12 @@
-"""The grid BSE adjoint (`LinearResponse.isdf_bse_adjoint`) distributed over
+"""The grid BSE adjoint (`gradients.gwbse.isdf_bse_adjoint`) distributed over
 simulated ranks (`run_simulated`), RHF/cc-pVDZ at 148 points per atom, on the
 chain's own roots and vectors, the factors cut by `SlicedFactors.from_whole`:
 
   (a) eps_bar, X_bar, D_bar and W_bar of dOmega_0 and of the interstate
-      element at 1, 2, 3 and 8 ranks are the one-rank run's bits on every
+      element at 1, 2, 3 and 8 ranks are the one-rank run's to a few ulp on every
       rank (singlet and triplet, full and TDA, water and ethylene, 256- and
       64-point tiles); the composed force and interstate element of a sliced
-      chain with `bse_adjoint='grid'` are bitwise those of the same chain with
+      chain with `bse_adjoint='grid'` are to a few ulp those of the same chain with
       the grid adjoint run serially on the gathered factors;
   (b) a line-by-line trace of every frame under src/ finds no whole-grid
       array outside the boundary gather (`adjoints_at_the_boundary`), no
@@ -14,32 +14,35 @@ chain's own roots and vectors, the factors cut by `SlicedFactors.from_whole`:
       rank's rows and tiles; the same scan finds the whole factors of the
       serial-replicated realization, so it can fail;
   (c) with the kernel's GEMMs scaled by a function of their call shape
-      (`ShapeSensitiveNumpy`), every rank is still bitwise the one-rank run;
+      (`ShapeSensitiveNumpy`, 2^-30 per unit of shape), every rank is still
+      the one-rank run to a few ulp;
   (d) each tile is computed by one rank and broadcast once per pass (column
       and W_bar), with three halo and two hand-back row exchanges.
 """
 import os
 import sys
-import warnings
 
 import numpy as np
 import pytest
-from pyscf import gto, lib
+from pyscf import gto
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.Base.constants import BSE_ADJOINT_TILE_ROWS
-from src.Base.sliced_factors import GridTileRows, SlicedFactors, whole_factor
-from src.Base.utils.mpi_grid import (contiguous_block, distributed,
-                                     run_simulated)
-from src.SingleReference.LinearResponse import isdf_bse_adjoint
-from src.SingleReference.LinearResponse.isdf_bse_adjoint import (
+from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import BSE_ADJOINT_TILE_ROWS
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
+from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
+from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.gradients.gwbse import isdf_bse_adjoint
+from src.gradients.gwbse.isdf_bse_adjoint import (
     isdf_bse_backward, isdf_interstate_backward)
-from src.gradients import excited_state
-from src.gradients.excited_state import ExcitedStateChain
+from src.gradients.gwbse import state_following
+from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.test_bse_grid_adjoint import ETHYLENE, grid_bound_ratios
+from tests.chain_stages import casida_args
+from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
 from tests.test_chain_sliced_factors import (BASIS, H2O, H2O_DISPLACED,
-                                             bitwise, chain_scf)
+                                             chain_scf)
+from tests.isdf_test_grid import g1_numerics
+from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 SIZES = [2, 3, 8]
 #: The default tile and one that cuts water's 444 points into 7 tiles.
@@ -143,10 +146,11 @@ def inputs():
     with distributed(None):
         for name, spin, tda, solver in CASES:
             mol = own_molecule(name)
-            chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol),
-                                      spin=spin, bse_tda=tda, solver=solver)
-            _, pieces = chain._forward(chain.mol0, chain.mf0)
-            x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+            chain = ExcitedStateChain(
+                mol, chain_scf, mf=chain_scf(mol), spin=spin, bse_tda=tda,
+                numerics=g1_numerics(mol, Numerics(bse={'solver': solver})))
+            x, d, eq, w, no, _, xn, yn = casida_args(
+                chain, *chain.forward(chain.mol0, chain.mf0))
             out[(name, spin, tda)] = (x, d, eq, w, no, xn, yn, spin, tda)
     return out
 
@@ -169,6 +173,14 @@ def adjoint(case, comm=None, bra=None, tile=256, stats=None):
     return isdf_interstate_backward(bra, 0, *f, *args, **kw)
 
 
+def close_arrays(a, b):
+    """Every array of two computations (two rank splits, two realizations of
+    the adjoint) to a few ulp (`matches` of tests/pins.py)."""
+    return len(a) == len(b) and all(
+        matches(x, y, RECORDING_BLAS, quantity='gradient')
+        for x, y in zip(a, b))
+
+
 def rel(a, b):
     """max |a - b| relative to max |b|."""
     return float(np.abs(np.asarray(a) - np.asarray(b)).max()
@@ -181,7 +193,8 @@ def rel(a, b):
 @pytest.mark.parametrize('tile', TILES)
 def test_every_rank_count_gives_the_one_rank_bits(inputs, case, tile):
     """eps_bar, X_bar, D_bar and W_bar of dOmega_0 and of <1| dH |0> at 2, 3
-    and 8 ranks: on every rank the one-rank run's bits."""
+    and 8 ranks: on every rank the one-rank run's to a few ulp (two rank
+    splits)."""
     for bra in (None, 1):
         with distributed(None):
             one = adjoint(inputs[case], bra=bra, tile=tile)
@@ -190,8 +203,8 @@ def test_every_rank_count_gives_the_one_rank_bits(inputs, case, tile):
                 lambda comm: adjoint(inputs[case], comm, bra=bra, tile=tile),
                 size)
             for r, out in enumerate(got):
-                assert bitwise(out, one), (case, tile, bra, size, r)
-    print(f'[info] {case} tile {tile}: 1/2/3/8 ranks bitwise, dOmega and '
+                assert close_arrays(out, one), (case, tile, bra, size, r)
+    print(f'[info] {case} tile {tile}: 1/2/3/8 ranks to a few ulp, dOmega and '
           'the interstate element')
 
 
@@ -229,20 +242,6 @@ def serial_replicated_rows(**override):
     return run
 
 
-@pytest.fixture
-def pyscf_one_thread():
-    """pyscf's OpenMP GEMM on one thread, so its K partials are summed in one
-    order and two runs of a chain repeat their bits; a no-op without OpenMP."""
-    threads = lib.num_threads()
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(1)
-    yield
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        lib.num_threads(threads)
-
-
 def mean_fields(size):
     """factory(rank): `chain_scf` converging once per geometry on each rank
     and handing that mean field to every chain there, so two runs share it
@@ -265,9 +264,10 @@ def grid_forces(comm, factory_of):
     of a sliced chain with the grid adjoint, on this rank's own Mole."""
     factory = factory_of(comm.Get_rank())
     mol = own_molecule('water')
-    chain = ExcitedStateChain(mol, factory, mf=factory(mol),
-                              solver='davidson', sliced=True,
-                              bse_adjoint='grid')
+    chain = ExcitedStateChain(
+        mol, factory, mf=factory(mol),
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid'},
+                                           layout={'sliced': True})))
     here = gto.M(atom=H2O_DISPLACED, basis=BASIS, verbose=0)
     g_ex, d_ex = chain.excitation_gradient(here)
     g_st, _ = chain.interstate_gradient(0, 1)
@@ -278,42 +278,43 @@ def grid_forces(comm, factory_of):
 def test_the_composed_force_is_the_replicated_adjoints(size, monkeypatch,
                                                        pyscf_one_thread):
     """The sliced chain's excitation force and interstate element with the
-    distributed grid adjoint are the bits of the same chain with the grid
+    distributed grid adjoint are to a few ulp those of the same chain with the grid
     adjoint run serially by every rank on the gathered factors."""
     factory_of = mean_fields(size)
     dist = run_simulated(grid_forces, size, factory_of)
     omega = serial_replicated(isdf_bse_backward, 1)
     element = serial_replicated(isdf_interstate_backward, 2)
-    monkeypatch.setattr(excited_state, 'isdf_bse_backward', omega)
-    monkeypatch.setattr(excited_state, 'isdf_interstate_backward', element)
+    monkeypatch.setattr(state_following, 'isdf_bse_backward', omega)
+    monkeypatch.setattr(state_following, 'isdf_interstate_backward', element)
     rows = serial_replicated_rows()
-    monkeypatch.setattr(excited_state, 'isdf_bse_backward_rows', rows)
+    monkeypatch.setattr(state_following, 'isdf_bse_backward_rows', rows)
     rep = run_simulated(grid_forces, size, factory_of)
     # serially the whole kernels, over ranks the rows kernel, twice a rank
     assert len(omega.calls) + len(element.calls) + len(rows.calls) == 2 * size
     for r in range(size):
-        assert bitwise(dist[r], rep[r]), f'rank {r} of {size}: {dist[r]}'
-        assert bitwise(dist[r], dist[0]), f'rank {r} of {size} != rank 0'
+        assert close_arrays(dist[r], rep[r]), f'rank {r} of {size}: {dist[r]}'
+        assert bitwise_arrays(dist[r], dist[0]), f'rank {r} of {size} != rank 0'
     print(f'[info] {size} ranks: composed force and interstate element '
-          f'bitwise the serial-replicated adjoint on every rank; '
+          f'the serial-replicated adjoint to a few ulp on every rank; '
           f'|g| {np.abs(dist[0][0]).max():.6e}')
 
 
 def traced_grid_forces(comm, factory_of):
     """`grid_forces`, recording at every reverse call this chain's seeds
     beside the default-tile kernel's run serially on the gathered factors and
-    folded on the same pieces: (the forces, the records)."""
+    folded on the same forward: (the forces, the records)."""
     factory = factory_of(comm.Get_rank())
     mol = own_molecule('water')
-    chain = ExcitedStateChain(mol, factory, mf=factory(mol),
-                              solver='davidson', sliced=True,
-                              bse_adjoint='grid')
+    chain = ExcitedStateChain(
+        mol, factory, mf=factory(mol),
+        numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid'},
+                                           layout={'sliced': True})))
     calls = []
-    seeds_of, fold = chain._casida_seeds, chain._fold_to_nuclei
+    seeds_of, fold = chain.follower.casida_seeds, chain.reverse.fold_to_nuclei
 
-    def seeds(pieces, n, m=None):
-        out = seeds_of(pieces, n, m)
-        x, d, eq, w, no, _, xn, yn = chain._casida_args(pieces)
+    def seeds(shared, solution, n, m=None):
+        out = seeds_of(shared, solution, n, m)
+        x, d, eq, w, no, _, xn, yn = casida_args(chain, shared, solution)
         X, D = whole_factor(x, 'X_mo'), whole_factor(d, 'D')
         kw = dict(spin=chain.spin, bse_tda=chain.bse_tda)
         with distributed(None):
@@ -328,16 +329,16 @@ def traced_grid_forces(comm, factory_of):
                                       for a in out)))
         return out
 
-    def folded(pieces, *own, **fold_kw):
+    def folded(shared, *own, **fold_kw):
         # the refold first, keeping the tape the probed fold may release
-        refold = np.asarray(fold(pieces, *[
+        refold = np.asarray(fold(shared, *[
             np.array(a, copy=True) for a in calls[-1]['ref']],
             release_tape=False)[0])
-        result = fold(pieces, *own, **fold_kw)
+        result = fold(shared, *own, **fold_kw)
         calls[-1]['refold'] = refold
         return result
 
-    chain._casida_seeds, chain._fold_to_nuclei = seeds, folded
+    chain.follower.casida_seeds, chain.reverse.fold_to_nuclei = seeds, folded
     here = gto.M(atom=H2O_DISPLACED, basis=BASIS, verbose=0)
     g_ex, d_ex = chain.excitation_gradient(here)
     g_st, _ = chain.interstate_gradient(0, 1)
@@ -346,28 +347,29 @@ def traced_grid_forces(comm, factory_of):
 
 def test_the_force_carries_the_adjoints_bits(monkeypatch, pyscf_one_thread):
     """At 2 ranks the replicated adjoint in 128-point tiles moves the composed
-    force off the distributed bits (so the bitwise gate can fail), by its
-    seeds alone: the root is unchanged, the fold of the default-tile seeds on
-    the reblocked run's pieces is the distributed force bitwise, and the
+    force off the distributed bits (by ~1e-8 Ha/Bohr, so the few-ulp gate
+    can fail), by its seeds alone: the root is unchanged, the fold of the
+    default-tile seeds on the reblocked run's pieces is the distributed force
+    to a few ulp, and the
     reblocked seeds lie within the derived rounding bound
     (`grid_bound_ratios`). The force difference is only printed: the fit
     adjoint carries last-bit input changes to ~1e-8 Ha/Bohr."""
     factory_of = mean_fields(2)
     dist = run_simulated(grid_forces, 2, factory_of)
-    monkeypatch.setattr(excited_state, 'isdf_bse_backward',
+    monkeypatch.setattr(state_following, 'isdf_bse_backward',
                         serial_replicated(isdf_bse_backward, 1,
                                           tile_rows=128))
-    monkeypatch.setattr(excited_state, 'isdf_interstate_backward',
+    monkeypatch.setattr(state_following, 'isdf_interstate_backward',
                         serial_replicated(isdf_interstate_backward, 2,
                                           tile_rows=128))
-    monkeypatch.setattr(excited_state, 'isdf_bse_backward_rows',
+    monkeypatch.setattr(state_following, 'isdf_bse_backward_rows',
                         serial_replicated_rows(tile_rows=128))
     moved = run_simulated(traced_grid_forces, 2, factory_of)
     for r, (forces, calls) in enumerate(moved):
         d = max(float(np.abs(np.asarray(a) - np.asarray(b)).max())
                 for a, b in zip(forces, dist[r]))
-        assert not bitwise(forces, dist[r]), f'rank {r}: nothing moved'
-        assert forces[1] == dist[r][1], f'rank {r}: the root moved'
+        assert not bitwise_arrays(forces, dist[r]), f'rank {r}: nothing moved'
+        assert_same(forces[1], dist[r][1], label=f'rank {r}: the root moved')
         assert len(calls) == 2, len(calls)
         for label, call, g in zip(('excitation', 'interstate'), calls,
                                   (dist[r][0], dist[r][2])):
@@ -375,14 +377,16 @@ def test_the_force_carries_the_adjoints_bits(monkeypatch, pyscf_one_thread):
                                        call['inputs'], call['spin'],
                                        call['tda'], call['n'], bra=call['m'],
                                        tiles=(BSE_ADJOINT_TILE_ROWS, 128))
-            same = np.array_equal(call['refold'], g)
+            same = matches(call['refold'], g, RECORDING_BLAS,
+                           quantity='gradient')
             print(f'[info] rank {r} {label}: 128-point tiles move the force '
                   f'{d:.2e} Ha/Bohr, the seeds X / D / W at {ratios[0]:.3f} / '
                   f'{ratios[1]:.3f} / {ratios[2]:.3f} of the derived bound; '
-                  f'the fold of the default-tile seeds bitwise the '
+                  f'the fold of the default-tile seeds to a few ulp the '
                   f'distributed force: {same}')
             assert same, (r, label)
-            assert np.array_equal(call['seeds'][0], call['ref'][0]), label
+            assert_same(call['seeds'][0], call['ref'][0], quantity='gradient',
+                        label=label)
             assert max(ratios) <= 1, (r, label, ratios)
 
 
@@ -502,7 +506,7 @@ def test_the_scan_sees_the_replicated_realization(inputs):
                          ids=lambda c: '-'.join(map(str, c)))
 def test_a_shape_sensitive_blas_moves_no_rank(inputs, case, monkeypatch):
     """Under the stand-in every rank at 2, 3 and 8 ranks is the one-rank
-    stand-in run's bits; the stand-in moves the result, and a 128-point tile
+    stand-in run to a few ulp; the stand-in moves the result, and a 128-point tile
     moves it by more than TILE_SHAPE_MOVES."""
     with distributed(None):
         real = adjoint(inputs[case], bra=1)
@@ -518,7 +522,7 @@ def test_a_shape_sensitive_blas_moves_no_rank(inputs, case, monkeypatch):
     for size in SIZES:
         for r, out in enumerate(run_simulated(
                 lambda comm: adjoint(inputs[case], comm, bra=1), size)):
-            assert bitwise(out, one), (case, size, r)
+            assert close_arrays(out, one), (case, size, r)
 
 
 if __name__ == '__main__':

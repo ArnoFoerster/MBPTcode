@@ -31,14 +31,14 @@ import contextlib
 import functools
 import itertools
 import os
+import sys
 import threading
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from src.Base.utils.threads import (_BlasLimit, _pool_is_ours, blas_single_threaded,
-                                    row_map)
+from src.Base.utils.parallel.threads import (BlasLimit, blas_single_threaded, pool_is_ours,
+                                             resolve_workers, row_map)
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
@@ -46,7 +46,8 @@ _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not
 
 def _stream_gb(text):
     """The slab budget in GB from MBPT_STREAM_GB: unset is 16; a finite number above
-    zero is itself; anything else is 16 with a warning naming the value."""
+    zero is itself; anything else is refused (ValueError naming the value), at
+    import on every rank alike."""
     if text is None:
         return 16.0
     try:
@@ -55,9 +56,8 @@ def _stream_gb(text):
         gb = np.nan
     if np.isfinite(gb) and gb > 0.0:
         return gb
-    warnings.warn(f'MBPT_STREAM_GB={text!r} is no finite budget above zero; '
-                  'streaming at 16 GB', RuntimeWarning)
-    return 16.0
+    raise ValueError(f'MBPT_STREAM_GB={text!r} is no finite budget above zero; '
+                     'unset it for 16 GB or give a number of GB')
 
 
 # GB a streamed kernel's slabs in flight may hold together; the job's environment
@@ -68,15 +68,12 @@ _STREAM_LOCK = threading.Lock()
 
 
 def _threads():
-    """The thread pin, OMP_NUM_THREADS, else the cores this process may run on."""
-    pin = os.environ.get('OMP_NUM_THREADS', '')
-    if pin.isdigit() and int(pin) > 0:
-        return int(pin)
-    return len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') \
-        else (os.cpu_count() or 1)
+    """The thread pin: the process's thread budget (`resolve_workers`), not capped
+    by a count of work items, since it keys row_map's one executor."""
+    return resolve_workers(None, sys.maxsize)
 
 
-def _ew(op, a, b, out=None):
+def ew(op, a, b, out=None):
     """op(a, b) for a NumPy ufunc op, a an array and b a scalar or an array of a's
     shape, split over the leading axis across the thread pin. A ufunc releases
     the GIL, so the slabs run in parallel; each element sees the same operation,
@@ -100,16 +97,16 @@ def _ew(op, a, b, out=None):
     return out
 
 
-def _ksum(fn, n, size):
+def ksum(fn, n, size):
     """sum of fn(r0, r1) over ranges tiling [0, n), one per thread of the pin, with
     BLAS held at one thread meanwhile. For a product whose output is small and
     whose summed axis is long, which BLAS splits over the output and so runs on a
     few cores; fn returns the product over its slab of that axis, and runs on a
-    pool thread, so it calls neither _ew nor _ksum. size, the long operand's
+    pool thread, so it calls neither ew nor ksum. size, the long operand's
     element count, keeps a product below _KSUM_MIN whole, where the wrap and the
     dispatch would cost more than the split wins. The partials are added in range
     order, so the sum is reordered against fn(0, n), not random. Off the main
-    thread, inside a _stream slab, the product stays whole: the slabs already
+    thread, inside a stream slab, the product stays whole: the slabs already
     share the cores, and the BLAS count is not this call's to hold at one."""
     nt = _threads()
     if (nt < 2 or n < 2 or size < _KSUM_MIN
@@ -125,7 +122,7 @@ def _stream_workers():
     return max(1, _threads() // 8)
 
 
-def _slab_plan(n, per_index, live):
+def slab_plan(n, per_index, live):
     """(width, workers) for streaming the indices [0, n) in slabs, where one slab
     index carries per_index elements of a slab block and a slab in flight holds
     `live` such blocks at once. The slabs in flight hold workers * width * live *
@@ -147,7 +144,7 @@ def _add(a, b):
 
 def _stream_pool(workers):
     """This process's executor of `workers` slab threads, made once. It is not one
-    of row_map's: a slab's own _ew passes run on those, and a slab waiting on a
+    of row_map's: a slab's own ew passes run on those, and a slab waiting on a
     pool it occupies would never return."""
     key = (os.getpid(), workers)
     with _STREAM_LOCK:
@@ -156,7 +153,7 @@ def _stream_pool(workers):
         return _STREAM_POOLS[key]
 
 
-def _stream(fn, n, width, workers=None):
+def stream(fn, n, width, workers=None):
     """fn(j0, j1) summed over the slabs [j0, j1) of width `width` tiling [0, n), the
     last one shorter. `workers` slabs run at once (default _stream_workers()), each
     worker taking a contiguous group of slabs in turn, with BLAS held at
@@ -178,11 +175,15 @@ def _stream(fn, n, width, workers=None):
         return group(0, len(slabs))
     ns = len(slabs)
     groups = [(p * ns // workers, (p + 1) * ns // workers) for p in range(workers)]
-    limit = (_BlasLimit(max(1, _threads() // workers)) if _pool_is_ours()
+    limit = (BlasLimit(max(1, _threads() // workers)) if pool_is_ours()
              else contextlib.nullcontext())
     with limit:
         parts = list(_stream_pool(workers).map(lambda g: group(*g), groups))
     return functools.reduce(_add, parts)
+
+
+# kept for ee_gw_pieces, which imports them from here
+_ew, _ksum, _slab_plan, _stream = ew, ksum, slab_plan, stream
 
 
 class SB:
@@ -235,21 +236,21 @@ class SB:
                 if k[0] != 'a':
                     continue
                 if k not in half:
-                    half[k] = _ew(np.multiply, v, sign)
+                    half[k] = ew(np.multiply, v, sign)
                 elif sign > 0:
-                    half[k] = _ew(np.add, half[k], v)
+                    half[k] = ew(np.add, half[k], v)
                 else:
-                    half[k] = _ew(np.subtract, half[k], v)
+                    half[k] = ew(np.subtract, half[k], v)
             return SB(_with_flip(half, self.parity), parity=self.parity)
         out = dict(self.blocks)
         for k, v in other.blocks.items():
             # one pass over the block: sign * v would be a second full temporary
             if k not in out:
-                out[k] = _ew(np.multiply, v, sign)
+                out[k] = ew(np.multiply, v, sign)
             elif sign > 0:
-                out[k] = _ew(np.add, out[k], v)
+                out[k] = ew(np.add, out[k], v)
             else:
-                out[k] = _ew(np.subtract, out[k], v)
+                out[k] = ew(np.subtract, out[k], v)
         return SB(out)
 
     def __add__(self, other):
@@ -259,10 +260,10 @@ class SB:
         return self._combine(other, -1.0)
 
     def __neg__(self):
-        return self._map(lambda v: _ew(np.multiply, v, -1.0))
+        return self._map(lambda v: ew(np.multiply, v, -1.0))
 
     def __mul__(self, c):
-        return self._map(lambda v: _ew(np.multiply, v, c))
+        return self._map(lambda v: ew(np.multiply, v, c))
 
     __rmul__ = __mul__
 
@@ -280,22 +281,16 @@ class SB:
         denominator, whose value differs between same- and opposite-spin
         configurations)."""
         if isinstance(arr, SB):
-            return SB({k: _ew(np.multiply, v, arr.get(k))
+            return SB({k: ew(np.multiply, v, arr.get(k))
                        for k, v in self.blocks.items() if arr.get(k) is not None})
-        return self._map(lambda v: _ew(np.multiply, v, arr))
+        return self._map(lambda v: ew(np.multiply, v, arr))
 
     def divide(self, arr):
         """scale() by the reciprocal, without forming 1/arr for the whole SB."""
         if isinstance(arr, SB):
-            return SB({k: _ew(np.true_divide, v, arr.get(k))
+            return SB({k: ew(np.true_divide, v, arr.get(k))
                        for k, v in self.blocks.items() if arr.get(k) is not None})
-        return self._map(lambda v: _ew(np.true_divide, v, arr))
-
-    def spin_flip(self):
-        """The closed-shell involution alpha <-> beta."""
-        tr = str.maketrans('ab', 'ba')
-        return SB({k.translate(tr): v for k, v in self.blocks.items()},
-                  parity=self.parity)
+        return self._map(lambda v: ew(np.true_divide, v, arr))
 
 
 _FLIP = str.maketrans('ab', 'ba')
@@ -386,16 +381,16 @@ def ovvv_ia(S, X):
 
     and alpha <-> beta for 'bb': matmuls on reshape views of S, one per j, where
     the block-wise einsum reorders (copies) the o v^3 block once per spin block,
-    summed over j-slabs by _ksum. An X with a flip parity needs the 'aa' matmuls
+    summed over j-slabs by ksum. An X with a flip parity needs the 'aa' matmuls
     alone."""
     nv = S.shape[0]
     out = {}
     spins = (('aa', ('aaaa', 'abba', 'abab')), ('bb', ('bbbb', 'baab', 'baba')))
     for s, (same, with_v, with_neg) in (spins if X.parity is None else spins[:1]):
         # Z = X^same - X^same_ijcb + X^v - X^neg_ijcb, left to right, in place
-        Z = _ew(np.subtract, X.get(same), X.get(same).transpose(0, 1, 3, 2))
-        _ew(np.add, Z, X.get(with_v), out=Z)
-        _ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
+        Z = ew(np.subtract, X.get(same), X.get(same).transpose(0, 1, 3, 2))
+        ew(np.add, Z, X.get(with_v), out=Z)
+        ew(np.subtract, Z, X.get(with_neg).transpose(0, 1, 3, 2), out=Z)
 
         def part(j0, j1):
             # sum_jbc Z_ijbc S_ajbc over the slab j0 <= j < j1, one j at a time:
@@ -405,7 +400,7 @@ def ovvv_ia(S, X):
                 acc += Z[:, j].reshape(Z.shape[0], -1) @ S[:, j].reshape(nv, -1).T
             return acc
 
-        out[s] = _ksum(part, Z.shape[1], Z.size)
+        out[s] = ksum(part, Z.shape[1], Z.size)
         del Z                               # before the next spin's Z is formed
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
@@ -428,7 +423,7 @@ def ooov_ia(G, X):
                      - sum_jkb Vx_jkib (X^aaaa + X^baab)_jkab,
 
     and alpha <-> beta for 'bb'. Each is a batch of (i, b) x (b, a) products
-    over (j, k), summed over j-slabs by _ksum, where the block-wise einsum
+    over (j, k), summed over j-slabs by ksum, where the block-wise einsum
     copies every doubles block to bring (j, k, b) together. An X with a flip
     parity needs 'aa' alone."""
 
@@ -450,7 +445,7 @@ def ooov_ia(G, X):
             j = slice(j0, j1)
             return pair(V[j], Xs[j] + Xv[j]) + pair(N[j], Xs[j] + Xn[j])
 
-        out[s] = _ksum(part, V.shape[0], Xs.size)
+        out[s] = ksum(part, V.shape[0], Xs.size)
     if X.parity is not None:
         return SB(_with_flip(out, X.parity), parity=X.parity)
     return SB(out)
@@ -480,14 +475,14 @@ def ovvv_ijab(S, x):
     swap = (0, 1, 3, 2)
 
     def anti(T):
-        return _ew(np.subtract, T, T.transpose(swap))       # T_ijab - T_ijba
+        return ew(np.subtract, T, T.transpose(swap))       # T_ijab - T_ijba
 
     def neg_swap(T):
-        return _ew(np.multiply, T.transpose(swap), -1.0)    # -T_ijba
+        return ew(np.multiply, T.transpose(swap), -1.0)    # -T_ijba
 
     if x.parity is not None:
         Ta = t(x.get('aa'))
-        Tb = Ta if x.parity > 0 else _ew(np.multiply, Ta, -1.0)
+        Tb = Ta if x.parity > 0 else ew(np.multiply, Ta, -1.0)
         return SB(_with_flip({'aaaa': anti(Ta), 'abab': Tb,
                               'abba': neg_swap(Tb)}, x.parity),
                   parity=x.parity)
@@ -550,7 +545,7 @@ def ovvv_ijab_pij_slab(S, x, j0, j1, out=None):
                                      (np.subtract, bt)))):
             o = out.get(key)
             for op, v in terms:
-                _ew(op, o, v, out=o)
+                ew(op, o, v, out=o)
     return out
 
 

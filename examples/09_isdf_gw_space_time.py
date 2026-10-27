@@ -22,18 +22,23 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.isdf_jk import isdf_jk, separable_factors_from_jk
+from src.Base.numerics.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
+from src.Base.factorization.isdf_jk import separable_factors_from_jk
+from src.gradients.isdf_mean_field import isdf_jk_with_force
+from src.Base.factorization.separable_ri import resolve_isdf_grid
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.space_time import (solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 
 mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
             basis='cc-pvdz', verbose=0)
 nocc = mol.nelectron // 2
 
 # 1. SCF with an ISDF with_df: J and K from the factors, no cderi stored.
-mf = isdf_jk(scf.RHF(mol), auxbasis='cc-pvdz-ri')
+#    The interpolation grid is named, here the level the surfaces use.
+counts = resolve_isdf_grid(SURFACE_GRID_ACCURACY, str(mol.basis))[0]
+mf = isdf_jk_with_force(scf.RHF(mol), auxbasis='cc-pvdz-ri', counts=counts)
 mf.kernel()
 print(f'ISDF-SCF   E = {mf.e_tot:.8f} Ha')
 
@@ -48,10 +53,11 @@ print('G0W0       HOMO-1, HOMO = '
 
 # 4a. BSE in two steps: the QP diagonal first, then the BSE on it.
 eps_qp, _ = solve_qp_diagonal_space_time(mf, mol, nocc, factors=factors)  # every orbital
-omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, nroots=3, qp=eps_qp,
+numerics = Numerics(bse={'nroots': 3})     # every numerical choice in one object
+omega, X, Y, info = solve_bse_isdf(mf, mol, nocc, numerics=numerics, qp=eps_qp,
                                    factors=factors)
 print('BSE@G0W0   ' + ', '.join(f'{w * HARTREE_TO_EV:.3f}' for w in omega) + ' eV')
 
 # 4b. Or in one call, which runs that same GW itself.
-omega1, _, _, _ = solve_bse_isdf(mf, mol, nocc, nroots=3, factors=factors)
+omega1, _, _, _ = solve_bse_isdf(mf, mol, nocc, numerics=numerics, factors=factors)
 print('one call   ' + ', '.join(f'{w * HARTREE_TO_EV:.3f}' for w in omega1) + ' eV')

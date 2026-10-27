@@ -1,5 +1,5 @@
-"""Every test file runs as a script and under pytest (tests/README.md); this
-file holds pytest to its half of that.
+"""Test files run under pytest or as scripts (tests/README.md); this file holds
+the test_* functions to what pytest needs.
 
 A script-style check named test_* is the failure this guards against: one that
 takes the molecule or mean field its own __main__ builds errors at collection
@@ -13,6 +13,10 @@ function, and every test_* method of a Test* class, takes only fixtures pytest
 can supply (its built-ins, fixtures defined in the module or in conftest.py,
 parametrized names, imported names) and returns nothing.
 
+Every tests/test_*.py is in exactly one CI tier list (tools/ci/fast.txt,
+slow.txt, heavy.txt, triage.txt), and every line of those lists names a file
+that exists: a file in no list never runs in CI.
+
 Run: python tests/test_conventions.py, or under pytest.
 """
 import ast
@@ -21,6 +25,8 @@ import os
 import sys
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
+CI = os.path.join(os.path.dirname(TESTS), 'tools', 'ci')
+CI_TIERS = ('fast', 'slow', 'heavy', 'triage')
 
 BUILTIN_FIXTURES = {'cache', 'capfd', 'capfdbinary', 'caplog', 'capsys',
                     'capsysbinary', 'doctest_namespace', 'monkeypatch',
@@ -111,20 +117,59 @@ def violations(path, shared_fixtures):
     return found
 
 
-def run():
+def tier_placement():
+    """{test file name: [tiers whose list names it]} over every tests/test_*.py
+    and every file a tier list names."""
+    placed = {os.path.basename(p): []
+              for p in glob.glob(os.path.join(TESTS, 'test_*.py'))}
+    for tier in CI_TIERS:
+        with open(os.path.join(CI, tier + '.txt')) as f:
+            for line in f:
+                line = line.split('#')[0].strip()
+                if line:
+                    placed.setdefault(line.split()[1], []).append(tier)
+    return placed
+
+
+def tier_problems():
+    """(file, problem) for a test file in no tier or in several, and for a tier
+    line naming a file that does not exist."""
+    problems = []
+    for name, tiers in sorted(tier_placement().items()):
+        if not os.path.exists(os.path.join(TESTS, name)):
+            problems.append((name, f'listed in {", ".join(tiers)} but does not exist'))
+        elif len(tiers) != 1:
+            problems.append((name, f'in {len(tiers)} tier lists {tiers}, not exactly one'))
+    return problems
+
+
+def pytest_violations():
+    """(number of test files, {path: violations}) over every tests/**/test_*.py."""
     shared = _conftest_fixtures()
     files = sorted(glob.glob(os.path.join(TESTS, '**', 'test_*.py'), recursive=True))
-    bad = {path: v for path in files if (v := violations(path, shared))}
+    return len(files), {path: v for path in files if (v := violations(path, shared))}
+
+
+def run():
+    problems = tier_problems()
+    for name, problem in problems:
+        print(f'  {name}: {problem}')
+    print(f'CI tier lists: {len(problems)} problems: {"FAIL" if problems else "OK"}')
+    nfiles, bad = pytest_violations()
     for path, found in bad.items():
         for name, problem in found:
             print(f'  {os.path.relpath(path, TESTS)}::{name} {problem}')
-    print(f'{len(files)} test files, {sum(map(len, bad.values()))} pytest-incompatible '
+    print(f'{nfiles} test files, {sum(map(len, bad.values()))} pytest-incompatible '
           f'test_* functions in {len(bad)} files: {"FAIL" if bad else "OK"}')
-    return not bad
+    return not bad and not problems
 
 
 def test_every_test_function_runs_under_pytest():
-    assert run()
+    assert pytest_violations()[1] == {}
+
+
+def test_every_test_file_is_in_exactly_one_tier():
+    assert tier_problems() == []
 
 
 if __name__ == '__main__':

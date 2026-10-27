@@ -3,47 +3,26 @@
 U blocks are materialized once (dense, cheap at O(norb*nH)); the fourteen
 C sub-blocks are applied per matvec. W_chemist screening (incl.
 screen_coupling) lives here -- the dense screening route."""
-import math
 import numpy as np
 
 from src.SingleReference.EpsteinNesbet import (EpsteinNesbetDenominators,
                                                restricted_channel_shifts)
-from src.SingleReference.ADC.adc_r_utils import (_build_u_blocks_unstreamed,
-                                                 _no_u_blocks)
+from src.SingleReference.ADC.adc_r_utils import (
+    G_BLOCK_NAMES, build_g_blocks, build_u_blocks_unstreamed, c_iip_iip, c_iip_iiip,
+    c_iiip_iip, c_iiip_iiip, c_ip_ip, csf_layout, no_u_blocks, unfold_pair, upper_pair,
+    upper_virtual_pair)
 
 
 def build_operator(s, nocc, static_correction=None, couplings=True):
     """(aop, diag, dims) for the dense-integral route. couplings=False: U = 0,
     i.e. F and the satellite block K + C only."""
-    eps, eri_chemist = s.eps, s.eri
+    eps = s.eps
     norb = s.norb
-    O, V = nocc, norb - nocc
-    eps_o, eps_v = eps[:O], eps[O:]
-
-    s32 = math.sqrt(1.5)
-    s12 = math.sqrt(0.5)
-    s2 = math.sqrt(2.0)
-    s3 = math.sqrt(3.0)
-
     d = s.dimensions(nocc)
-    nI, nII, nIII, n2h1p = d['nI'], d['nII'], d['nIII'], d['n2h1p']
-    nIp, nIIp, nIIIp = d['nIp'], d['nIIp'], d['nIIIp']
-    nH = d['nH']
-    nP_o = O * (O - 1) // 2
-    nP_v = V * (V - 1) // 2
-
-    oI = norb
-    oII = oI + nI
-    oIII = oII + nII
-    oIp = norb + n2h1p
-    oIIp = oIp + nIp
-    oIIIp = oIIp + nIIp
-
-    iu_o, ju_o = np.triu_indices(O, k=1)
-    iu_v, ju_v = np.triu_indices(V, k=1)
-    oidx = np.arange(O)
-    vidx_local = np.arange(V)
-    vidx_abs = np.arange(O, norb)
+    (O, V, eps_o, eps_v, s32, s2, s3, nH, nP_o, nP_v, oI, oII, oIII, oIp, oIIp,
+     oIIIp, iu_o, ju_o, iu_v, ju_v, oidx, vidx_local, vidx_abs) = csf_layout(s, nocc).take(
+        'O V eps_o eps_v s32 s2 s3 nH nP_o nP_v oI oII oIII oIp oIIp oIIIp '
+        'iu_o ju_o iu_v ju_v oidx vidx_local vidx_abs')
 
     # ===================== F block =====================
     if static_correction is None:
@@ -52,27 +31,10 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         F = np.diag(eps) + static_correction
 
     # Common integral slices (identical to the dense build)
-    g = s.eri.transpose(0, 2, 1, 3)
-    g_oovv = g[:O, :O, O:, O:]
-    g_vvoo = g[O:, O:, :O, :O]
-    g_vv_pv = g[O:, O:, :, O:]
-    g_vv_vp = g[O:, O:, O:, :]
-    g_oo_po = g[:O, :O, :, :O]
-    g_oo_op = g[:O, :O, :O, :]
-    g_vopo = g[O:, :O, :, :O]
-    g_voho = g[O:, :O, :O, :]
-    g_ovpv = g[:O, O:, :, O:]
-    g_ovvp = g[:O, O:, O:, :]
-    g_oo_pp = g[:O, :O, :, :]
-    g_vv_pp = g[O:, O:, :, :]
-    g_ii = g[oidx, oidx]
-    g_aa = g[vidx_abs, vidx_abs]
-    g_voov = g[O:, :O, :O, O:]
-    g_vovo = g[O:, :O, O:, :O]
-    g_oooo = g[:O, :O, :O, :O]
-    g_vvvv = g[O:, O:, O:, O:]
-    g_ovov = g[:O, O:, :O, O:]
-    g_ovvo = g[:O, O:, O:, :O]
+    blk = build_g_blocks(s.eri, O)
+    (g_oovv, g_vvoo, g_vv_pv, g_vv_vp, g_oo_po, g_oo_op, g_vopo, g_voho, g_ovpv, g_ovvp,
+     g_oo_pp, g_vv_pp, g_ii, g_aa, g_voov, g_vovo, g_oooo, g_vvvv, g_ovov,
+     g_ovvo) = (blk[k] for k in G_BLOCK_NAMES)
 
     g_oovv_T = g_oovv.transpose(0, 1, 3, 2)
     g_vvoo_T = g_vvoo.transpose(0, 1, 3, 2)
@@ -118,7 +80,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     # See build_supermatrix's identical block for the layout key and the
     # spin-resolved EN rationale (kept in sync deliberately).
     _deltas = (None, None, None)
-    if s.u2_denom_dress and not s._is_adc2x:
+    if s.u2_denom_dress and not s.is_adc2x:
         _deltas = restricted_channel_shifts(
             s.u2_denom_dress, s.B_aa,
             g_oooo_bare, g_vvvv_bare, O, vidx_abs,
@@ -135,14 +97,14 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         g_oo_pp_U=g_oo_pp_U, g_vv_pp_U=g_vv_pp_U)
     if couplings:
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
-         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _build_u_blocks_unstreamed(
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = build_u_blocks_unstreamed(
             None, O, V, norb, eps_o, eps_v, dens,
             None, None, None, None, None, None,
             iu_o, ju_o, iu_v, ju_v, _u_ints,
-            is_adc2x=s._is_adc2x, use_materialized=True, w_chemist=s.W_chemist)
+            is_adc2x=s.is_adc2x, use_materialized=True, w_chemist=s.W_chemist)
     else:
         (U_I, U_Ip, apply_U_2h1p_fwd, apply_U_2h1p_adj,
-         apply_U_2p1h_fwd, apply_U_2p1h_adj) = _no_u_blocks(norb, O, V, nP_o, nP_v)
+         apply_U_2p1h_fwd, apply_U_2p1h_adj) = no_u_blocks(norb, O, V, nP_o, nP_v)
     # ===================== K diagonals =====================
     e_I = (2 * eps_o[:, None] - eps_v[None, :]).ravel()
     e_II = (eps_o[iu_o, None] + eps_o[ju_o, None] - eps_v[None, :]).ravel()
@@ -163,16 +125,6 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         return term1 + term2
 
     g_oooo_anti = g_oooo - g_oooo.transpose(0, 1, 3, 2)
-    def unfold_pair(Vmat, iu, ju, O_, Vv):
-        Vfull = np.zeros((O_, O_, Vv))
-        Vfull[iu, ju, :] = Vmat
-        Vfull[ju, iu, :] = -Vmat
-        return Vfull
-
-    def upper_pair(Vmat, iu, ju, O_, Vv):
-        Vup = np.zeros((O_, O_, Vv))
-        Vup[iu, ju, :] = Vmat
-        return Vup
     M1a = g_vovo.transpose(1, 2, 3, 0)
     M1b = g_voov.transpose(1, 3, 2, 0)
     M1 = -M1a + 1.5 * M1b
@@ -242,15 +194,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
     g_kaia = g_ovov[:, vidx_local, :, vidx_local].transpose(1, 0, 2)
     inner_Ip = (g_kaai - 2 * g_kaia).transpose(2, 1, 0)
 
-    def apply_C_Ip_Ip(Vmat):
-        term1 = np.einsum('ic,ac->ia', Vmat, g_aabb, optimize=True)
-        term2 = np.einsum('iak,ka->ia', inner_Ip, Vmat, optimize=True)
-        return term1 + term2
     # --- App1..4 building blocks for the virt-pair (2p1h) C-blocks ---
-    def make_upper_k(Vmat, iu, ju, O_, Vv):
-        Vup = np.zeros((O_, Vv, Vv))
-        Vup[:, iu, ju] = Vmat
-        return Vup
     def compute_Apps(Vupper_k):
         App1 = np.einsum('kXin,kYn->iXY', g_ovov, Vupper_k, optimize=True)
         App2 = np.einsum('kXni,kYn->iXY', g_ovvo, Vupper_k, optimize=True)
@@ -259,7 +203,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         return App1, App2, App3, App4
 
     def apply_C_Ip_IIp(V_IIp):
-        Vupper_kp = make_upper_k(V_IIp, iu_v, ju_v, O, V)
+        Vupper_kp = upper_virtual_pair(V_IIp, iu_v, ju_v, O, V)
         term1 = s32 * np.einsum('kaDi,kaD->ia', g_ovvo, Vupper_kp, optimize=True)
         term2 = s32 * np.einsum('kaCi,kCa->ia', g_ovvo, Vupper_kp, optimize=True)
         return term1 - term2
@@ -270,7 +214,7 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         return s32 * Wc[:, C_r, D_r] - s32 * Wc[:, D_r, C_r]
 
     def apply_C_Ip_IIIp(V_IIIp):
-        Vupper_kp3 = make_upper_k(V_IIIp, iu_v, ju_v, O, V)
+        Vupper_kp3 = upper_virtual_pair(V_IIIp, iu_v, ju_v, O, V)
         term0 = s2 * (V_IIIp @ g_aa_cd.T)
         term1 = s2 * (-np.einsum('kaiD,kaD->ia', g_ovov, Vupper_kp3, optimize=True)
                       + 0.5 * np.einsum('kaDi,kaD->ia', g_ovvo, Vupper_kp3, optimize=True))
@@ -296,31 +240,6 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
 
     def _term0_IIIp(Vmat):
         return Vmat @ g_pp_v_sym1.T + Vmat @ g_pp_v_sym2.T
-    def apply_C_IIp_IIp(Vmat, Apps):
-        App1, App2, App3, App4 = Apps
-        Term0 = _term0_IIp(Vmat)
-        A, B = iu_v, ju_v
-        return (Term0 - App3[:, A, B] + App1[:, A, B] + 1.5 * App2[:, B, A]
-                - App1[:, B, A] - 1.5 * App4[:, B, A] + App3[:, B, A]
-                - 1.5 * App2[:, A, B] + 1.5 * App4[:, A, B])
-
-    def apply_C_IIIp_IIIp(Vmat, Apps):
-        App1, App2, App3, App4 = Apps
-        Term0 = _term0_IIIp(Vmat)
-        A, B = iu_v, ju_v
-        return (Term0 - (App1[:, A, B] + App1[:, B, A]) - (App3[:, A, B] + App3[:, B, A])
-                + 0.5 * (App2[:, A, B] + App2[:, B, A]) + 0.5 * (App4[:, A, B] + App4[:, B, A]))
-
-    def apply_C_IIp_IIIp(Apps_IIIp):
-        App1, App2, App3, App4 = Apps_IIIp
-        A, B = iu_v, ju_v
-        return 0.5 * s3 * (App2[:, B, A] - App2[:, A, B]) + 0.5 * s3 * (App4[:, B, A] - App4[:, A, B])
-
-    def apply_C_IIIp_IIp(Apps_IIp):
-        App1, App2, App3, App4 = Apps_IIp
-        A, B = iu_v, ju_v
-        return 0.5 * s3 * (App2[:, B, A] + App2[:, A, B]) - 0.5 * s3 * (App4[:, A, B] + App4[:, B, A])
-
     def aop(z):
         z_p = z[:norb]
         z_I = z[oI:oII].reshape(O, V)
@@ -342,18 +261,21 @@ def build_operator(s, nocc, static_correction=None, couplings=True):
         y_II = uT_II.reshape(-1) + e_II * z_II.reshape(-1) + c2h1p_II.reshape(-1)
         y_III = uT_III.reshape(-1) + e_III * z_III.reshape(-1) + c2h1p_III.reshape(-1)
 
-        Apps_IIp = compute_Apps(make_upper_k(z_IIp, iu_v, ju_v, O, V))
-        Apps_IIIp = compute_Apps(make_upper_k(z_IIIp, iu_v, ju_v, O, V))
+        Apps_IIp = compute_Apps(upper_virtual_pair(z_IIp, iu_v, ju_v, O, V))
+        Apps_IIIp = compute_Apps(upper_virtual_pair(z_IIIp, iu_v, ju_v, O, V))
         c2p1h_Ip = apply_C_Ip_IIp(z_IIp) + apply_C_Ip_IIIp(z_IIIp)
         c2p1h_IIp = apply_C_IIp_Ip(z_Ip)
         c2p1h_IIIp = apply_C_IIIp_Ip(z_Ip)
 
-        y_Ip = (U_Ip.T @ z_p) + e_Ip * z_Ip.reshape(-1) + (apply_C_Ip_Ip(z_Ip) + c2p1h_Ip).reshape(-1)
+        y_Ip = (U_Ip.T @ z_p) + e_Ip * z_Ip.reshape(-1) + (
+            c_ip_ip(z_Ip, g_aabb, inner_Ip) + c2p1h_Ip).reshape(-1)
         uT_IIp, uT_IIIp = apply_U_2p1h_adj(z_p)
         y_IIp = uT_IIp.reshape(-1) + e_IIp * z_IIp.reshape(-1) + (
-            c2p1h_IIp + apply_C_IIp_IIp(z_IIp, Apps_IIp) + apply_C_IIp_IIIp(Apps_IIIp)).reshape(-1)
+            c2p1h_IIp + c_iip_iip(_term0_IIp(z_IIp), Apps_IIp, iu_v, ju_v)
+            + c_iip_iiip(Apps_IIIp, iu_v, ju_v, s3)).reshape(-1)
         y_IIIp = uT_IIIp.reshape(-1) + e_IIIp * z_IIIp.reshape(-1) + (
-            c2p1h_IIIp + apply_C_IIIp_IIp(Apps_IIp) + apply_C_IIIp_IIIp(z_IIIp, Apps_IIIp)).reshape(-1)
+            c2p1h_IIIp + c_iiip_iip(Apps_IIp, iu_v, ju_v, s3)
+            + c_iiip_iiip(_term0_IIIp(z_IIIp), Apps_IIIp, iu_v, ju_v)).reshape(-1)
 
         return np.concatenate([y_p, y_I, y_II, y_III, y_Ip, y_IIp, y_IIIp])
 

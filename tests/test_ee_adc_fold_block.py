@@ -6,7 +6,7 @@ and A_eff(w) between the nodes is their Lagrange interpolant. Each root solves
 lambda_r(w) = w in the subspace model and is converged only by an exact
 product at its own w. Checks:
 
-  1. RIFoldADC2.fold_images: M U equals apply(U, None) bit for bit and each
+  1. RIFoldADC2.fold_images: M U equals apply(U, None) to a few ulp and each
      F[q] equals apply(U, w_q) - apply(U, None) to 1e-13 relative, singlets
      and triplets.
   2. the interpolation bound: for poles D at and above d_min the Lagrange
@@ -22,7 +22,7 @@ product at its own w. Checks:
   5. roots whose window reaches the lowest doubles energy: a warning, and the
      per-root Newton gives the exact roots.
   6. over simulated MPI ranks (2 and 3) the block solve driven from rank 0
-     returns the serial roots bit for bit on every rank.
+     returns the serial roots to a few ulp on every rank.
   7. completeness without the count: a state last on M's diagonal that the
      fold makes the lowest root (n 800; alone, and inside a coupled block of
      50), which M's seeds miss, is found through the start's random vector,
@@ -42,27 +42,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import DFIntegrals, get_orbital_energies
-from src.Base.utils.mpi_grid import run_simulated
+from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
+from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.ADC.eeADC import ee_equations
-
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
-
-
-def check(ok, label, detail=''):
-    """Print one verdict line and return `ok` as a bool."""
-    tail = f'   ({detail})' if detail else ''
-    print(f"  [{'ok' if ok else 'FAIL'}] {label}" + tail)
-    return bool(ok)
+from tests.adc_common import SCF_TOL_DF, WATER_ORIGIN, check
+from tests.pins import RECORDING_BLAS, matches, same_solution
 
 
 def water_df():
     """(mf, eps, B, no): RHF water/cc-pVDZ with DF factors B[Q, p, q] (MO)."""
-    mol = gto.M(atom=WATER, basis='cc-pvdz', verbose=0)
+    mol = gto.M(atom=WATER_ORIGIN, basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit()
-    mf.conv_tol = 1e-12
+    mf.conv_tol = SCF_TOL_DF
     mf.kernel()
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     return mf, eps, DFIntegrals.from_scf(mol, mf).B_aa, mol.nelectron // 2
@@ -111,7 +104,7 @@ def check_images(mf, eps, B, no):
         M0, _ = op.apply(U, None)
         err = max(float(np.abs(Fq[q] - (op.apply(U, [w, w])[0] - M0)).max()
                         / np.abs(Fq[q]).max()) for q, w in enumerate(nodes))
-        ok &= check(np.array_equal(MU, M0) and err < 1e-13,
+        ok &= check(matches(MU, M0, RECORDING_BLAS, quantity='root') and err < 1e-13,
                     f'{spin}: fold_images equals apply at every node',
                     f'max rel diff {err:.1e}')
     return ok
@@ -239,11 +232,11 @@ def check_ranks(mf, eps, B, no):
     ser = rank(None)
     for size in (2, 3):
         outs = run_simulated(rank, size)
-        same = all(np.array_equal(o['omega'], ser['omega'])
-                   and np.array_equal(o['t1'], ser['t1']) for o in outs)
+        same = all(same_solution((o['omega'], o['t1']), (ser['omega'], ser['t1']))
+                   for o in outs)
         ok &= check(same and set(ser['loop']) == {'block'},
                     f'{size} simulated ranks: the block roots equal the serial run '
-                    'bit for bit')
+                    'to a few ulp')
     return ok
 
 

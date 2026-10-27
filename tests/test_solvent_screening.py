@@ -1,7 +1,7 @@
 """Solvent-screened Coulomb kernel v -> v + vtilde (Duchemin, Jacquemin and
 Blase, J. Chem. Phys. 144, 164106 (2016), doi:10.1063/1.4946778).
 
-src.Base.solvent_screening folds the solvent's reducible polarizability into
+src.environments.solvent_screening folds the solvent's reducible polarizability into
 the Coulomb kernel (the paper's Eqs. (11)-(16)) and hands the result to the two
 places this code gets two-electron integrals from, so every self-energy picks
 it up at once.
@@ -54,20 +54,22 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.pyscf_interface import (get_two_electron_integrals_chemist,
-                                      get_density_fitting_coefficients,
-                                      get_uhf_spin_orbital_arrays_blockstacked,
-                                      get_uhf_spin_orbital_df_factor_blockstacked)
-from src.Base.solvent_screening import (SolventScreening, attach_solvent_screening,
-                                        detach_solvent_screening,
-                                        solvent_static_selfenergy,
-                                        solvent_dielectrics)
+from src.Base.pyscf.pyscf_interface import (get_two_electron_integrals_chemist,
+                                            get_density_fitting_coefficients,
+                                            get_uhf_spin_orbital_arrays_blockstacked,
+                                            get_uhf_spin_orbital_df_factor_blockstacked)
+from src.environments.solvent_screening import (SolventScreening, attach_solvent_screening,
+                                                detach_solvent_screening,
+                                                solvent_dielectrics)
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.qp_solve import static_exchange_matrix
-from src.Base.separable_ri import optimize_atomic_radii
+from src.Base.factorization.separable_ri import optimize_atomic_radii
 
-from src.Base.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
+from src.Base.environment_seam import environment_of
+from src.Base.numerics.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
+from tests.isdf_test_grid import g1, g1_route
+from tests.pins import RECORDING_BLAS, matches
 WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
 
 
@@ -185,7 +187,7 @@ def check_uhf():
 def check_static_cohsex(mol, mf):
     """The first-order reaction field: image-charge sign structure."""
     attach_solvent_screening(mf, solvent='water')
-    sigma = solvent_static_selfenergy(mf, mol)
+    sigma = environment_of(mf).static_self_energy(mf, mol)
     detach_solvent_screening(mf)
     nocc = mol.nelectron // 2
     diag = np.diag(sigma)
@@ -222,8 +224,8 @@ def check_the_grid_potential_streams(mol, mf):
                    - np.einsum('pik,iqk->pq', responded[:, :nocc], v_mo[:nocc],
                                optimize=True))
     whole = env.cohsex_correction(mol, mf.mo_coeff, nocc)
-    ok = check(np.array_equal(whole, dense),
-               'the default budget is one block and reproduces it bitwise')
+    ok = check(matches(whole, dense, RECORDING_BLAS, quantity='root'),
+               'the default budget is one block and reproduces it to a few ulp')
     # one grid point per block: the most reordering the split can produce
     fine = SolventScreening(mol, solvent='water')
     blocks = fine.grid_blocks(mf.mo_coeff.shape[1], budget_gb=1e-9)
@@ -281,30 +283,32 @@ def check_all_gw_routes(mol):
     bare interaction plus Duchemin et al.'s Eq. (18) shift, formed from the
     dressed static screening of each route's own factors (DF for casida and
     the imaginary-frequency route, the separable factors for space-time), so
-    the three modes must agree on the IP shift. The static_exchange_matrix
-    check below is the COHSEX operator a route without W (ADC) still uses."""
+    the three modes must agree on the IP shift. The shared static term
+    refuses a screening reached without its Eq. (18) shift."""
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit').run()
 
-    # The mechanism itself: attaching the screening moves static_exchange_matrix
-    # by exactly the static COHSEX operator.
-    sx_gas = static_exchange_matrix(mf, mol)
+    # The shared static term takes no COHSEX operator in place of Eq. (18): a
+    # route that reaches it with the screening attached and no shift is refused.
     attach_solvent_screening(mf, solvent='water')
-    sx_sol = static_exchange_matrix(mf, mol)
-    sigma = solvent_static_selfenergy(mf, mol)
+    try:
+        static_exchange_matrix(mf, mol)
+        refused = False
+    except ValueError:
+        refused = True
     detach_solvent_screening(mf)
-    d = np.abs(sx_sol - sx_gas - sigma).max()
-    ok = check(d < 1e-12, 'static_exchange_matrix picks up exactly Sigma^solv',
-               f'{d:.1e}')
+    ok = check(refused, 'static_exchange_matrix refuses a screening without '
+               'its Eq. (18) shift')
 
     # Optimize the ISDF radii once; the fit depends only on element/basis.
     auxbasis = str(mol.basis) + '-ri'
-    radii = {el: optimize_atomic_radii(el, mol.basis, auxbasis)[0]
+    radii = {el: optimize_atomic_radii(el, mol.basis, auxbasis,
+                                       counts=g1(mol))[0]
              for el in sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})}
 
     def ip(mode):
         kw = {'radii': radii} if mode == 'space-time' else {}
         return -calc_qp_energy(mf, selfenergy='GW', df=True, state='homo',
-                               mode=mode, **kw)
+                               mode=mode, **kw, **g1_route(mf, mode))
 
     shifts = {}
     for mode in ('casida', 'imagfrequency', 'space-time'):

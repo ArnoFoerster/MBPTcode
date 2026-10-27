@@ -10,7 +10,8 @@ diagonal. Screening at the quasiparticle energies instead moves these roots by
 flat under grid refinement, since it is not a fitting error at all.
 
 So the pins are: the default is unchanged, the argument reaches the direct term,
-the two spellings of "screen at my own energies" agree bitwise, and once the
+the two spellings of "screen at my own energies" agree to a few ulp (two
+builds), and once the
 split is right the residual gap to density fitting is the fitting set alone --
 the same size whether it is measured here or at a single energy set.
 """
@@ -22,12 +23,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.pyscf_interface import (get_density_fitting_coefficients,
-                                      get_two_electron_integrals_chemist)
+from src.Base.numerics.constants import HARTREE_TO_MEV
+from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
+                                            get_two_electron_integrals_chemist)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import solve_bse_isdf
+from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from src.Base.numerics.numerics import numerics_of
+from tests.isdf_test_grid import g1
+from tests.pins import RECORDING_BLAS, matches
 
 NROOTS = 4
 
@@ -40,7 +44,8 @@ if __name__ == '__main__':
     # in check 4. A Coulomb-fitting set would put it near the solver threshold.
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
-    info = solve_bse_isdf(mf, mol, nocc, nroots=NROOTS, probe='sign')[3]
+    info = solve_bse_isdf(mf, mol, nocc, probe='sign', counts=g1(mf),
+                          numerics=numerics_of({'nroots': NROOTS}))[3]
     eps_qp, eps_mf = info['eps'], info['eps_mf']
 
     coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
@@ -60,16 +65,17 @@ if __name__ == '__main__':
     base = resp.build_casida_matrices(nocc, lBSE=True, W_aux=W_full)
     same = resp.build_casida_matrices(nocc, lBSE=True, W_aux=W_full,
                                       eps_screen=eps_qp)
-    ok1 = all(np.array_equal(a, b) for a, b in zip(base, same))
+    ok1 = all(matches(a, b, RECORDING_BLAS, quantity='root')
+              for a, b in zip(base, same))
     all_ok &= ok1
-    print(f'1. eps_screen=None and =self.eps are bitwise identical   '
+    print(f'1. eps_screen=None and =self.eps agree to a few ulp   '
           f'{"OK" if ok1 else "FAIL"}')
 
     # 2. And the argument has to reach the direct term, i.e. the A matrix, not
     #    only the swap term that W_aux already fed.
     split = resp.build_casida_matrices(nocc, lBSE=True, W_aux=W_full,
                                        eps_screen=eps_mf)
-    d = (roots(*split) - roots(*base)) * HARTREE_TO_EV * 1e3
+    d = (roots(*split) - roots(*base)) * HARTREE_TO_MEV
     shift = d[np.argmax(np.abs(d))]
     ok2 = 10.0 < abs(shift) < 60.0
     all_ok &= ok2
@@ -100,11 +106,11 @@ if __name__ == '__main__':
     #    auxiliary basis and nothing else -- so it must not depend on which
     #    energies the measurement is taken at.
     gap_qp = abs(roots(*split) - roots(*df(eps_qp).build_casida_matrices(
-        nocc, lBSE=True, W_aux=W_df))).max() * HARTREE_TO_EV * 1e3
+        nocc, lBSE=True, W_aux=W_df))).max() * HARTREE_TO_MEV
     gap_mf = abs(roots(*full(eps_mf).build_casida_matrices(
         nocc, lBSE=True, W_aux=W_full))
         - roots(*df(eps_mf).build_casida_matrices(
-            nocc, lBSE=True, W_aux=W_df))).max() * HARTREE_TO_EV * 1e3
+            nocc, lBSE=True, W_aux=W_df))).max() * HARTREE_TO_MEV
     ok4 = abs(gap_qp - gap_mf) < 2.0
     all_ok &= ok4
     print(f'4. DF-to-full gap is the fitting set: {gap_qp:.1f} meV at G0W0 vs '

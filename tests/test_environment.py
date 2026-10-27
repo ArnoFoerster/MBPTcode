@@ -30,18 +30,18 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import df as pyscf_df, gto, qmmm, scf
 
-from src.Base.constants import HARTREE_TO_EV
-from src.Base.environment import (Environment, NoEnvironment, PointCharges,
-                                  attach_environment, attached_environment,
-                                  dresses_interaction, environment_of)
-from src.Base.polarizable_sites import PolarizableSites
-from src.Base.separable_ri import aux_metric_sqrt
-from src.Base.solvent_screening import (SolventScreening,
-                                        attach_solvent_screening,
-                                        solvent_static_selfenergy)
+from src.Base.numerics.constants import HARTREE_TO_EV
+from src.environments.environment import PointCharges, dresses_interaction
+from src.Base.environment_seam import Environment, NoEnvironment, attach_environment, attached_environment, environment_of
+from src.Base.numerics.numerics import Numerics
+from src.environments.polarizable_sites import PolarizableSites
+from src.Base.factorization.separable_ri import aux_metric_sqrt
+from src.environments.solvent_screening import (SolventScreening,
+                                                attach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
-from src.gradients.rpa_ground_state import RPAGroundStateChain
+from src.gradients.rpa.ground_state import RPAGroundStateChain
+from tests.isdf_test_grid import g1
 
 ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
@@ -257,16 +257,16 @@ def check_a_screening_environment_without_a_form_refuses_rather_than_returns_non
 
 
 def check_the_static_term_production_adds_is_the_environment_own(small):
-    """`solvent_static_selfenergy` reads the attached environment; nothing else."""
+    """The static term production adds is the attached environment's own:
+    none in the gas phase, the continuum's (nao, nao) term in solvent, none
+    for fixed charges."""
     mol, mf, _ = small
-    ok = check(solvent_static_selfenergy(mf, mol) is None,
+    ok = check(environment_of(mf).static_self_energy(mf, mol) is None,
                'no static term in the gas phase')
     attach_solvent_screening(mf, solvent='water')
     try:
         env = environment_of(mf)
         ok &= check(isinstance(env, SolventScreening)
-                    and np.array_equal(solvent_static_selfenergy(mf, mol),
-                                       env.static_self_energy(mf, mol))
                     and env.static_self_energy(mf, mol).shape
                     == (mol.nao, mol.nao),
                     "the static term production adds is the continuum's own")
@@ -353,7 +353,8 @@ def check_rpa_gradient_with_point_charges_vs_finite_difference():
     """
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     chain = RPAGroundStateChain(mol, rhf,
-                                environment=PointCharges(CHARGE_COORDS, CHARGES))
+                                environment=PointCharges(CHARGE_COORDS, CHARGES),
+                                numerics=Numerics(isdf={'counts': g1(mol)}))
     ok = check(isinstance(chain.mf0, qmmm.itrf.QMMM),
                'the chain converges its mean field inside the charges')
     g, e, diags = chain.total_gradient()
@@ -361,7 +362,8 @@ def check_rpa_gradient_with_point_charges_vs_finite_difference():
                 and diags['stationarity'] < 1e-9,
                 'the gradient reports the energy it differentiates, stationary',
                 f"stationarity {diags['stationarity']:.1e}")
-    gas = RPAGroundStateChain(mol, rhf, mf=rhf(mol)).total_gradient()[0]
+    gas = RPAGroundStateChain(mol, rhf, mf=rhf(mol),
+                                numerics=Numerics(isdf={'counts': g1(mol)})).total_gradient()[0]
     ok &= check(np.abs(g - gas).max() > 1e-3, 'the field is felt',
                 f'{np.abs(g - gas).max():.1e} Ha/Bohr')
     h, worst = 1e-4, 0.0

@@ -1,0 +1,143 @@
+name: tests
+
+# Fast tier on every push and pull request, on pinned dependencies: a red
+# run means the code changed. The slow tier runs nightly on the newest
+# dependencies, so a red nightly after a green push means a library moved.
+# The generated ADC(2)-(4) runtime is written nightly with pdaggerq (cached
+# until a generator source changes) and the fast and slow files that read it
+# or run the generators run on it; ADC(5) (hours to generate) and the heavy tests (hour-long, real
+# MPI) run on the cluster, not here: tools/ci/heavy.txt.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  fast:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # several tests extract a pinned commit with git archive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: tools/ci/pinned.txt
+      - name: Install
+        run: |
+          pip install -r tools/ci/pinned.txt
+          pip install openfermion geometric psutil
+          pip install cppe pyscf-dispersion || true   # optional: tests skip without them
+      - name: Fast tier, shard ${{ matrix.shard }} of 4
+        run: python tools/ci/run_tier.py fast --shard ${{ matrix.shard }}/4 --timeout 600
+
+  slow:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install newest releases
+        run: |
+          pip install numpy scipy pyscf opt_einsum threadpoolctl pytest
+          pip install openfermion geometric psutil
+          pip install cppe pyscf-dispersion || true
+          pip list
+      - name: Slow tier, shard ${{ matrix.shard }} of 6
+        run: python tools/ci/run_tier.py slow --shard ${{ matrix.shard }}/6 --timeout 3000
+
+  runtime:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PDAGGERQ_COMMIT: f3a1f29   # the commit docs/installation.md names
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: tools/ci/pinned.txt
+      - name: pdaggerq wheel (cached per commit)
+        id: pdaggerq
+        uses: actions/cache@v4
+        with:
+          path: ~/pdaggerq-wheel
+          key: pdaggerq-${{ env.PDAGGERQ_COMMIT }}-py310-${{ runner.os }}
+      - name: Build pdaggerq
+        if: steps.pdaggerq.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/edeprince3/pdaggerq.git ~/pdaggerq-src
+          git -C ~/pdaggerq-src checkout "$PDAGGERQ_COMMIT"
+          pip wheel --no-deps -w ~/pdaggerq-wheel ~/pdaggerq-src
+      - name: Generated ADC(2)-(4) runtime (cached by the generator sources)
+        id: runtime
+        uses: actions/cache@v4
+        with:
+          path: src/SingleReference/ADC/generatedADC
+          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py', 'src/SingleReference/ADC/adc_order_rule.py', 'src/SingleReference/ADC/precursor_classes.py') }}
+      - name: Write the runtime
+        if: steps.runtime.outputs.cache-hit != 'true'
+        run: |
+          pip install -r tools/ci/pinned.txt
+          pip install networkx==3.4.2   # the Goldstone-diagram engine of the generators
+          pip install ~/pdaggerq-wheel/*.whl
+          python -c "from src.CodeGeneration.generate_adc import GenerateRuntime; GenerateRuntime(orders=(2, 3, 4))"
+
+  generated:
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      PDAGGERQ_COMMIT: f3a1f29
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: tools/ci/pinned.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/pdaggerq-wheel
+          key: pdaggerq-${{ env.PDAGGERQ_COMMIT }}-py310-${{ runner.os }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v4
+        with:
+          path: src/SingleReference/ADC/generatedADC
+          key: adc-runtime-234-${{ env.PDAGGERQ_COMMIT }}-${{ hashFiles('src/CodeGeneration/**/*.py', 'src/SingleReference/ADC/generated_modules.py', 'src/SingleReference/ADC/adc_order_rule.py', 'src/SingleReference/ADC/precursor_classes.py') }}
+          fail-on-cache-miss: true
+      - name: Install
+        run: |
+          pip install -r tools/ci/pinned.txt
+          pip install openfermion geometric psutil
+          pip install networkx==3.4.2   # the Goldstone-diagram engine of the generator tests
+          pip install ~/pdaggerq-wheel/*.whl
+      - name: Generated-runtime files of the fast and slow tiers, shard ${{ matrix.shard }} of 4
+        run: python tools/ci/run_tier.py fast slow --generated --shard ${{ matrix.shard }}/4 --timeout 3000
