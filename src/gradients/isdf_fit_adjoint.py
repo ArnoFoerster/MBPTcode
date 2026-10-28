@@ -37,8 +37,9 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, broad
 from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, fit_settings, KeptIntegrals,
                                                  ao_l_labels, ao_blocks, gram_tiles,
                                                  block_coefficients, total_bytes, frozen_columns,
-                                                 tile_collocation, trsm, root_slab, metric_root,
-                                                 metric_spectrum)
+                                                 tile_collocation, root_slab, metric_root,
+                                                 metric_spectrum, cholesky_tiles,
+                                                 forward_tiles, backward_tiles)
 
 
 class RowFitAdjoint:
@@ -77,22 +78,26 @@ class AdjointSeeds:
         it adds to X_bar C^T.
     metric_bar: an adjoint on the bare metric V from outside the fit (Z's
         own V), on rank 0 (None elsewhere), added before its derivative.
+    root_bar: an adjoint on the bare metric root V^1/2 from a term reading
+        it without D (the static half of a split continuum on the bare
+        interaction), on rank 0 (None elsewhere), added to the grid sum
+        M D_bar before the root's adjoint.
     gauges: `GaugeSeeds` of further factors D_g = M^T (V + vtilde_g)^1/2 on
         the same fit, each with its own dressed metric root.
     """
 
     def __init__(self, d_bar=None, x_bar=None, mo_coeff=None, mt_bar=None,
-                 x_bar_ao=None, metric_bar=None, gauges=()):
+                 x_bar_ao=None, metric_bar=None, gauges=(), root_bar=None):
         if d_bar is None and mt_bar is None and not gauges:
             raise ValueError('the fit adjoint takes an adjoint on D (d_bar), '
                              'on M^T (mt_bar), on a dressed gauge (gauges), '
-                             'or several')
+                             'or several (root_bar rides beside them)')
         if x_bar is not None and mo_coeff is None:
             raise ValueError('an adjoint on X_mo needs the orbitals C of '
                              'X_mo = X_ao C')
         self.d_bar, self.x_bar, self.mo_coeff = d_bar, x_bar, mo_coeff
         self.mt_bar, self.x_bar_ao = mt_bar, x_bar_ao
-        self.metric_bar = metric_bar
+        self.metric_bar, self.root_bar = metric_bar, root_bar
         self.gauges = tuple(gauges)
 
 
@@ -282,58 +287,18 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
         (0, 0), comm, hold)
     del B_own, P_own
 
-    d_tiles = [_adjoint_tiles(s.d_bar, tiles, mine, block, nk)
-               for s in targets]
-    x_tiles = [_adjoint_tiles(s.x_bar, tiles, mine, block, nk)
-               for s in targets]
-    rooted = [g for g, s in enumerate(targets) if s.d_bar is not None]
-    g_tiles = [[_adjoint_tiles(q.d_bar, tiles, mine, block, nk)
-                for q in s.gauges] for s in targets]
-    # an adjoint arriving on M^T alone needs no root, and nothing reaches it
-    MTb = [{t: s.mt_bar[t] for t in mine} if s.d_bar is None and not s.gauges
-           else {t: np.empty((size_of[t], naux)) for t in mine}
-           if s.d_bar is not None
-           else {t: np.zeros((size_of[t], naux)) for t in mine}
-           for s in targets]
-    if rooted:
-        # MT_bar = D_bar V^1/2, the root on rank 0 and streamed in slabs
-        def assign(c0, c1, slab):
-            for g in rooted:
-                for t in mine:
-                    MTb[g][t][:, c0:c1] = d_tiles[g][t] @ slab.T
-
-        _streamed_root(auxmol, None, block, rank, comm, hold, assign)
-        for g in rooted:
-            if targets[g].mt_bar is not None:
-                for t in mine:
-                    MTb[g][t] += targets[g].mt_bar[t]
-    for g, s in enumerate(targets):
-        if s.d_bar is None and s.gauges and s.mt_bar is not None:
-            for t in mine:
-                MTb[g][t] += s.mt_bar[t]
-    # each dressed gauge adds D_bar_g R_g, R_g = (V + vtilde_g)^1/2, one root
-    # per environment, after the bare gauge
-    for env in _distinct(q.environment for s in targets for q in s.gauges):
-        pairs = [(g, j) for g, s in enumerate(targets)
-                 for j, q in enumerate(s.gauges) if q.environment is env]
-
-        def add(c0, c1, slab, pairs=pairs):
-            for g, j in pairs:
-                for t in mine:
-                    MTb[g][t][:, c0:c1] += g_tiles[g][j][t] @ slab.T
-
-        _streamed_root(auxmol, env, block, rank, comm, hold, add)
-    hold('MT_bar_rows', total(MTb))
+    d_tiles, x_tiles, g_tiles, rooted, MTb = adjoint_inputs(
+        targets, tiles, mine, block, nk, naux, auxmol, rank, comm, hold)
 
     # W = G^-1 d MT_bar, the forward substitution in the factorization sweep
     Qb = [{t: mtb[t] * d[slice(*tiles[t]), None] for t in mine}
           for mtb in MTb]
     hold('Q_bar_rows', total(Qb))
-    diagonal, panels = _cholesky_tiles(S, tiles, owners, rank, comm, Qb,
+    diagonal, panels = cholesky_tiles(S, tiles, owners, rank, comm, Qb,
                                        regularization, hold)
     del S
     for qb in Qb:
-        _backward_tiles(diagonal, panels, qb, tiles, owners, rank, comm)
+        backward_tiles(diagonal, panels, qb, tiles, owners, rank, comm)
         for t in mine:
             qb[t] *= d[slice(*tiles[t]), None]
     # the three-centre pass: Q as the forward accumulates it, and the
@@ -400,8 +365,8 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
         Q[t] *= d[slice(*tiles[t]), None]
 
     # Z = G^-1 R on the kept factor, M^T = d Z: the forward's M^T
-    _forward_tiles(diagonal, panels, Q, tiles, owners, rank, comm, hold)
-    _backward_tiles(diagonal, panels, Q, tiles, owners, rank, comm,
+    forward_tiles(diagonal, panels, Q, tiles, owners, rank, comm, hold)
+    backward_tiles(diagonal, panels, Q, tiles, owners, rank, comm,
                     keep=False)
     del diagonal, panels
     d8 = [{} for _ in range(ntargets)]
@@ -412,28 +377,8 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
     MT = Q
     del MTb, Q
     hold('MT_rows', total_bytes(MT.values()))
-    Vhbar = [None] * ntargets
-    for g in rooted:
-        Vhbar[g] = np.zeros((naux, naux)) if rank == 0 else None
-        d_bar = targets[g].d_bar
-        rows_in = isinstance(d_bar, GridTileRows)
-        for t, got in tiles_at_root([MT, d_tiles[g]] if rows_in else [MT],
-                                     tiles, rank, nranks, comm, hold):
-            if got is not None:
-                Vhbar[g] += got[0].T @ (got[1] if rows_in
-                                        else d_bar[slice(*tiles[t])])
-    # each dressed gauge's root adjoint M D_bar_g, the same sum on rank 0
-    Rbar = [[None] * len(s.gauges) for s in targets]
-    for g, s in enumerate(targets):
-        for j, q in enumerate(s.gauges):
-            Rbar[g][j] = np.zeros((naux, naux)) if rank == 0 else None
-            rows_in = isinstance(q.d_bar, GridTileRows)
-            for t, got in tiles_at_root([MT, g_tiles[g][j]] if rows_in
-                                         else [MT], tiles, rank, nranks,
-                                         comm, hold):
-                if got is not None:
-                    Rbar[g][j] += got[0].T @ (got[1] if rows_in
-                                              else q.d_bar[slice(*tiles[t])])
+    Vhbar, Rbar = root_sums(targets, MT, d_tiles, g_tiles, rooted, tiles,
+                            rank, nranks, comm, naux, hold)
 
     # the (mu nu|P) adjoints, w U^T D_pair, by the block's owner
     three = _three_centre_rows_adjoint(
@@ -515,17 +460,17 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
         g_ao = mol.eval_gto('GTOval_ip_sph', coords[rows])
         f = []
         for g, s in enumerate(targets):
-            f.append(_centre_forces(g_ao, aob[g][t], ao_slices))
+            f.append(centre_forces(g_ao, aob[g][t], ao_slices))
             fit_points[g][rows] = np.einsum('xgm,gm->gx', g_ao, aob[g][t])
             if with_coll[g]:
-                xa = _collocation_rows(s, x_tiles[g], t)
-                coll_tile[g][t] = _centre_forces(g_ao, xa, ao_slices).ravel()
+                xa = collocation_rows(s, x_tiles[g], t)
+                coll_tile[g][t] = centre_forces(g_ao, xa, ao_slices).ravel()
                 coll_points[g][rows] = np.einsum('xgm,gm->gx', g_ao, xa)
                 del xa
         del g_ao
         g_aux = auxmol.eval_gto('GTOval_ip_sph', coords[rows])
         for g in range(ntargets):
-            f[g] += _centre_forces(g_aux, Pb[g][t], aux_slices)
+            f[g] += centre_forces(g_aux, Pb[g][t], aux_slices)
             fit_points[g][rows] += np.einsum('xgm,gm->gx', g_aux, Pb[g][t])
             fit_tile[g][t] = f[g].ravel()
         del g_aux, f
@@ -539,13 +484,122 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
             allgather_ranges(coll_tile[g], tile_ranges, comm)
             allgather_ranges(coll_points[g], point_ranges, comm)
 
+    return closed_adjoints(targets, Vhbar, VbarF, Rbar, auxmol, block, rank,
+                           nranks, comm, hold, held, fit_tile, fit_points,
+                           coll_tile, coll_points, three, with_coll)
+
+
+def adjoint_inputs(targets, tiles, mine, block, nk, naux, auxmol, rank, comm,
+                   hold):
+    """(d_tiles, x_tiles, g_tiles, rooted, MT_bar) of a row fit's adjoint
+    over `targets`: this rank's tiles of each target's D_bar, X_bar and
+    dressed gauges' D_bar (`_adjoint_tiles`), the targets carrying a D_bar,
+    and each target's MT_bar = D_bar V^1/2 (+ its own mt_bar) + sum_g
+    D_bar_g R_g, the roots on rank 0 and streamed in slabs
+    (`_streamed_root`), the bare one first."""
+    size_of = {t: tiles[t][1] - tiles[t][0] for t in range(len(tiles))}
+    d_tiles = [_adjoint_tiles(s.d_bar, tiles, mine, block, nk)
+               for s in targets]
+    x_tiles = [_adjoint_tiles(s.x_bar, tiles, mine, block, nk)
+               for s in targets]
+    rooted = [g for g, s in enumerate(targets) if s.d_bar is not None]
+    g_tiles = [[_adjoint_tiles(q.d_bar, tiles, mine, block, nk)
+                for q in s.gauges] for s in targets]
+    # an adjoint arriving on M^T alone needs no root, and nothing reaches it
+    MTb = [{t: s.mt_bar[t] for t in mine} if s.d_bar is None and not s.gauges
+           else {t: np.empty((size_of[t], naux)) for t in mine}
+           if s.d_bar is not None
+           else {t: np.zeros((size_of[t], naux)) for t in mine}
+           for s in targets]
+    if rooted:
+        # MT_bar = D_bar V^1/2, the root on rank 0 and streamed in slabs
+        def assign(c0, c1, slab):
+            for g in rooted:
+                for t in mine:
+                    MTb[g][t][:, c0:c1] = d_tiles[g][t] @ slab.T
+
+        _streamed_root(auxmol, None, block, rank, comm, hold, assign)
+        for g in rooted:
+            if targets[g].mt_bar is not None:
+                for t in mine:
+                    MTb[g][t] += targets[g].mt_bar[t]
+    for g, s in enumerate(targets):
+        if s.d_bar is None and s.gauges and s.mt_bar is not None:
+            for t in mine:
+                MTb[g][t] += s.mt_bar[t]
+    # each dressed gauge adds D_bar_g R_g, R_g = (V + vtilde_g)^1/2, one root
+    # per environment, after the bare gauge
+    for env in _distinct(q.environment for s in targets for q in s.gauges):
+        pairs = [(g, j) for g, s in enumerate(targets)
+                 for j, q in enumerate(s.gauges) if q.environment is env]
+
+        def add(c0, c1, slab, pairs=pairs):
+            for g, j in pairs:
+                for t in mine:
+                    MTb[g][t][:, c0:c1] += g_tiles[g][j][t] @ slab.T
+
+        _streamed_root(auxmol, env, block, rank, comm, hold, add)
+    hold('MT_bar_rows', sum(total_bytes(a.values()) for a in MTb))
+    return d_tiles, x_tiles, g_tiles, rooted, MTb
+
+
+def root_sums(targets, MT, d_tiles, g_tiles, rooted, tiles, rank, nranks,
+              comm, naux, hold):
+    """(Vhbar, Rbar): each target's root adjoint M D_bar and each dressed
+    gauge's M D_bar_g, (naux, naux) sums over the grid on rank 0 (None
+    elsewhere) from the M^T tiles `MT`, each tile sent to rank 0 in tile
+    order (`tiles_at_root`)."""
+    ntargets = len(targets)
+    Vhbar = [None] * ntargets
+    for g in rooted:
+        Vhbar[g] = np.zeros((naux, naux)) if rank == 0 else None
+        d_bar = targets[g].d_bar
+        rows_in = isinstance(d_bar, GridTileRows)
+        for t, got in tiles_at_root([MT, d_tiles[g]] if rows_in else [MT],
+                                     tiles, rank, nranks, comm, hold):
+            if got is not None:
+                Vhbar[g] += got[0].T @ (got[1] if rows_in
+                                        else d_bar[slice(*tiles[t])])
+    # each dressed gauge's root adjoint M D_bar_g, the same sum on rank 0
+    Rbar = [[None] * len(s.gauges) for s in targets]
+    for g, s in enumerate(targets):
+        for j, q in enumerate(s.gauges):
+            Rbar[g][j] = np.zeros((naux, naux)) if rank == 0 else None
+            rows_in = isinstance(q.d_bar, GridTileRows)
+            for t, got in tiles_at_root([MT, g_tiles[g][j]] if rows_in
+                                         else [MT], tiles, rank, nranks,
+                                         comm, hold):
+                if got is not None:
+                    Rbar[g][j] += got[0].T @ (got[1] if rows_in
+                                              else q.d_bar[slice(*tiles[t])])
+    return Vhbar, Rbar
+
+
+def closed_adjoints(targets, Vhbar, VbarF, Rbar, auxmol, block, rank, nranks,
+                    comm, hold, held, fit_tile, fit_points, coll_tile,
+                    coll_points, three, with_coll):
+    """[RowFitAdjoint] of a row fit's adjoint from its parts: on rank 0 the
+    metric's adjoint (the root's, `_metric_root_adjoint`, beside the fit's
+    own grid sum VbarF), each dressed gauge's root adjoint and cavity
+    derivative and the targets' metric_bar; (P|Q)' by slab; then every
+    target's centre terms added in their fixed order (the tiles', the
+    three-centre `three`, the two-centre and the cavity's)."""
+    ntargets = len(targets)
+    natm = auxmol.natm
+    ntiles = len(fit_tile[0]) if ntargets else 0
     # the metric: (V^1/2)'s adjoint on rank 0, (P|Q)' by slab; each dressed
     # gauge's root adjoint and its cavity derivative on rank 0
     V_bar = [None] * ntargets
     cavity = [np.zeros(natm * 3) for _ in range(ntargets)]
     if rank == 0:
         for g, s in enumerate(targets):
-            sums = {'root': Vhbar[g], 'fit': VbarF[g]}
+            root = Vhbar[g]
+            if s.root_bar is not None:
+                # the bare root's adjoint from outside D joins M D_bar
+                root = (np.array(s.root_bar, float) if root is None
+                        else root + s.root_bar)
+            sums = {'root': root, 'fit': VbarF[g]}
+            del root
             Vhbar[g] = VbarF[g] = None
             V_bar[g] = (sums.pop('fit') if sums['root'] is None
                         else _metric_root_adjoint(auxmol, sums, hold))
@@ -593,12 +647,13 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
 
 def summed_seeds(seeds):
     """One `AdjointSeeds` holding the sum of `seeds` kind by kind (D_bar,
-    X_bar, MT_bar, the AO collocation's and the metric's adjoints), in the
+    X_bar, MT_bar, the AO collocation's, the metric's and the bare root's
+    adjoints), in the
     order given: the first present copied, each next one added onto it;
     dressed gauges, each on its own root, are listed side by side.
     The fit adjoint is linear in every seed, so its adjoint is theirs summed;
     an adjoint on X_mo joins only others on the same orbitals. Tiles are this
-    rank's, metric_bar rank 0's (None elsewhere)."""
+    rank's, metric_bar and root_bar rank 0's (None elsewhere)."""
     seeds = list(seeds)
     if len(seeds) == 1:
         return seeds[0]                  # nothing to add, nothing copied
@@ -634,10 +689,11 @@ def summed_seeds(seeds):
         mt_bar=added([s.mt_bar for s in seeds]),
         x_bar_ao=added([s.x_bar_ao for s in seeds]),
         metric_bar=added([s.metric_bar for s in seeds]),
+        root_bar=added([s.root_bar for s in seeds]),
         gauges=[q for s in seeds for q in s.gauges])
 
 
-def _collocation_rows(seed, x_tiles, t):
+def collocation_rows(seed, x_tiles, t):
     """Tile t of the AO collocation adjoint of `seed`: X_bar C^T (+ its
     x_bar_ao), or its x_bar_ao alone."""
     if seed.x_bar is None:
@@ -661,121 +717,6 @@ def _adjoint_tiles(bar, tiles, mine, block, nk):
                              f'layout')
         return bar.tiles()
     return {t: bar[slice(*tiles[t])] for t in mine}
-
-
-def _cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
-                    hold):
-    """(diagonal, panels): `fit_rows`' right-looking Cholesky of the Gram
-    tiles S (consumed), the forward substitution of each right-hand side of
-    `rhs_sets` riding in the sweep as it does there, and the factor kept for
-    later solves: the diagonal block and the gathered panel below it of
-    every tile this rank owns, the same arrays and the same calls as that
-    sweep's."""
-    nk, nranks = tiles[-1][1], len(owners)
-    mine = owners[rank]
-    ncols = [broadcast(next(iter(rhs.values())).shape[1] if rhs else 0, comm)
-             for rhs in rhs_sets]
-    diagonal, panels = {}, {}
-    for j, (j0, j1) in enumerate(tiles):
-        owner = j % nranks
-        LT = np.empty((j1 - j0, j1 - j0))
-        info = 0
-        if rank == owner:
-            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
-            LT = L.T
-        info = broadcast(info, comm, root=owner)
-        if info != 0:
-            raise np.linalg.LinAlgError(
-                f'Cholesky of the balanced Gram matrix failed at leading '
-                f'minor {j0 + info}: it is not positive definite, which for a '
-                f'Gram matrix plus a {regularization:g} shift means the grid '
-                'is degenerate.')
-        broadcast_rows(LT, owner, comm)
-        L = LT.T
-        ys = []
-        for rhs, ncol in zip(rhs_sets, ncols):
-            y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
-            if rank == owner:
-                trsm(L, y.T, side=1, trans_a=1)
-            broadcast_rows(y, owner, comm)
-            ys.append(y)
-        if rank == owner:
-            diagonal[j] = L
-        below = [i for i in mine if i > j]
-        Lcol = {}
-        for i in below:
-            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
-            trsm(L, Lcol[i].T, side=0, trans_a=0)
-        for rhs, y in zip(rhs_sets, ys):
-            for i in below:
-                rhs[i] -= Lcol[i] @ y
-        del ys
-        panel = np.empty((nk - j1, j1 - j0))
-        for i in below:
-            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
-        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
-                                  for i in own if i > j] for own in owners],
-                         comm)
-        for i in below:
-            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
-            S[i] = S[i][:, j1 - j0:] - U
-            del U
-        if rank == owner:
-            panels[j] = panel
-        hold('panel', panel.nbytes)
-        hold('S_rows', total_bytes(S.values()) + total_bytes(panels.values())
-             + total_bytes(diagonal.values()))
-        del panel
-    return diagonal, panels
-
-
-def _forward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm, hold):
-    """rhs <- L^-1 rhs on the kept factor: the owner of tile j solves its
-    block and broadcasts it with its panel, and every rank updates its tiles
-    below with the call `_cholesky_tiles` makes there."""
-    nk, nranks = tiles[-1][1], len(owners)
-    mine = owners[rank]
-    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
-    ncol = broadcast(ncol, comm)
-    for j, (j0, j1) in enumerate(tiles):
-        owner = j % nranks
-        y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
-        if rank == owner:
-            trsm(diagonal[j], y.T, side=1, trans_a=1)
-        broadcast_rows(y, owner, comm)
-        panel = panels[j] if rank == owner else np.empty((nk - j1, j1 - j0))
-        broadcast_rows(panel, owner, comm)
-        hold('panel', panel.nbytes)
-        for i in mine:
-            if i > j:
-                rhs[i] -= panel[tiles[i][0] - j1:tiles[i][1] - j1] @ y
-        del y, panel
-
-
-def _backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
-                    keep=True):
-    """rhs <- L^-T rhs on the kept factor, `fit_rows`' backward sweep: each
-    solved block broadcast by its owner and pushed into the rows that own a
-    panel. keep=False drops the factor as it goes, as that sweep does."""
-    nranks = len(owners)
-    mine = owners[rank]
-    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
-    ncol = broadcast(ncol, comm)
-    for j in reversed(range(len(tiles))):
-        j0, j1 = tiles[j]
-        owner = j % nranks
-        z = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
-        if rank == owner:
-            trsm(diagonal[j] if keep else diagonal.pop(j), z.T, side=1,
-                  trans_a=0)
-            if not keep:
-                panels.pop(j, None)
-        broadcast_rows(z, owner, comm)
-        for i in mine:
-            if i < j:
-                i1 = tiles[i][1]
-                rhs[i] -= panels[i][j0 - i1:j1 - i1].T @ z
-        del z
 
 
 def tiles_at_root(arrays, tiles, rank, nranks, comm, hold):
@@ -818,7 +759,7 @@ def _scatter_pairs(out, E, X, mu, nu):
         out[:, nus] += E[:, a:b] * X[:, m][:, None]
 
 
-def _centre_forces(g, bar, slices):
+def centre_forces(g, bar, slices):
     """(natm, 3) of sum_{k mu} bar[k, mu] chi_mu(r_k) through the centres:
     g = GTOval_ip = +d chi/dr, whose nuclear derivative is its negative."""
     f = np.zeros((len(slices), 3))

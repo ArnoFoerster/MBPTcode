@@ -23,8 +23,7 @@ from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_fold, ee_ri_fold, ee_u_r_sigma_df)
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis, csf_isometry
-from src.Base.numerics.constants import (ADC2_SPIN_SCALING, EE_ADC_DENSE_LIMIT,
-                                         EE_FOLD_RESIDUAL_GAP)
+from src.Base.numerics.constants import EE_ADC_DENSE_LIMIT, EE_FOLD_RESIDUAL_GAP
 from src.Base.environment_seam import attached_environment, resolve_environment
 from src.Base.utils.parallel import memory
 from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
@@ -99,24 +98,12 @@ def _bare(mf):
     return attached_environment(mf, None)
 
 
-def spin_scaling_factors(spin_scaling):
-    """(c_os, c_ss) of a spin_scaling argument, or None for ADC(2)."""
-    if spin_scaling is None:
-        return None
-    if isinstance(spin_scaling, str):
-        if spin_scaling not in ADC2_SPIN_SCALING:
-            raise ValueError(f'spin_scaling={spin_scaling!r}; expected one of '
-                             f'{sorted(ADC2_SPIN_SCALING)} or (c_os, c_ss)')
-        return ADC2_SPIN_SCALING[spin_scaling]
-    c_os, c_ss = (float(c) for c in spin_scaling)
-    return c_os, c_ss
-
-
 def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
                     numerics=None, state_specific='off', ss_density='unrelaxed',
-                    scaling=None, relaxed_density=False):
-    """fold=True: the density-fitted tiled fold of ee_ri_fold."""
+                    scaling=None, relaxed_density=False, start=None):
+    """fold=True: the density-fitted tiled fold of ee_ri_fold; start the
+    block solver's (ee_fold.solve_folded), level 'adc2'."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
         raise ValueError('fold=True is a closed-shell spin-free route')
     if level not in ee_ri_fold.LEVELS:
@@ -148,7 +135,8 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                                      tol_residual=max(conv_tol, np.sqrt(
                                          conv_tol * EE_FOLD_RESIDUAL_GAP)),
                                      dense_limit=dense_limit, solver='block',
-                                     verbose=int(mol.verbose >= logger.INFO))
+                                     verbose=int(mol.verbose >= logger.INFO),
+                                     start=start)
         else:
             r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
         return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,
@@ -162,30 +150,33 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                              out['loop'], out['converged'], embed, out['level'],
                              out.get('flags'))
     Z = np.column_stack([embed(res.x1[:, k]) for k in range(res.omega.size)])
-    res.operator = op
+    res.operator, res.environment = op, env
     e = res.omega
     if state_specific != 'off':
         _state_specific(res, op, env, mol, mf, frozen, state_specific, tile_gb,
                         ss_density, auxbasis)
         e = res.omega_ss
     elif relaxed_density:
-        res.delta_density_relaxed = _relaxed_densities(res, op, env, mol, mf,
-                                                       frozen, tile_gb, False,
-                                                       auxbasis)
+        res.delta_density_relaxed = relaxed_densities(res, mol, mf, frozen,
+                                                      tile_gb, auxbasis)
     return EEResult((e, Z, res) if return_fold else (e, Z), res.converged)
 
 
-def _relaxed_densities(res, op, env, mol, mf, frozen, tile_gb, pcm_response,
-                       auxbasis):
-    """Each root's orbital-relaxed difference density (ee_relaxed_density),
-    full MO basis; a collective over op's ranks."""
+def relaxed_densities(res, mol, mf, frozen, tile_gb, auxbasis, roots=None,
+                      pcm_response=False):
+    """The orbital-relaxed difference density (ee_relaxed_density) of each
+    root in `roots` (default: every root) of a fold result solved on mf
+    (res.operator, res.environment), full MO basis; a collective over the
+    operator's ranks, every rank asking for the same roots."""
+    op, env = res.operator, res.environment
+    roots = range(res.omega.size) if roots is None else roots
     with _bare(mf):
         Bc = erd.core_factors(mol, mf, frozen, auxbasis) if frozen else None
         return [erd.relaxed_density(
                     erd.tiled_pieces(op, res.y[:, k], res.omega[k], tile_gb),
                     op, mf, mol, frozen, res.t1[k], Bc=Bc, env=env,
                     pcm_response=pcm_response)
-                for k in range(res.omega.size)]
+                for k in roots]
 
 
 def _active_orbitals(mol, mf, frozen, op):
@@ -212,9 +203,9 @@ def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb,
         env, mol, mo_act, res.delta_density, modes)
     res.ss_density = ss_density
     if ss_density != 'unrelaxed':
-        res.delta_density_relaxed = _relaxed_densities(
-            res, op, env, mol, mf, frozen, tile_gb,
-            ss_density == 'relaxed+pcm', auxbasis)
+        res.delta_density_relaxed = relaxed_densities(
+            res, mol, mf, frozen, tile_gb, auxbasis,
+            pcm_response=ss_density == 'relaxed+pcm')
         C = np.asarray(mf.mo_coeff)
         res.delta_dipole = ee_state_specific.delta_dipoles(
             mol, mo_act, C, res.delta_density, res.delta_density_relaxed)

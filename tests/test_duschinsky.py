@@ -101,6 +101,23 @@ def test_unit_rotation_band_is_the_displaced_oscillator_band(g_fwhm, l_fwhm):
         assert got[key] == pytest.approx(ref[key], rel=1e-10), key
 
 
+def test_a_reviving_fast_mode_does_not_end_the_time_grid():
+    """A 3000 cm^-1 mode with S = 9 beside soft displaced ones: |G| dips
+    below 1e-10 inside the first period and revives after it. The density at
+    J = 1 is still the displaced oscillator's (it was 1.1% low at -0.6 eV
+    when the grid stopped at the dip)."""
+    w = np.array([85., 212., 494., 1130., 1193., 1698., 3032., 3185.]) * CM
+    s = np.array([5.55, 2.93, 0.98, 0.61, 0.87, 1.57, 9.08, 1.77])
+    model = DuschinskyModel(w, w.copy(), np.eye(len(w)), np.sqrt(2 * s / w))
+    lam = 0.1 * EV
+    kt = BOLTZMANN_HARTREE_PER_KELVIN * 300.0
+    for de in np.array([-0.6, -1.0, -2.0]) * EV:
+        rho = duschinsky_density(model, de + lam, 300.0, 'emission',
+                                 broadening=np.sqrt(2 * lam * kt))
+        ref = fc_weighted_dos(de, s, w, 300.0, lambda_classical=lam)
+        assert rho == pytest.approx(ref, rel=1e-8)
+
+
 def test_band_grid_of_the_displaced_model_is_band_grid():
     from src.properties.band_shape import band_grid
     kw = dict(gaussian_fwhm=0.03 * EV, lorentzian_fwhm=0.01 * EV)

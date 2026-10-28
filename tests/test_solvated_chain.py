@@ -51,7 +51,7 @@ from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
                                                         reaction_field_shift,
                                                         static_screening)
 from src.properties.characters import ct_character, roots
-from tests.isdf_test_grid import g1_numerics
+from tests.isdf_test_grid import g1_numerics, legacy
 from tests.pins import RECORDING_BLAS, matches
 
 BASIS = 'cc-pvdz'
@@ -100,7 +100,7 @@ def water():
     return mol, scf_factory(mol)
 
 
-def solvated(mol, mf, solvent='water'):
+def solvated(mol, mf, solvent='water', numerics=None):
     """The chain of `mol` in a continuum: one environment, both halves of it.
 
     THE CAVITY IS PER GEOMETRY. `SolventScreening` builds a surface for one
@@ -110,7 +110,8 @@ def solvated(mol, mf, solvent='water'):
     surface, and the reference any future analytic gradient has to reproduce.
     """
     return ExcitedStateChain(mol, scf_factory, mf=mf,
-                             environment=SolventScreening(mol, solvent=solvent), numerics=g1_numerics(mol))
+                             environment=SolventScreening(mol, solvent=solvent),
+                             numerics=g1_numerics(mol) if numerics is None else numerics)
 
 
 # --------------------------------------------------------------------------
@@ -273,7 +274,8 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
     is reordered there, so that half agrees to a few ulp (two calls).
     """
     mol, mf = water
-    chain = solvated(mol, mf)
+    # the Duchemin-Blase fit's adjoint over its pair layout
+    chain = solvated(mol, mf, numerics=legacy(g1_numerics(mol)))
     mol, mf = chain.mean_field(mol, mf)
     x_mo, d, eps, auxmol, crd, _ = chain.factors_at(mol, mf)
     d_bare = chain.bare_factor(mol, auxmol, crd)

@@ -53,7 +53,7 @@ from src.gradients.isdf_derivatives import product_pairs
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.excitations import SurfaceSpec, surface_of
-from tests.isdf_test_grid import g1, g1_kw, g1_numerics
+from tests.isdf_test_grid import LEGACY_FIT, g1, g1_kw, g1_numerics
 from tests.pins import assert_same
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -140,7 +140,7 @@ class Route:
 
 def drpa(mol, **kw):
     chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol),
-                                numerics=numerics_of(g1_kw(mol, kw)))
+                                numerics=numerics_of(dict(g1_kw(mol, kw), test_set=LEGACY_FIT)))
     return Route(chain, lambda m: chain.energy(m)[0],
                  lambda: chain.total_gradient()[0])
 
@@ -148,7 +148,7 @@ def drpa(mol, **kw):
 def bse(mol, **layout):
     chain = ExcitedStateChain(
         mol, chain_scf, spin='singlet', mf=chain_scf(mol),
-        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': BSE_CONV_TOL})))
+        numerics=g1_numerics(mol, numerics_of({'test_set': LEGACY_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': BSE_CONV_TOL})))
     return Route(chain, chain.excitation,
                  lambda: chain.excitation_gradient()[0])
 
@@ -157,7 +157,7 @@ def sop(mol, **kw):
     spec = SurfaceSpec(GroundState('dft', 'hf'), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics=numerics_of(dict(kw, bse_adjoint='grid')))
+                       numerics=numerics_of(dict(kw, bse_adjoint='grid', test_set=LEGACY_FIT)))
     chain = surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                        sop_scf)
     return Route(chain, chain.excitation,

@@ -14,6 +14,10 @@ beside an .npz of its arrays, read back to the bit) and carries
                  (`stages.Stamps`), and their sha256 under 'identity'
     provenance   the commit of the checkout, the BLAS and its threads, the
                  host, the ranks, the time
+    medium       the continuum the environment names, resolved: both
+                 dielectric constants and the cavity convention
+                 (`src.environments.medium`), None in the gas phase; the
+                 environment in the stamp already fixes it
 
 A record is READ only under the stamp it was written with: another stamp
 refuses the run (`StoreRefused`), since every later stage would build on a
@@ -34,6 +38,7 @@ from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
 from src.Base.utils.parallel.mpi_grid import current_comm, is_root, n_ranks
 from src.Base.utils.parallel.threads import blas_libraries
+from src.environments.medium import parse as parse_medium
 
 
 class StoreRefused(RuntimeError):
@@ -61,6 +66,8 @@ class Store:
     def __init__(self, root, declaration):
         self.dir = (pathlib.Path(root).resolve() / declaration.system.name
                     / declaration.environment_dir)
+        medium = None if declaration.gas else parse_medium(declaration.environment)
+        self.medium = None if medium is None else medium.record()
         if self.root_rank:
             self.dir.mkdir(parents=True, exist_ok=True)
         self.barrier()
@@ -99,7 +106,8 @@ class Store:
         if self.root_rank:
             write_record(self.path(name), {
                 'stamp': dict(stamp, identity=record_hash(stamp)),
-                'provenance': provenance(), 'record': record})
+                'provenance': provenance(), 'medium': self.medium,
+                'record': record})
         self.barrier()
 
     def held(self, name):

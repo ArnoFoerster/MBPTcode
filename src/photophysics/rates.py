@@ -150,6 +150,14 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         first moment.
     n_max: quanta retained in the Poisson sum.
     """
+    return golden_rule(coupling, mlj_density(delta_e, lambda_m, s_eff,
+                                             omega_eff, temperature, n_max))
+
+
+def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max=50):
+    """rho_FC of `marcus_levich_jortner_rate`, Hartree^-1: the Poisson sum
+    over quanta of the effective mode, each a classical Marcus line of
+    width lambda_m (same arguments and sign convention)."""
     kt = thermal_energy(lambda_m, temperature)
     if s_eff < 0.0 or omega_eff < 0.0:
         raise ValueError(f'the effective mode needs S >= 0 and omega >= 0, got '
@@ -168,9 +176,8 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         raise ValueError(f'n_max = {n_max} keeps only {poisson.sum():.6f} of '
                          f'the Poisson weight at S = {s_eff}; raise n_max')
     activation = (float(delta_e) + lambda_m + n * omega_eff) ** 2
-    rho_fc = ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
-              / np.sqrt(4.0 * np.pi * lambda_m * kt))
-    return golden_rule(coupling, rho_fc)
+    return ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
+            / np.sqrt(4.0 * np.pi * lambda_m * kt))
 
 
 def marcus_rate(coupling, delta_e, lambda_total, temperature):

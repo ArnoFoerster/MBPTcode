@@ -11,8 +11,9 @@ The route is solve_ee_adc(fold=True): the doubles folded into the singles
 problem and every doubles-shaped quantity built a tile at a time from the DF
 factors, so a thousand basis functions fit on one machine. The reference is
 DF-RHF on the JK fit (--jk-auxbasis); the ADC integrals use the correlation
-fit (--auxbasis). In a continuum (a solvent name from pyscf's SMD table) the
-SCF relaxes at the solvent's static dielectric constant and the excitation's
+fit (--auxbasis). In a continuum (a solvent name from pyscf's SMD table, or
+eps=EPS_S,n2=N2 for any other medium, on the cavity --cavity names) the SCF
+relaxes at the solvent's static dielectric constant and the excitation's
 reaction field answers at the optical one, in the singlet singles block; the
 second-order terms keep the bare interaction (see ee_ri_fold).
 
@@ -35,7 +36,8 @@ ADC2_SPIN_SCALING), gas phase or with the LR term, not with --state-specific.
 
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
-spin channel in channel_<spin>.json; a rerun reuses both. --estimate-only
+spin channel in channel_<spin>.json; a rerun reuses both (a channel of another
+medium is solved again). --estimate-only
 prints the problem's size, the memory the operator holds and the floating
 point work of one product, and exits.
 
@@ -62,6 +64,7 @@ from src.Base.numerics.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,
                                          EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import code_id
+from src.environments.medium import CAVITY_CONVENTIONS, describe, parse as parse_medium
 from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
                                               lockstep_mean_field)
 from src.Base.utils.parallel.threads import blas_threads, openmp_threads
@@ -165,7 +168,12 @@ def main(argv=None):
     p.add_argument('--jk-auxbasis', default='aug-cc-pvdz-jkfit',
                    help='JK fit of the reference')
     p.add_argument('--environment', default='gas',
-                   help="'gas' or a solvent name of pyscf's SMD table")
+                   help="'gas', a solvent name of pyscf's SMD table, or "
+                        'eps=EPS_S,n2=N2[,label=NAME] (src.environments.medium)')
+    p.add_argument('--cavity', default=None,
+                   choices=sorted(CAVITY_CONVENTIONS),
+                   help='the cavity convention, radius set and scale (default '
+                        'the one --environment names, else DEFAULT_CAVITY)')
     p.add_argument('--spins', nargs='+', default=['singlet', 'triplet'])
     p.add_argument('--nroots', type=int, default=6)
     p.add_argument('--state-specific', default='off',
@@ -239,13 +247,10 @@ def run(args, comm):
     record_path = os.path.join(args.out_dir, 'record.json')
     env = None
     env_info = {'name': 'gas'}
-    if args.environment != 'gas':
-        from src.environments.solvent_screening import SolventScreening
-        env = SolventScreening(mol, solvent=args.environment)
-        env_info = dict(name=args.environment, eps_optical=env.eps,
-                        eps_static=env.eps_static, method=env.method,
-                        cavity=dict(env.cavity_settings, cavity_atoms=None),
-                        ngrids=env.ngrids,
+    medium = parse_medium(args.environment, args.cavity)
+    if medium is not None:
+        env = medium.screening(mol)
+        env_info = dict(describe(env), name=medium.name, eps_optical=env.eps,
                         convention='SCF at eps_static; LR transition reaction '
                                    'field at eps_optical in the singlet singles '
                                    'block; second order with the bare '
@@ -289,7 +294,9 @@ def run(args, comm):
                 stored = json.load(fh)
             if (stored.get('state_specific', 'off') == args.state_specific
                     and stored.get('ss_density', 'unrelaxed') == args.ss_density
-                    and stored.get('spin_scaling', 'none') == args.spin_scaling):
+                    and stored.get('spin_scaling', 'none') == args.spin_scaling
+                    # a channel written before it carried its medium is reused
+                    and stored.get('medium', describe(env)) == describe(env)):
                 channels[spin] = stored
                 say(f'{spin}: reused {path}', flush=True)
                 continue
@@ -322,7 +329,7 @@ def run(args, comm):
                   wall_s=time.time() - t, peak_rss_gb=peak_rss_gb(),
                   state_specific=args.state_specific,
                   ss_density=args.ss_density,
-                  spin_scaling=args.spin_scaling)
+                  spin_scaling=args.spin_scaling, medium=describe(env))
         if args.state_specific != 'off':
             ch['ss_shifts_eV'] = {m: (np.asarray(v) * HARTREE_TO_EV).tolist()
                                   for m, v in res.ss_shifts.items()}

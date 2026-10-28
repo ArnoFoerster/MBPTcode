@@ -38,7 +38,7 @@ import numpy as np
 from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_DEFAULT_TEST_SET,
                                          ISDF_TILE_GB)
 from src.Base.numerics.numerics import numerics_or_default, requested
 from src.Base.environment_seam import environment_of
@@ -52,8 +52,9 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  molecular_points_covariant,
                                                  refuse_unrepresented_factors,
                                                  resolve_grid)
-from src.Base.factorization.ao_product_fit import (ao_product_fit, pivoted_points,
-                                                   placed)
+from src.Base.factorization.ao_product_fit import (ao_product_fit,
+                                                   ao_product_fit_rows,
+                                                   pivoted_points, placed)
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
@@ -172,10 +173,12 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      where its points and settings are this call's, ignored
                      otherwise; `timings['fit_reused_tiles']` says it was read.
 
-    `numerics.isdf.test_set` 'ao_products' fits every AO product in the
-    Coulomb metric (`ao_product_fit`, replicated only), and
-    `numerics.isdf.pivot_points` replaces the grid by that many points
-    pivoted from it at this geometry (`ao_product_fit.pivoted_points`):
+    `numerics.isdf.test_set` 'ao_products', what an unnamed one means,
+    fits every AO product in the Coulomb metric (`ao_product_fit`; with
+    fit='rows' `ao_product_fit_rows`) on `numerics.isdf.pivot_points`
+    (else `ao_product_fit.pivot_count`) points pivoted from the grid at
+    this geometry (`ao_product_fit.pivoted_points`); 'duchemin_blase'
+    places the grid as it is:
     a selection made per call, for energies at one geometry; a gradient
     chain freezes its selection (`FrozenFactorization`).
     """
@@ -209,10 +212,8 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
     isdf = numerics_or_default(numerics).isdf
-    ao_products = isdf.test_set == 'ao_products'
-    if ao_products and fit == 'rows':
-        raise ValueError("test_set='ao_products' is fitted whole: "
-                         "fit='replicated'")
+    # a named grid without a test set is the AO-product fit
+    ao_products = (isdf.test_set or ISDF_DEFAULT_TEST_SET) == 'ao_products'
     _t0 = _time.time()
     comm = current_comm() if comm is None else comm
     auxbasis = req['auxbasis'] or paired_auxbasis(mol.basis)
@@ -226,7 +227,7 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
         where='separable_factors')
 
     _t = _time.time()
-    if isdf.pivot_points is not None:
+    if ao_products:
         frames = atomic_frames(mol)[0]
         pts_local, _, _ = pivoted_points(mol, radii, origins, frames,
                                          isdf.pivot_points, numerics, comm)
@@ -244,7 +245,7 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
             (mf.mo_energy, mf.mo_coeff, mf.mo_occ, coords), comm, check=True)
     if fit == 'rows':
         out = _row_factors(mf, mol, auxmol, coords, numerics, comm, timings,
-                           fit_block, _t0, fit_tiles)
+                           fit_block, _t0, fit_tiles, ao_products)
         return _represented(out, mf, mol, auxmol, comm) if refuse else out
     # Z = M^T V M is never read here: D = M^T V^1/2 below carries the metric.
     if ao_products:
@@ -298,14 +299,21 @@ def _represented(factors, mf, mol, auxmol, comm, root=None):
 
 
 def _row_factors(mf, mol, auxmol, coords, numerics, comm, timings, fit_block,
-                 t0, fit_tiles=None):
+                 t0, fit_tiles=None, ao_products=False):
     """`separable_factors`' fit='rows' tail: the row-distributed fit (or the
-    tiles handed in of it), then X_mo, D = M^T V^1/2 and X_ao on this rank's
-    contiguous rows, each read in the fit's own tiles; `SlicedFactors` over
-    more than one rank."""
-    row_fit = fit_M_streaming(mol, auxmol, coords,
-                              numerics=numerics, comm=comm, timings=timings,
-                              fit='rows', block=fit_block, tiles=fit_tiles)
+    tiles handed in of it), the AO-product one where `ao_products`
+    (`ao_product_fit_rows`), then X_mo, D = M^T V^1/2 and X_ao on this
+    rank's contiguous rows, each read in the fit's own tiles;
+    `SlicedFactors` over more than one rank."""
+    if ao_products:
+        row_fit = ao_product_fit_rows(mol, auxmol, coords, numerics=numerics,
+                                      comm=comm, block=fit_block,
+                                      tiles=fit_tiles, timings=timings)
+    else:
+        row_fit = fit_M_streaming(mol, auxmol, coords,
+                                  numerics=numerics, comm=comm,
+                                  timings=timings, fit='rows',
+                                  block=fit_block, tiles=fit_tiles)
     _t = _time.time()
     many = comm is not None and comm.Get_size() > 1
     X_mo = row_fit.mo_rows(mf.mo_coeff)

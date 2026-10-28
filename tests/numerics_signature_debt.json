@@ -36,7 +36,7 @@
  "src/environments/polarizable_sites.py::rpa_polarizability": [
   "conv_tol"
  ],
- "src/gradients/isdf_fit_adjoint.py::_cholesky_tiles": [
+ "src/Base/factorization/separable_ri.py::cholesky_tiles": [
   "regularization"
  ],
  "src/Base/factorization/separable_ri.py::_flat_from_radii": [

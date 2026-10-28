@@ -13,14 +13,16 @@ defects are shown to move the bits of the sums; under the recording BLAS
 their 1e-12 moves also lie far outside the few-ulp bar:
 
   * the helpers on random addends, owners round-robin (`ordered_sum`) and in
-    consecutive runs (`ordered_chain_sum`), and the planted defect -- rank
-    1's first addend moved by MOVE -- fails both;
+    consecutive runs (`ordered_chain_sum`, broadcast or kept by one root
+    rank), and the planted defect -- rank 1's first addend moved by MOVE --
+    fails both;
   * the sites that use them, every call recorded and compared with the
     serial run's: chi0(0) of the static screening and the screened
     interaction W itself (`static_screening_matrix`), the dRPA correlation
     energy's frequency sum (`rpa_correlation_energy_space_time`), the
-    quasiparticle set's eps_bar (gathered) and B_p_bar (chained) frequency
-    sums (`qp_set_gradient`), the fitted Fock skeleton's (natm, 3) tile sum
+    quasiparticle set's eps_bar (gathered) and B_p_bar (chained to the
+    slice's owner, the one rank that holds the call's result) frequency sums
+    (`qp_set_gradient`), the fitted Fock skeleton's (natm, 3) tile sum
     (`fitted_fock_skeleton`) and the Davidson trial space's pair-tile joins
     (`PairRows.join`); the screened diagonal's tile chain is gated in
     tests/test_davidson_preconditioner.py;
@@ -117,7 +119,8 @@ def recording(monkeypatch, module, name, plant=False):
                 a.flat[np.abs(a).argmax()] *= 1 + MOVE
                 terms[k] = a
         out = real(terms, *args, **kwargs)
-        log.setdefault(rank, []).append(np.array(out, copy=True))
+        log.setdefault(rank, []).append(None if out is None
+                                        else np.array(out, copy=True))
         return out
 
     monkeypatch.setattr(module, name, wrapped)
@@ -125,10 +128,12 @@ def recording(monkeypatch, module, name, plant=False):
 
 
 def same_calls(ref, got):
-    """Every call's result the serial run's to a few ulp, call for call."""
+    """Every call's result the serial run's to a few ulp, call for call; a
+    call whose result one root rank keeps is None on the others."""
     return len(ref) == len(got) and all(
-        a.shape == b.shape
-        and matches(b, a, RECORDING_BLAS, unit='1', quantity='root')
+        b is None or (a.shape == b.shape
+                      and matches(b, a, RECORDING_BLAS, unit='1',
+                                  quantity='root'))
         for a, b in zip(ref, got))
 
 
@@ -136,7 +141,14 @@ def bitwise_calls(ref, got):
     """Every call's result the serial run's bits, call for call: what a
     planted move must break."""
     return len(ref) == len(got) and all(
-        a.shape == b.shape and np.array_equal(a, b) for a, b in zip(ref, got))
+        b is None or (a.shape == b.shape and np.array_equal(a, b))
+        for a, b in zip(ref, got))
+
+
+def every_call_held(ref, log, size):
+    """Every call's result is held by at least one rank."""
+    return all(any(log.get(r, [None] * len(ref))[c] is not None
+                   for r in range(size)) for c in range(len(ref)))
 
 
 # ----------------------------------------------------------------- helpers
@@ -157,17 +169,21 @@ def test_the_helpers_are_the_one_rank_sum(size):
     owners = [r for r in range(size)
               for _ in range(*mpi_grid.contiguous_block(n, r, size))]
 
+    root = size - 1
+
     def rank(comm):
         r = comm.Get_rank()
         mine = [(k, terms[k]) for k in range(r, n, size)]
         chain = {k: terms[k] for k in range(n) if owners[k] == r}
         return (ordered_sum(mine, comm, onto=onto),
-                ordered_chain_sum(chain, owners, comm, onto))
+                ordered_chain_sum(chain, owners, comm, onto),
+                ordered_chain_sum(chain, owners, comm, onto, root=root))
 
-    for a, b in run_simulated(rank, size):
+    for r, (a, b, c) in enumerate(run_simulated(rank, size)):
         assert_same(a, serial, unit='1', quantity='root', label='ordered_sum')
         assert_same(b, serial, unit='1', quantity='root',
                     label='ordered_chain_sum')
+        assert np.array_equal(b, c) if r == root else c is None, r
 
 
 def test_a_moved_addend_fails_both_helpers():
@@ -265,6 +281,7 @@ def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
         outs = run_simulated(lambda comm: run(water), size)
         for r in range(size):
             assert same_calls(ref, log.get(r, [])), (site, size, r)
+        assert every_call_held(ref, log, size), (site, size)
         if site in ('chi0(0)', 'E_c'):
             for out in outs:
                 assert_same(out, ref_out, unit='1', quantity='root',

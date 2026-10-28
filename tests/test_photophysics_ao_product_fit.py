@@ -1,19 +1,18 @@
-"""The photophysics command line on the AO-product fit (--isdf-test-set
-ao_products, --pivot-points).
+"""The photophysics command line on the AO-product fit (--pivot-points,
+--isdf-test-set).
 
 Gates:
-  * the options reach the declaration's one Numerics: the AO-product test set
-    and the pivot count on the --grid-accuracy level, fitted whole (the row
-    fit realizes the Duchemin-Blase set only), the factors still sliced and
-    the adjoint still the grid's; without them the factors are the row fit
-    as before;
-  * a pivot count without the AO-product set is refused by name;
+  * the options reach the declaration's one Numerics: with no test set named
+    the --grid-accuracy level is the AO-product fit (on --pivot-points, else
+    the default count), with --isdf-test-set duchemin_blase the Duchemin-Blase
+    set, every fit by rows, the factors sliced and the adjoint the grid's;
+  * a pivot count beside the Duchemin-Blase set is refused by name;
   * the chain the command line declares runs on that fit: water/cc-pVDZ
     Hartree-Fock, 250 points pivoted from the G3 parent, over two and three
-    simulated ranks, its S1 force on the sliced factors with the grid adjoint
-    the whole layout's with the explicit adjoint within 1e-9 Ha/Bohr (two
-    adjoints, which agree to rounding; measured 1.3e-12), on every rank rank
-    0's force, both chains on the 250 AO-product points.
+    simulated ranks, its S1 force on the sliced row fit with the grid adjoint
+    the whole layout's replicated fit with the explicit adjoint within 1e-9
+    Ha/Bohr (two realizations and two adjoints, which agree to rounding), on
+    every rank rank 0's force, both chains on the 250 AO-product points.
 """
 import os
 import sys
@@ -39,24 +38,26 @@ ADJOINT_TOL = 1e-9
 def test_the_options_select_the_ao_product_fit():
     n = declaration(*AO_FIT).numerics
     assert (n.isdf.level, n.isdf.test_set, n.isdf.pivot_points) == ('G3', 'ao_products', 250)
-    assert n.isdf.fit is None and n.layout.sliced and n.bse.adjoint == 'grid'
+    assert n.isdf.fit == 'rows' and n.layout.sliced and n.bse.adjoint == 'grid'
+    assert declaration('--pivot-points', '250').numerics.identity() == n.identity()
     plain = declaration().numerics
-    assert (plain.isdf.fit, plain.isdf.test_set, plain.isdf.pivot_points) == ('rows', None, None)
-    assert n.identity() != plain.identity()
+    assert (plain.isdf.fit, plain.isdf.pivot_points) == ('rows', None)
+    assert plain.isdf.test_set_named() == 'ao_products'
+    legacy = declaration('--isdf-test-set', 'duchemin_blase').numerics
+    assert (legacy.isdf.fit, legacy.isdf.test_set) == ('rows', 'duchemin_blase')
+    assert len({n.identity(), plain.identity(), legacy.identity()}) == 3
 
 
-@pytest.mark.parametrize('extra', [('--pivot-points', '250'),
-                                   ('--isdf-test-set', 'duchemin_blase',
-                                    '--pivot-points', '250')])
-def test_a_pivot_count_needs_the_ao_product_set(extra):
-    with pytest.raises(SystemExit, match='--isdf-test-set ao_products'):
-        declaration(*extra)
+def test_a_pivot_count_beside_the_duchemin_blase_set_is_refused():
+    with pytest.raises(SystemExit, match='duchemin_blase'):
+        declaration('--isdf-test-set', 'duchemin_blase', '--pivot-points', '250')
 
 
 @pytest.mark.parametrize('size', [2, 3])
 def test_the_declared_chain_runs_on_the_ao_product_fit(size, pyscf_one_thread):
     production = declaration(*AO_FIT).numerics
-    whole = production.derive('the whole layout and the explicit adjoint',
+    whole = production.derive('the replicated fit, the whole layout and the '
+                              'explicit adjoint', isdf={'fit': 'replicated'},
                               layout={'sliced': None}, bse={'adjoint': 'explicit'})
 
     def rank(comm):

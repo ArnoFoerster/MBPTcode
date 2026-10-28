@@ -84,7 +84,8 @@ from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.LinearResponse.space_time import (
     ProjRows, chi0_imaginary_frequency, frequency_blocks,
     owned_frequency_blocks, polarizability_projected_sweep,
-    rpa_correlation_energy_space_time, split_branches, tile_rows)
+    rpa_correlation_energy_space_time, split_branches, square_tile_rows,
+    tile_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +173,7 @@ def _sweep_backward(slabs, X, D, eps, nocc, grid, mu, tile_gb):
     X_o, X_v, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
     D = whole_factor(D, 'D')
     M, naux = X_o.shape[0], D.shape[1]
-    rows = tile_rows(M, tile_gb, 4 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_gb, 4 * M * 8))
 
     eps_bar = np.zeros_like(np.asarray(eps, float))
     X_bar = (np.zeros((M, X.nmo)) if isinstance(X, SlicedFactors)
@@ -257,7 +258,7 @@ def _static_sweep_backward(chi0_bar, X, D, eps, nocc, grid, mu,
     X_o, X_v, e_o, e_v, _, occ, virt = split_branches(X, eps, nocc, mu)
     D = whole_factor(D, 'D')
     M, naux = X_o.shape[0], D.shape[1]
-    rows = tile_rows(M, tile_memory_gb, 5 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 5 * M * 8))
     wt = np.asarray(grid.cosft_wt)[0]
 
     eps_bar = np.zeros_like(np.asarray(eps, float))

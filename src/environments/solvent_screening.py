@@ -121,12 +121,14 @@ import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf import gto
 from pyscf import solvent as pyscf_solvent
+from pyscf.data import radii as pyscf_radii
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
 from src.Base.basis.ri_fallback import auxbasis_for
 from src.Base.numerics.constants import (BYTES_PER_GB, BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
-                                         PCM_LEBEDEV_ORDER, SOLVENT_PLASMON_EV,
+                                         COSMO_RADII_ANGSTROM, PCM_LEBEDEV_ORDER,
+                                         SOLVENT_PLASMON_EV,
                                          SOLVENT_RI_PROBE_ORBITALS,
                                          SOLVENT_RI_RESIDUAL_MAX)
 from src.Base.factorization.distributed_df import distributed_mean_field
@@ -223,6 +225,59 @@ def solvent_plasmon_energy(solvent, rule='f_sum'):
             f"literature fit exists for water only, and the f-sum-rule value "
             f"follows from the solvent's own electron density")
     return value / HARTREE_TO_EV
+
+
+# The named radius sets a cavity's spheres are drawn from, each scaled by
+# vdw_scale: pyscf's modified Bondi set (Bondi's radii with hydrogen at 1.1
+# Angstrom, its PCM default), the UFF radii of Rappe et al. (half the UFF
+# bond distances x_i, Gaussian's default set) and the COSMO-optimized radii of
+# Klamt et al. (`COSMO_RADII_ANGSTROM`).
+RADII_SETS = ('bondi', 'uff', 'cosmo')
+
+
+def _radius_table(name):
+    """The unscaled radius of every element of the radius set `name`, in Bohr,
+    indexed by nuclear charge (NaN where the set has none)."""
+    if name == 'bondi':
+        return np.asarray(pyscf_pcm.modified_Bondi, float)
+    if name == 'uff':
+        return np.asarray(pyscf_radii.UFF, float)
+    if name == 'cosmo':
+        table = np.full(len(pyscf_pcm.modified_Bondi), np.nan)
+        for symbol, r in COSMO_RADII_ANGSTROM.items():
+            table[gto.charge(symbol)] = r / BOHR_TO_ANGSTROM
+        return table
+    raise ValueError(f'radius set {name!r}: one of {RADII_SETS}')
+
+
+def cavity_radii(cavity):
+    """The sphere radius of every element in Bohr (indexed by nuclear charge)
+    of a cavity's settings: its own radii_table when one was given, else the
+    named set times vdw_scale plus the probe radius, the rule pyscf applies to
+    its modified Bondi set."""
+    if cavity.get('radii_table') is not None:
+        return np.asarray(cavity['radii_table'], float)
+    return (cavity['vdw_scale'] * _radius_table(cavity.get('radius_set', 'bondi'))
+            + cavity['r_probe'] / BOHR_TO_ANGSTROM)
+
+
+def pcm_radii_table(cavity):
+    """What a pyscf PCM's `radii_table` is set to for these settings: None for
+    the modified Bondi set without a table of its own (pyscf builds exactly
+    `cavity_radii` from vdw_scale and r_probe), else `cavity_radii`."""
+    if cavity.get('radii_table') is None and cavity.get('radius_set', 'bondi') == 'bondi':
+        return None
+    return cavity_radii(cavity)
+
+
+def require_radii(cavity, elements):
+    """Refuse a cavity whose radius set has no radius for one of `elements`."""
+    table = cavity_radii(cavity)
+    missing = sorted({e for e in elements if not np.isfinite(table[gto.charge(e)])})
+    if missing:
+        raise ValueError(
+            f"the {cavity.get('radius_set', 'bondi')!r} radius set has no radius for "
+            f"{', '.join(missing)}: name another set for this molecule")
 
 
 def normalize_cavity_atoms(cavity_atoms, unit='Angstrom'):
@@ -336,7 +391,8 @@ class SolventScreening:
 
     def __init__(self, mol, eps=None, solvent=None, method='IEF-PCM',
                  lebedev_order=PCM_LEBEDEV_ORDER, vdw_scale=1.2, r_probe=0.0,
-                 radii_table=None, allow_static_eps=False, eps_static=None,
+                 radii_table=None, radius_set='bondi', allow_static_eps=False,
+                 eps_static=None,
                  omega_p=None, cavity_atoms=None, cavity_unit='Angstrom',
                  equilibrium=False, frozen_polarization=False):
         """eps: optical dielectric constant. Give this or `solvent` (a name in
@@ -345,6 +401,12 @@ class SolventScreening:
         to pyscf's PCM and carry its meanings and defaults, lebedev_order
         aside (`PCM_LEBEDEV_ORDER`, 50 points per sphere against the 302 of
         pyscf's order 29).
+
+        radius_set: the named radius set (`RADII_SETS`) that vdw_scale multiplies,
+        pyscf's modified Bondi set by default; a radii_table of one's own
+        replaces it and is given with the default name only. A medium names
+        the set and the scale together as one cavity convention
+        (`src.environments.medium`).
 
         eps_static: the constant the ground state relaxes in, which `mean_field`
         puts the SCF inside. A solvent name supplies it; an explicit optical eps
@@ -422,8 +484,13 @@ class SolventScreening:
         self.cavity_atoms = normalize_cavity_atoms(cavity_atoms, cavity_unit)
         # a shell's spheres do not ride the atoms; see EnclosingPCM
         self.differentiable = self.cavity_atoms is None
+        if radius_set not in RADII_SETS:
+            raise ValueError(f'radius_set={radius_set!r}: one of {RADII_SETS}')
+        if radii_table is not None and radius_set != 'bondi':
+            raise ValueError(f'radius_set={radius_set!r} names a radius set and a '
+                             f'radii_table was given as well: pass one')
         self._cavity = dict(lebedev_order=lebedev_order, vdw_scale=vdw_scale,
-                            r_probe=r_probe, radii_table=radii_table,
+                            r_probe=r_probe, radii_table=radii_table, radius_set=radius_set,
                             cavity_atoms=self.cavity_atoms,
                             cavity_unit='Bohr')
 
@@ -433,7 +500,8 @@ class SolventScreening:
         self._pcm.lebedev_order = lebedev_order
         self._pcm.vdw_scale = vdw_scale
         self._pcm.r_probe = r_probe
-        self._pcm.radii_table = radii_table
+        require_radii(self._cavity, CavitySpheres(mol, self.cavity_atoms or ()).elements)
+        self._pcm.radii_table = pcm_radii_table(self._cavity)
         self._pcm.verbose = 0
         bound_pyscf_pcm_blocks(self._pcm)
         self._pcm.build()
@@ -446,8 +514,9 @@ class SolventScreening:
 
     @property
     def cavity_settings(self):
-        """{lebedev_order, vdw_scale, r_probe, radii_table}: the cavity every
-        PCM of this continuum is built on, a copy."""
+        """{lebedev_order, vdw_scale, r_probe, radii_table, radii,
+        cavity_atoms, cavity_unit}: the cavity every PCM of this continuum is
+        built on, a copy."""
         return dict(self._cavity)
 
     def new_pcm(self, mol):
@@ -464,11 +533,7 @@ class SolventScreening:
         for symbol, xyz in (self.cavity_atoms or ()):
             centres.append(xyz)
             charges.append(gto.charge(symbol))
-        table = self._cavity['radii_table']
-        if table is None:
-            table = (self._cavity['vdw_scale'] * pyscf_pcm.modified_Bondi
-                     + self._cavity['r_probe'] / BOHR_TO_ANGSTROM)
-        return np.array(centres), np.asarray(table, float)[charges]
+        return np.array(centres), cavity_radii(self._cavity)[charges]
 
     # ---- surface response -------------------------------------------------
 
@@ -985,7 +1050,7 @@ class SolventScreening:
         wrapped.with_solvent.lebedev_order = self._cavity['lebedev_order']
         wrapped.with_solvent.vdw_scale = self._cavity['vdw_scale']
         wrapped.with_solvent.r_probe = self._cavity['r_probe']
-        wrapped.with_solvent.radii_table = self._cavity['radii_table']
+        wrapped.with_solvent.radii_table = pcm_radii_table(self._cavity)
         hook = getattr(mf, 'force_hook', None)
         if hook is not None:
             # an ISDF mean field's force is bound to the unwrapped object: the
@@ -1053,9 +1118,12 @@ class SolventScreening:
                     abs(float(theirs) - float(ours)) > 1e-12:
                 mismatched.append(f'{name} {theirs} vs {ours}')
         theirs = getattr(with_solvent, 'radii_table', None)
-        ours = self._cavity['radii_table']
-        if theirs is not None and ours is not None and \
-                not np.allclose(np.asarray(theirs, float), np.asarray(ours, float)):
+        if theirs is None:
+            theirs = cavity_radii(dict(vdw_scale=with_solvent.vdw_scale,
+                                       r_probe=with_solvent.r_probe))
+        theirs, ours = np.asarray(theirs, float), cavity_radii(self._cavity)
+        n = min(len(theirs), len(ours))
+        if not np.allclose(theirs[:n], ours[:n], equal_nan=True):
             mismatched.append('radii_table differs')
         theirs = getattr(with_solvent, 'cavity_atoms', None)
         if (theirs is None) != (self.cavity_atoms is None) or (

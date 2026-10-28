@@ -156,7 +156,16 @@ def test_block_norm_is_another_quantity(case):
     single = np.linalg.norm(case['single'])
     off_old = abs(case['block'] - single) / single
     off_new = np.linalg.norm(case['analytic'] - case['single']) / single
-    assert off_old > 0.05 and off_new < 0.5 * off_old
+    # The block norm misses the element's derivative by an order more than
+    # the T2 + partner truncation does: at r = 1.45 off_old 0.053 (0.043 on
+    # another machine: the block norm's second difference moves with where
+    # the Davidson stops, 0.045 to 0.061 in `case`) against off_new 0.0028 on
+    # the AO-product fit, 0.080 against 0.0025 on the Duchemin-Blase one.
+    # The ratio is the claim; an absolute floor on off_old sat inside that
+    # solver noise.
+    assert off_new < 0.5 * off_old
+    if case['r'] == 1.45:
+        assert off_new < 0.1 * off_old
     if case['r'] == 1.38:
         # where T2 does not dominate, the block norm is ten times the element
         assert case['block'] > 3.0 * single

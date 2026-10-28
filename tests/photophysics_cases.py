@@ -69,9 +69,10 @@ def run_of(store_root, *extra, max_memory=4000, **changes):
 
 def production(store_root, environment, solvation, *extra):
     """(the photophysics Run, the S1 surface at R0 it would walk): the walk
-    gate's configuration, the run's own factory and declaration; `extra`
-    command-line options appended."""
-    run = run_of(store_root, '--environment', environment,
+    gate's configuration (in a continuum scheme A), the run's own
+    factory and declaration; `extra` command-line options appended."""
+    scheme = () if environment == 'gas' else ('--solvent-scheme', 'scheme-a')
+    run = run_of(store_root, '--environment', environment, *scheme,
                  '--relaxed-solvation', solvation, *extra,
                  qp_states='admitted')
     mol0 = run.mol_in

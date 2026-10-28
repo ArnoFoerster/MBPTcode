@@ -13,8 +13,11 @@ Gates, on water (C1 geometry):
     bound are refused, a parent of lower numerical rank keeps that rank and
     flags it; three simulated ranks give the one-rank selection bit for bit
     and its projection and fit to rounding, the same bits on every rank;
-  * the Numerics fields refuse what no route realizes and leave every identity
-    written before them unchanged;
+  * the Numerics fields refuse what no route realizes; a named grid with no
+    test set is the AO-product fit on `pivot_count` points (600 on water at
+    G1), in its identity too, and the Duchemin-Blase fit, named, keeps the
+    identity it had before the fields existed (as does the ISDF-K mean
+    field's grid named alone, which keeps its fit);
   * a selection frozen at a reference geometry and carried by the body frame
     gives the same fitted Coulomb matrix after a rigid rotation and
     translation (1e-10 relative), and travels through a record;
@@ -28,6 +31,7 @@ Gates, on water (C1 geometry):
 """
 import os
 import sys
+import threading
 import warnings
 
 import numpy as np
@@ -191,6 +195,35 @@ def test_the_pivot_and_the_fit_over_ranks(water):
         assert np.array_equal(E, ranks[0][1]) and np.array_equal(M, ranks[0][2])
 
 
+def test_the_ranks_agree_on_a_pivot_only_one_of_them_holds(water):
+    """A pivot kept from before on one rank alone (the others' entries
+    dropped: simulated ranks share one table) is not read there: every rank
+    pivots again, in the same collectives, and gets the one-rank selection.
+    Rank 0's stale entry is a wrong selection, so reading it would show; the
+    group runs under a time limit, since a rank skipping the collectives
+    hangs the others."""
+    mol = water[0]
+    radii, origins, _, _ = resolve_grid(mol, Numerics(isdf={'level': 'G1'}).isdf)
+    frames = atomic_frames(mol)[0]
+    serial = apf.pivoted_points(mol, radii, origins, frames, 150)[1]
+    parent = apf.placed(mol, apf.parent_layout(mol, radii, origins)[0], frames)
+
+    def run(comm):
+        if comm.Get_rank() == 0:
+            stale = apf.pivot_key(mol, parent, 150, None, comm)
+            with apf._MADE_LOCK:
+                apf._MADE[stale] = np.arange(150)
+        return apf.pivoted_points(mol, radii, origins, frames, 150)[1]
+    out = []
+    group = threading.Thread(target=lambda: out.append(run_simulated(run, 2)),
+                             daemon=True)
+    group.start()
+    group.join(300)
+    assert not group.is_alive(), 'the ranks entered different collectives'
+    for owner in out[0]:
+        assert np.array_equal(owner, serial)
+
+
 def test_a_pivot_beyond_its_memory_bound_is_refused(water, monkeypatch):
     mol = water[0]
     radii, origins, _, _ = resolve_grid(mol, Numerics(isdf={'level': 'G1'}).isdf)
@@ -202,24 +235,68 @@ def test_a_pivot_beyond_its_memory_bound_is_refused(water, monkeypatch):
 def test_the_numerics_refuse_what_no_route_realizes():
     with pytest.raises(ValueError, match='test_set'):
         Numerics(isdf={'test_set': 'orbital_pairs'})
-    with pytest.raises(ValueError, match='needs it'):
-        Numerics(isdf={'pivot_points': 100})
-    with pytest.raises(ValueError, match='replicated'):
-        Numerics(isdf={'test_set': 'ao_products', 'fit': 'rows'})
+    with pytest.raises(ValueError, match="test_set='ao_products'"):
+        Numerics(isdf={'test_set': 'duchemin_blase', 'pivot_points': 100})
     with pytest.raises(ValueError, match='positive'):
         Numerics(isdf={'test_set': 'ao_products', 'pivot_points': 0})
+    Numerics(isdf={'level': 'G3', 'pivot_points': 100})   # the AO-product fit
 
 
-def test_identities_written_before_the_fields_stay_what_they_were():
-    plain = Numerics(isdf={'level': 'G3'})
-    values = plain.values()
+def old_identity(numerics):
+    """The identity written before test_set and pivot_points existed."""
+    values = numerics.values()
     for name in ('test_set', 'pivot_points', 'runtime_radii'):
         values['isdf'].pop(name)
-    old = record_hash({k: values[k] for k in ('isdf', 'scf', 'span', 'qp',
-                                              'quadrature', 'bse', 'solvent',
-                                              'walk')})
-    assert plain.identity() == old
-    assert Numerics(isdf={'level': 'G3', 'test_set': 'ao_products'}).identity() != old
+    return record_hash({k: values[k] for k in ('isdf', 'scf', 'span', 'qp',
+                                               'quadrature', 'bse', 'solvent',
+                                               'walk')})
+
+
+def test_a_named_grid_is_the_ao_product_fit_in_the_identity():
+    """The Duchemin-Blase fit named keeps the identity it had before the
+    fields existed (it was what a named level meant); a level named alone is
+    the AO-product fit and says so; nothing named keeps its identity."""
+    legacy = Numerics(isdf={'level': 'G3', 'test_set': 'duchemin_blase'})
+    assert legacy.identity() == old_identity(legacy)
+    plain = Numerics(isdf={'level': 'G3'})
+    assert plain.isdf.test_set_named() == 'ao_products'
+    assert plain.identity() != old_identity(plain)
+    assert plain.identity() == Numerics(
+        isdf={'level': 'G3', 'test_set': 'ao_products'}).identity()
+    assert Numerics().identity() == old_identity(Numerics())
+    assert Numerics().isdf.test_set_named() is None
+    # the ISDF-K mean field's grid alone keeps its fit and its identity
+    isdf_k = Numerics(scf={'grid_level': 'G1'})
+    assert isdf_k.identity() == old_identity(isdf_k)
+
+
+def test_the_pivot_count_rule():
+    """max(ISDF_PIVOT_FRACTION x parent, ISDF_PIVOT_POINTS_PER_ATOM x atoms),
+    at most the parent: the counts the validated emitters get at the G3
+    parent (888 points per atom)."""
+    assert apf.pivot_count(62, 55056) == 12400        # CBP
+    assert apf.pivot_count(60, 53280) == 12000        # PXZ-TRZ
+    assert apf.pivot_count(21, 18648) == 4200         # DMABN
+    assert apf.pivot_count(3, 2664) == 600            # water
+    assert apf.pivot_count(1, 150) == 150             # never above the parent
+    assert apf.pivot_count(2, 20000) == 3200          # the fraction decides
+
+
+def test_a_named_level_pivots_the_ao_product_fit(water):
+    mol = water[0]
+    radii, origins, _, _ = resolve_grid(mol, Numerics(isdf={'level': 'G1'}).isdf)
+    n_parent = len(apf.parent_layout(mol, radii, origins)[1])
+    fz = FrozenFactorization(mol, Numerics(isdf={'level': 'G1'}))
+    assert fz.test_set == 'ao_products' and fz.layout is None
+    assert fz.M == apf.pivot_count(mol.natm, n_parent) == 600
+    old = FrozenFactorization(mol, Numerics(isdf={'level': 'G1',
+                                                  'test_set': 'duchemin_blase'}))
+    assert old.layout is not None and 2 * old.M == n_parent   # the grid as is
+    # a chain naming a grid asks for the AO-product fit; one naming none
+    # accepts whatever it is handed
+    with pytest.raises(ValueError, match='was built for'):
+        old.require_match(Numerics(isdf={'level': 'G1'}))
+    old.require_match(Numerics())
 
 
 def moved(mol, rot, shift):
@@ -272,15 +349,6 @@ def test_the_chain_settings_must_name_the_same_fit(water):
     with pytest.raises(ValueError, match='was built for'):
         fz.require_match(Numerics(isdf={'test_set': 'ao_products',
                                         'pivot_points': 160}))
-
-
-def test_the_row_fit_is_refused():
-    mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
-    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
-    mf.kernel()
-    with pytest.raises(ValueError, match='fitted whole'):
-        separable_factors(mf, mol, fit='rows', numerics=Numerics(
-            isdf={'level': 'G1', 'test_set': 'ao_products'}))
 
 
 def test_augmented_bse_against_df():

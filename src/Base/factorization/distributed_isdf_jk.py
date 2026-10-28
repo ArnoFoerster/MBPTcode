@@ -88,7 +88,7 @@ from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
                                                    lockstep_density,
                                                    reduce_parts, add_seconds,
                                                    distributed_handles)
-from src.Base.factorization.ao_product_fit import ao_product_fit
+from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  fit_M_streaming, screened_layout)
@@ -288,14 +288,10 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
                                                    size)]
             t_fit = time.time()
             if source.test_set == 'ao_products':
-                # the AO-product fit: its projection divided over the ranks,
-                # its solve by every rank; this rank keeps its tiles' rows
-                _, M, _ = ao_product_fit(mol, self.auxmol, coords,
-                                         source.numerics, comm)
-                fit = None
-                self.MT = {t: np.ascontiguousarray(M[:, slice(*self.tiles[t])].T)
-                           for t in self.mine}
-                del M
+                # the AO-product row fit, in the same tiles
+                fit = ao_product_fit_rows(mol, self.auxmol, coords,
+                                          numerics=source.numerics, comm=comm,
+                                          block=self.tile)
             else:
                 fit = fit_M_streaming(mol, self.auxmol, coords,
                                       numerics=source.numerics,
@@ -594,9 +590,9 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
         """This rank's M^T tiles and the fit they are, read-only views
         (`separable_ri.FitTiles`), or None before the build: the settings
         are the ones `build` hands the row fit, so a later stage asking for
-        the same fit reads these instead of making it again. None too on the
-        AO-product fit, which is not the row fit."""
-        if self.MT is None or self.source.test_set == 'ao_products':
+        the same fit reads these instead of making it again; the AO-product
+        row fit's are marked as such."""
+        if self.MT is None:
             return None
         source = self.source
         return FitTiles(self.mol, self.auxmol, self.coords, self.tile,
@@ -604,7 +600,7 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
                         fit_settings(source.numerics, 'l_max_second',
                                      'pair_tol', 'regularization',
                                      'block_memory_gb'),
-                        kept=self.fit_kept)
+                        kept=self.fit_kept, test_set=source.test_set)
 
     def held_bytes(self):
         """{array: bytes} this rank holds now, read off the arrays: the X and
@@ -746,7 +742,8 @@ def scf_pair_layout(mf):
     """The AO-pair columns (mu, nu, weight) the ISDF-K fit of `mf` kept: the
     layout it was frozen to, else the screen at its own points, the bits
     either fit realization screens; None where `mf` built no ISDF-K fit (a
-    fitted mean field, or a pure functional's, which never asks for K).
+    fitted mean field, or a pure functional's, which never asks for K) and
+    on the AO-product test set, which screens no pair.
 
     A walk freezes this at its reference geometry (`frozen_pair_layout`).
     """
@@ -757,7 +754,8 @@ def scf_pair_layout(mf):
         if handles is not None and isinstance(handles[0], DistributedISDFJK):
             handle = handles[0]
     source = with_df if handle is None else handle.source
-    if not isinstance(source, ISDFJK):
+    if not isinstance(source, ISDFJK) or source.test_set == 'ao_products':
+        # the AO-product test set screens no pair
         return None
     if source.pair_layout is not None:
         return source.pair_layout

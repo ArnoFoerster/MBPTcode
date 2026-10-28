@@ -291,6 +291,14 @@ KAPPA = {'singlet': 2.0, 'triplet': 0.0}
 # flop count is unchanged.
 ISDF_TILE_GB = 4.0
 
+# The most grid rows a (rows, M) tile of an (M, M) intermediate holds
+# (`space_time.square_tile_rows`): the polarizability's Green's functions, their
+# adjoints and the BSE's factorized adjoint. Above it no rank forms an (M, M)
+# array whole, whatever ISDF_TILE_GB allows (at M = 10000 the budget alone gives
+# every row); at or below it the tiles are the budget's, the same bits. A tile of
+# 2048 rows at M = 15000 is 0.25 GB.
+ISDF_SQUARE_TILE_ROWS = 2048
+
 # Grid points per tile of the row-distributed ISDF fit (`fit_rows`): the Gram
 # tiles, the Cholesky panels and diagonal blocks, the substitution blocks, the
 # three-centre contraction and the projections all run on tiles of this edge,
@@ -325,7 +333,12 @@ WHOLE_FIT_ADJOINT_MAX_GB = 256.0
 # spurious root (CBP, LRC-wPBEh/aug-cc-pVDZ in the full basis: S1 2.6 eV below
 # DF-RI at 27528 points, on the tabulated G3 grid and on pivoted points alike);
 # the second puts every root within 0.5 meV of DF-RI at 9000 pivoted points.
+# A grid named without a test set (a level, counts or radii) is 'ao_products'
+# on points pivoted by ISDF_PIVOT_FRACTION / ISDF_PIVOT_POINTS_PER_ATOM; the
+# first is reached only by naming it.
 ISDF_TEST_SETS = ('duchemin_blase', 'ao_products')
+#: The test set a named grid means where none is named.
+ISDF_DEFAULT_TEST_SET = 'ao_products'
 
 # The parent grid points are hard-pivoted from (`IsdfNumerics.pivot_points`):
 # the tabulated atomic grid of the level or counts with every sub-shell's radii
@@ -334,6 +347,18 @@ ISDF_TEST_SETS = ('duchemin_blase', 'ao_products')
 # (aug-cc-pVDZ, about 55000 parent points) the pivot reaches DF-RI within
 # 0.6 meV at 9000-10000 points.
 ISDF_PIVOT_PARENT_FACTOR = 2
+
+# The pivoted point count where none is asked for (`ao_product_fit.pivot_count`):
+# max(ISDF_PIVOT_FRACTION x the parent, ISDF_PIVOT_POINTS_PER_ATOM x the atoms),
+# at most the parent. The tabulated levels' parents hold the same points for
+# every element (G3 x2: 888 per atom, G1 x2: 592), so at them the per-atom
+# count decides. Measured, LRC-wPBEh/aug-cc-pVDZ full basis, lowest three
+# singlets and triplets on the DF-RI Kohn-Sham diagonal, worst |ISDF - DF-RI|:
+# CBP (62 atoms) 0.45 meV at 9000, 0.17 at 11000; PXZ-TRZ (60) 0.57 at 10000,
+# 0.10 at 15000; DMABN (21) 0.91 at 3500, 0.71 at 5000. The rule gives 12400,
+# 12000 and 4200, each between two measured counts within 1 meV.
+ISDF_PIVOT_FRACTION = 0.16
+ISDF_PIVOT_POINTS_PER_ATOM = 200
 
 # GB of the pivot's factor columns one rank may hold (`ao_product_fit.pivot_gb`):
 # count x (the parent rows it owns) float64; the parent's Gram matrix is never
@@ -356,14 +381,16 @@ FIT_ADJOINT_ULP_RESPONSE_MAX = 1e-10
 # frequency sweeps, the Davidson's products -- which moves their results by a
 # few ulp; the chain carries an ulp change of what reaches its fold to at most
 # FIT_ADJOINT_ULP_RESPONSE_MAX (water/cc-pVDZ: 8e-13 to 1.5e-12 Ha/Bohr at 2
-# and 3 ranks), and a total energy of ~100 Ha by a few of its ulp (1.4e-14).
+# and 3 ranks), and a total energy of ~100 Ha by up to a few hundred of its
+# ulp: the non-equilibrium solvated chain at 2 ranks reaches 2e-12 Ha on some
+# CPU/BLAS types while its forces still agree to 1e-12 Ha/Bohr.
 # It assumes the factors themselves are not re-associated: the fit's
 # three-centre sum is one block on the molecules gated here, and where a rank
 # split cuts it, its last bits reach the force through the fit's Gram matrix
 # (cond ~ 2e8) at ~1e-8, as a one-BLAS-thread repeat does (FIT_REALIZATION_
 # FORCE_TOL).
 RANK_SPLIT_FORCE_TOL = 1e-10
-RANK_SPLIT_ENERGY_TOL = 1e-12
+RANK_SPLIT_ENERGY_TOL = 5e-12
 
 # How far a force may move between two mean fields each converged to
 # SCF_DIFFERENTIABLE_GRAD_TOL (two SCF runs, or the SCF divided over ranks
@@ -1210,6 +1237,15 @@ TRANSFORM_FIT_RCOND = 1e-100
 # degree.
 PCM_LEBEDEV_ORDER = 11
 
+# COSMO-optimized atomic radii in Angstrom (Klamt, Jonas, Buerger and Lohrenz,
+# J. Phys. Chem. A 102, 5074 (1998)), the radius set of the 'cosmo' cavity
+# convention, used unscaled. An element without one is refused by that
+# convention rather than given a radius from another set.
+COSMO_RADII_ANGSTROM = {
+    'H': 1.30, 'C': 2.00, 'N': 1.83, 'O': 1.72, 'F': 1.72,
+    'S': 2.16, 'Cl': 2.05, 'Br': 2.16, 'I': 2.32,
+}
+
 
 # The smallest residual the BSE/Casida Davidson (`LinearResponse.davidson`) may
 # be asked for, as a multiple of machine epsilon times the largest particle-hole
@@ -1238,6 +1274,18 @@ DAVIDSON_SIZED_RESIDUAL = 1e-5
 # on none of 48. As used, sized below DAVIDSON_SIZED_RESIDUAL, 1e-3 converges
 # 48 of 48 at 1e-8 and 47 at 1e-10.
 DAVIDSON_MIN_NEW_FRACTION = 1e-3
+# The largest residual |H z - omega M z| of a Casida subspace solution,
+# relative to max |H| max |z|, that pyscf's LU-based subspace solver may
+# leave before the pencil is solved again by a symmetric-definite eigh
+# (`trial_space.subspace_eigen`). Its error grows as eps cond(sigma - pi)^2,
+# and a trial pair with |x| close to |y| makes that condition large; its root
+# error runs at about 5 max |H| times this residual. Water/cc-pVDZ
+# BSE@LRC-wPBEh: one cycle at cond 1.2e3 left 1.6e-9 and S1 2.2e-9 Ha too
+# high, the others at most 2.4e-14. Benzene/cc-pVDZ BSE@HF, 12 roots at
+# conv_tol 1e-9: cycles at 2.7e-13 to 1e-10 left roots 1e-12 to 5e-10 Ha off,
+# and at 1e-11 a solve that stopped on a 9.3e-12 cycle was 3.7e-11 Ha off
+# the dense roots; at 1e-13 every solve met them to 2.8e-13.
+DAVIDSON_SUBSPACE_RESIDUAL_TOL = 1e-13
 # The one symmetric Davidson (`Solvers.davidson.solve_symmetric`): its default
 # residual tolerance and cycle cap; the bounds its davidson1 linear-dependence
 # threshold is held between (1e-2 |r|^2, never looser than pyscf's own 1e-14
@@ -1733,9 +1781,12 @@ DAVIDSON_ACTION_SYMMETRY_TOL = 1e-8
 # number, dimensionless.
 PIN_CROSS_BLAS_BAR = 2e-12
 
-# Forces and gradients, Ha/Bohr, the ISDF gradient floor: 1.15e-9 to 2.2e-9
-# (surface_comm 1.15e-9 to 1.82e-9, outside_scissor R0 2.0e-9 to 2.2e-9).
-PIN_CROSS_BLAS_GRADIENT_BAR = ISDF_GRADIENT_FLOOR
+# Forces and gradients, Ha/Bohr: 1.15e-9 to 2.2e-9 on the cluster MKL
+# (surface_comm 1.15e-9 to 1.82e-9, outside_scissor R0 2.0e-9 to 2.2e-9), and
+# 1.04e-8 on OpenBLAS (outside_scissor water, R0 + 0.05 Bohr on atom 0): the fit
+# adjoint turns last-bit differences into this, so the bar is twice the
+# same-machine ISDF gradient floor.
+PIN_CROSS_BLAS_GRADIENT_BAR = 2e-8
 
 # Quantities of an analytic continuation, which amplifies the fit's last
 # bits: the Pade route's quasiparticle energy, Ha, and its pole strength Z,
@@ -1823,6 +1874,16 @@ EVALUATION_CACHE_SIZE = 2
 # SCF_DIFFERENTIABLE_GRAD_TOL.
 SCF_OPTIMIZATION_CONV_TOL = SCF_ENERGY_CONV_TOL
 SCF_OPTIMIZATION_GRAD_TOL = 1e-8
+
+# What the mean field of an S0 Hessian is converged to -- the analytic
+# Hessian's density-fitted twin, the displaced forces of a numerical one: the
+# run's own orbital-gradient threshold where it is tighter, else this, the
+# force ceiling SCF_GRAD_TOL. SCF_DIFFERENTIABLE_GRAD_TOL lies below what DIIS
+# reaches on augmented double-zeta bases with density-fitted J and K on XC
+# grid 4 (the orbital gradient stalls between 4e-11 and 8e-11, in a continuum
+# alike, where the reaction field's re-convergence is then refused), so a
+# Hessian held to it could not be taken there at all.
+HESSIAN_SCF_GRAD_TOL = SCF_GRAD_TOL
 
 # Cycle cap of a production mean field (`photophysics.chain`); the PCM
 # re-convergence copies it.
@@ -2049,6 +2110,25 @@ RATE_FC_LAMBDA_RATIO_MAX = 2.0
 # and the lowest final state is a channel (exp(-10) = 4.5e-5).
 RATE_THERMAL_WINDOW_KT = 10.0
 
+# A Duschinsky Franck-Condon density is a real-time integral (no contour
+# shift), whose roundoff floor sits near eps times the band's peak density
+# 1/sqrt(2 pi variance). A rate density below this fraction of that peak is
+# not resolved: it is kept, warned about (`FCDensityAtRoundoff`) and named in
+# the rate chain's numerical flags. 1e-13 is about 450 eps.
+RATE_FC_DENSITY_FLOOR_REL = 1e-13
+
+# The classical reorganization energies, eV, the effective-mode literature
+# assumes instead of computing one (the last rung of the rate chain's
+# ablation ladder, `photophysics.rate_chain.ablation_ladder`).
+RATE_ASSUMED_LAMBDAS_EV = (0.1, 0.2)
+
+# Coupling-to-gap ratio r of a second-order spin-vibronic path above which the
+# rate chain mixes the path state in exactly (the diabatic two-state model)
+# rather than to first order: the exact thermal weight of the path state falls
+# below second order's r^2 by about 9 r^2, 8% at 0.1
+# (`spin_vibronic.mixed_weight`).
+RATE_MIXING_RATIO_MAX = 0.1
+
 # Curvilinear displacements (`properties.curvilinear`): a valence angle
 # above this many degrees is linear and neither it nor a dihedral through it is
 # a primitive (both are undefined at 180 degrees); the directions they would
@@ -2114,6 +2194,11 @@ EE_FOLD_FOLLOW = 2
 # summation order, so neither is ever set by the rank count.
 DF_FORCE_BLOCK_GB = 1.0
 DF_FORCE_AUX_CHUNK = 256
+# Auxiliary functions per block of the orbital-response kernel's J and K
+# (Base.pyscf.cphf.ResponseKernel): the blocks are dealt over the
+# ranks and summed in block order, so the block, never the rank count, fixes
+# the bits.
+SCF_KERNEL_AUX_BLOCK = 128
 # Basis functions above which the ADC(2)/MP2 state models take the tiled force
 # instead of the dense reference (every MO factor and doubles tensor whole).
 EE_FORCE_DENSE_MAX_NAO = 150
@@ -2134,6 +2219,16 @@ SOLVATION_LOOP_DIIS_SPACE = 8
 # on its own frozen conventions, differing by more than this many loop
 # tol_energy is flagged in the photophysics record (walk_vs_vertical_flag)
 WALK_VERTICAL_G_FLAG_FACTOR = 10
+# The photophysics drivers' loop tolerances (`python -m src.photophysics
+# solvated` and the stage pipeline's scheme B, --loop-tol-q / --loop-tol-energy):
+# a force of G_eq differenced against its energy at 1e-8 Ha/Bohr needs G to
+# 1e-11 Ha
+PHOTOPHYSICS_LOOP_TOL_Q = 1e-9
+PHOTOPHYSICS_LOOP_TOL_ENERGY = 1e-11
+# Largest distance (Bohr) of an atom of an external Hessian file's geometry
+# from R0 (`photophysics.stages.ground_modes`): the file prints its
+# coordinates to 1e-6 Bohr
+EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR = 1e-5
 # Loosest orbital gradient (pyscf conv_tol_grad) a state model's SCF may be
 # converged to (src.gradients.state_models): the relaxed density and the
 # Hellmann-Feynman force assume stationary orbitals, and both are first order
@@ -2149,10 +2244,21 @@ PCM_FORCE_DENSITY_SYMMETRY_TOL = 1e-10
 # Norm of the difference below which a PCM object's cached density (and its
 # charges) is reused for a force (pcm_derivatives.potential_integral_gradient)
 PCM_DM_CACHE_TOL = 1e-10
+# The fewest tiles the continuum's surface potential is cut into once it needs
+# more than one (src.environments.pcm_factorization.cavity_tiles), whatever the
+# rank count:
+# the tiles are a function of the cavity and the basis alone, so the reaction
+# field is the same bits at every rank count, and up to this many ranks share
+# its integrals in a cycle.
+PCM_CAVITY_MIN_TILES = 32
 
 # Folded ADC(2) nuclear force (src.gradients.adc.ee_gradient)
 # eigenvalue tolerance (Hartree) of the root whose force is taken
 EE_FORCE_ROOT_TOL = 1e-12
+# Newton steps a force may take to polish a root the call solved more loosely
+# on the same operator (ee_gradient.polish_root) before it solves the roots
+# afresh instead; from a call's root at 1e-8 two to three are taken.
+EE_FORCE_POLISH_STEPS = 8
 # A state model's force re-solves its root at EE_FORCE_ROOT_TOL; at the call's
 # own field its omega must equal the call's to this many times the call's
 # conv_tol, or the force is another state's (ee_state_model, follow='index').

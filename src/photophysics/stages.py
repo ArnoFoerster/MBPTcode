@@ -79,8 +79,91 @@ stage record's `numerical_flags` ({flag: what it says}, empty when clean):
 the stage raised (`numerical_flags.flag`), with its messages. The rate table gathers them under
 `numerical_flags` by stage, beside its own ('fc_integrand_not_decayed'), so
 every rate, adiabatic energy and dE_ST built on a flagged step says so.
+
+THE S0 HESSIAN (hess) is the analytic Hessian of a density-fitted twin, the
+central differences of the declared mean field's force, or an external file
+(`Policies.external_hessian`, an ORCA .hess, read as data by
+`duschinsky.read_orca_hessian`): its content must be the declared one and
+its geometry R0's, each atom within EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR, else
+the stage is refused. Every Huang-Rhys factor, reorganization energy and
+Franck-Condon sum of the rate table stands on these modes.
+
+SCHEME B (`Declaration.solvent_scheme` 'scheme-b-eq' or 'scheme-b-noneq',
+`declaration.SOLVENT_SCHEMES`): every state stands in
+the self-consistent state-specific loop of the continuum
+(`src.environments.solvation_loop`), each GW-BSE state model on the declared
+chain (`chain` module docstring, `state_specific`); the walks run on G_eq
+(`SolvatedSurface`), with the policies above (nudge, refreeze, saddle
+check, engine). The stages:
+
+    s0     the walk of G_eq(S0): the reference self-consistent with its own
+           density in the continuum at eps_static
+    hess   as in the other schemes (the two computed routes stand on PCM at
+           eps_static, the same ground state)
+    vert   at R0, ONE shared evaluation of every property in S0's
+           equilibrium charges, and the absorption of the singlet and the
+           triplet followed, G_neq(X | S0) - G_eq(S0), each on a chain built
+           at R0 (`state_specific.vertical`)
+    s1,t1  the walk of G_eq(X), its saddle check, the loop again at the
+           minimum on the surface the last walk ran on, ONE shared evaluation
+           of every property in X's equilibrium charges there, and the
+           emission G_eq(X) - G_neq(S0 | X) on a chain built at the minimum;
+           its G_eq there against the walk's is `walk_vs_vertical`
+    rate   the TADF table off these records
+
+WHICH DENSITY EACH PROPERTY SEES (scheme B). A property is taken in the
+reaction field of ONE state, held fixed: at R0 the equilibrium charges of S0,
+at the S1 (T1) minimum those of S1 (T1), each the loop's converged answer to
+that state's orbital-relaxed density (slow and fast parts at eps_static). In
+those charges the mean field is converged again and the chain (the walked
+surface's at a minimum, the singlet vertical's at R0) gives every root of
+both spins, the oscillator strengths and transition dipoles of the BSE
+vectors there (the singlets' linear response at eps_inf), the spin-orbit
+table, d(S0,S1), d(S1,S2), d(T1,T2) and the second-order spin-vibronic
+derivative. The charges do not follow the nuclei in these derivatives: the
+reaction field is an external potential held fixed, its own nuclear
+derivative left out, so the couplings are those of the molecule in a frozen
+reaction field.
+
+THE ENERGIES (scheme B) are free energies (`free_energies`). At R0 (both
+schemes), e0 = G_eq(S0), the singlet and the triplet followed sit at e0 plus
+their absorption and every other root at the followed state of its spin plus
+its splitting from it in S0's charges. At a minimum of X:
+
+    scheme-b-eq     the solvent relaxed around X: energy[X] = G_eq(X) (the
+                    loop at the minimum on the walk's last surface), e0 =
+                    G_eq(X) - emission (G_neq(S0 | X)), so omega[X] is the
+                    emission; the properties in X's equilibrium charges
+    scheme-b-noneq  the solvent left in S0's equilibrium: energy[X] =
+                    G_neq(X | S0) and e0 = G_eq(S0), both at X's minimum, so
+                    omega[X] is the absorption there; the properties in the
+                    charges of that non-equilibrium loop (S0's slow charges,
+                    X's fast ones)
+
+every other root at energy[X] plus its splitting from X in the property
+charges. The walks and minima are the same G_eq ones in both: a walk on
+G_neq(X | S0) needs the derivative of S0's slow charges, which the loop does
+not provide. Adiabatic energies are then differences of these energies at
+each state's minimum, as the solvated driver's (`solvated`) for 'eq'. The
+records keep the evaluation's own numbers under props['field_e0'] and
+props['field_omega'].
+
+A scheme-B surface writes no record of itself: a relaunch starts a new walk
+from the last accepted geometry of '<stage>_progress' (its optimizer Hessian,
+not nudged) on a surface built there, and goes on from a converged
+'<stage>_walked' on a surface built at its minimum, as the solvated driver
+does; the record holds `restarted_from`. Scheme B refuses what the loop does
+not run (`declaration.SCHEME_B_REFUSES`): another ground state than E_KS, an
+ISDF-K mean field, a span cut, a far start, the DF acceptance check, a
+Newton finish, a mean field converged above STATE_MODEL_SCF_GRAD_TOL, a
+non-equilibrium relaxed state, the UISC model, and a quasiparticle set
+selected at the geometry a chain is built at (admitted, adaptive): each
+scheme-B surface builds its own chain, so only a set fixed by orbital index
+(frontier, as the solvated driver's) keeps every surface of a run one model.
 """
 import functools
+import hashlib
+import pathlib
 import time
 import warnings
 from dataclasses import asdict, replace
@@ -90,8 +173,9 @@ import numpy as np
 from pyscf import gto
 
 from src.Base.numerical_flags import collecting, gathered
-from src.Base.numerics.constants import (HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
-                                         SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.numerics.constants import (EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR,
+                                         HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
+                                         HESSIAN_SCF_GRAD_TOL)
 from src.Base.declaration import Excitation
 from src.environments.environment import equilibrium_environment
 from src.Base.geometry.geometry import elements_of, molecule_at
@@ -106,21 +190,23 @@ from src.SingleReference.BSE.solve import oscillator_strengths
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
 from src.gradients.gwbse.state_manifold import StateManifold
-from src.photophysics import chain, df_check, rate_models, uisc
+from src.photophysics import chain, df_check, rate_models, state_specific, uisc
 from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
                                       refreeze_summary, walk_fields)
 from src.gradients.gwbse.diagnostics import qp_bookkeeping
-from src.properties.excitations import (grid_record, relaxation_flags,
-                                        saddle_check, saddle_verdict,
-                                        surface_of)
+from src.properties.duschinsky import read_orca_hessian
+from src.properties.excitations import (grid_record, relaxation_fields,
+                                        relaxation_flags, saddle_check,
+                                        saddle_verdict, surface_of)
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
                                     require_hessian_counts,
                                     translation_residual)
 from src.properties.optimize import (relax, saddle_test, surface_from_record,
                                      surface_record)
 from src.gradients.mean_field_surface import MeanFieldSurface
+from src.gradients.solvated_surface import SolvatedSurface
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
                                           spin_vibronic_coupling)
@@ -154,7 +240,15 @@ class Stamps:
                   'mean_field': mean_field,
                   'scf': n.to_record()['scf'],
                   'span': span}
+        if d.scheme_b:
+            # stamped under scheme B alone, so that the gas and scheme-A
+            # records keep the stamps they were written with (they differ in
+            # the environment, and a scheme-B record carries the key)
+            ground['solvent_scheme'] = {'scheme': d.solvent_scheme,
+                                        'loop': n.to_record()['solvent']}
         hess = dict(ground, hessian=d.policies.hessian)
+        if d.policies.hessian == 'external':
+            hess['external_hessian'] = d.policies.external_hessian.sha256
         if d.policies.hessian == 'numerical':
             h = d.hessian_numerics
             hess.update(hessian_numerics=h.identity(),
@@ -254,6 +348,35 @@ class Run:
         return self.mean_field_factory(self.declaration.numerics,
                                        warm_start=self.warm_start)
 
+    @functools.cached_property
+    def loop(self):
+        """(make_field, make_state, loop_kw) of scheme B (module docstring):
+        the continuum as the loop's medium (`chain.reaction_field`), the
+        GW-BSE state models on the declared chain (`chain.DeclaredChain`),
+        their mean field configured from the declaration and converged by
+        each model in its charges, warm-started where the declaration says,
+        and the loop's tolerances the declaration's Numerics."""
+        d = self.declaration
+        make_scf = chain.mean_field_factory(
+            d.reference, d.numerics, self.max_memory, self.histories,
+            finish=d.policies.scf_finish, warm_start=self.warm_start,
+            span=(None, None), surface_route=d.numerics.scf.route,
+            converge=False)
+        make_state = state_specific.gwbse_states(
+            make_scf, d.numerics, d.kernel == 'bse-tda',
+            roots={'singlet': d.singlet - 1, 'triplet': d.triplet - 1},
+            build_chain=chain.DeclaredChain(d))
+        return chain.reaction_field(d), make_state, {'numerics': d.numerics}
+
+    def loop_surface(self, kind, mol, where):
+        """The scheme-B surface G_eq of `kind` ('S0', 'singlet', 'triplet')
+        whose first evaluation is at `mol`; `where` names it in the log."""
+        make_field, make_state, loop_kw = self.loop
+        return SolvatedSurface(mol, make_field, make_state(kind),
+                               label=f'{kind} {self.declaration.environment}'
+                                     f' ({where})',
+                               make_ground=make_state('S0'), **loop_kw)
+
     # ------------------------------------------------------------ helpers
     def mean_field_factory(self, numerics, warm_start=None, span=None):
         """`chain.mean_field_factory` of this run on `numerics` (the run's
@@ -268,6 +391,9 @@ class Run:
             surface_route=d.numerics.scf.route)
 
     def write(self, name, record):
+        """`record` under `name`, with the run's solvent scheme in it (every
+        record names the scheme it was computed in)."""
+        record = dict(record, solvent_scheme=self.declaration.solvent_scheme)
         self.store.write(name, record, self.stamp(name))
 
     def flag(self, stage, **flags):
@@ -478,15 +604,29 @@ class Run:
         Every accepted step is stored as '<stage>_progress', and `resume`,
         such a state read back, is where the walk goes on from; geomeTRIC's
         files go to geometric_<stage>/. A walk with no `stage` keeps no
-        checkpoint."""
-        p = self.declaration.policies
+        checkpoint. Under scheme B a state without a surface record starts
+        a new walk from its geometry and Hessian, not nudged, on the surface
+        handed in (built there, `resumable`), its progress kept under the
+        first walk's start; its root is read at the minimum
+        (`scheme_b_minimum`) and comes back None."""
+        d = self.declaration
+        p = d.policies
         given = {} if hess_init is None else {'hess_init': hess_init}
+        start = np.array(mol.atom_coords(), float)
+        nudge, restarted = p.nudge_bohr, None
+        if d.scheme_b and resume is not None and resume.get('surface') is None:
+            restarted = {'walk_pass': int(resume['pass']),
+                         'accepted_steps': len(resume['history']),
+                         'G': float(resume['energy'])}
+            mol = self.molecule_at(np.asarray(resume['coords'], float))
+            if resume.get('hessian') is not None:
+                given['hess_init'] = np.asarray(resume['hessian'], float)
+            nudge, resume = 0.0, None
         if stage is not None and p.engine != 'cartesian':
             workdir = self.store.workdir(f'geometric_{stage}')
             # one geomeTRIC per rank: the others keep their files apart
             given['workdir'] = (str(workdir) if self.store.root_rank
                                 else None)
-        start = np.array(mol.atom_coords(), float)
 
         def checkpoint(state):
             self.write(f'{stage}_progress', {'start_bohr': start,
@@ -496,10 +636,12 @@ class Run:
         mol_opt, info = relax(surface, mol, engine=p.engine,
                               verbose=self.store.root_rank,
                               refreeze=int(p.refreeze),
-                              nudge=p.nudge_bohr,
+                              nudge=nudge,
                               checkpoint=None if stage is None
                               else checkpoint, resume=resume, **given)
         final = info.pop('final_surface', surface)
+        if restarted is not None:
+            info['restarted_from'] = restarted
         # one root-following entry per forward pass the first walk ran: one
         # fewer than its evaluations when the first point was handed over
         log_ = getattr(surface, 'follow_log', None) or []
@@ -507,7 +649,7 @@ class Run:
                                         == len(info.get('history') or []) - 1)
         # the root is the last walk's, followed on its own surface at the
         # minimum it returned, not at a step it rejected after
-        root = followed_root(final, mol_opt)
+        root = None if d.scheme_b else followed_root(final, mol_opt)
         return lockstep_geometry(mol_opt), info, root, final
 
     def progress(self, stage, start):
@@ -535,6 +677,14 @@ class Run:
         """(surface, state) of a walk '<stage>_progress' resumes from
         `start`, the surface rebuilt from the state's record; None."""
         state = self.progress(stage, start)
+        if state is not None and state['surface'] is None and \
+                self.declaration.scheme_b:
+            at = self.molecule_at(np.asarray(state['coords'], float))
+            log(f'{stage}: a new walk from the last accepted geometry of '
+                f'pass {state["pass"]} after {len(state["history"])} '
+                f'evaluations ({self.store.path(stage + "_progress")}), on a '
+                f'surface built there')
+            return self.loop_surface(stage_kind(stage), at, 'restart'), state
         if state is None or state['surface'] is None:
             return None
         log(f'{stage}: resuming the walk in pass {state["pass"]} after '
@@ -549,7 +699,8 @@ class Run:
         self.write(f'{stage}_walked', {
             'coords_bohr': np.array(mol.atom_coords(), float),
             'info': {k: v for k, v in info.items() if k != 'final_surface'},
-            'root': int(root), 'surface': surface_record(final)})
+            'root': None if root is None else int(root),
+            'surface': surface_record(final)})
 
     def walked(self, stage):
         """(minimum, info, root, surface) of '<stage>_walked', the surface
@@ -558,6 +709,12 @@ class Run:
         if not self.store.has(name):
             return None
         held = self.read(name)
+        if held['surface'] is None and self.declaration.scheme_b:
+            mol = self.molecule_at(held['coords_bohr'])
+            log(f'{stage}: the walk is stored ({self.store.path(name)}); '
+                f'resuming at its minimum on a surface built there')
+            return (mol, held['info'], held['root'],
+                    self.loop_surface(stage_kind(stage), mol, 'minimum'))
         if held['surface'] is None:
             return None
         log(f'{stage}: the walk is stored ({self.store.path(name)}); resuming '
@@ -625,12 +782,18 @@ class Run:
     def analytic_df_hessian(self):
         """pyscf's analytic Hessian of the density-fitted twin at R0, on rank
         0, broadcast. The twin's numerics are the run's, derived: J and K
-        fitted, its orbital gradient converged for a derivative."""
+        fitted, its orbital gradient converged to the run's threshold or
+        HESSIAN_SCF_GRAD_TOL, whichever is tighter; the run's own where they
+        already are that (a density-fitted run at or above the ceiling)."""
         d = self.declaration
-        twin = d.numerics.derive(
-            'the analytic Hessian of a density-fitted twin at R0',
-            scf={'route': 'df', 'grid_level': None,
-                 'conv_tol_grad': SCF_DIFFERENTIABLE_GRAD_TOL})
+        scf = {'route': 'df', 'grid_level': None,
+               'conv_tol_grad': min(d.numerics.scf.conv_tol_grad,
+                                    HESSIAN_SCF_GRAD_TOL)}
+        twin = (d.numerics
+                if all(getattr(d.numerics.scf, k) == v for k, v in scf.items())
+                else d.numerics.derive(
+                    'the analytic Hessian of a density-fitted twin at R0',
+                    scf=scf))
 
         def build():
             factory = self.mean_field_factory(twin)
@@ -640,6 +803,31 @@ class Run:
         with distributed(None):
             hess = build() if root else None
         return broadcast(hess, comm)
+
+    def external_hessian(self):
+        """(Hessian (3N, 3N), info) of the declared external file at R0
+        (module docstring): refused where its content is no longer the
+        declared one, or its geometry is not R0's."""
+        external = self.declaration.policies.external_hessian
+        path = pathlib.Path(external.path)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest != external.sha256:
+            raise StageRefused(f'{path} is not the file declared (sha256 '
+                               f'{digest[:12]}, declared '
+                               f'{external.sha256[:12]})')
+        held = read_orca_hessian(str(path), self.mol0,
+                                 source=f'external file {path.name}')
+        offset = float(np.abs(held.mol.atom_coords()
+                              - self.mol0.atom_coords()).max())
+        if offset > EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR:
+            raise StageRefused(
+                f'{path} is the Hessian of another geometry: an atom lies '
+                f'{offset:.2e} Bohr from R0 (bar '
+                f'{EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR:.0e}); compute it at '
+                f'R0, {self.store.path("s0.xyz")}')
+        return (np.asarray(held.hessian, float),
+                {'file': str(path), 'sha256': digest,
+                 'max_offset_bohr': offset})
 
     def accept(self, stage):
         """With the DF acceptance check, the check of `stage`'s geometry
@@ -680,6 +868,52 @@ def with_partition(spec, partition):
     if partition is None:
         return spec
     return replace(spec, options=dict(spec.options, qp_partition=partition))
+
+
+def stage_kind(stage):
+    """The spin a walked stage ('s1', 't1', 's1_escape', ...) relaxes."""
+    return 'singlet' if stage.split('_')[0] == 's1' else 'triplet'
+
+
+def loop_flags(surface, mol):
+    """{flag: [messages]} the scheme-B `surface` logged at the nuclei of
+    `mol` (`SolvatedSurface.flags`): the loops', the state models' and the
+    forces' numerical events there."""
+    x = mol.atom_coords().tolist()
+    out = {}
+    for entry in surface.flags:
+        if entry['coords'] == x:
+            for name in entry['flags']:
+                out.setdefault(name, [])
+            for name, text in zip(entry['flags'], entry['messages']):
+                out[name].append(text)
+    return out
+
+
+def free_energies(props, anchors, e0):
+    """`props` with the scheme-B energies (module docstring): each root at
+    the anchor of its spin, or at the one anchor, plus its splitting from it
+    in the property field; omega against `e0`; the evaluation's own e0 and
+    omega kept as field_e0 and field_omega. anchors: {label: G (Ha)}."""
+    field_omega = dict(props['omega'])
+    by_spin = {name[0]: name for name in anchors}
+    energy = {}
+    for name, w in field_omega.items():
+        anchor = by_spin.get(name[0], next(iter(anchors)))
+        energy[name] = float(anchors[anchor] + w - field_omega[anchor])
+    return dict(props, e0=float(e0), energy=energy,
+                omega={k: v - float(e0) for k, v in energy.items()},
+                field_e0=props['e0'], field_omega=field_omega)
+
+
+def merged_flags(*parts):
+    """{flag: [what it says]} of several such maps, the lists joined."""
+    out = {}
+    for part in parts:
+        for name, what in (part or {}).items():
+            out.setdefault(name, []).extend(
+                what if isinstance(what, list) else [what])
+    return out
 
 
 # ------------------------------------------------------------ properties
@@ -756,8 +990,8 @@ def surface_fields(manifold, mol, span):
 
 # ---------------------------------------------------------------- stages
 def ground_minimum(run):
-    """s0: the ground-state minimum R0 on the declared mean field; sets
-    `run.mol0`. Returns the record."""
+    """s0: the ground-state minimum R0 on the declared mean field (under
+    scheme B G_eq(S0) of the loop); sets `run.mol0`. Returns the record."""
     d = run.declaration
     if run.reusable('s0'):
         record = run.read('s0')
@@ -765,12 +999,23 @@ def ground_minimum(run):
         log(f's0 stored: {run.store.path("s0")}')
         return record
     t0 = time.time()
-    surface = MeanFieldSurface(run.mol_in, run.factory, environment=run.env)
+    if d.scheme_b:
+        surface = run.loop_surface('S0', run.mol_in, 'R0')
+        given = {'nudge': 0.0}
+    else:
+        surface = MeanFieldSurface(run.mol_in, run.factory,
+                                   environment=run.env)
+        given = {}
     log(f's0: relaxing the ground state, {run.mol_in.natm} atoms, nao '
         f'{run.mol_in.nao_nr()}, {d.reference}/{run.mol_in.basis} '
-        f'{d.mean_field_name}, {d.environment}')
+        f'{d.mean_field_name}, {d.environment} ({d.solvent_scheme})')
     mol, info = relax(surface, run.mol_in, engine=d.policies.engine,
-                      verbose=run.store.root_rank)
+                      verbose=run.store.root_rank, **given)
+    if d.scheme_b:
+        # the loops' and the state model's events at R0
+        info['numerical_flags'] = merged_flags(
+            info.get('numerical_flags'),
+            loop_flags(info.get('final_surface', surface), mol))
     # a walk that did not converge is flagged; R0 is where it stopped
     run.flag_unrelaxed('s0', info)
     run.mol0 = lockstep_geometry(mol)
@@ -783,7 +1028,7 @@ def ground_minimum(run):
                         f'{d.environment}')
     log(f's0: E {info.get("energy"):.9f} Ha, {info.get("cycles")} cycles, '
         f'residual {info.get("opt_grad_max"):.2e}', t0)
-    return record
+    return run.read('s0')
 
 
 def ground_modes(run):
@@ -805,6 +1050,9 @@ def ground_modes(run):
         hess = numerical_hessian(run.mol0, chain.solvated(run.env, fd),
                                  map_fn=map_fn, verbose=run.store.root_rank,
                                  info=info)
+    elif route == 'external':
+        log(f'hess: the external Hessian {d.policies.external_hessian.path}')
+        hess, info = run.external_hessian()
     else:
         log('hess: the analytic Hessian of a density-fitted twin at R0')
         hess = run.analytic_df_hessian()
@@ -827,15 +1075,17 @@ def ground_modes(run):
             f'{n_imag} imaginary modes at R0 (lowest internal curvature '
             f'{saddle["lowest_curvature"]:.2e} Ha/Bohr^2, mode in '
             f'hess_failed): a saddle point, and no rate is defined about one')
-    return record
+    return run.read('hess')
 
 
 def vertical(run, walks_next=False):
     """vert: ONE shared evaluation at R0, the vertical spectrum and every
     coupling. With `walks_next` (the S1 walk follows in this launch from R0
     on the vertical declaration) and a zero nudge, the S1 force rides along
-    as the walk's first point."""
+    as the walk's first point. Under scheme B `scheme_b_vertical`."""
     d = run.declaration
+    if d.scheme_b:
+        return scheme_b_vertical(run)
     shared = run.relaxed_spec is run.spec
     walks = (shared and walks_next and d.policies.far_start is None
              and not run.reusable('s1'))
@@ -867,6 +1117,56 @@ def vertical(run, walks_next=False):
     report_properties('vert (R0)', props)
     log('vert done', t0)
     run.accept('vert')
+    return run.read('vert')
+
+
+def scheme_b_vertical(run):
+    """vert under scheme B (module docstring): the absorption of the singlet
+    and the triplet followed, each on a chain built at R0, and every property
+    of ONE evaluation of the singlet's chain in S0's equilibrium charges."""
+    d = run.declaration
+    if run.reusable('vert'):
+        log('vert stored')
+        return run.read('vert')
+    t0 = time.time()
+    make_field, make_state, loop_kw = run.loop
+    r = {kind: state_specific.vertical(make_field, make_state, kind, run.mol0,
+                                       loop_kw)
+         for kind in ('singlet', 'triplet')}
+    man = run.manifold(run.s_key, run.t_key, chain=r['singlet']['state'].chain)
+    # the ground state's equilibrium loop ended in S0's converged charges
+    ev = man.evaluate(run.mol0, r['singlet']['ground'].mf,
+                      couplings=run.couplings)
+    e0 = r['singlet']['G']['eq_ground']
+    props = free_energies(
+        geometry_properties(ev, run.s_key, run.t_key, d.n_states),
+        {label(run.s_key): e0 + r['singlet']['absorption'],
+         label(run.t_key): e0 + r['triplet']['absorption']}, e0)
+    absorption_flags = {label(k): r[k[0]]['flags']
+                        for k in (run.s_key, run.t_key)}
+    partition = man.driven.resolved.qp_partition
+    record = {'props': props, 'seconds': time.time() - t0,
+              'solvent_scheme': d.solvent_scheme, 'solvation': d.solvation,
+              'absorption_eV': {label(k): r[k[0]]['absorption'] * HARTREE_TO_EV
+                                for k in (run.s_key, run.t_key)},
+              'absorption_G': {label(k): r[k[0]]['G']
+                               for k in (run.s_key, run.t_key)},
+              'absorption_flags': absorption_flags,
+              'qp_states': man.chain.realization.qp_states,
+              'qp_bookkeeping': qp_bookkeeping(man.chain, run.mol0),
+              'frame_turning': frame_turning_record(run.mol0),
+              'qp_partition': (None if partition is None
+                               else partition.as_record()),
+              'factor_layout': chain.factor_layout(man),
+              'numerical_flags': merged_flags(*(
+                  {name: [f'{where} {loop} loop'] for loop, names in
+                   flags.items() for name in names}
+                  for where, flags in absorption_flags.items())),
+              'method': GW_BSE, 'kernel': d.kernel}
+    run.write('vert', record)
+    report_properties('vert (R0, in S0\'s equilibrium charges)', props)
+    log('vert: absorption ' + ', '.join(
+        f'{k} {v:.4f} eV' for k, v in record['absorption_eV'].items()), t0)
     return run.read('vert')
 
 
@@ -909,8 +1209,11 @@ def finish_minimum(run, stage, walked, t0, extra):
     """The record of `stage` ('s1', 't1') at the walk's minimum: the
     saddle check, ONE shared evaluation on the surface the last walk ran
     on, every property there, the record written and accepted.
-    `extra(info)` adds the stage's own fields."""
+    `extra(info)` adds the stage's own fields. Under scheme B
+    `scheme_b_minimum`."""
     d = run.declaration
+    if d.scheme_b:
+        return scheme_b_minimum(run, stage, walked, t0, extra)
     mol, info, root, final, saddle = run.saddle_checked(stage, *walked, t0)
     singlet = stage == 's1'
     key = ('singlet' if singlet else 'triplet', root)
@@ -945,6 +1248,80 @@ def finish_minimum(run, stage, walked, t0, extra):
     return run.read(stage)
 
 
+def scheme_b_minimum(run, stage, walked, t0, extra):
+    """`finish_minimum` under scheme B (module docstring): the saddle check
+    on the walk's surface, the loop again at the minimum on the surface the
+    last walk ran on (G_eq of the state, its charges and the model whose
+    chain followed it), the vertical energies on a chain built at the
+    minimum, and ONE evaluation of every property in the charges the scheme
+    takes (scheme-b-eq: X's equilibrium; scheme-b-noneq: X in S0's slow
+    charges)."""
+    d = run.declaration
+    mol, info, _, final, saddle = run.saddle_checked(stage, *walked, t0)
+    kind = stage_kind(stage)
+    g_walk = final.total_energy(mol)
+    model = final.last['state']
+    root = followed_root(model.chain, mol)
+    key = (kind, root)
+    s_key, t_key = (key, run.t_key) if kind == 'singlet' else (run.s_key, key)
+    man = run.manifold(s_key, t_key, chain=model.chain)
+    ev = man.evaluate(mol, model.mf,
+                      couplings=(following(*s_key), following(*t_key)))
+    make_field, make_state, loop_kw = run.loop
+    r = state_specific.vertical(make_field, make_state, kind, mol, loop_kw)
+    if d.solvent_scheme == 'scheme-b-noneq':
+        # the solvent left in S0's equilibrium (module docstring): X in S0's
+        # slow charges, its properties in that loop's charges
+        neq = r['models']['neq_state']
+        man = run.manifold(s_key, t_key, chain=neq.chain)
+        ev = man.evaluate(mol, neq.mf,
+                          couplings=(following(*s_key), following(*t_key)))
+        anchor, e0 = r['G']['neq_state'], r['G']['eq_ground']
+    else:
+        anchor, e0 = g_walk, g_walk - r['emission']
+    props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states),
+                          {label(key): anchor}, e0)
+    refrozen = relaxation_fields(info).get('refreeze') in ('measured',
+                                                           'not converged')
+    gap, gap_flagged = state_specific.walk_vs_vertical(
+        kind, g_walk, r['G']['eq_state'], refrozen,
+        d.numerics.solvent.loop_tol_energy)
+    fields = walk_fields(info)
+    fields['numerical_flags'] = merged_flags(
+        fields['numerical_flags'], loop_flags(final, mol),
+        {name: [f'emission {loop} loop'] for loop, names in r['flags'].items()
+         for name in names},
+        {'walk_vs_vertical': [f'{gap:.2e} Ha']} if gap_flagged else {})
+    record = {'props': props, 'root_followed': root,
+              'solvation': d.solvation, 'solvent_scheme': d.solvent_scheme,
+              'G_eq': g_walk,
+              'emission_eV': r['emission'] * HARTREE_TO_EV,
+              'emission_G': r['G'], 'emission_flags': r['flags'],
+              'walk_vs_vertical_G_Ha': gap,
+              'walk_vs_vertical_flag': gap_flagged,
+              'qp_states': man.chain.realization.qp_states,
+              'factor_layout': chain.factor_layout(man),
+              'e_walk': info.get('energy'), 'seconds': time.time() - t0,
+              'saddle_check': saddle, **extra(info),
+              'method': GW_BSE, 'kernel': d.kernel,
+              'qp_bookkeeping': qp_bookkeeping(man.chain, mol),
+              'qp_partition': (None if man.driven.resolved.qp_partition is None
+                               else man.driven.resolved.qp_partition.as_record()),
+              'frame_turning': frame_turning_record(mol),
+              'restarted_from': info.get('restarted_from'), **fields}
+    run.write(stage, record)
+    run.store.write_xyz(f'{stage}.xyz', mol, f'{label(key)} minimum, '
+                        f'{d.environment} scheme B')
+    report_properties(f'{stage} minimum ({label(key)}, in its equilibrium '
+                      f'charges)', props)
+    log(f'{stage}: {info.get("cycles")} cycles, residual '
+        f'{info.get("opt_grad_max"):.2e}, G_eq {g_walk:.9f} Ha, emission '
+        f'{record["emission_eV"]:.4f} eV; {refreeze_summary(record)}', t0)
+    if record['numerical_flags']:
+        log(f'{stage}: FLAGGED {record["numerical_flags"]}')
+    return run.read(stage)
+
+
 def s1_minimum(run):
     """s1: the S1 walk from R0 (or from the far start, on a chain built
     there) and one shared evaluation at its minimum."""
@@ -962,6 +1339,9 @@ def s1_minimum(run):
     if walked is None:
         if held is not None:
             surface, resume = held
+        elif d.scheme_b:
+            resume = None
+            surface = run.loop_surface('singlet', start, where)
         elif far is not None:
             # the start is its own reference: a chain built there
             resume = None
@@ -977,7 +1357,7 @@ def s1_minimum(run):
                 ev if d.handover else None))
         log(f's1: relaxing {label(run.s_key)} from {where} on '
             f'{surface.label()}'
-            + ('' if d.handover
+            + ('' if d.handover and not d.scheme_b
                else f', start nudged by {d.policies.nudge_bohr} Bohr'))
         walked = walked_minimum(run, 's1', surface, start, resume)
 
@@ -1011,6 +1391,9 @@ def t1_minimum(run):
     if walked is None:
         if held is not None:
             surface, resume = held
+        elif d.scheme_b:
+            resume = None
+            surface = run.loop_surface('triplet', mol_s1, 'the S1 minimum')
         else:
             resume = None
             if 't1' not in run.first:
@@ -1028,7 +1411,7 @@ def t1_minimum(run):
         hess_init = s1.get('hessian')
         log(f't1: relaxing {label(run.t_key)} from the S1 minimum'
             + ('' if hess_init is None else ' on the S1 walk\'s Hessian')
-            + ('' if d.handover
+            + ('' if d.handover and not d.scheme_b
                else f', start nudged by {d.policies.nudge_bohr} Bohr'))
         walked = walked_minimum(run, 't1', surface, mol_s1, resume, hess_init=hess_init)
     return finish_minimum(run, 't1', walked, t0, lambda info: {})
@@ -1107,6 +1490,7 @@ def rates(run):
               from_gw_bse_record(records['t1'], 'T1'))
     table = rules.table(run, minima, records)
     table['isdf_df_check'] = checks
+    table['solvent_scheme'] = d.solvent_scheme
     held = dict(records, s0=run.read('s0')) if run.reusable('s0') else records
     stage_flags = {n: dict(r.get('numerical_flags') or {})
                    for n, r in held.items()}
@@ -1147,10 +1531,13 @@ def describe_run(run, stages, grid):
     and store; then what the store holds."""
     d, store = run.declaration, run.store
     isdf = d.numerics.isdf
+    test_set = isdf.test_set_named(True)
     points = (f'{grid["grid_points_per_atom"]} points per atom'
+              if test_set == 'duchemin_blase' else
+              'the default count pivoted from its parent'
               if isdf.pivot_points is None else
               f'{isdf.pivot_points} points pivoted from its parent')
-    fit = '' if isdf.test_set is None else f', {isdf.test_set} fit'
+    fit = f', {test_set} fit'
     log(f'{d.system.name}: {run.mol_in.natm} atoms, nao '
         f'{run.mol_in.nao_nr()}, {d.reference}/{run.mol_in.basis}, '
         f'{d.mean_field_name}, factors {isdf.level} ({points}{fit}), '

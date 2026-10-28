@@ -53,9 +53,17 @@ def rotation_gradient(C, fock, gamma, nocc, kernel):
     with gamma_ao = C gamma C^T, fock the MO Fock matrix and kernel the
     closed-shell response kernel G (AO density -> AO potential). The same
     expression serves a target's own partial and the multiplier's; it needs a
-    Coulomb and an exchange build and no norb^4 tensor."""
+    Coulomb and an exchange build and no norb^4 tensor. A gamma without a
+    virtual-virtual block goes to the kernel's `factored` where it has one
+    (Base.pyscf.cphf.ResponseKernel)."""
     gs = 0.5 * (gamma + gamma.T)
-    G = kernel(C @ gs @ C.T)
+    factored = getattr(kernel, 'factored', None)
+    if factored is not None and not np.any(gs[nocc:, nocc:]):
+        # no virtual-virtual block: C gs C^T = Co P^T + P Co^T
+        P = C @ gs[:, :nocc] - 0.5 * C[:, :nocc] @ gs[:nocc, :nocc]
+        G = factored(P)
+    else:
+        G = kernel(C @ gs @ C.T)
     Y = 2.0 * (fock @ gs)
     Y[:, :nocc] += 4.0 * (C.T @ G @ C)[:, :nocc]
     return Y

@@ -86,6 +86,7 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_closed_shell_or_unrestricted,
                                             spin_index)
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
+from src.Base.utils.parallel.mpi_grid import OwnedSlices
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.Base.orbital_spaces import particle_hole_window
 from src.SingleReference.GW.qp_solve import (add_reaction_field, channel_anchor,
@@ -100,7 +101,8 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                   qp_energy_sop, sop_from_wc)
 from src.SingleReference.LinearResponse.space_time import (
-    laplace_representation_error, owned_frequency_blocks,
+    ProjRows, frequency_blocks, laplace_representation_error,
+    owned_frequency_blocks,
     polarizability_projected_sweep, spin_summed, static_screening_matrix,
     static_screening_matrix_unrestricted, three_index_ov, three_index_slice)
 from src.Solvers.qp_equation import qp_start, solve_qp_equation_scan
@@ -275,18 +277,91 @@ def cd_pair_contraction_multi(proj_tau, cosft_wt, Bps, pairs,
     """wc_ij[k, q] = B_i[:,q]^T [W(i.nu_k) - I] B_j[:,q] for each (i, j) of
     `pairs` (positions into Bps): the off-diagonal partner of
     `cd_screening_contraction_multi`, on the same factorization per
-    frequency, and like it zero in the rows of the frequencies not computed."""
+    frequency, and like it zero in the rows of the frequencies not computed.
+
+    At each frequency one [W - I] B_j exists at a time: it serves every pair
+    whose right member is j and is dropped before the next member's.
+
+    Bps may be `OwnedSlices`, each slice on its owner alone
+    (`streamed_pair_contraction`)."""
     nfreq, naux = cosft_wt.shape[0], proj_tau.shape[-1]
+    if isinstance(Bps, OwnedSlices):
+        if Bps.size > 1 and not isinstance(proj_tau, ProjRows):
+            raise ValueError('slices held by their owners stream over the '
+                             'ranks with proj(tau) held by rows (ProjRows)')
+        # a held frequency is its factor and the transient of its solve
+        k0, k1 = frequency_blocks(nfreq, naux, tile_gb, live=2)[0]
+        return streamed_pair_contraction(
+            owned_frequency_blocks(proj_tau, cosft_wt, tile_gb, freq_indices),
+            k1 - k0, Bps.size > 1 and freq_indices is not None, Bps, pairs,
+            [np.zeros((nfreq, Bps.shape[1])) for _ in pairs])
     eye = np.eye(naux)
     out = [np.zeros((nfreq, Bps[i].shape[1])) for i, _ in pairs]
-    members = sorted({s for pair in pairs for s in pair})
+    members = sorted({j for _, j in pairs})
     for ks, blk in owned_frequency_blocks(proj_tau, cosft_wt, tile_gb,
                                           freq_indices):
         for m, k in enumerate(ks):
             solve = screening_solver(eye - blk[m])
-            wtb = {s: solve(Bps[s]) - Bps[s] for s in members}
-            for (i, j), wc in zip(pairs, out):
-                wc[k] = np.einsum('Pq,Pq->q', Bps[i], wtb[j])
+            for j in members:
+                wtb = solve(Bps[j]) - Bps[j]
+                for (i, jj), wc in zip(pairs, out):
+                    if jj == j:
+                        wc[k] = np.einsum('Pq,Pq->q', Bps[i], wtb)
+                wtb = None
+    return out
+
+
+def frequency_groups(blocks, cap, rounds):
+    """The frequency blocks of `owned_frequency_blocks` or `ProjRows.blocks`
+    in groups of at most `cap` frequencies a rank, every rank the same
+    groups. rounds: the blocks are rounds over the ranks (`freq_indices`
+    given on several ranks), one frequency a rank each; otherwise a block
+    counts its length, the same on every rank."""
+    group, weight = [], 0
+    for b in blocks:
+        group.append(b)
+        weight += 1 if rounds else len(b[0] if isinstance(b, tuple)
+                                       else b.block)
+        if weight >= cap:
+            yield group
+            group, weight = [], 0
+    if group:
+        yield group
+
+
+def streamed_pair_contraction(blocks, cap, rounds, Bps, pairs, out):
+    """`cd_pair_contraction_multi` on `OwnedSlices`, into out, the same
+    numbers to the bit: a rank factorizes a group of at most `cap` of its
+    frequencies (`frequency_groups` over `blocks`), then the slices pass by
+    one at a time (`OwnedSlices.fetch`) and each takes its triangular solves
+    at the group's frequencies. A rank holds its own slices, one passing
+    slice with its pair partners, and the group's factors; no slice list is
+    whole on any rank. Over ranks the blocks are `ProjRows`', which every
+    rank walks in step, so the fetches are collective."""
+    members = sorted({j for _, j in pairs})
+    partners = {j: sorted({i for i, jj in pairs if jj == j and i != j})
+                for j in members}
+    eye = None
+    for group in frequency_groups(blocks, cap, rounds):
+        solves = []
+        for g, (ks, blk) in enumerate(group):
+            if eye is None:
+                eye = np.eye(blk.shape[-1])
+            solves += [(k, screening_solver(eye - blk[m]))
+                       for m, k in enumerate(ks)]
+            group[g] = blk = None
+        for j in members:
+            Bj = Bps.fetch(j)
+            Bi = {i: Bps.fetch(i) for i in partners[j]}
+            Bi[j] = Bj
+            for k, solve in solves:
+                wtb = solve(Bj) - Bj
+                for (i, jj), wc in zip(pairs, out):
+                    if jj == j:
+                        wc[k] = np.einsum('Pq,Pq->q', Bi[i], wtb)
+                wtb = None
+            Bj = Bi = None
+        solves = None
     return out
 
 

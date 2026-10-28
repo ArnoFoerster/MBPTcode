@@ -30,8 +30,8 @@ from pyscf.grad import rhf as grad_rhf
 from src.Base.factorization.isdf_jk import ISDFJK
 from src.environments.pcm_derivatives import reaction_field_fock_skeleton
 from src.Base.pyscf.pyscf_interface import fock_mo, response_kernel
-from src.gradients.skeleton_tiles import fitted_fock_skeleton, xc_grid_skeleton
-from src.Base.utils.parallel.mpi_grid import lockstep
+from src.gradients.skeleton_tiles import (exchange_skeleton_by_atoms, fitted_fock_skeleton,
+                                         xc_grid_skeleton)
 from src.gradients.isdf_derivatives import (isdf_fock_partial_exchange,
                                             require_fitted_coulomb)
 from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
@@ -266,22 +266,14 @@ def exchange_channel_skeleton(mf, g_ao, D, omega, weight):
     auxiliary metric (P|erf(omega r)/r|Q) goes rank-deficient, and the
     derivative of a truncated pseudo-inverse is not -V^-1 dV V^-1, so a fitted
     skeleton is wrong there at any threshold. Four-centre derivative integrals
-    have no metric and no such failure, and the term costs one exchange build
-    either way.
+    have no metric and no such failure.
 
-    `pyscf.grad.rhf.get_jk` is used directly, not `mf.Gradients()`, which on a
-    fitted mean field returns the fitted derivative J/K.
+    `skeleton_tiles.exchange_skeleton_by_atoms` takes both densities through
+    one direct pass of pyscf's derivative exchange (`pyscf.grad.rhf.get_jk`'s
+    K, not `mf.Gradients()`, which on a fitted mean field returns the fitted
+    derivative J/K), each rank of the current region its own atoms.
     """
-    mol = mf.mol
-    with mol.with_range_coulomb(omega):
-        vk_D = grad_rhf.get_jk(mol, D)[1]
-        vk_g = grad_rhf.get_jk(mol, g_ao)[1]
-    t = -weight * (np.einsum('ac,xac->xa', g_ao, vk_D, optimize=True)
-                   + np.einsum('ad,xad->xa', D, vk_g, optimize=True))
-    grad = np.zeros((mol.natm, 3))
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        grad[ia] = t[:, p0:p1].sum(axis=1)
-    return grad
+    return exchange_skeleton_by_atoms(mf.mol, g_ao, D, omega, weight)
 
 
 def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
@@ -309,8 +301,8 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
     integrals and their derivatives over fixed auxiliary tiles, the tiles
     divided over the current ranks and their (natm, 3) addends reduced once.
     Every omega = 0 channel is one exchange at the channels' summed weight;
-    a long-range one is the four-centre `exchange_channel_skeleton`, rank 0's
-    on every rank. The exchange term costs naux nao^2 nocc, what
+    a long-range one is the four-centre `exchange_channel_skeleton`, its
+    atoms divided over the current ranks. The exchange term costs naux nao^2 nocc, what
     density-fitted exchange costs anywhere.
 
     `channels` is `exchange_channels(mf)`, and a range-separated hybrid's
@@ -333,7 +325,6 @@ def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),
         coulomb=coulomb, exchange=full)
     for omega, weight in channels:
         if omega != 0.0 and weight != 0.0:
-            # pyscf's threaded derivative K: one rank's bits on all of them
-            grad = grad + lockstep(exchange_channel_skeleton(mf, g_ao, D,
-                                                             omega, weight))
+            grad = grad + exchange_channel_skeleton(mf, g_ao, D, omega,
+                                                    weight)
     return grad

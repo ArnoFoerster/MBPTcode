@@ -83,6 +83,7 @@ from src.gradients.surface_identity import chain_identity
 from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
                                          EVALUATION_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS,
+                                         ISDF_DEFAULT_TEST_SET,
                                          ISDF_FIT_ERROR_FAILED, ISDF_TEST_SETS)
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
                                         require_same_numerics)
@@ -95,7 +96,9 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  resolve_isdf_grid, runtime_atomic_radii,
                                                  subshells, fit_test_set_layout)
 from src.Base.factorization.separable_ri import require_grid
-from src.Base.factorization.ao_product_fit import ao_product_fit, pivoted_points
+from src.Base.factorization.ao_product_fit import (ao_product_fit,
+                                                   ao_product_fit_rows,
+                                                   pivoted_points)
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.utils.timing import stage
@@ -237,10 +240,13 @@ class FrozenFactorization:
     (`FIT_REASSOCIATION_K`). `FactorChain.nuclear_gradient` differentiates
     that estimator on either.
 
-    `test_set` 'ao_products' (`IsdfNumerics.test_set`) trains the fit on
-    every AO product in the Coulomb metric instead (`ao_product_fit`), on the
-    replicated realization; it has no pair layout (`layout` None). With
-    `pivot_points` the points are that many pivots of the AO-product Gram
+    `test_set` 'ao_products' (`IsdfNumerics.test_set`, what an unnamed one
+    means) trains the fit on every AO product in the Coulomb metric
+    (`ao_product_fit`), on
+    either realization ('rows': `ao_product_fit.ao_product_fit_rows`, its
+    adjoint `ao_product_fit_adjoint.ao_product_fit_rows_adjoints`); it has
+    no pair layout (`layout` None). Its points are `pivot_points` (else
+    `ao_product_fit.pivot_count`) pivots of the AO-product Gram
     matrix over the parent grid (`ao_product_fit.pivoted_points`), chosen
     here, at the reference geometry, and kept with their atoms in the frozen
     frames like any tabulated grid; a refreeze pivots again.
@@ -250,7 +256,9 @@ class FrozenFactorization:
         numerics = numerics_or_default(numerics)
         # Refused before the radii are optimized or anything is placed.
         self._refuse_fit_layout(numerics)
-        self.test_set = numerics.isdf.test_set or ISDF_TEST_SETS[0]
+        # a factorization always names a grid: unnamed, its test set is the
+        # AO-product one
+        self.test_set = numerics.isdf.test_set or ISDF_DEFAULT_TEST_SET
         self.pivot_points = numerics.isdf.pivot_points
         elements = elements_of(mol)
         self._resolve_grid(mol, numerics.isdf, elements)
@@ -345,7 +353,7 @@ class FrozenFactorization:
                                   *point_layout(mol, radii),
                                   atomic_frames(mol)[0]))
         self.seconds['points'] = time.perf_counter() - t0
-        if self.pivot_points is not None:
+        if self.test_set == 'ao_products':
             # the pivot over the densified parent on rank 0's frames, and
             # rank 0's selection on every rank (a pivot can tie on the last
             # bits another rank holds)
@@ -602,12 +610,14 @@ class FrozenFactorization:
         other.n_start = self.n_start if n_start is None else n_start
         # a chain with no opinion on radii accepts the factorization's
         other.radii_tag = radii_tag(radii) if radii is not None else self.radii_tag
-        # a chain with no opinion on the test set accepts the
-        # factorization's, and its pivot with it
-        if isdf.test_set is None:
+        # a chain with no opinion on the test set (none named, no grid
+        # named) accepts the factorization's, and its pivot with it; a named
+        # grid is the AO-product fit (`IsdfNumerics.test_set_named`)
+        named = isdf.test_set_named()
+        if named is None:
             other.test_set, other.pivot_points = self.test_set, self.pivot_points
         else:
-            other.test_set, other.pivot_points = isdf.test_set, isdf.pivot_points
+            other.test_set, other.pivot_points = named, isdf.pivot_points
         if other.settings() != self.settings():
             raise ValueError(
                 f'this chain asks for {other.settings()} but the shared '
@@ -1132,14 +1142,23 @@ class FactorChain(ReferenceMeanField):
         whose own screen kept the frozen layout's pairs (the reference
         geometry), the rows are read from its handle's M^T tiles
         (`separable_ri.FitTiles`) instead of fitted again.
+
+        On the AO-product test set the rows are
+        `ao_product_fit.ao_product_fit_rows`' on the frozen points, read
+        likewise from an SCF's AO-product tiles.
         """
         comm = self.factorization.slice_comm()
         handle = isdf_scf_handle(mf)
-        fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
-                              block=self.factorization.fit_block,
-                              layout=self.factorization.layout,
-                              tiles=None if handle is None
-                              else handle.fit_tiles())
+        tiles = None if handle is None else handle.fit_tiles()
+        if self.factorization.test_set == 'ao_products':
+            fit = ao_product_fit_rows(mol, auxmol, crd,
+                                      block=self.factorization.fit_block,
+                                      tiles=tiles)
+        else:
+            fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
+                                  block=self.factorization.fit_block,
+                                  layout=self.factorization.layout,
+                                  tiles=tiles)
         x_mo = fit.mo_rows(mf.mo_coeff)
         d = fit.metric_root_rows(auxmol, self.environment_at(mol))
         x_ao = fit.ao_rows()
@@ -1324,21 +1343,15 @@ class FactorChain(ReferenceMeanField):
         `whole_fit_branches`: where the environment dresses the interaction
         d_bar is the dressed gauge's (with root_bar and kernel_bar on its
         root and vtilde), d_bar_bare the bare one's, and `gauges` further
-        dressed factors (a split continuum's static one); in the gas phase
-        d_bar is the bare gauge's and the call is the one-gauge call.
+        factors (a split continuum's static one, dressed, or on the bare
+        interaction with an adjoint on the bare root: scheme B's, which
+        joins the bare gauge, `row_fit_adjoint`); in the gas phase d_bar is
+        the bare gauge's and the call is the one-gauge call.
 
         Inside the force's `one_fit_adjoint` window the call carries the
         skeletons' seeds too (`PendingFitAdjoint.contract`), and `held` is
         that one call's ledger.
         """
-        if any(g.environment is None for g in gauges):
-            # scheme B's static half is the bare root; its root adjoint is
-            # carried on the replicated fit (`dfactor_adjoint_gauges`) only
-            raise NotImplementedError(
-                'a bare gauge with a root adjoint (the static half of '
-                'split_equilibrium.ClassicalStateSpecific) is differentiated '
-                "on the replicated fit; build the factorization with "
-                "fit='replicated' for a scheme B force or relaxed density")
         env = self.environment_at(mol)
         if dresses_interaction(env, auxmol):
             bare = d_bar_bare
@@ -1360,7 +1373,8 @@ class FactorChain(ReferenceMeanField):
                                       body=self.body,
                                       block=self.fit_block,
                                       pending=pending_fit_adjoint(mf),
-                                      gauges=dressed)
+                                      gauges=dressed,
+                                      test_set=self.factorization.test_set)
         return adjoint
 
     def _assembled(self, g_orb, g_coll, g_fit, diags, x_mo,

@@ -237,7 +237,7 @@ def ordered_sum(addends, comm, shape=None, onto=None):
     return total
 
 
-def ordered_chain_sum(terms, owners, comm, onto):
+def ordered_chain_sum(terms, owners, comm, onto, root=None):
     """The sum of n indexed terms in index order onto `onto`, term k held by
     rank `owners[k]` alone ({k: array} of this rank's): the same bits on
     every rank and at every rank count, and serially the terms' own sum in
@@ -250,7 +250,14 @@ def ordered_chain_sum(terms, owners, comm, onto):
     copy in flight and its own terms; the running sum crosses once per change
     of owner along the index, so owners should hold consecutive runs. The
     owners must hold their terms before the chain starts.
+
+    root: the one rank that holds `onto` and receives the sum, for a sum only
+    its owner keeps; the chain starts from it and ends at it, and every other
+    rank passes `onto` as an array of the sum's shape (its values unread) and
+    gets None back. Serially it is the call without root.
     """
+    if root is not None and comm is not None and comm.Get_size() > 1:
+        return _ordered_chain_sum_at(terms, owners, comm, onto, int(root))
     total = np.array(onto, dtype=np.float64, order='C', copy=True)
     if comm is None or comm.Get_size() == 1:
         for k in range(len(owners)):
@@ -258,21 +265,109 @@ def ordered_chain_sum(terms, owners, comm, onto):
         return total
     size, rank = comm.Get_size(), comm.Get_rank()
     holder = int(owners[0]) if len(owners) else 0
-    empty = np.empty((0,) + total.shape[1:])
     for k, owner in enumerate(int(o) for o in owners):
         if owner != holder:
-            send = [total if (rank == holder and peer == owner) else empty
-                    for peer in range(size)]
-            shapes = [total.shape if (rank == owner and peer == holder)
-                      else empty.shape for peer in range(size)]
-            got = exchange_blocks(send, shapes, comm)
-            if rank == owner:
-                total[...] = got[holder]
+            total = _hand_over(total, holder, owner, comm)
             holder = owner
         if rank == owner:
             total += terms[k]
     broadcast_rows(total, holder, comm)
     return total
+
+
+def _ordered_chain_sum_at(terms, owners, comm, onto, root):
+    """`ordered_chain_sum` with the running sum starting from and ending at
+    `root`: the same additions in the same order, no broadcast."""
+    rank = comm.Get_rank()
+    total = (np.array(onto, dtype=np.float64, order='C', copy=True)
+             if rank == root else
+             np.empty(np.shape(onto), dtype=np.float64))
+    holder = root
+    for k, owner in enumerate(int(o) for o in owners):
+        if owner != holder:
+            total = _hand_over(total, holder, owner, comm)
+            holder = owner
+        if rank == owner:
+            total += terms[k]
+    if holder != root:
+        total = _hand_over(total, holder, root, comm)
+    return total if rank == root else None
+
+
+def _hand_over(total, holder, owner, comm):
+    """The running sum of a chain moved from `holder` to `owner`, verbatim:
+    the owner's `total` overwritten with the holder's, every rank in the
+    call."""
+    size, rank = comm.Get_size(), comm.Get_rank()
+    empty = np.empty((0,) + total.shape[1:])
+    send = [total if (rank == holder and peer == owner) else empty
+            for peer in range(size)]
+    shapes = [total.shape if (rank == owner and peer == holder)
+              else empty.shape for peer in range(size)]
+    got = exchange_blocks(send, shapes, comm)
+    if rank == owner:
+        total[...] = got[holder]
+    return total
+
+
+class OwnedSlices:
+    """n arrays of one shape, each held by one rank alone: rank r holds the
+    items of its `contiguous_block` of the n indices, so the whole list is
+    on no rank and what a rank holds falls with the rank count. One rank
+    holds every item.
+
+    `fetch(i)` is collective -- every rank calls it, for the same i, in the
+    same order -- and gives every rank item i: the owner its own array, the
+    others a broadcast copy of its bits. `put` and `held` are the owner's.
+    """
+
+    def __init__(self, n, shape, comm=None):
+        self.n, self.shape, self.comm = int(n), tuple(shape), comm
+        self.size = 1 if comm is None else comm.Get_size()
+        self.rank = 0 if comm is None else comm.Get_rank()
+        self.bounds = [contiguous_block(self.n, r, self.size)
+                       for r in range(self.size)]
+        self.held = {}
+
+    def __len__(self):
+        return self.n
+
+    def owner(self, i):
+        """The rank whose block holds item i."""
+        for r, (start, stop) in enumerate(self.bounds):
+            if start <= i < stop:
+                return r
+        raise IndexError(f'item {i} of {self.n}')
+
+    def mine(self):
+        """The indices this rank holds."""
+        return range(*self.bounds[self.rank])
+
+    def put(self, i, a):
+        """Item i, which this rank owns."""
+        if self.owner(i) != self.rank:
+            raise ValueError(f'item {i} is rank {self.owner(i)}\'s, not '
+                             f'rank {self.rank}\'s')
+        self.held[int(i)] = a
+
+    def fetch(self, i):
+        """Item i on every rank (collective)."""
+        i = int(i)
+        if self.size == 1:
+            return self.held[i]
+        owner = self.owner(i)
+        buf = (self.held[i] if self.rank == owner
+               else np.empty(self.shape, dtype=np.float64))
+        return broadcast_rows(buf, owner, self.comm)
+
+    def zeros(self, items):
+        """An `OwnedSlices` of the same layout holding zeros for the items of
+        `items` this rank owns."""
+        out = OwnedSlices(self.n, self.shape, self.comm)
+        for i in items:
+            if out.owner(i) == out.rank:
+                out.put(i, np.zeros(self.shape))
+        return out
 
 
 def reduce_scatter_rows(a, comm, out=None):

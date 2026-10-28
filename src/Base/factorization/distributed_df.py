@@ -1221,12 +1221,18 @@ def _lock_solvent(mf, comm, timings):
     density, (e_solvent, v_solvent): `get_veff` only TAGS the J/K matrix with
     it and `get_fock` and `energy_elec` add it, once per cycle. `_B_dot_x(dm1)`
     is its linear response, which an equilibrium response function adds (a
-    Newton step on the solvated orbital Hessian). Both are replicated and
-    cheap -- a cavity of a few hundred points -- so every rank computes them
+    Newton step on the solvated orbital Hessian). Every rank computes them
     from the density the J/K entry lockstepped, and the result is
     lockstepped to rank 0's (checked: only a rank apart moves anything). The
     loop's energy, Fock matrix and DIIS then read the same reaction field on
     every rank, which is what keeps the replicated drivers in step.
+
+    Their cost is the surface potential, (nao, nao, n_surf) three-centre
+    integrals, which is not small on a large molecule. Every rank enters both
+    calls here at the same point, so the block attaches `comm` to the
+    continuum as `_cavity_comm`: a continuum that splits its surface points
+    over ranks (`environments.pcm_factorization.tile_cavity`) reads it, and
+    any other ignores it.
 
     None where `mf` carries no continuum, or an enclosing block already
     locked it.
@@ -1241,6 +1247,7 @@ def _lock_solvent(mf, comm, timings):
         saved.append((name, solvent.__dict__.get(name)))
         setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
                                             timings))
+    solvent._cavity_comm = comm
     _RANK_LOCKED.add(solvent)
     return solvent, saved
 
@@ -1251,6 +1258,7 @@ def _unlock_solvent(locked):
         return
     solvent, saved = locked
     _restore_methods(solvent, saved)
+    solvent.__dict__.pop('_cavity_comm', None)
     _RANK_LOCKED.discard(solvent)
 
 

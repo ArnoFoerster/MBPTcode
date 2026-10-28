@@ -1,5 +1,9 @@
 """The nuclear adjoint of the AO-product Coulomb-metric ISDF fit
-(`ao_product_fit`) on frozen points.
+(`ao_product_fit`) on frozen points: the LS-THC fit of Parrish, Hohenstein,
+Martinez and Sherrill (J. Chem. Phys. 137, 224106 (2012)) on points from
+Matthews' pivoted Cholesky selection (J. Chem. Theory Comput. 16, 1382
+(2020)), the selection held fixed so the force is the derivative of the
+energy along a walk.
 
 The forward fit, in the notation of `ao_product_fit`:
 
@@ -33,6 +37,26 @@ through the frozen points carried with their atoms, on the point chain
 The forward's arithmetic is repeated here rather than read from the fit:
 the force is the derivative of the energy the fit gives, to the rounding of
 the balanced Gram matrix.
+
+THE ROW FIT. `ao_product_fit_rows_adjoints` is the same reverse pass for the
+row fit (`ao_product_fit.ao_product_fit_rows`), in its tiles and under the
+rules of the Duchemin-Blase row fit's adjoint (`isdf_fit_adjoint`): every
+call's shape fixed by tile and run indices, nothing summed across ranks.
+With W = G^-1 d MT_bar (the factor's sweep and a backward solve), the rows
+E_bar^T = d W V^-1 and Z = G^-1 d F^T (M^T = d Z):
+
+    d_bar  = MT_bar . Z + W . F^T + ((G_bar + G_bar^T) o A o A) d
+    G_bar + G_bar^T = -(Z W^T + W Z^T)       by row tile, column tiles streamed
+    X_bar  = 2 ((G_bar + G_bar^T) o A o d d^T) X - 2 (d_bar d^2) o X
+             + 2 sum_nP (P|mn) X_gn E_bar[P, g]       riding the forward pass
+    V_bar  = (V^1/2)'^T (M D_bar) - E_bar F^T         on rank 0, tile by tile
+    (mn|P)_bar = sum_g E_bar[P, g] X_gm X_gn           by each run's owner,
+                                                       E_bar streamed by tile
+
+The seeds are `isdf_fit_adjoint.AdjointSeeds` and the result its
+`RowFitAdjoint`, so a force pools the exchange skeletons' seeds into one call
+as on the other row fit (`isdf_derivatives.FitKey`). Same bits at every rank
+count, one rank included; the replicated pass's to the fit's rounding.
 """
 import numpy as np
 import scipy.linalg
@@ -42,11 +66,25 @@ from src.Base.factorization.ao_product_fit import (ao_product_projection,
                                                    half_transform_operand,
                                                    half_transformed,
                                                    own_runs, point_tiles,
+                                                   product_gram_tiles,
+                                                   projection_rows,
                                                    shell_runs,
                                                    three_centre_block)
-from src.Base.factorization.separable_ri import ao_values, aux_metric_sqrt
-from src.Base.utils.parallel.mpi_grid import (current_comm, lockstep, ordered_sum,
+from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
+                                                 backward_tiles,
+                                                 cholesky_tiles, fit_settings,
+                                                 forward_tiles,
+                                                 tile_collocation,
+                                                 total_bytes)
+from src.Base.numerics.constants import BYTES_PER_GB, FIT_CHOLESKY_BLOCK
+from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
+                                              current_comm, lockstep,
+                                              ordered_sum, partition,
                                               reduce_sum)
+from src.gradients.isdf_fit_adjoint import (centre_forces, collocation_rows,
+                                            adjoint_inputs, closed_adjoints,
+                                            root_sums, summed_seeds,
+                                            tiles_at_root)
 from src.environments.environment import dresses_interaction
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
@@ -237,6 +275,306 @@ def _projection_adjoint(mol, auxmol, X, E_bar, X_bar, numerics):
     for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
         grad[ia] += aux_total[:, q0:q1].sum(axis=1)
     return grad
+
+
+def ao_product_fit_rows_adjoints(mol, auxmol, coords, targets, numerics=None,
+                                 comm=None, block=None):
+    """[RowFitAdjoint], one per target: the nuclear adjoint of the AO-product
+    row fit's factor D = M^T V^1/2 on `coords` (the module docstring's row
+    fit), every target's in one pass. A target is an
+    `isdf_fit_adjoint.AdjointSeeds`, or a list of them wanted summed (a
+    pool, `summed_seeds`); `isdf_fit_adjoint.fit_rows_adjoints` is the same
+    call on the Duchemin-Blase row fit, its seeds and output the same.
+
+    What no seed enters runs once: the Gram tiles and their factor, the
+    metric's LU, the forward pass and its integrals, Z and M^T, the
+    collocations and the derivative integrals. What is linear in the seeds
+    (MT_bar's roots and solves, E_bar, the Gram, balancing and projection
+    adjoints, the metric's grid sums) runs per target in the calls a pass of
+    that target alone makes, so each target's adjoint is the bits of its own
+    call. Per rank it holds its tiles of the Gram rows and then the factor,
+    and per target of MT_bar, W, E_bar and X_bar, (rows, naux) or
+    (rows, nao) each, beside the forward's F^T, Z and M^T; one run's
+    integrals and the one it receives; and the metric's sums on rank 0.
+    """
+    regularization, block_memory_gb = fit_settings(
+        numerics, 'regularization', 'block_memory_gb')
+    comm = current_comm() if comm is None else comm
+    rank, nranks = (0, 1) if comm is None else (comm.Get_rank(),
+                                                comm.Get_size())
+    if nranks > 1:
+        coords = lockstep(coords, comm)
+    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
+    nk = len(coords)
+    tiles = [(t0, min(t0 + block, nk)) for t0 in range(0, nk, block)]
+    ntiles = len(tiles)
+    owners = [[int(t) for t in partition(ntiles, r, nranks)]
+              for r in range(nranks)]
+    mine = owners[rank]
+    targets = [summed_seeds(t) if isinstance(t, (list, tuple)) else t
+               for t in targets]
+    ntargets = len(targets)
+    # every array the pass may hold, zero until it does: the same keys on
+    # every rank
+    held = dict.fromkeys((
+        'metric_lu', 'X_rows', 'X_ext', 'stream_tile', 'S_rows', 'panel',
+        'metric_root', 'metric_slab', 'MT_bar_rows', 'W_rows', 'E_bar_rows',
+        'X_bar_rows', 'E_rows', 'run_block', 'root_gather', 'MT_rows',
+        'G3_batch', 'derivative_block', 'column_tile', 'root_adjoint',
+        'two_centre_slab'), 0)
+
+    def hold(name, nbytes):
+        held[name] = max(held[name], int(nbytes))
+
+    def total(per_target):
+        return sum(total_bytes(a.values()) for a in per_target)
+
+    def rows(t):
+        return slice(*tiles[t])
+
+    lu = scipy.linalg.lu_factor(auxmol.intor('int2c2e', aosym='s1'))
+    if nranks > 1:
+        lu = lockstep(lu, comm, check=True)
+    hold('metric_lu', lu[0].nbytes)
+    S, d, X_own, _ = product_gram_tiles(mol, coords, tiles, owners, rank,
+                                        numerics, (0, 0), hold)
+    d_tiles, x_tiles, g_tiles, rooted, MTb = adjoint_inputs(
+        targets, tiles, mine, block, nk, naux, auxmol, rank, comm, hold)
+
+    # W = G^-1 d MT_bar: the forward substitution in the factorization sweep
+    W = [{t: mtb[t] * d[rows(t), None] for t in mine} for mtb in MTb]
+    hold('W_rows', total(W))
+    diagonal, panels = cholesky_tiles(S, tiles, owners, rank, comm, W,
+                                      regularization, hold)
+    del S
+    for w in W:
+        backward_tiles(diagonal, panels, w, tiles, owners, rank, comm)
+    # E_bar^T = F_bar^T V^-1, F_bar^T = d W
+    Ub = [{t: np.ascontiguousarray(scipy.linalg.lu_solve(
+        lu, (w[t] * d[rows(t), None]).T).T) for t in mine} for w in W]
+    hold('E_bar_rows', total(Ub))
+
+    # the forward pass: E^T, and the projection's collocation adjoint
+    # 2 sum_nP (P|mn) X_gn E_bar[P, g] from the same half-transformed runs
+    aob = [{t: np.zeros((len(X_own[t]), nao)) for t in mine}
+           for _ in range(ntargets)]
+    hold('X_bar_rows', total(aob))
+
+    def also(t, T, a0, a1):
+        for ub, ob in zip(Ub, aob):
+            ob[t][:, a0:a1] += 2.0 * np.einsum('mPg,gP->gm', T, ub[t])
+
+    FT = projection_rows(mol, auxmol, X_own, numerics, comm, hold, also=also)
+    for t in mine:
+        FT[t] = np.ascontiguousarray(scipy.linalg.lu_solve(lu, FT[t].T).T)
+    del lu
+    # V_bar's -E_bar F^T, the grid sum on rank 0; d_bar's W . F^T
+    VbarF = [np.zeros((naux, naux)) if rank == 0 else None
+             for _ in range(ntargets)]
+    for ub, vbar in zip(Ub, VbarF):
+        for t, got in tiles_at_root([ub, FT], tiles, rank, nranks, comm,
+                                    hold):
+            if got is not None:
+                vbar -= got[0].T @ got[1]
+    dbar = [{t: np.einsum('kb,kb->k', w[t], FT[t]) for t in mine} for w in W]
+
+    # Z = G^-1 d F^T on the kept factor, M^T = d Z
+    Z = FT
+    for t in mine:
+        Z[t] *= d[rows(t), None]
+    forward_tiles(diagonal, panels, Z, tiles, owners, rank, comm, hold)
+    backward_tiles(diagonal, panels, Z, tiles, owners, rank, comm, keep=False)
+    del diagonal, panels, FT
+    for g in range(ntargets):
+        for t in mine:
+            dbar[g][t] += np.einsum('kb,kb->k', MTb[g][t], Z[t])
+    del MTb
+    MT = {t: Z[t] * d[rows(t), None] for t in mine}
+    hold('MT_rows', total_bytes(MT.values()))
+    Vhbar, Rbar = root_sums(targets, MT, d_tiles, g_tiles, rooted, tiles,
+                            rank, nranks, comm, naux, hold)
+    del MT
+
+    # the (mn|P) adjoints, by each run's owner over E_bar streamed by tile
+    three = _projection_rows_adjoint(mol, auxmol, coords, Ub, X_own, tiles,
+                                     owners, rank, comm, numerics,
+                                     block_memory_gb * BYTES_PER_GB, hold)
+    del Ub
+
+    # the Gram matrix's adjoint by row tile, [Z_k | W_k] streamed in order
+    for k, (k0, k1) in enumerate(tiles):
+        owner = k % nranks
+        both = (np.hstack([Z[k]] + [w[k] for w in W]) if rank == owner
+                else np.empty((k1 - k0, (1 + ntargets) * naux)))
+        broadcast_rows(both, owner, comm)
+        hold('column_tile', both.nbytes)
+        Z_k = both[:, :naux]
+        if k in X_own:
+            X_k = X_own[k]
+        else:
+            X_k = tile_collocation(mol, coords[k0:k1])
+            hold('stream_tile', X_k.nbytes)
+        d_k = d[k0:k1]
+        for i in mine:
+            A = X_own[i] @ X_k.T
+            for g in range(ntargets):
+                W_k = both[:, (1 + g) * naux:(2 + g) * naux]
+                H = Z[i] @ W_k.T
+                H += W[g][i] @ Z_k.T
+                H *= -A                  # (G_bar + G_bar^T) o A
+                dbar[g][i] += (H * A) @ d_k
+                H *= d[rows(i), None]
+                H *= d_k[None, :]
+                aob[g][i] += 2.0 * (H @ X_k)
+                del H
+            del A
+        del both, X_k
+    del Z, W
+    # the balancing d = 1/s, s_g = |X_g|^2
+    for g in range(ntargets):
+        for t in mine:
+            s_bar = -dbar[g][t] * d[rows(t)] * d[rows(t)]
+            aob[g][t] += 2.0 * s_bar[:, None] * X_own[t]
+    del dbar
+
+    # the collocations' centres and points, one tile at a time
+    ao_slices = [(p0, p1) for _, _, p0, p1 in mol.aoslice_by_atom()]
+    fit_tile = [np.zeros((ntiles, natm * 3)) for _ in range(ntargets)]
+    fit_points = [np.zeros((nk, 3)) for _ in range(ntargets)]
+    with_coll = [s.x_bar is not None or s.x_bar_ao is not None
+                 for s in targets]
+    coll_tile = [np.zeros((ntiles, natm * 3)) if c else None
+                 for c in with_coll]
+    coll_points = [np.zeros((nk, 3)) if c else None for c in with_coll]
+    for t in mine:
+        g_ao = mol.eval_gto('GTOval_ip_sph', coords[rows(t)])
+        for g, s in enumerate(targets):
+            fit_tile[g][t] = centre_forces(g_ao, aob[g][t],
+                                            ao_slices).ravel()
+            fit_points[g][rows(t)] = np.einsum('xgm,gm->gx', g_ao, aob[g][t])
+            if with_coll[g]:
+                xa = collocation_rows(s, x_tiles[g], t)
+                coll_tile[g][t] = centre_forces(g_ao, xa, ao_slices).ravel()
+                coll_points[g][rows(t)] = np.einsum('xgm,gm->gx', g_ao, xa)
+                del xa
+        del g_ao
+    del aob, X_own
+    tile_ranges = [[(t, t + 1) for t in own] for own in owners]
+    point_ranges = [[tiles[t] for t in own] for own in owners]
+    for g in range(ntargets):
+        allgather_ranges(fit_tile[g], tile_ranges, comm)
+        allgather_ranges(fit_points[g], point_ranges, comm)
+        if with_coll[g]:
+            allgather_ranges(coll_tile[g], tile_ranges, comm)
+            allgather_ranges(coll_points[g], point_ranges, comm)
+    return closed_adjoints(targets, Vhbar, VbarF, Rbar, auxmol, block, rank,
+                           nranks, comm, hold, held, fit_tile, fit_points,
+                           coll_tile, coll_points, three, with_coll)
+
+
+def _projection_rows_adjoint(mol, auxmol, coords, Ub, X_own, tiles, owners,
+                             rank, comm, numerics, budget, hold):
+    """[(natm * 3,)] per target of sum_{mnP} (mn|P)_bar d(mn|P)/dR with
+    (mn|P)_bar = sum_g E_bar[P, g] X_gm X_gn, Ub each target's tiles of
+    E_bar^T.
+
+    The shell runs (`shell_runs` sized for the three derivative components)
+    go largest first, run order[c] to rank c % size. Its owner accumulates
+    every target's (mn|P)_bar over E_bar streamed tile by tile in grid
+    order, in batches of consecutive rounds whose accumulators stay within
+    `budget` bytes on every rank, then evaluates the run's int3c2e_ip1 and
+    _ip2 once and contracts them with each target's sum: the first AO's
+    centre counted twice ((mn|P)_bar and (mn|P) are both symmetric in m, n)
+    and the auxiliary centre once. Each run's (natm, 3) is gathered and the
+    runs are added in their order."""
+    nranks = len(owners)
+    nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
+    ntargets = len(Ub)
+    runs = shell_runs(mol, auxmol, numerics, comp=3)
+    width = [a1 - a0 for _, _, a0, a1 in runs]
+    order = sorted(range(len(runs)), key=lambda ib: (-width[ib], ib))
+    owner_of = {ib: c % nranks for c, ib in enumerate(order)}
+    ao_atom = np.empty(nao, dtype=int)
+    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+        ao_atom[p0:p1] = ia
+    aux_atom = np.empty(naux, dtype=int)
+    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
+        aux_atom[q0:q1] = ia
+    batches, current, load = [], [], np.zeros(nranks)
+    for c0 in range(0, len(order), nranks):
+        add = np.zeros(nranks)
+        for pos, ib in enumerate(order[c0:c0 + nranks]):
+            add[pos] = width[ib] * nao * naux * 8 * ntargets
+        if current and np.any(load + add > budget):
+            batches.append(current)
+            current, load = [], np.zeros(nranks)
+        current.extend(order[c0:c0 + nranks])
+        load += add
+    if current:
+        batches.append(current)
+    forces = [np.zeros((len(runs), natm * 3)) for _ in range(ntargets)]
+    for batch in batches:
+        own = [ib for ib in batch if owner_of[ib] == rank]
+        acc = [{ib: np.zeros((width[ib], nao, naux)) for ib in own}
+               for _ in range(ntargets)]
+        hold('G3_batch', sum(total_bytes(a.values()) for a in acc))
+        for t, (t0, t1) in enumerate(tiles):
+            owner = t % nranks
+            U_t = []
+            for ub in Ub:
+                u_t = ub[t] if rank == owner else np.empty((t1 - t0, naux))
+                broadcast_rows(u_t, owner, comm)
+                U_t.append(u_t)
+            if not own:
+                continue
+            if t in X_own:
+                X_t = X_own[t]
+            else:
+                X_t = tile_collocation(mol, coords[t0:t1])
+                hold('stream_tile', X_t.nbytes)
+            for ib in own:
+                a0 = runs[ib][2]
+                for m in range(a0, runs[ib][3]):
+                    pair = (X_t * X_t[:, m:m + 1]).T          # (nao, rows)
+                    for a, u_t in zip(acc, U_t):
+                        a[ib][m - a0] += pair @ u_t
+                    del pair
+            del X_t, U_t
+        for ib in own:
+            a0, a1 = runs[ib][2], runs[ib][3]
+            # AO-major, so each AO's slab is contiguous
+            d1 = np.ascontiguousarray(three_centre_block(
+                mol, auxmol, runs[ib], 'int3c2e_ip1', 3).transpose(1, 0, 2, 3))
+            d2 = np.ascontiguousarray(three_centre_block(
+                mol, auxmol, runs[ib], 'int3c2e_ip2', 3).transpose(1, 0, 2, 3))
+            hold('derivative_block', d1.nbytes + d2.nbytes)
+            for g in range(ntargets):
+                G3 = acc[g].pop(ib)
+                t_ao = np.zeros((3, a1 - a0))
+                t_aux = np.zeros((3, naux))
+                for m in range(a0, a1):
+                    # +(grad .) integrals: each nuclear derivative a minus
+                    t_ao[:, m - a0] = -2.0 * np.einsum('xnP,nP->x',
+                                                       d1[m - a0], G3[m - a0])
+                    t_aux -= np.einsum('xnP,nP->xP', d2[m - a0], G3[m - a0])
+                del G3
+                f = np.zeros((natm, 3))
+                np.add.at(f, ao_atom[a0:a1], t_ao.T)
+                np.add.at(f, aux_atom, t_aux.T)
+                forces[g][ib] = f.ravel()
+            del d1, d2
+        del acc
+    totals = []
+    for out in forces:
+        allgather_ranges(out, [[(ib, ib + 1) for ib in order
+                                if owner_of[ib] == r] for r in range(nranks)],
+                         comm)
+        total = np.zeros(natm * 3)
+        for ib in order:
+            total += out[ib]
+        totals.append(total)
+    return totals
 
 
 def exchange_skeleton(mf, dm, dm_other, prefactor, channels):

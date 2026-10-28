@@ -43,10 +43,13 @@ optional third-party one.
 | imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
 | ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian`, `test_ao_product_fit` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
-| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_solvated_ground_surface` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_casida_subspace_eigen`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
+| environment and solvent | `test_environment`, `test_solvent_screening`, `test_ground_state_cavity_check`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_pcm_cavity_tiles`, `test_solvated_ground_surface` |
+| any medium by eps and n^2, the cavity conventions, their records and resume keys, the gas limit and forces in such a medium | `test_host_medium`, `test_host_medium_loops` (slow) |
 | a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |
-| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_isdf_k` |
+| the state models' force of a Kohn-Sham reference carries the motion of its XC grid | `test_state_model_ks_force` |
+| the stage pipeline's four named solvent schemes and scheme B: refusals, stamps, external S0 Hessian; forces against their own energy, the stages, their restart, the saddle check | `test_photophysics_scheme_b`, `test_photophysics_scheme_b_run` (slow) |
+| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_fitted_exchange_conditioning` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
 | couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
@@ -54,6 +57,7 @@ optional third-party one.
 | the quasiparticle energy on the BSE diagonal: the pole model's frozen verdict, the scissors' static terms, the force against its own energy | `test_pole_model_route_frozen`, `test_inside_scissor_static_term`, `test_solvated_outside_scissor`, `test_qp_energy_assembly` (slow) |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
 | bands with Duschinsky rotation and frequency change: the displaced-oscillator limit, a sum over states, the branch of the square root, the model from two Hessians | `test_duschinsky` |
+| the ISC/RISC rate chain of any method's minima: every ablation switch moves the rate as its physics says; the Condon, single-T1 and Marcus-Levich-Jortner limits bitwise; one mode set is the displaced oscillator; the gradient route is the displacement route on a harmonic surface; another method's minima through the same protocol; the diabatic two-state mixing of a near-degenerate path: its exact thermal weight against quadrature, the perturbative rate in the weak limit to O(r^2), the switch at the stated ratio, saturation as the gap closes, a manifold that moves coupling and creates none | `test_rate_chain` (about a minute) |
 | conformers beyond the torsional grid: ring puckering (Cremer-Pople), pyramidal inversion, mirror degeneracy and free-energy weights, the restrained torsion scan and its barrier, a sweep that halves its increment where the followed state is lost or a point does not converge, the twisted-triplet pairing | `test_conformer_space` (about 4 minutes) |
 | Herzberg-Teller intensity: off = Condon, a forbidden transition's false origin, a sum over states with Condon/Herzberg-Teller interference, the dipole derivative, the radiative rate over the band | `test_herzberg_teller` |
 | Herzberg-Teller dmu/dq of a BSE@GW state: phase tracking by the transported overlap, a rotated degenerate pair matched as a subspace, a solve without the roots refused, formaldehyde S1 stable under sign flips and step | `test_herzberg_teller_bse` |
@@ -189,6 +193,13 @@ with sliced factors, against the serial references:
 ```bash
 OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_solvated_scf_mpi.py
 OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_solvated_scf_mpi.py
+```
+
+`test_exchange_skeleton_mpi` checks the four-centre exchange skeleton with
+its atoms split over the ranks against two separate pyscf passes:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_exchange_skeleton_mpi.py
 ```
 
 `test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:

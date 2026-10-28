@@ -32,6 +32,9 @@
     solvated       gas and continuum absorption, emission and adiabatic
                    S1/T1 energies of one molecule, ADC(2) or GW-BSE, as one
                    JSON record (`python -m src.photophysics solvated`)
+    state_specific the GW-BSE states of the self-consistent state-specific
+                   solvation loop (scheme B) and the vertical energies of
+                   one state, which the drivers build
 
 A run, in Python:
 

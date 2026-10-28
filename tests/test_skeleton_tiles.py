@@ -6,8 +6,10 @@ references, at 1, 2, 3 and 8 simulated ranks:
 
   * the fitted Fock skeleton (`fock_partial_skeleton_df`) is the
     whole-tensor contraction to `ISDF_GRADIENT_FLOOR`: the tiles contract
-    (mn|P) in another order and the exchange applies an explicit Cholesky
-    inverse of the metric where the whole form solves against it;
+    (mn|P) in another order and the exchange solves against the metric's
+    Cholesky factor tile by tile where the whole form solves against the
+    metric at once (an ill-conditioned metric:
+    tests/test_fitted_exchange_conditioning.py);
   * over the ranks every rank holds the serial skeleton to a few ulp: every
     tile's (natm, 3) addend added in tile order (`ordered_sum`);
   * planted: a rank dropping one of its tiles, a rank counting one twice --
@@ -175,8 +177,8 @@ def whole_fitted_skeleton(mf, auxmol, gamma, channels, coulomb=True):
             continue
         K = np.linalg.solve(V, J.reshape(-1, naux).T).reshape(naux, nao, nao)
         GK = np.einsum('ab,Pbc,cd->Pad', g, K, D, optimize=True)
-        T = np.einsum('ab,bcP,cd,daQ->PQ', g, J, D, J, optimize=True)
-        VTV = np.linalg.solve(V, np.linalg.solve(V, T).T).T
+        # Vinv T Vinv, T_PQ = tr[g J^P D J^Q]
+        VTV = np.einsum('Pad,Qda->PQ', GK, K, optimize=True)
         grad += weight * (three_centre_adjoint(mol, auxmol,
                                                -GK.transpose(1, 2, 0))
                           + two_centre_adjoint(auxmol, 0.5 * VTV))

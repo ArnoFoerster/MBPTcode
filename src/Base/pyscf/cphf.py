@@ -32,11 +32,13 @@ the answer: the operator itself always carries the exact diag.
 """
 
 import numpy as np
-from pyscf import lib
+from pyscf import lib, scf
 
-from src.Base.numerics.constants import CPHF_KRYLOV_LINDEP, CPHF_KRYLOV_TOL
+from src.Base.numerics.constants import (CPHF_KRYLOV_LINDEP, CPHF_KRYLOV_TOL,
+                                         SCF_KERNEL_AUX_BLOCK)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.numerical_flags import flag
+from src.Base.utils.parallel.mpi_grid import ordered_sum
 
 class CphfNotConverged(RuntimeWarning):
     """An orbital-response solve that ended above its true-residual tolerance
@@ -104,3 +106,83 @@ def solve(coupling, diag, rhs, numerics=None, precond=None):
                 f'refinements (tol {tol:.0e}); its last iterate is returned')
         flag('orbital_response_not_converged', text, CphfNotConverged)
     return x
+
+
+class ResponseKernel:
+    """G(x) = J[x] - K[x]/2 of mf's own interaction (its JK fit, or the exact
+    integrals when it has none), no environment, for symmetric AO x.
+
+    With a JK fit the auxiliary blocks of `block` functions (default
+    SCF_KERNEL_AUX_BLOCK) are dealt over comm's ranks (default none: serial)
+    and each block's J and K summed in block order (ordered_sum): the same
+    bits on every rank and at every rank count, a collective that every rank
+    calls with the same x.
+    `factored(P)` is G of x = Co P^T + P Co^T (Co the occupied orbitals, P
+    (nao, nocc)), the shape of every orbital-rotation density without a
+    virtual-virtual block: its exchange from the occupied half-transforms
+    (L_Q Co)(L_Q P)^T, nocc / nao of the cost of a general x. Without a fit,
+    pyscf's exact get_jk, serial on every rank."""
+
+    def __init__(self, mf, comm=None, block=SCF_KERNEL_AUX_BLOCK):
+        self.mf, self.comm, self.block = mf, comm, int(block)
+        self.with_df = getattr(mf, 'with_df', None)
+        nocc = mf.mol.nelectron // 2
+        self.Co = np.ascontiguousarray(np.asarray(mf.mo_coeff)[:, :nocc])
+        self._half = {}
+        if self.with_df is None:
+            self.m = scf.RHF(mf.mol)
+            return
+        if self.with_df._cderi is None:
+            self.with_df.build()
+        rank = 0 if comm is None else comm.Get_rank()
+        size = 1 if comm is None else comm.Get_size()
+        self.mine = [b for b in range(self._nblocks()) if b % size == rank]
+
+    def _nblocks(self):
+        return -(-self.with_df.get_naoaux() // self.block)
+
+    def _blocks(self):
+        """(b, L_b (nb, nao, nao)) of this rank's auxiliary blocks."""
+        nao = self.mf.mol.nao
+        for b, blk in enumerate(self.with_df.loop(self.block)):
+            if b in self.mine:
+                yield b, lib.unpack_tril(blk).reshape(-1, nao, nao)
+
+    def _total(self, parts):
+        nao = self.mf.mol.nao
+        tot = ordered_sum(parts, self.comm, shape=(2, nao, nao))
+        return tot[0] - 0.5 * tot[1]
+
+    def __call__(self, x):
+        x = np.asarray(x, float)
+        if self.with_df is None:
+            vj, vk = self.m.get_jk(self.mf.mol, x, hermi=1)
+            return vj - 0.5 * vk
+        nao = x.shape[0]
+        parts = []
+        for b, L in self._blocks():
+            Lf = L.reshape(len(L), -1)
+            J = (Lf @ x.ravel()) @ Lf
+            T = L @ x                                  # (L_Q x)_{m l}
+            K = T.transpose(1, 0, 2).reshape(nao, -1) @ L.reshape(-1, nao)
+            parts.append((b, np.stack([J.reshape(nao, nao), K])))
+        return self._total(parts)
+
+    def factored(self, P):
+        """G of x = Co P^T + P Co^T (class docstring)."""
+        P = np.ascontiguousarray(P, dtype=float)
+        if self.with_df is None:
+            return self(self.Co @ P.T + P @ self.Co.T)
+        nao = P.shape[0]
+        parts = []
+        for b, L in self._blocks():
+            X = self._half.get(b)
+            if X is None:
+                X = self._half[b] = L @ self.Co        # (L_Q Co) (nb, nao, nocc)
+            Y = L @ P
+            rho = 2.0 * np.einsum('qmi,mi->q', X, P)
+            J = (rho @ L.reshape(len(L), -1)).reshape(nao, nao)
+            K = (X.transpose(1, 0, 2).reshape(nao, -1)
+                 @ Y.transpose(1, 0, 2).reshape(nao, -1).T)
+            parts.append((b, np.stack([J, K + K.T])))
+        return self._total(parts)

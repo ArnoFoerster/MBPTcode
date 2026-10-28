@@ -57,10 +57,13 @@ structure come from.
 Duchemin and Blase, J. Chem. Phys. 150, 174120 (2019) -- the separable RI that
 is actually fitted here (`src/Base/factorization/separable_ri.py`): the interpolation
 coefficients reproduce RI-V fitting coefficients rather than the orbital
-products themselves, which is what keeps the per-molecule step cubic. With
+products themselves, which is what keeps the per-molecule step cubic. It is
+the mean field's fit unless a test set is named: its points follow the atoms'
+frames, so the energy is smooth along a walk. With
 `IsdfNumerics.test_set='ao_products'` the fit is trained on every AO product
-in the Coulomb metric instead, on `pivot_points` points pivoted from the grid
-(`ao_product_fit`), the post-SCF factors' own choice.
+in the Coulomb metric, on `pivot_points` (else `pivot_count`) points pivoted
+from the grid (`ao_product_fit`), smooth along a walk inside
+`frozen_frames`.
 """
 import contextlib
 import threading
@@ -72,7 +75,8 @@ from pyscf import df, scf
 from pyscf.lib import logger
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_JK_CHECK_TOL,
+from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_TEST_SETS,
+                                         ISDF_JK_CHECK_TOL,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION)
 from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.numerics import (ISDF_JK_REQUEST_FIELDS, IsdfNumerics,
@@ -424,7 +428,10 @@ class ISDFJK(df.df.DF):
         # the fit's test set and its pivoted points, the same choice as the
         # post-SCF factors' (`IsdfNumerics.test_set`, `pivot_points`); the
         # parent is this handle's own grid, its level's rows densified
-        self.test_set = self.numerics.isdf.test_set or 'duchemin_blase'
+        # unnamed, the tabulated grid's fit: its points follow the atoms'
+        # frames at every geometry, where pivoted points move smoothly only
+        # inside `frozen_frames`, which a walk's mean field does not enter
+        self.test_set = self.numerics.isdf.test_set or ISDF_TEST_SETS[0]
         self.pivot_points = self.numerics.isdf.pivot_points
         # None follows mol.verbose, so the knob that turns on the mean field's
         # output turns on the factorization's too, which can run for minutes
@@ -506,7 +513,8 @@ class ISDFJK(df.df.DF):
         distributed one (`DistributedISDFJK`) both make, so the two fit one
         grid.
 
-        With `pivot_points` the points are that many pivots of the AO-product
+        On the AO-product test set the points are `pivot_points` (else
+        `pivot_count`) pivots of the AO-product
         Gram matrix over the grid's densified parent (`pivoted_points`), on
         the frames the grid would take; a `FrozenFrames` that carries a
         selection (`reference_frames`) places that selection instead, so a
@@ -519,7 +527,7 @@ class ISDFJK(df.df.DF):
             auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
             frames=frames,
             runtime_radii=self.numerics.isdf.runtime_radii)
-        if self.pivot_points is None:
+        if self.test_set != 'ao_products':
             return pts, radii, origins
         mol = self.mol
         held = None if frames is None else frames.selection

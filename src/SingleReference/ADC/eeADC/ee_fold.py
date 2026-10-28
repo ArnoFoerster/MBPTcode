@@ -1568,19 +1568,26 @@ class _Roots:
             self.add(float(lam.mean()), Z[:, j], t1[j], lv, k, 'index', conv)
 
 
-def _solve_block(R, m0, diag_s, nroots):
+def _solve_block(R, m0, diag_s, nroots, start=None):
     """All nroots at once (_block_roots), appended to the _Roots R; False when
-    the window reaches min_K D_K, where the interpolation has no bound."""
+    the window reaches min_K D_K, where the interpolation has no bound. start:
+    solve_folded's, the seeds in place of M's."""
     pieces, spin, n, label = R.pieces, R.spin, R.n, R.label
     tol_omega, tol_residual, verbose = R.tol_omega, R.tol_residual, R.verbose
     k = min(nroots + EE_FOLD_BLOCK_BUFFER, n)
-    # sum_q M_pq x_qr = e_r x_pr, the k lowest, loosely: the start
-    e_m, X_m, _ = _solve(m0, diag_s, nroots=k,
-                         tol_residual=max(tol_residual, EE_FOLD_M_SEED_RESIDUAL),
-                         label=label + ' seeds of M')
-    e_m, X_m = np.asarray(e_m, float), np.asarray(X_m, float)
+    if start is not None:
+        # a neighbouring problem's roots, orthonormal and padded to k (_guess),
+        # e their M Rayleigh quotients
+        X_m = _guess(np.asarray(start, float), diag_s, k)
+        e_m = np.einsum('pr,pr->r', X_m, _matmat(m0, X_m))
+    else:
+        # sum_q M_pq x_qr = e_r x_pr, the k lowest, loosely: the start
+        e_m, X_m, _ = _solve(m0, diag_s, nroots=k,
+                             tol_residual=max(tol_residual, EE_FOLD_M_SEED_RESIDUAL),
+                             label=label + ' seeds of M')
+        e_m, X_m = np.asarray(e_m, float), np.asarray(X_m, float)
     fold_diag = getattr(pieces.get('operator'), 'fold_diagonal', None)
-    if fold_diag is not None:
+    if fold_diag is not None and start is None:
         # the doubles pull some configurations (charge transfer) far below
         # where M puts them: the seeds are the k lowest of M plus the
         # model of the fold's diagonal, e their M Rayleigh quotients
@@ -1651,7 +1658,7 @@ def _solve_block(R, m0, diag_s, nroots):
 
 def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
                  t_min=0.3, max_newton=12, max_fixed=30, dense_limit=None,
-                 verbose=0, solver='davidson'):
+                 verbose=0, solver='davidson', start=None):
     """The nroots lowest folded roots, each level at its own frequency.
 
     solver 'davidson' (the default): from the seeds below, one Davidson in the
@@ -1776,6 +1783,11 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         M, A_eff or A_eff' inside an eigensolve or the root-wise Davidson; the dense
         branch's builds and the scalar A_eff' passes for T1 are not counted), and
         inside a long eigensolve a line at most every EE_FOLD_HEARTBEAT (600) s.
+    start : ndarray (n, m) or None, solver 'block' only: the roots of a
+        neighbouring problem (the same channel at a nearby field or geometry),
+        whose span replaces the seeds of M as the block's start; the window,
+        the block and the completeness check are as without it. Unread on the
+        dense branch.
     solver : {'davidson', 'newton', 'block'}, the root-wise Davidson, the
         per-level Newton loops from the seeds, or the block Davidson over images
         at Chebyshev frequencies (its trace counts each image at a node as one
@@ -1796,20 +1808,22 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     try:
         return _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min,
                              max_newton, max_fixed, dense_limit, verbose, solver,
-                             flags)
+                             flags, start)
     finally:
         _TRACE.reset(token)
         _FLAGS.reset(flag_token)
 
 
 def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newton,
-                  max_fixed, dense_limit, verbose, solver, flags):
+                  max_fixed, dense_limit, verbose, solver, flags, start=None):
     """solve_folded inside its trace; the arguments are solve_folded's, flags
     the call's named flags (FoldResult.flags)."""
     _check_level(pieces)
     if solver not in ('davidson', 'newton', 'block'):
         raise ValueError(f"solver={solver!r}; expected 'davidson', 'newton' or "
                          "'block'")
+    if start is not None and solver != 'block':
+        raise ValueError(f"start is read by solver='block' only, not {solver!r}")
     m0, _, diag_s, embed, _ = folded_operator(pieces, None, spin)
     n = diag_s.size
     if dense_limit is None:
@@ -1829,7 +1843,8 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
                max_newton, max_fixed, verbose)
     R.note(f'start: {n} singles, nroots {nroots}, {"dense" if dense else "Davidson"}, '
            f'tol_omega {tol_omega:g}, tol_residual {tol_residual:g}, solver {solver}')
-    block = not dense and solver == 'block' and _solve_block(R, m0, diag_s, nroots)
+    block = not dense and solver == 'block' and _solve_block(R, m0, diag_s, nroots,
+                                                             start)
     if not block:
         # the Davidson starts from whole levels as far as it may follow past
         # nroots: residuals keep a level's symmetry, so a partner the start

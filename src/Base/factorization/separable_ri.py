@@ -114,7 +114,8 @@ from src.Base.numerics.constants import (BYTES_PER_GB, AUX_METRIC_INDEFINITE_TOL
                                          ISDF_GRID_N_START, ISDF_ORBITAL_RESIDUAL_TOL,
                                          ISDF_REFUSED_ORBITALS_NAMED,
                                          ISDF_RADII_MATCH_TOL,
-                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TILE_GB,
+                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TEST_SETS,
+                                         ISDF_TILE_GB,
                                          THREE_CENTER_BLOCK_BYTES)
 from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.numerics import numerics_or_default
@@ -250,10 +251,14 @@ class FitTiles:
     The distributed ISDF-K SCF hands its own out
     (`DistributedISDFJK.fit_tiles`), and the gradient chain and the energy
     route's factor stage read the SCF's fit instead of repeating it.
+    `test_set` names the fit the tiles are (`IsdfNumerics.test_set`): the
+    AO-product row fit (`ao_product_fit.ao_product_fit_rows`) hands tiles
+    out the same way, and neither fit reads the other's.
     """
 
     def __init__(self, mol, auxmol, coords, block, mt, comm, held, settings,
-                 kept=None):
+                 kept=None, test_set=ISDF_TEST_SETS[0]):
+        self.test_set = str(test_set)
         self.keys = (content_key(mol), content_key(auxmol))
         self.kept = None if kept is None else _read_only(kept)
         self.coords = _read_only(coords)
@@ -269,11 +274,11 @@ class FitTiles:
                          float(regularization), float(block_memory_gb))
 
     def row_fit(self, mol, auxmol, coords, block, comm, settings,
-                layout=None):
+                layout=None, test_set=ISDF_TEST_SETS[0]):
         """The `RowFit` `fit_rows` would return for this call, read from
         these tiles, or None where the call asks for another fit: another
-        molecule, basis, point, tile edge, setting or rank layout, or a
-        frozen pair `layout` other than the columns these tiles kept.
+        test set, molecule, basis, point, tile edge, setting or rank layout,
+        or a frozen pair `layout` other than the columns these tiles kept.
 
         The collocation over this rank's contiguous rows is evaluated tile
         by tile, the calls the fit's own Gram pass makes for it, and the
@@ -281,7 +286,8 @@ class FitTiles:
         """
         ranks = (1, 0) if comm is None else (comm.Get_size(), comm.Get_rank())
         l_max, tol, reg, gb = settings
-        if (ranks != self.ranks or int(block) != self.block
+        if (str(test_set) != self.test_set or ranks != self.ranks
+                or int(block) != self.block
                 or (int(l_max), float(tol), float(reg), float(gb))
                 != self.settings
                 or (content_key(mol), content_key(auxmol)) != self.keys
@@ -1354,6 +1360,121 @@ def gram_tiles(mol, auxmol, coords, tiles, owners, rank, second, w,
         S[i] *= d[None, :i1]
         S[i][:, i0:i1][np.diag_indices(i1 - i0)] += regularization
     return S, d, X_own, B_own, P_own, X_ext, screen_ref
+
+
+def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
+                    hold):
+    """(diagonal, panels): `fit_rows`' right-looking Cholesky of the Gram
+    tiles S (consumed), the forward substitution of each right-hand side of
+    `rhs_sets` riding in the sweep as it does there, and the factor kept for
+    later solves: the diagonal block and the gathered panel below it of
+    every tile this rank owns, the same arrays and the same calls as that
+    sweep's."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncols = [broadcast(next(iter(rhs.values())).shape[1] if rhs else 0, comm)
+             for rhs in rhs_sets]
+    diagonal, panels = {}, {}
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        LT = np.empty((j1 - j0, j1 - j0))
+        info = 0
+        if rank == owner:
+            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
+            LT = L.T
+        info = broadcast(info, comm, root=owner)
+        if info != 0:
+            raise np.linalg.LinAlgError(
+                f'Cholesky of the balanced Gram matrix failed at leading '
+                f'minor {j0 + info}: it is not positive definite, which for a '
+                f'Gram matrix plus a {regularization:g} shift means the grid '
+                'is degenerate.')
+        broadcast_rows(LT, owner, comm)
+        L = LT.T
+        ys = []
+        for rhs, ncol in zip(rhs_sets, ncols):
+            y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+            if rank == owner:
+                trsm(L, y.T, side=1, trans_a=1)
+            broadcast_rows(y, owner, comm)
+            ys.append(y)
+        if rank == owner:
+            diagonal[j] = L
+        below = [i for i in mine if i > j]
+        Lcol = {}
+        for i in below:
+            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
+            trsm(L, Lcol[i].T, side=0, trans_a=0)
+        for rhs, y in zip(rhs_sets, ys):
+            for i in below:
+                rhs[i] -= Lcol[i] @ y
+        del ys
+        panel = np.empty((nk - j1, j1 - j0))
+        for i in below:
+            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
+        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
+                                  for i in own if i > j] for own in owners],
+                         comm)
+        for i in below:
+            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
+            S[i] = S[i][:, j1 - j0:] - U
+            del U
+        if rank == owner:
+            panels[j] = panel
+        hold('panel', panel.nbytes)
+        hold('S_rows', total_bytes(S.values()) + total_bytes(panels.values())
+             + total_bytes(diagonal.values()))
+        del panel
+    return diagonal, panels
+
+
+def forward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm, hold):
+    """rhs <- L^-1 rhs on the kept factor: the owner of tile j solves its
+    block and broadcasts it with its panel, and every rank updates its tiles
+    below with the call `cholesky_tiles` makes there."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j], y.T, side=1, trans_a=1)
+        broadcast_rows(y, owner, comm)
+        panel = panels[j] if rank == owner else np.empty((nk - j1, j1 - j0))
+        broadcast_rows(panel, owner, comm)
+        hold('panel', panel.nbytes)
+        for i in mine:
+            if i > j:
+                rhs[i] -= panel[tiles[i][0] - j1:tiles[i][1] - j1] @ y
+        del y, panel
+
+
+def backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
+                    keep=True):
+    """rhs <- L^-T rhs on the kept factor, `fit_rows`' backward sweep: each
+    solved block broadcast by its owner and pushed into the rows that own a
+    panel. keep=False drops the factor as it goes, as that sweep does."""
+    nranks = len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j in reversed(range(len(tiles))):
+        j0, j1 = tiles[j]
+        owner = j % nranks
+        z = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j] if keep else diagonal.pop(j), z.T, side=1,
+                  trans_a=0)
+            if not keep:
+                panels.pop(j, None)
+        broadcast_rows(z, owner, comm)
+        for i in mine:
+            if i < j:
+                i1 = tiles[i][1]
+                rhs[i] -= panels[i][j0 - i1:j1 - i1].T @ z
+        del z
 
 
 def block_coefficients(integrals, lu, shells, a0, keep, second, w, hold):

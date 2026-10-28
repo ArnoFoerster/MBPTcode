@@ -16,16 +16,37 @@ The physics policies (--temperature, --lambda-env, --nudge, --far-start or
 given. The numerical settings default to the production chain's
 (`production_numerics`), and the help names each default.
 
-On augmented bases the tabulated points miss the diffuse AO products. There
-the factors take the AO-product fit (--isdf-test-set ao_products) on
---pivot-points points pivoted from the --grid-accuracy level's parent grid,
-fitted whole on every rank and laid out in grid rows; the mean field is best
+The factors are the AO-product fit, which keeps the diffuse AO products of an
+augmented basis, on points pivoted from the --grid-accuracy level's parent
+grid (--pivot-points of them, omitted the default count), fitted by rows over
+the ranks; the Duchemin-Blase set on the tabulated grid is
+--isdf-test-set duchemin_blase. On augmented bases the mean field is best
 density-fitted (--scf df, J and K on <basis>-jkfit):
 
     srun --mpi=pmi2 -n 8 python -m src.photophysics --xyz emitter.xyz \\
         --basis aug-cc-pvdz --environment toluene ... --tda --scf df \\
-        --grid-accuracy G3 --isdf-test-set ao_products --pivot-points 9000 \\
+        --grid-accuracy G3 --pivot-points 9000 \\
         --scf-grad-tol 1e-9 --out tadf --distribute
+
+In a continuum the run names how its states are solvated (--solvent-scheme,
+required there, no default): 'scheme-a', the solvated BSE of Duchemin et
+al.; 'scheme-b-eq' or 'scheme-b-noneq', every state self-consistent with its
+own relaxed density in the state-specific loop, the excited minima's
+energies in their own equilibrium or in S0's slow charges (`stages` module
+docstring), whose loops converge to --loop-tol-q / --loop-tol-energy. A
+scheme-B run of the AO-product route:
+
+    srun --mpi=pmi2 -n 8 python -m src.photophysics --xyz emitter.xyz \\
+        --basis aug-cc-pvdz --environment toluene --solvent-scheme scheme-b-eq \\
+        --relaxed-solvation equilibrium --df-check 0 --no-far-start ... \\
+        --tda --qp-states frontier --scf df --grid-accuracy G3 \\
+        --isdf-test-set ao_products --pivot-points 5000 \\
+        --scf-conv-tol 1e-10 --scf-grad-tol 1e-9 \\
+        --hessian external --hessian-file s0.hess --out tadf --distribute
+
+The S0 Hessian may come from elsewhere (--hessian external): an ORCA .hess
+file at R0, the geometry the s0 stage writes to s0.xyz; another geometry is
+refused.
 
 The thread environment (--threads) is set before this module is imported
 (`launch`, from `__main__` and the launcher): numpy sizes its pools at
@@ -34,8 +55,10 @@ import.
 import argparse
 import pathlib
 
-from src.Base.numerics.constants import (ISDF_HESSIAN_MIN_GRID, ISDF_TEST_SETS,
-                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+from src.Base.numerics.constants import (HESSIAN_SCF_GRAD_TOL, ISDF_HESSIAN_MIN_GRID,
+                                         ISDF_TEST_SETS,
+                                         PHOTOPHYSICS_LOOP_TOL_ENERGY,
+                                         PHOTOPHYSICS_LOOP_TOL_Q,
                                          SCF_OPTIMIZATION_CONV_TOL,
                                          SCF_OPTIMIZATION_GRAD_TOL, TADF_ALLOCATION_MB,
                                          TADF_GRID_ACCURACY, TADF_N_STATES,
@@ -50,7 +73,8 @@ from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from src.photophysics.declaration import (ENGINES, GAS, GROUNDS,
                                           HESSIAN_ROUTES, RELAXED_SOLVATION,
                                           RESIDUES, SCF_FINISH, SCF_ROUTES,
-                                          Declaration, FarStart, Policies,
+                                          SCHEME_B, SOLVENT_SCHEMES, Declaration,
+                                          ExternalHessian, FarStart, Policies,
                                           System, TadfModel, UiscModel)
 from src.photophysics.stages import run_tadf
 from src.photophysics.rates import MANIFOLD_GAP_RULES
@@ -84,8 +108,14 @@ def add_system(ap):
                          'the xyz file\'s stem')
     ap.add_argument('--basis', required=True)
     ap.add_argument('--environment', required=True,
-                    help="'gas', a solvent of pyscf's SMD table, or "
-                         "'EPS:EPS_STATIC'")
+                    help="'gas', a solvent of pyscf's SMD table, "
+                         "'eps=EPS_S,n2=N2[,label=NAME]' or 'N2:EPS_STATIC', "
+                         "each optionally ',cavity=NAME' (src.environments.medium)")
+    ap.add_argument('--solvent-scheme', default=None,
+                    choices=tuple(s for s in SOLVENT_SCHEMES if s != GAS),
+                    help='in a continuum, required: how every state stands '
+                         "in it ('scheme-a', 'scheme-b-eq' or "
+                         "'scheme-b-noneq'); the gas phase takes none")
 
 
 def add_policies(ap):
@@ -110,6 +140,9 @@ def add_policies(ap):
                      required=True)
     pol.add_argument('--df-check', type=int, choices=(0, 1), required=True)
     pol.add_argument('--hessian', choices=HESSIAN_ROUTES, required=True)
+    pol.add_argument('--hessian-file', metavar='HESS', default=None,
+                     help='with --hessian external: the ORCA .hess file of '
+                          'the S0 Hessian at R0')
     pol.add_argument('--relaxed-solvation', required=True,
                      choices=RELAXED_SOLVATION)
     pol.add_argument('--span', required=True, type=span_option,
@@ -167,12 +200,12 @@ def add_numerics(ap):
                           f'{TADF_GRID_ACCURACY})')
     num.add_argument('--isdf-test-set', default=None, choices=ISDF_TEST_SETS,
                      help='the products the factors\' fit is trained on; '
-                          'omitted is the Duchemin-Blase set, fitted by rows; '
-                          'ao_products on augmented bases')
+                          'omitted is ao_products; duchemin_blase, the pair '
+                          'set on the tabulated grid, by name')
     num.add_argument('--pivot-points', type=int, default=None,
-                     help='with --isdf-test-set ao_products, the points '
-                          'pivoted from the --grid-accuracy level\'s parent '
-                          'grid; omitted places that grid as it is')
+                     help='the AO-product fit\'s points pivoted from the '
+                          '--grid-accuracy level\'s parent grid; omitted is '
+                          'ao_product_fit.pivot_count')
     num.add_argument('--hessian-grid', default=None,
                      help='the numerical Hessian\'s grid; omitted is '
                           'ISDF_HESSIAN_MIN_GRID')
@@ -194,6 +227,14 @@ def add_numerics(ap):
     num.add_argument('--no-scf-warm-start', action='store_true')
     num.add_argument('--scf-finish', default='diis', choices=SCF_FINISH)
     num.add_argument('--engine', default='auto', choices=ENGINES)
+    num.add_argument('--loop-tol-q', type=float, default=None,
+                     help='scheme-b-*: the loop\'s largest charge change (e) at '
+                          'convergence; omitted is PHOTOPHYSICS_LOOP_TOL_Q')
+    num.add_argument('--loop-tol-energy', type=float, default=None,
+                     help='scheme-b-*: the loop\'s change of G (Ha) at '
+                          'convergence; omitted is the larger of '
+                          'PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF\'s '
+                          'conv_tol (G settles no further)')
 
 
 def add_launch(ap):
@@ -214,11 +255,12 @@ def add_launch(ap):
 # ----------------------------------------------------------- declaration
 def production_numerics(args):
     """The `Numerics` of the production chain with the command line's
-    choices: the factors on --grid-accuracy fitted by rows and sliced (with
-    --isdf-test-set ao_products the AO-product fit on --pivot-points pivoted
-    points, fitted whole and sliced), the grid adjoint, the ISDF-K mean field
+    choices: the factors on --grid-accuracy fitted by rows and sliced (the
+    AO-product fit on pivoted points, or the Duchemin-Blase set named by
+    --isdf-test-set, `isdf_numerics_of`), the grid adjoint, the ISDF-K mean field
     on --scf-grid converged for a walk, the span cut --span declares
-    (`span_cut_of`)."""
+    (`span_cut_of`), and under scheme B the loop's tolerances
+    (`loop_numerics_of`)."""
     bse = {'nroots': args.nroots, 'adjoint': 'grid',
            'track': 'overlap' if args.track == 'overlap' else None}
     if args.bse_conv_tol is not None:
@@ -231,8 +273,7 @@ def production_numerics(args):
         scf={'route': args.scf,
              'grid_level': (None if args.scf == 'df'
                             else args.scf_grid or ISDF_HESSIAN_MIN_GRID),
-             'conv_tol': (SCF_OPTIMIZATION_CONV_TOL if args.scf_conv_tol is None
-                          else args.scf_conv_tol),
+             'conv_tol': scf_conv_tol_of(args),
              'conv_tol_grad': (SCF_OPTIMIZATION_GRAD_TOL
                                if args.scf_grad_tol is None
                                else args.scf_grad_tol),
@@ -241,21 +282,68 @@ def production_numerics(args):
         qp={'outside_scissor': args.outside_scissor,
             'hamiltonian': args.qp_hamiltonian,
             'residue_route': args.residues},
-        bse=bse)
+        bse=bse, **loop_numerics_of(args))
+
+
+def loop_numerics_of(args):
+    """{'solvent': the loop's tolerances} under a scheme-b-* --solvent-scheme
+    (omitted: PHOTOPHYSICS_LOOP_TOL_Q, and the larger of
+    PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF's conv_tol), else nothing:
+    another scheme runs no loop, and a tolerance given to it is refused."""
+    given = [o for o in ('loop_tol_q', 'loop_tol_energy')
+             if getattr(args, o) is not None]
+    if args.solvent_scheme not in SCHEME_B:
+        if given:
+            raise SystemExit(', '.join('--' + o.replace('_', '-')
+                                       for o in given)
+                             + ' set the loop of a scheme-b-* solvent scheme')
+        return {}
+    return {'solvent': {
+        'loop_tol_q': (PHOTOPHYSICS_LOOP_TOL_Q if args.loop_tol_q is None
+                       else args.loop_tol_q),
+        'loop_tol_energy': (max(PHOTOPHYSICS_LOOP_TOL_ENERGY, scf_conv_tol_of(args))
+                            if args.loop_tol_energy is None
+                            else args.loop_tol_energy)}}
+
+
+def scf_conv_tol_of(args):
+    """The SCF's conv_tol: --scf-conv-tol, else SCF_OPTIMIZATION_CONV_TOL."""
+    return (SCF_OPTIMIZATION_CONV_TOL if args.scf_conv_tol is None
+            else args.scf_conv_tol)
+
+
+def solvent_scheme_of(args, environment):
+    """The solvent scheme: 'gas' in the gas phase (where --solvent-scheme is
+    refused), --solvent-scheme in a continuum (where it is required)."""
+    if environment == GAS:
+        if args.solvent_scheme is not None:
+            raise SystemExit('--solvent-scheme names how states stand in a '
+                             'continuum; the gas phase takes none')
+        return GAS
+    if args.solvent_scheme is None:
+        raise SystemExit(f'--environment {environment} needs --solvent-scheme '
+                         f'(scheme-a, scheme-b-eq or scheme-b-noneq)')
+    return args.solvent_scheme
 
 
 def isdf_numerics_of(args):
-    """The factors' fit: the Duchemin-Blase set fitted by rows on
-    --grid-accuracy, or with --isdf-test-set ao_products the AO-product fit,
-    which is fitted whole, on --pivot-points points pivoted from that level's
-    parent grid. A pivot count without the AO-product set is refused."""
-    if args.isdf_test_set != 'ao_products':
+    """The factors' fit, by rows over the ranks, on --grid-accuracy: the
+    AO-product fit on --pivot-points points pivoted from that level's parent
+    grid (omitted: `ao_product_fit.pivot_count`), or with --isdf-test-set
+    duchemin_blase the Duchemin-Blase set on the level's grid as it is. A
+    pivot count beside the Duchemin-Blase set is refused."""
+    isdf = {'level': args.grid_accuracy, 'fit': 'rows'}
+    if args.isdf_test_set == 'duchemin_blase':
         if args.pivot_points is not None:
-            raise SystemExit('--pivot-points pivots the points of '
-                             '--isdf-test-set ao_products: pass both')
-        return {'level': args.grid_accuracy, 'fit': 'rows'}
-    return {'level': args.grid_accuracy, 'test_set': 'ao_products',
-            'pivot_points': args.pivot_points}
+            raise SystemExit('--pivot-points pivots the points of the '
+                             'AO-product fit, not --isdf-test-set '
+                             'duchemin_blase')
+        return dict(isdf, test_set='duchemin_blase')
+    if args.isdf_test_set is not None:
+        isdf['test_set'] = args.isdf_test_set
+    if args.pivot_points is not None:
+        isdf['pivot_points'] = args.pivot_points
+    return isdf
 
 
 def span_option(text):
@@ -291,12 +379,14 @@ def system_of(args):
 
 def hessian_numerics_of(args, numerics):
     """The numerical Hessian's numerics: the run's own where they already
-    are the Hessian's (its grid, SCF gradient converged for a derivative),
-    else derived from them; None for the analytic route."""
+    are the Hessian's (its grid, SCF gradient converged to the run's threshold
+    or HESSIAN_SCF_GRAD_TOL, whichever is tighter), else derived from them;
+    None for the analytic route."""
     if args.hessian != 'numerical':
         return None
     scf = {'grid_level': args.hessian_grid or ISDF_HESSIAN_MIN_GRID,
-           'conv_tol_grad': SCF_DIFFERENTIABLE_GRAD_TOL}
+           'conv_tol_grad': min(numerics.scf.conv_tol_grad,
+                                HESSIAN_SCF_GRAD_TOL)}
     if all(getattr(numerics.scf, k) == v for k, v in scf.items()):
         return numerics
     return numerics.derive('the finite-difference S0 Hessian: displaced '
@@ -308,12 +398,17 @@ def policies_of(args):
     """The `Policies` of the command line's required options."""
     far = (None if args.far_start is None else
            FarStart(xyz_atoms(pathlib.Path(args.far_start).read_text())))
+    if (args.hessian == 'external') != (args.hessian_file is not None):
+        raise SystemExit('--hessian external reads --hessian-file, and only '
+                         'it does')
     return Policies(
         nudge_bohr=args.nudge, far_start=far, refreeze=bool(args.refreeze),
         saddle_check=bool(args.saddle_check), df_check=bool(args.df_check),
         hessian=args.hessian, relaxed_solvation=args.relaxed_solvation,
         scf_warm_start=not args.no_scf_warm_start, engine=args.engine,
-        scf_finish=args.scf_finish)
+        scf_finish=args.scf_finish,
+        external_hessian=(None if args.hessian_file is None
+                          else ExternalHessian.of(args.hessian_file)))
 
 
 def qp_states_of(args):
@@ -340,10 +435,12 @@ def rate_model_of(args):
 def declaration_of(args):
     """The `Declaration` the parsed command line `args` says."""
     numerics = production_numerics(args)
+    environment = (GAS if args.environment.lower() in ('', 'none', GAS)
+                   else args.environment)
     return Declaration(
         system=system_of(args), ground=args.ground, reference=args.reference,
-        environment=(GAS if args.environment.lower() in ('', 'none', GAS)
-                     else args.environment),
+        environment=environment,
+        solvent_scheme=solvent_scheme_of(args, environment),
         kernel='bse-tda' if args.tda else 'bse', singlet=args.singlet,
         triplet=args.triplet, n_states=args.n_states,
         qp_states=qp_states_of(args), numerics=numerics,

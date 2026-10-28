@@ -86,7 +86,7 @@ from src.SingleReference.LinearResponse.probe import (lowest_amb_from_action,
                                                       lowest_amb_eigenvalue)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.test_distributed_fit_mpi import relative, roots_resolution
-from tests.isdf_test_grid import g1, g1_kw
+from tests.isdf_test_grid import g1, g1_kw, legacy
 from tests.pins import RECORDING_BLAS, assert_same, bitwise, matches
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
@@ -148,7 +148,7 @@ def _system(geometry, nroots):
     # benzene's virtual 86 is missed by 0.12 on the default grid and the
     # factors would be refused; this gate is the solver's, not the fit's
     factors = unrefused_separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
-                                          counts=g1(mol))
+                                          counts=g1(mol), numerics=legacy())
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(mol=mol, mf=mf, nocc=nocc, nroots=nroots, factors=factors,
                 W_aux=W_aux, eps=np.asarray(mf.mo_energy, float))
@@ -194,7 +194,7 @@ def solve(s, comm=None, probe='sign', qp=False, preconditioner=None,
     bse = {'nroots': s['nroots'], 'conv_tol': conv_tol}
     if preconditioner is not None:
         bse['preconditioner'] = preconditioner
-    return solve_bse_isdf(mf, s['mol'], s['nocc'], numerics=Numerics(bse=bse), qp=qp,
+    return solve_bse_isdf(mf, s['mol'], s['nocc'], numerics=legacy(Numerics(bse=bse)), qp=qp,
                           probe=probe, progress=False,
                           distribute=comm is not None, comm=comm, **g1_kw(s['mol'], kw))
 

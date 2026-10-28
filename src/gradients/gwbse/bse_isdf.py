@@ -44,7 +44,7 @@ import numpy as np
 from src.Base.numerics.constants import ISDF_TILE_GB, KAPPA
 from src.SingleReference.LinearResponse.casida import casida_solve
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
-from src.SingleReference.LinearResponse.space_time import b_block
+from src.SingleReference.LinearResponse.space_time import b_block, square_tile_rows
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.factorization.sliced_factors import whole_factor
 
@@ -115,11 +115,12 @@ def _factorized_block_backward(X, D, p_idx, q_idx, cP, alpha, beta,
     the (n_aux, n_vir, n_vir) block entirely.
 
     S1, S2 and E are (M, M), the objects the polarizability sweep also refuses
-    to hold, so they are tiled over k' by the same budget: only a block is live.
+    to hold, so they are tiled over k' by the same budget, at most
+    ISDF_SQUARE_TILE_ROWS rows (`square_tile_rows`): only a block is live.
     """
     Xp, Xq = X[:, p_idx], X[:, q_idx]
     M = X.shape[0]
-    rows = max(1, min(M, int(tile_gb * 1e9 / max(3 * M * 8, 1))))
+    rows = square_tile_rows(max(1, min(M, int(tile_gb * 1e9 / max(3 * M * 8, 1)))))
     same = p_idx is q_idx or (np.array_equal(np.asarray(p_idx),
                                              np.asarray(q_idx)))
     for k0 in range(0, M, rows):

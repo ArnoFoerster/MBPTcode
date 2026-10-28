@@ -14,6 +14,7 @@ script test_amplitudes_consistency.py
 script test_analytical_continuation.py
 pytest test_ao_product_fit.py
 pytest test_ao_product_fit_adjoint.py
+pytest test_ao_product_fit_rows.py
 pytest test_auxiliary_bosons.py
 pytest test_auxiliary_bosons_move.py
 script test_base.py
@@ -29,8 +30,10 @@ script test_casida_build_inplace.py
 script test_casida_memory.py
 pytest test_casida_normalization.py
 pytest test_casida_phase.py
+pytest test_casida_subspace_eigen.py
 script test_ccsdt_density_matrix.py
 script test_ccsdt_lambda.py
+pytest test_cd_forward_memory.py
 pytest test_cd_grid_sizing.py
 pytest test_cd_own_pole_resolution.py
 pytest test_cd_singular_part.py
@@ -73,6 +76,8 @@ pytest test_environment.py
 pytest test_environment_cache.py
 pytest test_environment_guards.py
 pytest test_eom_left_right_pairing.py
+pytest test_exchange_skeleton_split.py
+pytest test_fitted_exchange_conditioning.py
 script test_exciton_descriptors.py
 pytest test_faddeev_adc3.py
 pytest test_fit_adjoint_stability.py
@@ -98,6 +103,7 @@ pytest test_isdf_jk_gradient_guard.py
 pytest test_isdf_one_grid_call.py
 pytest test_isdf_pcm_force.py
 pytest test_isdf_refuses_cartesian.py
+pytest test_isdf_rows_census.py
 pytest test_legacy_defaults_and_aliases.py
 pytest test_matsubara_ir.py
 pytest test_metallic_grid_wiring_quick.py
@@ -135,9 +141,12 @@ pytest test_pbc_smallq.py
 pytest test_pbc_symmetry.py
 script test_pbc_w.py
 pytest test_pcm_cavity_blocks.py
+pytest test_pcm_cavity_tiles.py
 pytest test_photoluminescence.py
 pytest test_photophysics_ao_product_fit.py
+pytest test_photophysics_hessian_scf_tol.py
 pytest test_photophysics_package.py
+pytest test_photophysics_scheme_b.py
 pytest test_photophysics_span.py
 pytest test_polarizable_sites.py
 pytest test_polarizable_sites_calibration.py
@@ -200,6 +209,7 @@ pytest test_solvated_outside_scissor.py
 pytest test_solvent_continuations.py
 pytest test_solvent_mean_field.py
 pytest test_solvent_screening.py
+pytest test_ground_state_cavity_check.py
 pytest test_sop_fits_over_ranks.py
 pytest test_space_time_shared_kernel.py
 pytest test_spin_adapt.py
@@ -207,6 +217,7 @@ pytest test_spin_orbit.py
 pytest test_spin_orbit_ranks.py
 pytest test_spin_vibronic_model.py
 pytest test_state_manifold.py
+pytest test_state_model_ks_force.py
 pytest test_state_pair_saddle_check.py
 pytest test_static_correction_semicanonical_view.py
 pytest test_static_exchange_distributed.py
@@ -352,9 +363,17 @@ pytest test_cphf_residual.py
 pytest test_ee_adc_gradient.py
 pytest test_ee_adc_gradient_tiled.py
 pytest test_ee_adc_relaxed_density.py
+pytest test_scs_adc2_gradient.py
 pytest test_ee_state_model_follow.py
 pytest test_solvation_force.py
 pytest test_solvation_gas_limit.py
+pytest test_adc2_state_reuse.py
+pytest test_response_kernel.py
+pytest test_mp2_state_density.py
+pytest test_solvated_memory_budget.py
+pytest test_solvated_adc2_scf.py
+pytest test_ee_adc_fold_start.py
+pytest test_host_medium.py
 pytest test_adc_davidson_degenerate_copies.py
 pytest test_codegen_optional.py
 pytest test_generated_adc2_hash.py

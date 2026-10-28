@@ -19,7 +19,7 @@ from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_streaming
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.rpa.ground_state import RPAGroundStateChain
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import LEGACY_FIT, g1
 from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
@@ -51,7 +51,7 @@ def _fit_the_old_way(chain, mol, auxmol, crd, layout):
 def test_the_split_is_bitwise(mol):
     """Splitting the fit at the gauge must not move it past a few ulp (the
     two are separate computations)."""
-    ch = RPAGroundStateChain(mol, rhf, numerics=Numerics(isdf={'counts': g1(mol)}))
+    ch = RPAGroundStateChain(mol, rhf, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
     fac = ch.factorization
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     ox, od = _fit_the_old_way(ch, mol, auxmol, crd, fac.layout)
@@ -65,7 +65,7 @@ def test_two_environments_do_not_share_a_gauge(mol):
     DIFFERENT environments must get different D, and each must equal what it
     would get standing alone. If this ever fails, a solvated calculation is
     silently using someone else's screening."""
-    shared = FrozenFactorization(mol, Numerics(isdf={'basis': BASIS, 'auxbasis': BASIS + '-ri', 'counts': g1(mol)}))
+    shared = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'basis': BASIS, 'auxbasis': BASIS + '-ri', 'counts': g1(mol)}))
     auxmol, crd = shared.auxmol(mol), shared.coords(mol)
     gas = RPAGroundStateChain(mol, rhf, factorization=shared)
     sol = RPAGroundStateChain(mol, rhf, factorization=shared,
@@ -75,7 +75,7 @@ def test_two_environments_do_not_share_a_gauge(mol):
     assert not np.allclose(d_gas, d_sol), 'the environment did not reach D'
 
     alone = RPAGroundStateChain(mol, rhf,
-                                environment=SolventScreening(mol, solvent='toluene'), numerics=Numerics(isdf={'counts': g1(mol)}))
+                                environment=SolventScreening(mol, solvent='toluene'), numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
     _, d_alone = alone.factors(mol, alone.factorization.auxmol(mol),
                                alone.factorization.coords(mol))
     assert_same(d_sol, d_alone, unit='1', quantity='root',

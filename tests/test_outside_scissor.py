@@ -13,8 +13,8 @@ WHAT THE SCISSOR IS. Water/cc-pVDZ, RHF/cc-pVDZ-ri, the default window
 outside orbital the correction of the explicit orbital nearest it in orbital
 energy, which on this set is two tiers:
 
-    occupied outside (0, 1, 2)     +0.9798 eV
-    virtual outside (7 ... 23)     -0.3169 eV
+    occupied outside (0, 1, 2)     +0.9796 eV
+    virtual outside (7 ... 23)     -0.3168 eV
 
 THE SHIFT IS A CONSTANT, so d eps^QP_p/dR = d eps_p/dR outside the set and the
 adjoint chain needs no term of its own. The finite-difference gate below is
@@ -52,7 +52,7 @@ GATES = pathlib.Path(__file__).resolve().parent
 
 #: The two tiers the default window calibrates to on water, in eV. Gated so
 #: the numbers in the docstring are measured rather than remembered.
-WATER_TIERS_EV = (0.979797900918945, -0.3168834834722673)
+WATER_TIERS_EV = (0.9796418766187323, -0.3168388791674836)
 
 #: The finite-difference step and tolerance tests/test_excited_state.py gates
 #: its own gradients at: a frozen scissor only adds a constant to the chain.

@@ -13,10 +13,13 @@ emission (solvation_loop.vertical_energies there) or an adiabatic energy
     mol_min, info = optimize.relax(surface, mol, nudge=0)
 
 make_field(mol) -> a ReactionField around mol; make_state(mol, field) -> a
-fresh state model. Between geometries the surface carries the last converged
+fresh state model; make_ground(mol, field) -> a fresh S0 model of the same
+method (None where the surface's model freezes nothing). Between geometries the surface carries the last converged
 charges as the next loop's start when the cavity keeps its number of sites,
 and an excited root by the overlap of its AO transition amplitudes
-(state.y_follow, eeADC.ee_follow.FollowedRoot), so a walk stays on one state.
+(state.y_follow, eeADC.ee_follow.FollowedRoot), so a walk stays on one state,
+and an ADC(2) model's roots as the next geometry's fold start
+(state.fold_start).
 A loop that does not converge warns and returns its last cycle
 (solvation_loop.SolvationNotConverged); every evaluation whose loop, state
 model or force carried a numerical flag is logged in `flags` ({'coords':
@@ -25,7 +28,13 @@ returns the names logged at one geometry, so a record built on a walk's last
 geometry says which caveats it stands on.
 
 A state model whose surface is fixed by an object it carries (`surface_key`,
-a GW-BSE model's chain: gradients.gwbse.state_model) must stay on that one
+a GW-BSE model's chain: gradients.gwbse.state_model) is built in S0's
+equilibrium charges (`solvation_loop`, "Frozen surfaces"): where its loop has
+no charges to start from -- the first geometry, the first geometry of a
+refrozen surface, a cavity of another number of sites -- the surface runs
+S0's loop there first (`make_ground`, the same loop settings) and starts
+from its charges; without make_ground the loop refuses a model whose first
+call would freeze its surface. Such a model must stay on that one
 surface: make_state then moves the first model
 (`reference.at(mol, make_scf, field.transition_environment())`)
 and a model on another surface is refused before its loop runs. The walkers'
@@ -35,10 +44,10 @@ accepted steps (gradients.surface.commit) reach the model's own
 Refreeze (`refreeze(mol)`, the outer loop of `optimize.relax(...,
 refreeze=1)`): a model on a surface of its own is rebuilt at `mol` by its
 `refrozen(mol, lr_environment)` (a GW-BSE model: a fresh chain, built at
-`mol` in the zero-charge mean field, exactly as the model of a vertical
-energy there is), and the new surface moves that model to every later
-geometry. It starts its first loop from no charges, as a vertical's loop
-does, and carries the followed root (ADC(2)'s `y_follow`) over. A surface whose model
+`mol` in S0's equilibrium charges there, exactly as the model of a
+vertical energy there is), and the new surface moves that model to every
+later geometry. It starts its first loop from S0's charges at `mol`, as a
+vertical's loop does, and carries the followed root (ADC(2)'s `y_follow`) over. A surface whose model
 carries no `surface_key` -- HF, MP2 and ADC(2), which freeze nothing (an
 ADC(2) root followed by overlap is matched at every geometry, not frozen),
 and the GW-BSE reference -- is its own refreeze.
@@ -54,13 +63,16 @@ class SolvatedSurface(PotentialEnergySurface):
     INGREDIENTS = frozenset({'mean_field'})
 
     def __init__(self, mol0, make_field, make_state, label='solvated state',
-                 **loop_kw):
+                 make_ground=None, **loop_kw):
         self.mol0 = mol0
         self.make_field, self.make_state = make_field, make_state
+        self.make_ground = make_ground
         self._label = label
         self.loop_kw = loop_kw
         self._q = None
         self.y_follow = None
+        # an ADC(2) model's last roots, the next geometry's fold start
+        self.fold_start = None
         self.last = None
         self._surface_key = None
         self.flags = []
@@ -91,12 +103,22 @@ class SolvatedSurface(PotentialEnergySurface):
                 'm, make_scf, f.transition_environment())')
         if self.y_follow is not None and hasattr(state, 'y_follow'):
             state.y_follow = self.y_follow
+        if self.fold_start is not None and hasattr(state, 'fold_start'):
+            state.fold_start = self.fold_start
         q0 = self._q if (self._q is not None and self._q.size == field.nsites) else None
+        if q0 is None and self.make_ground is not None and (
+                getattr(state, 'freezes_on_first_call', False)
+                or getattr(state, 'surface_key', None) is not None):
+            # S0's equilibrium charges here (module docstring)
+            q0 = sl.equilibrate(self.make_ground(mol, field), field,
+                                **self.loop_kw).q
         r = sl.equilibrate(state, field, q0=q0, **self.loop_kw)
         self._log_flags(mol, r.flags)
         self._q = r.q
         if getattr(state, 'y_follow', None) is not None:
             self.y_follow = state.y_follow
+        if getattr(state, 'fold_start', None) is not None:
+            self.fold_start = state.fold_start
         if self._surface_key is None:
             self._surface_key = getattr(state, 'surface_key', None)
         self.last = dict(mol=mol, field=field, state=state, result=r)
@@ -154,7 +176,8 @@ class SolvatedSurface(PotentialEnergySurface):
             built.append(state.refrozen(m, lr))
             return built[0]
         out = SolvatedSurface(self.mol0, self.make_field, make_state,
-                              label=self._label, **self.loop_kw)
+                              label=self._label, make_ground=self.make_ground,
+                              **self.loop_kw)
         out.y_follow = self.y_follow
         # one flag log for the walk and its refreezes (flags_at reads both)
         out.flags = self.flags

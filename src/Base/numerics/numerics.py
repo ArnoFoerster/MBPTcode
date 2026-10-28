@@ -54,7 +54,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DAVIDSON_PRECONDITIONERS,
                                          FIT_REALIZATIONS, ISDF_FIT_L_MAX_SECOND,
                                          ISDF_FIT_PAIR_TOL, ISDF_FIT_REGULARIZATION,
-                                         ISDF_TEST_SETS,
+                                         ISDF_DEFAULT_TEST_SET, ISDF_TEST_SETS,
                                          NUCLEAR_FD_STEP,
                                          OUTSIDE_SCISSOR_MODES,
                                          QP_DEGENERACY_TOL, ROOT_FOLLOWING,
@@ -97,15 +97,24 @@ class IsdfNumerics:
         'duchemin_blase' (every AO times the low-l AOs plus the auxiliary
         functions) or 'ao_products' (every AO product in the Coulomb metric,
         `ao_product_fit`), which also represents the near-null AO
-        combinations of an augmented basis; None takes a given
-        factorization's, else 'duchemin_blase'. Only the 'replicated' fit
-        realizes 'ao_products'.
-    pivot_points: None places the level's (or counts') atomic grid as it is;
-        a count hard-pivots that many points from that grid with every
-        sub-shell's radii ISDF_PIVOT_PARENT_FACTOR times as dense, by the
-        pivoted Cholesky factorization of the 'ao_products' Gram matrix
-        (`ao_product_fit.pivoted_points`); it needs test_set='ao_products'.
-        Both fields leave the identity what it was while at their defaults.
+        combinations of an augmented basis. For the factors, None is
+        'ao_products' (ISDF_DEFAULT_TEST_SET) wherever a grid is named -- a
+        level, counts or radii -- and, handed a factorization without
+        naming a grid, takes that one's (`test_set_named`); their
+        'duchemin_blase' fit is reached only by naming it. The ISDF-K mean
+        field (`isdf_jk.ISDFJK`) keeps 'duchemin_blase' unless a test set is
+        named: pivoted points move smoothly along a walk only inside
+        `isdf_jk.frozen_frames`. Both realizations of the fit realize
+        either.
+    pivot_points: the points of the 'ao_products' fit, hard-pivoted from
+        the level's (or counts') atomic grid with every sub-shell's radii
+        ISDF_PIVOT_PARENT_FACTOR times as dense, by the pivoted Cholesky
+        factorization of its Gram matrix (`ao_product_fit.pivoted_points`);
+        None takes `ao_product_fit.pivot_count` of the molecule and its
+        parent. Refused beside test_set='duchemin_blase'. The identity
+        leaves out test_set at 'duchemin_blase' (and with no grid named)
+        and pivot_points at None, so every identity written before the
+        fields stays what it was.
     runtime_radii: True declares a grid the shipped radii table holds no
         row for, re-optimized at run time (`runtime_atomic_radii`); False
         refuses one (`UntabulatedISDFGrid`). Not part of `identity`: where a
@@ -133,21 +142,31 @@ class IsdfNumerics:
         if self.test_set is not None and self.test_set not in ISDF_TEST_SETS:
             raise ValueError(f'test_set={self.test_set!r} not in '
                              f'{ISDF_TEST_SETS}')
-        if self.test_set == 'ao_products' and self.fit == 'rows':
-            raise ValueError(
-                "test_set='ao_products' is fitted whole (fit='replicated'); "
-                "the row-distributed fit realizes the 'duchemin_blase' test "
-                'set only')
         if self.pivot_points is not None:
             if int(self.pivot_points) != self.pivot_points or self.pivot_points < 1:
                 raise ValueError(f'pivot_points={self.pivot_points!r}: a '
                                  'positive point count')
-            if self.test_set != 'ao_products':
+            if self.test_set == 'duchemin_blase':
                 raise ValueError(
-                    "pivot_points selects points for test_set='ao_products' "
-                    "and needs it: the 'duchemin_blase' fit on pivoted points "
-                    'binds the same spurious BSE root as on the tabulated '
-                    'grid on augmented bases')
+                    "pivot_points selects points for test_set='ao_products': "
+                    "the 'duchemin_blase' fit on pivoted points binds the "
+                    'same spurious BSE root as on the tabulated grid on '
+                    'augmented bases')
+
+    def grid_named(self):
+        """Whether this section names an interpolation grid: a level,
+        counts or radii."""
+        return not (self.level is None and self.counts is None
+                    and self.radii is None)
+
+    def test_set_named(self, grid_named=None):
+        """The test set this section asks for: its own, else
+        ISDF_DEFAULT_TEST_SET where a grid is named (`grid_named`, this
+        section's own where None), else None (no opinion)."""
+        if self.test_set is not None:
+            return self.test_set
+        named = self.grid_named() if grid_named is None else grid_named
+        return ISDF_DEFAULT_TEST_SET if named else None
 
 
 @dataclass(frozen=True)
@@ -713,6 +732,12 @@ class Numerics:
         values = self.values()
         for section, name in IDENTITY_EXCLUDED:
             values[section].pop(name)
+        # a named grid without a test set is the AO-product fit, written so;
+        # the 'duchemin_blase' fit is left out as the field's absence was
+        # before it existed
+        values['isdf']['test_set'] = self.isdf.test_set_named()
+        if values['isdf']['test_set'] == 'duchemin_blase':
+            values['isdf']['test_set'] = None
         for section, name in IDENTITY_AT_DEFAULT_OMITTED:
             default = getattr(SECTIONS[section](), name)
             if values[section][name] == default:

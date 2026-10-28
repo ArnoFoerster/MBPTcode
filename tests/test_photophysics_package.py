@@ -158,9 +158,9 @@ def test_python_m_runs_both_command_lines():
         assert out.returncode == 0, out.stderr[-2000:]
         return out.stdout
     staged, solvated = help_of(), help_of('solvated')
-    assert '--rate-model' in staged and '--solvent' not in staged
+    assert '--rate-model' in staged and '--solvent SOLVENT' not in staged
     assert 'python -m src.photophysics solvated' in solvated
-    assert '--solvent' in solvated and '--rate-model' not in solvated
+    assert '--solvent SOLVENT' in solvated and '--rate-model' not in solvated
 
 
 def test_the_default_stages_are_the_rate_model_s(tmp_path):

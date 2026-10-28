@@ -61,14 +61,14 @@ from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                          RESIDUE_ROUTES_ALL,
                                          LAPLACE_SCREENING_TOL, QP_ROOT_TOL,
                                          SOP_N_POLES)
-from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
-                                              contiguous_block, current_comm, lockstep,
+from src.Base.utils.parallel.mpi_grid import (OwnedSlices, agreement,
+                                              current_comm, lockstep,
                                               mpi_map, ordered_chain_sum, ordered_sum,
                                               partition, reduce_sum)
 from src.SingleReference.GW.contour_deformation import (
     cd_integral_weights, cd_pair_contraction_multi,
-    cd_screening_contraction_multi, contour_state_root, residue_route_auto,
-    screening_solver, static_term)
+    cd_screening_contraction_multi, contour_state_root, frequency_groups,
+    residue_route_auto, screening_solver, static_term)
 from src.SingleReference.GW.qp_states import scissor_route
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                    pole_amplitudes, sop_from_wc)
@@ -81,7 +81,8 @@ from src.Solvers.qp_equation import qp_start, quasiparticle_weight
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
 from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.space_time import (
-    ProjRows, polarizability_projected_rows, three_index_ov, three_index_slice)
+    ProjRows, frequency_blocks, polarizability_projected_rows, three_index_ov,
+    three_index_slice)
 from src.gradients.rpa.space_time_adjoint import (
     polarizability_backward, polarizability_backward_rows,
     three_index_ov_backward, three_index_slice_backward,
@@ -260,26 +261,21 @@ def sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles, sop_stride):
 
 
 def slices_over_ranks(X, D, states, tile_gb, comm=None):
-    """[B_p for p in states], each slice built by one rank and gathered onto
-    every one; serially the list it always was. comm None is `current_comm()`.
+    """`OwnedSlices` of B_p for p in states, each slice built by its owner and
+    held there alone; serially every slice on the one rank. comm None is
+    `current_comm()`.
 
     A slice is O(M naux norb), one per state, so a window of hundreds of
-    states built on every rank is a cost no rank count divides. Each slice is
-    the same `three_index_slice` call on the same whole factors wherever it
-    runs and travels verbatim (`allgather_rows`): every rank holds the serial
-    slices bitwise, as views into one (nstates, naux, norb) array.
+    states built or held on every rank is a cost no rank count divides (35 MB
+    a state at 60 atoms on an augmented double-zeta basis). Each slice is the
+    serial `three_index_slice` call on the same whole factors, and a rank that
+    reads another's gets its bits verbatim (`OwnedSlices.fetch`).
     """
     comm = current_comm() if comm is None else comm
-    nranks = 1 if comm is None else comm.Get_size()
-    if nranks == 1:
-        return [three_index_slice(X, D, int(p), tile_gb=tile_gb)
-                for p in states]
-    out = np.zeros((len(states), D.shape[1], X.shape[1]))
-    start, stop = contiguous_block(len(states), comm.Get_rank(), nranks)
-    for i in range(start, stop):
-        out[i] = three_index_slice(X, D, int(states[i]), tile_gb=tile_gb)
-    allgather_rows(out, comm)
-    return list(out)
+    out = OwnedSlices(len(states), (D.shape[1], X.shape[1]), comm)
+    for i in out.mine():
+        out.put(i, three_index_slice(X, D, int(states[i]), tile_gb=tile_gb))
+    return out
 
 
 def pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
@@ -325,7 +321,7 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     return out
 
 
-def integral_term_reverse(state, WtB, k):
+def integral_term_reverse(state, Bp, WtB, k):
     """(Bp_bar, chi0_bar, eps_bar) of ONE contour-deformation frequency for one state.
 
     Sigma^int_p(w) = -(1/pi) sum_kq c[k,q] wc[k,q] with the weights of
@@ -336,11 +332,10 @@ def integral_term_reverse(state, WtB, k):
     third term. On the pole-model route the omega dependence is analytic and
     `wc_bar` already holds the whole weight, so that term is zero.
 
-    state: one entry of the reverse pass's active set -- the state's slice
-    `Bp`, its Z-weighted adjoint `zw`, the weights `c` and `dc` at its root
-    (`integral_state`) and `wc_bar` or None.
+    state: one entry of the reverse pass's active set -- its Z-weighted
+    adjoint `zw`, the weights `c` and `dc` at its root (`integral_state`) and
+    `wc_bar` or None; Bp its slice, WtB = W(i.nu_k) Bp.
     """
-    Bp = state['Bp']
     if state['wc_bar'] is not None:
         bb, _, cb = integral_term_backward(Bp, WtB, state['wc_bar'][k])
         return bb, cb, 0.0
@@ -349,13 +344,14 @@ def integral_term_reverse(state, WtB, k):
     return bb, cb, -coeff * wck * state['dc'][k]
 
 
-def integral_state(Bp, zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
+def integral_state(zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
                    **extra):
     """One entry of the reverse pass's active set (`integral_term_reverse`):
     the integral term's weights at the root are computed once, for every
     frequency, because the exact singular part puts the near-pole correction
-    on the two smallest nodes whichever rank owns them."""
-    state = dict(Bp=Bp, zw=zw, wc_bar=wc_bar, **extra)
+    on the two smallest nodes whichever rank owns them. The state's slice is
+    not in it: the slices stay with their owners (`OwnedSlices`)."""
+    state = dict(zw=zw, wc_bar=wc_bar, **extra)
     if wc_bar is None:
         state['c'], state['dc'] = cd_integral_weights(w_star - eps, nu_points,
                                                       nu_weights)
@@ -455,8 +451,8 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
 class QPSetTape:
     """What `qp_set_gradient`'s forward built, for a later call to read back.
 
-    proj(tau) held by rows, the states' slices Bps and their contractions
-    wcs, with the arguments they were built from: the factor objects
+    proj(tau) held by rows, the states' slices Bps (`OwnedSlices`, each on
+    its owner) and their contractions wcs, with the arguments they were built from: the factor objects
     themselves, eps, mu, the tile budget, the states, the tau points and the
     transform onto the CD frequencies. A later call on the same objects and
     bits reads proj and Bps from here, and wcs as well when the frequency
@@ -475,7 +471,7 @@ class QPSetTape:
     tau_points: np.ndarray
     cosft_wt: np.ndarray
     proj_tau: ProjRows
-    Bps: list
+    Bps: OwnedSlices
     wcs: list
     C_ov: object = None
 
@@ -669,7 +665,7 @@ class QPSetPass:
         active = []
         for si, (p, wgt) in enumerate(zip(states, weights)):
             p = int(p)
-            Bp, wc = Bps[si], wcs[si]
+            Bp, wc = Bps.fetch(si), wcs[si]
             if si in fit_round and (sop_poles is None or p not in sop_poles):
                 rnd = fit_round[si]
                 sop_poles = fit_poles_over_ranks(
@@ -756,83 +752,109 @@ class QPSetPass:
                                                         eps, nocc, nu_points,
                                                         sigma_bar=zw)
                 eps_bar += eps_sop
-            active.append(integral_state(Bp, zw, w_star, eps, nu_points,
+            active.append(integral_state(zw, w_star, eps, nu_points,
                                          nu_weights, wc_bar, si=si, p=p,
                                          res=res, rs=rs, route=route))
         self.active, self.sop_poles, self.C_ov = active, sop_poles, C_ov
 
     def reverse_frequencies(self):
-        """PASS 2 -- the integral term's reverse pass, frequency outside,
-        over the frequencies this rank owns. Each frequency's addends reach
-        every rank and are added in frequency order (`ordered_sum`): the
-        one-rank bits."""
-        active, eps, comm, rank = self.active, self.eps, self.comm, self.rank
+        """PASS 2 -- the integral term's reverse pass over the frequencies
+        this rank owns, in groups a rank can hold factorized
+        (`held_frequencies`); within a group the states pass by one slice at
+        a time (`OwnedSlices.fetch`), each taking its solves at the group's
+        frequencies. Every addend is the one of the frequency-outside loop
+        and joins its sum in the same order: chi0_bar(i.nu_k) the states in
+        set order and then the pairs, B_p_bar the frequencies in order
+        (`ordered_chain_sum`, kept by the slice's owner), eps_bar by
+        (frequency, state) (`ordered_sum`): the one-rank bits."""
+        active, eps, comm = self.active, self.eps, self.comm
         proj_tau, grid, naux, eye = (self.proj_tau, self.grid, self.naux,
                                      self.eye)
         pairs, Bps, paired = self.pairs, self.Bps, self.paired
         self.lap = _lap(self.timer, 'qp_set.routes', self.lap)
-        Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
+        Bp_bars = Bps.zeros([a['si'] for a in active])
         eps_bar_part = np.zeros_like(eps)
         proj_bar = None
-
-        def chain_frequency(owner, terms):
-            """Every state's B_p_bar += its term at one frequency, added by
-            the frequency's owner and handed to every rank
-            (`ordered_chain_sum`)."""
-            for a in active:
-                si = a['si']
-                Bp_bars[si] = ordered_chain_sum(
-                    {0: terms[si]} if owner == rank else {}, [owner], comm,
-                    Bp_bars[si])
-
         if active:
             eps_terms = []
             proj_bar = proj_tau.zeros_like()
-            for fb in proj_tau.blocks(grid.cosft_wt, self.tile_gb,
-                                      self.nu_mine):
-                owned = {}
-                for m, k in enumerate(fb.ks):
-                    solve = screening_solver(eye - fb.chi0[m])
-                    chi0_bar = np.zeros((naux, naux))
-                    terms, wtbs = {}, {}
-                    for j, a in enumerate(active):
-                        WtB = solve(a['Bp'])
-                        bb, cb, e_k = integral_term_reverse(a, WtB, k)
-                        terms[a['si']] = bb
-                        chi0_bar += cb
-                        eps_terms.append(((k, j), e_k))
-                        if a['si'] in paired:
-                            wtbs[a['si']] = WtB
-                    # the off-diagonal contractions' adjoints, on the same
-                    # solves
-                    for i, j, wc_bar in pairs:
-                        bi, bj, cb = pair_term_backward(
-                            Bps[i], Bps[j], wtbs[i], wtbs[j], wc_bar[k])
-                        terms[i] = terms[i] + bi
-                        terms[j] = terms[j] + bj
-                        chi0_bar += cb
-                    fb.chi0[m] = chi0_bar
-                    if fb.owners is None:
-                        chain_frequency(rank, terms)
-                    else:
-                        owned[k] = terms
-                    terms = wtbs = None
-                # B_p_bar is (naux, nmo) a frequency, a fraction of a GB
-                # on a large chromophore dimer at a triple-zeta basis: a
-                # round's terms join the running sum in frequency order as soon
-                # as the round is solved, so a rank holds one frequency's,
-                # whatever the number of frequencies
-                if fb.owners is not None:
-                    for k, owner in zip(fb.block, fb.owners):
-                        chain_frequency(int(owner), owned.get(k))
-                owned = None
-                proj_bar.fold(grid.cosft_wt, fb)
-            fb = solve = chi0_bar = None
+            # a held frequency: its factor and chi0_bar, and the B_p_bar
+            # terms of the state passing by and of every paired state
+            live = 2 + (len(paired) + 1) * Bps.shape[1] / naux
+            k0, k1 = frequency_blocks(len(grid.cosft_wt), naux, self.tile_gb,
+                                      live)[0]
+            cap = k1 - k0
+            blocks = proj_tau.blocks(grid.cosft_wt, self.tile_gb, self.nu_mine)
+            for group in frequency_groups(blocks, cap, self.nranks > 1):
+                self._reverse_group(group, eps_terms, Bp_bars)
+                for fb in group:
+                    proj_bar.fold(grid.cosft_wt, fb)
+                group = fb = None
             eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
             eps_terms = None
         self.eps_bar += eps_bar_part
         self.lap = _lap(self.timer, 'qp_set.frequency_reverse', self.lap)
         self.Bp_bars, self.proj_bar = Bp_bars, proj_bar
+
+    def _reverse_group(self, group, eps_terms, Bp_bars):
+        """One group of pass 2: each held frequency's chi0 replaced by its
+        chi0_bar, every state's B_p_bar terms chained onto Bp_bars."""
+        active, comm, rank, eye = self.active, self.comm, self.rank, self.eye
+        Bps, paired, pairs = self.Bps, self.paired, self.pairs
+        held = []
+        for fb in group:
+            for m, k in enumerate(fb.ks):
+                held.append((fb.chi0, m, k, screening_solver(eye - fb.chi0[m])))
+                fb.chi0[m] = 0.0
+        # every frequency of the group in order, with the rank that holds it
+        chain = [(k, rank if fb.owners is None else int(owner))
+                 for fb in group
+                 for k, owner in zip(fb.block, fb.owners or fb.block)]
+
+        def chain_state(si, terms):
+            """terms {k: B_p_bar term} of state si joined onto its B_p_bar in
+            frequency order, at the slice's owner."""
+            root = Bp_bars.owner(si)
+            onto = (Bp_bars.held[si] if rank == root
+                    else np.empty(Bp_bars.shape))
+            total = ordered_chain_sum(
+                {n: terms[k] for n, (k, owner) in enumerate(chain)
+                 if owner == rank}, [owner for _, owner in chain], comm,
+                onto, root=root)
+            if rank == root:
+                Bp_bars.held[si] = total
+
+        kept = {}
+        for j, a in enumerate(active):
+            si = a['si']
+            Bp = Bps.fetch(si)
+            terms = {}
+            for chi0, m, k, solve in held:
+                bb, cb, e_k = integral_term_reverse(a, Bp, solve(Bp), k)
+                chi0[m] += cb
+                eps_terms.append(((k, j), e_k))
+                terms[k] = bb
+            Bp = None
+            if si in paired:
+                kept[si] = terms
+            else:
+                chain_state(si, terms)
+            terms = None
+        # the off-diagonal contractions' adjoints, on the same solves, after
+        # every state's terms at each frequency as in the frequency-outside
+        # loop
+        for i, j, wc_bar in pairs:
+            Bi, Bj = Bps.fetch(i), Bps.fetch(j)
+            for chi0, m, k, solve in held:
+                bi, bj, cb = pair_term_backward(Bi, Bj, solve(Bi), solve(Bj),
+                                                wc_bar[k])
+                kept[i][k] = kept[i][k] + bi
+                kept[j][k] = kept[j][k] + bj
+                chi0[m] += cb
+            Bi = Bj = None
+        for a in active:
+            if a['si'] in kept:
+                chain_state(a['si'], kept.pop(a['si']))
 
     def direct_terms(self):
         """PASS 3 -- per state: the direct term, the residues, the slice
@@ -863,10 +885,11 @@ class QPSetPass:
                 D_bar = GridTileRows.zeros(D.shape[0], self.naux, rows_block,
                                            comm)
         for a in active:
-            p, zw, Bp, res, route = (a['p'], a['zw'], a['Bp'], a['res'],
-                                     a['route'])
+            p, zw, res, route = a['p'], a['zw'], a['res'], a['route']
+            Bp = self.Bps.fetch(a['si'])
+            Bp_bar = Bp_bars.fetch(a['si'])
+            Bp_bars.held.pop(a['si'], None)
             rs = a.pop('rs')
-            Bp_bar = Bp_bars[a['si']]
             eps_bar[p] += zw
             if res:
                 e_r, b_r, _ = residue_terms_backward(p, roots[p], Bp, eps,

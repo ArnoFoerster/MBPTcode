@@ -1,6 +1,12 @@
 """The ISDF fit trained on every AO product in the Coulomb metric, and the
 interpolation points it selects for itself.
 
+This is least-squares tensor hypercontraction (LS-THC; Parrish, Hohenstein,
+Martinez and Sherrill, J. Chem. Phys. 137, 224106 (2012)) in the Coulomb
+metric, with a per-point row scaling, on points chosen by Matthews' pivoted
+Cholesky selection over a larger parent grid (J. Chem. Theory Comput. 16,
+1382 (2020)), used here as the ISDF fit of the GW-BSE factors.
+
 THE FIT. With X[g, m] = chi_m(r_g) on the points, the factors interpolate
 every AO product, chi_m chi_n ~ sum_g X_gm X_gn zeta_g, and M[P, g] holds the
 auxiliary coefficients of zeta_g, so that D = M^T V^1/2 is the factor every
@@ -33,13 +39,15 @@ points puts the lowest three singlets and triplets within 0.45 meV of DF-RI
 at 9000 points and within 0.17 meV at 11000 (PXZ-TRZ: 0.57 meV at 10000,
 0.11 at 15000, where G3 is 3.6 meV off at 26640).
 
-THE POINTS. `pivoted_points` takes the tabulated atomic grid of the level
-with every sub-shell's radii resampled ISDF_PIVOT_PARENT_FACTOR times as
-densely (the parent), places it on the covariant atomic frames, and keeps the
-first `count` pivots of the exact pivoted Cholesky factorization of the
-parent's balanced Gram matrix G above, its columns formed on demand
-(`column_pivots`): the points whose AO products are least represented by the
-points already taken. Each kept point
+THE POINTS (Matthews' selection). The AO-product test set is what a named
+grid means where no test set is named, its points always pivoted:
+`pivot_points` of the numerics, else `pivot_count`. `pivoted_points` takes
+the tabulated atomic grid of the level with every sub-shell's radii
+resampled ISDF_PIVOT_PARENT_FACTOR times as densely (the parent), places it
+on the covariant atomic frames, and keeps the first `count` pivots of the
+exact pivoted Cholesky factorization of the parent's balanced Gram matrix G
+above, its columns formed on demand (`column_pivots`): the points whose AO
+products are least represented by the points already taken. Each kept point
 stays attached to its atom, in its atom's frame, so a selection frozen at a
 reference geometry is carried with the molecule exactly as a tabulated grid
 is (`FrozenFactorization`, `body_frame.BodyFrame`). Re-pivoting at every
@@ -56,8 +64,29 @@ adjoint divide the shell runs of the three-centre integrals over the ranks
 ranks; E's partials are added in rank order, the same bits on every rank and
 at another rank count the same to rounding. Every rank forms the (nk, nk)
 Gram matrix of the selected points and its Cholesky factor.
+
+THE ROW FIT. `ao_product_fit_rows` solves the same estimator with the points
+in the fixed tiles of `separable_ri.fit_rows` (FIT_CHOLESKY_BLOCK points,
+tile t rank t % size's), so that no rank holds an (nk, nk) array, or any
+nk-indexed array, whole:
+
+  Gram     G_ik = (X_i X_k^T)^2 o d_i d_k^T + reg I, i >= k, i owned, the
+           column tiles' collocation streamed (every rank evaluates each
+           once), d_k = 1/s_k from the tile's own rows;
+  pass     the shell runs in rounds of one run per rank, largest first: the
+           run's owner evaluates its (m n|P) and broadcasts it, and every
+           rank adds sum_mn (P|mn) X_gm X_gn of the run into its own tiles of
+           E^T, in the fixed run order; then E^T_i V^-1 per tile;
+  Cholesky `separable_ri.cholesky_tiles` and `backward_tiles`, the row
+           fit's right-looking sweep, M^T_i = d_i (G^-1 d F^T)_i.
+
+Every call has a shape fixed by the tile and run indices, and no partial is
+summed across ranks, so the rows are the same bits at every rank count, one
+rank included: another realization of the replicated fit's estimator, within
+its rounding (the balanced Gram matrix's conditioning), not its bits.
 """
 import threading
+import time
 from collections import OrderedDict
 
 import numpy as np
@@ -66,33 +95,48 @@ from pyscf import df as pyscf_df
 
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (BYTES_PER_GB, FIT_CHOLESKY_BLOCK,
+                                         ISDF_PIVOT_FRACTION,
                                          ISDF_PIVOT_MAX_GB,
-                                         ISDF_PIVOT_PARENT_FACTOR)
-from src.Base.factorization.separable_ri import (ao_values, atomic_points,
-                                                 auxmol_key, content_key,
-                                                 fit_settings)
+                                         ISDF_PIVOT_PARENT_FACTOR,
+                                         ISDF_PIVOT_POINTS_PER_ATOM)
+from src.Base.factorization.separable_ri import (RowFit, ao_values,
+                                                 atomic_points, auxmol_key,
+                                                 backward_tiles,
+                                                 cholesky_tiles, content_key,
+                                                 fit_settings,
+                                                 tile_collocation,
+                                                 total_bytes)
 from src.Base.utils.parallel.mpi_grid import (broadcast_rows, contiguous_block,
-                                              current_comm, ordered_chain_sum)
+                                              current_comm, lockstep,
+                                              ordered_chain_sum, partition)
 
 
 #: Pivots and fits already made, by content: the ISDF-K mean field and the
 #: post-SCF factors of one geometry ask for the same ones where they stand on
 #: the same parent, count and settings, and pay for them once. Keyed on the
-#: rank's communicator too, so the ranks of a distribution hit or miss
-#: together and none skips a collective the others enter.
+#: rank's place in its communicator; whether a lookup hits is agreed over the
+#: ranks (`_made`), since one rank's entry can be dropped while another's is
+#: kept (simulated ranks share this table).
 _MADE = OrderedDict()
 _MADE_LOCK = threading.Lock()
 #: Entries kept: a pivot and a fit for each of two geometries.
 _MADE_SIZE = 4
 
 
-def _made(key, build):
+def _made(key, build, comm=None):
     """`build()`'s value under `key`, made once while it stays among the
-    last `_MADE_SIZE` asked for."""
+    last `_MADE_SIZE` asked for. Under ranks (`comm`) it is read only where
+    every rank holds its own entry, else every rank builds again, so none
+    skips a collective of `build` the others enter."""
     with _MADE_LOCK:
-        if key in _MADE:
+        value = _MADE.get(key)
+        if value is not None:
             _MADE.move_to_end(key)
-            return _MADE[key]
+    hit = value is not None
+    if comm is not None and comm.Get_size() > 1:
+        hit = all(comm.allgather(hit))
+    if hit:
+        return value
     value = build()
     with _MADE_LOCK:
         _MADE[key] = value
@@ -324,7 +368,194 @@ def ao_product_fit(mol, auxmol, coords, numerics=None, comm=None):
         M = scipy.linalg.cho_solve(cho, (F * d[None, :]).T).T * d[None, :]
         return X, M, V
     return _made(('fit', _rank_key(comm), content_key(mol), auxmol_key(auxmol),
-                  _array_key(coords), regularization, block_gb), build)
+                  _array_key(coords), regularization, block_gb), build, comm)
+
+
+# ---------------------------------------------------------- the row fit
+
+def inverse_row_norms(X):
+    """d = 1/s with s_g = |X_g|^2, the norm of point g's row of the
+    AO-product test set (1 where it vanishes), from these rows alone."""
+    s = np.einsum('gm,gm->g', X, X)
+    s[s == 0.0] = 1.0
+    return 1.0 / s
+
+
+def product_gram_tiles(mol, coords, tiles, owners, rank, numerics, ext,
+                       hold):
+    """(S, d, X, X_ext) of the row fit: the balanced, regularized Gram tiles
+    S_ik = (X_i X_k^T)^2 o d_i d_k^T (i >= k) of the row tiles `rank` owns,
+    the fit's regularization (`fit_settings`) on the diagonal, as
+    `separable_ri.cholesky_tiles` reads them (row tile i holds columns
+    [0, end of tile i)); d over every point; the
+    collocation of this rank's tiles; and the rows [ext) of X. The column
+    tiles are streamed, each evaluated once by every rank, the tile's one
+    call (`tile_collocation`)."""
+    regularization, = fit_settings(numerics, 'regularization')
+    nao, nk = mol.nao_nr(), len(coords)
+    mine = owners[rank]
+    e0, e1 = ext
+    X_own = {t: tile_collocation(mol, coords[slice(*tiles[t])]) for t in mine}
+    hold('X_rows', total_bytes(X_own.values()))
+    X_ext = np.empty((e1 - e0, nao))
+    hold('X_ext', X_ext.nbytes)
+    d = np.empty(nk)
+    S = {i: np.empty((tiles[i][1] - tiles[i][0], tiles[i][1])) for i in mine}
+    for k, (k0, k1) in enumerate(tiles):
+        if k in X_own:
+            X_k = X_own[k]
+        else:
+            X_k = tile_collocation(mol, coords[k0:k1])
+            hold('stream_tile', X_k.nbytes)
+        d[k0:k1] = inverse_row_norms(X_k)
+        if k0 < e1 and k1 > e0:
+            X_ext[k0 - e0:k1 - e0] = X_k
+        for i in mine:
+            if i >= k:
+                A = X_own[i] @ X_k.T
+                A *= A
+                S[i][:, k0:k1] = A
+        del X_k
+    for i in mine:
+        i0, i1 = tiles[i]
+        S[i] *= d[i0:i1, None]
+        S[i] *= d[None, :i1]
+        S[i][:, i0:i1][np.diag_indices(i1 - i0)] += regularization
+    hold('S_rows', total_bytes(S.values()))
+    return S, d, X_own, X_ext
+
+
+def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
+                    also=None):
+    """{t: E^T_t}, E[P, g] = sum_mn (P|mn) X_gm X_gn on this rank's tiles
+    (X_own, {tile: collocation}), one pass over the shell runs
+    (`shell_runs`), largest first.
+
+    The runs go in rounds of one per rank: each rank evaluates its run's
+    (m n|P) and every run is broadcast by its owner in turn, so each tile
+    adds the runs in the one fixed order whoever evaluated them, the same
+    calls on the same shapes: the same bits at every rank count. also(t, T,
+    a0, a1), where given, is called with each tile's half-transformed run
+    T[m, P, g] = sum_n (m n|P) X[g, n] (`half_transformed`) and its AO span
+    (the adjoint reads the pass through it).
+    """
+    comm = current_comm() if comm is None else comm
+    rank, nranks = (0, 1) if comm is None else (comm.Get_rank(),
+                                                comm.Get_size())
+    nao, naux = mol.nao_nr(), auxmol.nao_nr()
+    runs = shell_runs(mol, auxmol, numerics)
+    width = [a1 - a0 for _, _, a0, a1 in runs]
+    order = sorted(range(len(runs)), key=lambda ib: (-width[ib], ib))
+    Et = {t: np.zeros((len(x), naux)) for t, x in X_own.items()}
+    if hold is not None:
+        hold('E_rows', total_bytes(Et.values()))
+    for c0 in range(0, len(order), nranks):
+        batch = order[c0:c0 + nranks]
+        own = None
+        if rank < len(batch):
+            own = half_transform_operand(three_centre_block(mol, auxmol,
+                                                            runs[batch[rank]]))
+        for pos, ib in enumerate(batch):
+            a0, a1 = runs[ib][2], runs[ib][3]
+            nb = a1 - a0
+            operand = own if pos == rank else np.empty((nb * naux, nao))
+            broadcast_rows(operand, pos, comm)
+            if hold is not None:
+                hold('run_block', operand.nbytes
+                     + (0 if own is None or pos == rank else own.nbytes))
+            for t, X_t in X_own.items():
+                T = half_transformed(operand, X_t, 0, len(X_t), nb)
+                Et[t] += np.einsum('mPg,gm->gP', T, X_t[:, a0:a1])
+                if also is not None:
+                    also(t, T, a0, a1)
+                del T
+            del operand
+        own = None
+    return Et
+
+
+def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
+                        block=None, tiles=None, timings=None):
+    """The AO-product fit's M^T as this rank's block-cyclic tiles of `block`
+    points (FIT_CHOLESKY_BLOCK when None), a `separable_ri.RowFit`: the
+    row fit of the module docstring, the same bits at every rank count.
+
+    tiles: a `separable_ri.FitTiles` of this fit another stage holds (the
+    distributed ISDF-K SCF's), read in place of fitting where it is this
+    fit -- the AO-product test set, molecule, auxiliary basis, points, tile
+    edge, settings and ranks -- and ignored otherwise.
+    timings: filled with 'fit_gram', 'fit_integrals', 'fit_cholesky'
+    (factorization and both substitutions); read from `tiles`,
+    'fit_collocation' and 'fit_reused_tiles'.
+    """
+    settings = fit_settings(numerics, 'l_max_second', 'pair_tol',
+                            'regularization', 'block_memory_gb')
+    regularization = settings[2]
+    comm = current_comm() if comm is None else comm
+    rank, nranks = (0, 1) if comm is None else (comm.Get_rank(),
+                                                comm.Get_size())
+    if nranks > 1:
+        coords = lockstep(coords, comm)
+    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    if block < 1:
+        raise ValueError(f'block={block}: a tile holds at least one point')
+    if tiles is not None:
+        _t = time.time()
+        handed = tiles.row_fit(mol, auxmol, coords, block, comm, settings,
+                               test_set='ao_products')
+        if handed is not None:
+            if timings is not None:
+                timings['fit_collocation'] = time.time() - _t
+                timings['fit_reused_tiles'] = len(handed.mt)
+            return handed
+    nk = len(coords)
+    grid = [(t0, min(t0 + block, nk)) for t0 in range(0, nk, block)]
+    owners = [[int(t) for t in partition(len(grid), r, nranks)]
+              for r in range(nranks)]
+    mine = owners[rank]
+    r0, r1 = contiguous_block(nk, rank, nranks)
+    e0 = e1 = r0             # the whole tiles over this rank's contiguous rows
+    if r1 > r0:
+        e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
+    # every array the fit may hold, zero until it does: the same keys on
+    # every rank
+    held = dict.fromkeys(('metric_lu', 'X_rows', 'X_ext', 'stream_tile',
+                          'S_rows', 'E_rows', 'run_block', 'panel',
+                          'MT_rows'), 0)
+
+    def hold(name, nbytes):
+        held[name] = max(held[name], int(nbytes))
+
+    _t = time.time()
+    lu = scipy.linalg.lu_factor(auxmol.intor('int2c2e', aosym='s1'))
+    if nranks > 1:
+        # one metric, rank 0's, for every tile's solve
+        lu = lockstep(lu, comm, check=True)
+    hold('metric_lu', lu[0].nbytes)
+    S, d, X_own, X_ext = product_gram_tiles(mol, coords, grid, owners, rank,
+                                            numerics, (e0, e1), hold)
+    if timings is not None:
+        timings['fit_gram'] = time.time() - _t
+    _t = time.time()
+    R = projection_rows(mol, auxmol, X_own, numerics, comm, hold)
+    del X_own
+    for i in mine:
+        # F^T = E^T V^-1 (V symmetric), balanced
+        R[i] = np.ascontiguousarray(scipy.linalg.lu_solve(lu, R[i].T).T)
+        R[i] *= d[slice(*grid[i]), None]
+    del lu
+    if timings is not None:
+        timings['fit_integrals'] = time.time() - _t
+    _t = time.time()
+    diagonal, panels = cholesky_tiles(S, grid, owners, rank, comm, [R],
+                                      regularization, hold)
+    backward_tiles(diagonal, panels, R, grid, owners, rank, comm, keep=False)
+    for i in mine:
+        R[i] *= d[slice(*grid[i]), None]
+    if timings is not None:
+        timings['fit_cholesky'] = time.time() - _t
+    hold('MT_rows', total_bytes(R.values()))
+    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held)
 
 
 # ---------------------------------------------------------------- the pivot
@@ -366,9 +597,7 @@ def column_pivots(mol, coords, count, numerics=None, comm=None):
     X, d, r, L = {}, {}, {}, {}
     for t, t0, t1 in mine:
         X[t] = np.ascontiguousarray(ao_values(mol, coords[t0:t1]))
-        a = np.einsum('gm,gm->g', X[t], X[t])
-        a[a == 0.0] = 1.0
-        d[t] = 1.0 / a
+        d[t] = inverse_row_norms(X[t])
         # (a a) d d is 1 up to rounding; its exact value, so the first pivot,
         # a tie of every point, goes to the lowest index whatever the
         # rounding
@@ -419,13 +648,31 @@ def column_pivots(mol, coords, count, numerics=None, comm=None):
     return np.array(order, dtype=int)
 
 
+def pivot_count(natm, n_parent):
+    """The point count pivoted where none is asked for:
+    max(ISDF_PIVOT_FRACTION x n_parent, ISDF_PIVOT_POINTS_PER_ATOM x natm),
+    at most the parent (constants.py has the measurements)."""
+    want = max(int(np.ceil(ISDF_PIVOT_FRACTION * n_parent)),
+               ISDF_PIVOT_POINTS_PER_ATOM * int(natm))
+    return min(int(n_parent), want)
+
+
+def pivot_key(mol, coords, count, numerics, comm):
+    """The key a pivot is kept under (`_made`): this rank's place, the
+    molecule, the placed parent, the count and the fit's regularization
+    (`fit_settings` of `numerics`)."""
+    regularization, = fit_settings(numerics, 'regularization')
+    return ('pivot', _rank_key(comm), content_key(mol), _array_key(coords),
+            int(count), float(regularization))
+
+
 def pivoted_points(mol, element_radii, origins, frames, count, numerics=None,
                    comm=None):
     """(pts_local, owner, parent_size): the `count` points pivoted from the
     parent grid (`parent_layout` on `element_radii` and `origins`, placed on
     `frames`) for the AO-product test set (`column_pivots`), each kept with
     its atom, in the parent's order; the clouds as
-    `FrozenFactorization.coords` reads them.
+    `FrozenFactorization.coords` reads them. count None is `pivot_count`'s.
 
     A count above the parent's size, and a pivot whose factor columns would
     exceed ISDF_PIVOT_MAX_GB on one rank, are refused before anything is
@@ -436,6 +683,8 @@ def pivoted_points(mol, element_radii, origins, frames, count, numerics=None,
     comm = current_comm() if comm is None else comm
     pts_local, owner = parent_layout(mol, element_radii, origins)
     n_parent = len(owner)
+    if count is None:
+        count = pivot_count(mol.natm, n_parent)
     if count > n_parent:
         raise ValueError(
             f'pivot_points={count} exceeds the {n_parent} points of the '
@@ -448,10 +697,9 @@ def pivoted_points(mol, element_radii, origins, frames, count, numerics=None,
             f'ISDF_PIVOT_MAX_GB = {ISDF_PIVOT_MAX_GB:g} GB; run it over more '
             'ranks or ask for fewer points')
     coords = placed(mol, pts_local, frames)
-    keep = np.sort(_made(('pivot', _rank_key(comm), content_key(mol), _array_key(coords),
-                          int(count), regularization),
+    keep = np.sort(_made(pivot_key(mol, coords, count, numerics, comm),
                          lambda: column_pivots(mol, coords, int(count),
-                                               numerics, comm)))
+                                               numerics, comm), comm))
     starts = np.concatenate([[0], np.cumsum([len(p) for p in pts_local])])
     local = []
     for ia in range(mol.natm):

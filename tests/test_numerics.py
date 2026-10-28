@@ -62,6 +62,8 @@ def test_every_choice_moves_the_identity(section, name):
         other = 'sop'
     if (section, name) == ('isdf', 'fit'):
         other = 'rows'
+    if (section, name) == ('isdf', 'test_set'):
+        other = 'ao_products'
     if (section, name) == ('layout', 'z_mode'):
         other = 'dense'
     if (section, name) == ('bse', 'preconditioner'):

@@ -59,10 +59,11 @@ from src.environments.pcm_derivatives import (bound_pyscf_pcm_blocks,
                                      potential_integral_gradient, solvation_gradient)
 from src.environments.pcm_factorization import factorize_once
 from src.Base.utils.record_io import record_hash
-from src.environments.solvent_screening import SolventScreening, symmetrized_response
+from src.environments.solvent_screening import (SolventScreening, pcm_radii_table,
+                                                symmetrized_response)
 
 RESPONSES = ('static', 'fast')
-CAVITY_KEYS = ('lebedev_order', 'vdw_scale', 'r_probe', 'radii_table')
+CAVITY_KEYS = ('lebedev_order', 'vdw_scale', 'r_probe', 'radii_table', 'radius_set')
 
 
 def _cavity_of(env):
@@ -137,7 +138,9 @@ class ContinuumField:
         p = self._new_pcm(self.mol)
         p.eps, p.method, p.verbose = eps, self.method, 0
         for k, v in self._cavity.items():
-            setattr(p, k, v)
+            if k not in ('radius_set', 'radii_table'):
+                setattr(p, k, v)
+        p.radii_table = pcm_radii_table(self._cavity)
         bound_pyscf_pcm_blocks(p)
         p.build()
         factorize_once(p)
@@ -183,13 +186,19 @@ class ContinuumField:
 
     def identity(self):
         """What this medium is, for a checkpoint's key: the model, both
-        dielectric constants, the cavity settings and a digest of its sites
-        and their areas."""
+        dielectric constants, the cavity settings (a radius table of one's
+        own by its digest; the radius set by name unless it is the modified
+        Bondi set, which a key without a name has always meant) and a digest
+        of its sites and their areas."""
         surf = self._pcm['static'].surface
+        cavity = {k: v for k, v in self._cavity.items()
+                  if not (k == 'radius_set' and v == 'bondi')}
         return dict(medium='continuum', method=self.method,
                     eps_static=self.eps['static'], eps_inf=self.eps['fast'],
-                    cavity={k: (None if v is None else str(v))
-                            for k, v in sorted(self._cavity.items())},
+                    cavity={k: (None if v is None else
+                                record_hash(np.asarray(v, float))
+                                if isinstance(v, np.ndarray) else str(v))
+                            for k, v in sorted(cavity.items())},
                     sites=record_hash((np.asarray(surf['grid_coords'], float),
                                        np.asarray(surf['area'], float))))
 

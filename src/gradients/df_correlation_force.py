@@ -10,8 +10,8 @@ A correlated energy E_c on RHF orbitals is described to this module by
     Y_extra (nmo, nmo)                dE_c / dkappa_rp of any further orbital
                                        dependence (a reaction field's LR term)
 
-with E_c depending on B only through sum_P B^P_pq B^P_rs. MP2 is here
-(`mp2_pieces`); ADC(2) in src.gradients.adc.ee_gradient.
+with E_c depending on B only through sum_P B^P_pq B^P_rs. MP2 and SCS-MP2 are here
+(`mp2_pieces`); ADC(2) and SCS-ADC(2) in src.gradients.adc.ee_gradient.
 
 The orbitals. For C -> C (1 + kappa) (kappa general), dL/dkappa_rp = Y_rp,
 
@@ -41,11 +41,13 @@ phase and in a fixed field.
 import numpy as np
 import scipy.linalg
 from pyscf import df as pyscf_df
-from pyscf import scf
+from pyscf.dft.rks import KohnShamDFT
 
+from src.Base.pyscf.cphf import ResponseKernel
 from src.Base.pyscf.pyscf_interface import auxmol_of
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
-                                                      doubles_denominator)
+                                                      doubles_denominator, singlet_pairs)
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
 from src.gradients.grad_engine import one_electron_skeleton
 from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
@@ -73,16 +75,18 @@ def whitening(auxmol):
     return V, scipy.linalg.solve_triangular(Lc, np.eye(Lc.shape[0]), lower=True)
 
 
-def mp2_pieces(B, eps, nf, nocc):
+def mp2_pieces(B, eps, nf, nocc, scaling=None):
     """(e_mp2, gamma (nmo, nmo), Gamma (nmo, nmo, naux)) of closed-shell
     DF-MP2 with nf frozen core orbitals: E = -sum I tau, tau = (2 I - I~) / D,
-    D = e_a + e_b - e_i - e_j > 0."""
+    D = e_a + e_b - e_i - e_j > 0. scaling (c_os, c_ss): SCS-MP2, tau =
+    [(c_os + c_ss) I - c_ss I~] / D (df_amplitudes.singlet_pairs); E stays
+    quadratic in I, so gamma and Gamma keep their form."""
     nmo, naux = B.shape[0], B.shape[2]
     o, v = slice(nf, nocc), slice(nocc, nmo)
     L = B[o, v]
     I = np.einsum('iaP,jbP->iajb', L, L)
     D = doubles_denominator(eps[o], eps[v])
-    tau = (2.0 * I - I.transpose(PAIR)) / D
+    tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
     e = -float(np.sum(I * tau))
     g_oo, g_vv = amplitude_fock(-I / D, tau)
     gamma = np.zeros((nmo, nmo))
@@ -105,18 +109,11 @@ def jk_fit(mf):
 
 def scf_kernel(mf):
     """G(x) = J[x] - K[x]/2 of mf's own interaction (its JK fit, or the exact
-    integrals when it has none), no environment, built serially whatever the
-    mean field's distribution."""
-    with_df = getattr(mf, 'with_df', None)
-    m = scf.RHF(mf.mol)
-    if with_df is not None:
-        m = m.density_fit(auxbasis=with_df.auxbasis)
-        m.with_df = with_df
-
-    def kernel(x):
-        vj, vk = m.get_jk(mf.mol, x, hermi=1)
-        return vj - 0.5 * vk
-    return kernel
+    integrals when it has none), no environment: a ResponseKernel whose Fock
+    builds are shared over the current communicator's ranks, a collective
+    that every rank calls alike (as the multiplier solve's root-driven
+    iteration does)."""
+    return ResponseKernel(mf, current_comm())
 
 
 def relax(mf, mol, B, gamma0, Gam, nf, Y_extra=None, numerics=None, flags=None):
@@ -132,7 +129,9 @@ def relax_gradient(mf, mol, YG, gamma0, nf, numerics=None, flags=None):
     """relax from the Gamma part of the orbital gradient, YG_rp = sum_qP
     Gs2^P_pq B^P_rq (+ Y_extra), however it was assembled: the multipliers of
     the virtual-occupied and frozen-core-active pairs (module docstring),
-    their tolerances from `numerics`, a short solve flagged into `flags`."""
+    their tolerances from `numerics`, a short solve flagged into `flags`. Under
+    ranks a collective: rank 0 iterates, every rank builds its share of each
+    Fock matrix (scf_kernel)."""
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)
     nmo, nocc = C.shape[1], mol.nelectron // 2
@@ -179,23 +178,41 @@ def hf_force(mf):
     nuclear repulsion included. The mean field's own gradient class
     (mf.nuc_grad_method()): RHF or DF-RHF, and for a Kohn-Sham reference the
     RKS class with its exchange-correlation term (RHF's class there would
-    differentiate J - K/2 and no XC)."""
+    differentiate J - K/2 and no XC), its quadrature's motion included
+    (`grid_response`, which pyscf leaves off: without it the force of a
+    Kohn-Sham reference is not the derivative of its energy)."""
     g = mf.nuc_grad_method()
     g.verbose = 0
+    if isinstance(mf, KohnShamDFT):
+        g.grid_response = True
     return g.kernel()
 
 
-def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None):
+def mp2_density(mf, mol, frozen, auxbasis, numerics=None, flags=None, scaling=None):
+    """(e_mp2, gamma (MO, relaxed)) of DF-MP2 on the dense reference: the
+    force's energy and relaxed density without its derivative integrals,
+    d E_MP2 / d h_pq; numerics, flags and scaling as mp2_force's."""
+    jk_fit(mf)                     # refuses a mean field with no JK fit
+    nocc = mol.nelectron // 2
+    ri = RIFactors(mol, mf, auxbasis)
+    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc, scaling)
+    gamma, _ = relax(mf, mol, ri.B, gamma, Gam, frozen, None, numerics, flags)
+    return e2, gamma
+
+
+def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None,
+              scaling=None):
     """(dE/dR (natm, 3), (e_mp2, gamma (MO, relaxed), max |Y - Y^T|, extra)) of
     E_HF + E_MP2 on the dense reference; excited(C, nocc, nmo) -> (gamma,
     Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout.
     numerics: the caller's (the Z-vector's tolerances); flags: the list a
-    short Z-vector solve appends its flag to."""
+    short Z-vector solve appends its flag to; scaling: (c_os, c_ss) of
+    SCS-MP2, or None (mp2_pieces)."""
     jk_fit(mf)                     # refuses a mean field with no JK fit
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
     ri = RIFactors(mol, mf, auxbasis)
-    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc)
+    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc, scaling)
     Y_extra = extra = None
     if excited is not None:
         g1, G1, Y_extra, extra = excited(C, nocc, nmo)

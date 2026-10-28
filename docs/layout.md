@@ -35,7 +35,9 @@ src/Base/                      the foundation
     factorization/             separable_ri.py (ISDF / separable RI of the
                                ERIs, with its radii table in data/),
                                ao_product_fit.py (the fit on every AO
-                               product and its pivoted points),
+                               product and its pivoted points: LS-THC of
+                               Parrish et al. with Matthews' selection,
+                               used as the ISDF fit),
                                isdf_jk.py (ISDF Coulomb and exchange for the
                                SCF), the distributed DF and ISDF builds,
                                sliced_factors.py
@@ -69,7 +71,9 @@ src/Solvers/                   the quasiparticle root finder (one for every
                                route), the symmetric Davidson eigensolver,
                                and the active-space solvers (FCI,
                                determinant basis, DMRG)
-src/environments/              solvent_screening.py (PCM reaction field and
+src/environments/              medium.py (a medium by name or by eps and
+                               n^2, and the cavity conventions),
+                               solvent_screening.py (PCM reaction field and
                                its adjoint), pcm_factorization.py and
                                pcm_derivatives.py (the cavity's cached solve
                                and nuclear derivatives), environment.py
@@ -154,8 +158,10 @@ src/properties/                optimize.py (walks, refreeze), vibronic.py,
                                state_moments.py (dipoles between two
                                excited states)
 src/photophysics/              rates.py (golden-rule and Marcus rates, the
-                               rate table), forster.py (Förster transfer and
-                               annihilation rates and radii),
+                               rate table), rate_chain.py (ISC and RISC
+                               of any method's minima on the full model and
+                               each of its ablations), forster.py (Förster
+                               transfer and annihilation rates and radii),
                                transfer_rates.py (rates of triplet transfer
                                and triplet-triplet annihilation between
                                molecules) and the composite runs: the

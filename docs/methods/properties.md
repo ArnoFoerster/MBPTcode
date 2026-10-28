@@ -174,6 +174,43 @@ valence internal coordinates (`properties.curvilinear`), so a rotated methyl
 or amino group does not show up as a fake displacement along the C-H
 stretches.
 
+**ISC and RISC of any method** — `src/photophysics/rate_chain.py` computes
+intersystem crossing S1 -> T1 and its reverse from one method's S1 and T1
+minima (`minimum.StateMinimum`, filled alike by GW-BSE, ADC(2) or any other
+method) and two Hessians at their own minima, which may come from another
+method (an ORCA TD-DFT `.hess` read with `read_orca_hessian`). The model is
+declared field by field in `RateModel`: Duschinsky rotation, frequency change
+and zero-point difference; the displacement from the method's own minima
+(curvilinear or Cartesian) or from its gradient at the other minimum; the
+solvent reorganization (non-equilibrium minus equilibrium energy of the
+accepting state) as the classical broadening; the Condon coupling plus its
+nuclear derivative; the Boltzmann-populated singlets and triplets with every
+reachable pair, so RISC through T2 is included. A second-order path through a
+nearly degenerate state (T2 a few meV above T1) is outside first-order
+mixing: its coupling-to-gap ratio r, read off the path's own derivative
+(`spin_vibronic.path_ratio`), switches that direction to the diabatic
+two-state model above 0.1, where the path state's exact thermal weight
+(`spin_vibronic.mixed_weight`, at most 1/2) replaces r^2; the record says
+which model each rate used, and `mixing` is a switch of its own. `ablation_ladder` removes
+one ingredient at a time down to a single Marcus-Levich-Jortner mode with an
+assumed reorganization energy, and every rung records its model:
+
+```python
+from src.photophysics.rate_chain import (RateInputs, RateModel,
+                                         ablation_ladder, rate_chain)
+from src.properties.duschinsky import read_orca_hessian
+
+inputs = RateInputs(s1=s1_minimum, t1=t1_minimum,
+                    hessians={'S1': read_orca_hessian('s1.hess', mol),
+                              'T1': read_orca_hessian('t1.hess', mol)},
+                    gradients={}, solvent=solvent_energies)
+full = RateModel.full('curvilinear', 0.0)
+table = rate_chain(inputs, full, 300.0)
+print(table['ISC']['k_eff'], table['RISC']['k_eff'])
+for rung in ablation_ladder(inputs, full, 300.0, shared=inputs):
+    print(rung['step'], rung.get('refused') or rung['table']['RISC']['k_eff'])
+```
+
 **Photophysics from the command line** — `src/photophysics` runs the TADF
 rates of an emitter in stages: the S0 minimum, its modes, the vertical
 spectrum, the S1 and T1 minima, then the rates. Each stage writes a record
@@ -193,6 +230,30 @@ python -m src.photophysics --system formaldehyde \
 The records land in `tadf/formaldehyde/gas/`. `--rate-model uisc` runs the
 UISC protocol of Samanta et al. instead, and `--distribute` under `srun`
 spreads the stages over MPI ranks.
+
+In a solvent the run names how its states are solvated, one way for every
+stage: `--solvent-scheme scheme-a` (the solvated BSE of Duchemin et al.),
+`scheme-b-eq` or `scheme-b-noneq`. Under both scheme-B names every state,
+the ground state included, is made self-consistent with its own relaxed
+density in the continuum (the same states as `solvated` below), the walks
+relax the solvated free energy of each state, absorption and emission are
+non-equilibrium energies, and the couplings and oscillator strengths at each
+geometry are taken in one reaction field, held fixed. `scheme-b-eq` gives each
+excited minimum its energy with the solvent relaxed around it (adiabatic
+gaps in equilibrium); `scheme-b-noneq` with the solvent left as the ground
+state had it. The S0 Hessian can come from another program (`--hessian
+external --hessian-file s0.hess`, an ORCA .hess file computed at the geometry
+in `s0.xyz`):
+
+```bash
+python -m src.photophysics --system formaldehyde \
+    --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
+    --basis cc-pvdz --environment toluene --solvent-scheme scheme-b-eq \
+    --temperature 300 --lambda-env 0.05 --nudge 0.02 --no-far-start \
+    --refreeze 1 --saddle-check 0 --df-check 0 --hessian analytic-df \
+    --relaxed-solvation equilibrium --span full --manifold-gaps stacked \
+    --tda --qp-states frontier --scf df --scf-grad-tol 1e-9 --out tadf
+```
 
 `python -m src.photophysics solvated` gives the absorption, emission and
 adiabatic S1 and T1 energies of one molecule in the gas phase and in a

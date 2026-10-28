@@ -57,9 +57,14 @@ fixed relaxed density, the last the medium's part of a method's LR terms
 (Haettig and Pausch Eqs. 40-47). Equilibrium states only: a minimum of G_eq is
 the structure an emission or an adiabatic energy starts from.
 
-The loop. q from the state's gas-phase density; then the state in the field of
+The loop. q from the state's gas-phase density, or the start charges q0
+handed in; then the state in the field of
 q, its relaxed density, the medium's answer; DIIS on q; stop when the largest
-change of a charge and of G are below their tolerances. A loop that reaches
+change of a charge and of G are below their tolerances. A cycle at zero charges
+whose answer is zero (a medium with no response: no sites, or a continuum at
+eps = 1) is the fixed point itself and ends the loop at once, converged; the
+gas-phase call that set q0 = 0 is that cycle, so such a loop calls the state
+once. A loop that reaches
 loop_max_cycle first is a numerical event (the policy: refuse inputs, warn
 numerics): it warns (SolvationNotConverged, a RuntimeWarning) and
 returns its last cycle -- G at the charges the state was last solved in --
@@ -73,6 +78,17 @@ NaN; a walk rejects that step
 (properties.optimize.NonFiniteEvaluation). A state model with a linear-response term (its lr_environment) must read
 the field's own transition_environment(), the same object: the loop refuses
 any other (another cavity or eps_inf would answer the transition density).
+
+Frozen surfaces. A state model whose first evaluation fixes its surface
+(`freezes_on_first_call`, a GW-BSE excited state: its chain freezes its
+orbital conventions on the mean field of that call) is built in S0's
+equilibrium charges at that geometry: its loop needs q0 (those charges), and
+one started from no charges in a medium with sites is refused (a chain
+frozen on the zero-charge mean field cannot match the orbitals of the
+reaction field when diffuse frontier orbitals rotate in it).
+`vertical_energies` starts both loops of the state from S0's; the solvated
+surface (`src.gradients.solvated_surface`) runs S0's loop first where it has
+no charges to start from.
 
 Checkpoint. equilibrate(..., checkpoint=path) writes, after every cycle,
 what the next cycle starts from (src.Base.utils.record_io, atomic): the charges, the
@@ -239,7 +255,9 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
                 checkpoint=None):
     """The loop of the module docstring: G_eq of `state` in `field`, or with
     slow = (q_s, c_s) (slow_charges of another state) G_neq. q0: starting
-    charges (default: the answer to the state's gas-phase density).
+    charges (default: the answer to the state's gas-phase density); required
+    for a model whose first call freezes its surface (module docstring,
+    "Frozen surfaces").
     numerics: a `src.Base.numerics.numerics.Numerics`, whose solvent section holds the
     loop's tolerances loop_tol_q, loop_tol_energy and its loop_max_cycle; None
     takes the state model's own, else the defaults (`loop_numerics`). checkpoint: a path (JSON, its arrays
@@ -265,17 +283,27 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
             return field.charges(V, 'static'), V
         return slow[0] + field.charges(V, 'fast'), V
 
+    if (q0 is None and field.nsites
+            and getattr(state, 'freezes_on_first_call', False)):
+        raise ValueError(
+            f'{type(state).__name__} freezes its surface on its first call: '
+            "start its loop from S0's equilibrium charges at this geometry "
+            "(q0=, the S0 loop's q; SolvatedSurface(make_ground=)), not from "
+            'no charges')
     identity = (None if checkpoint is None
                 else _identity(state, field, slow, q0, tol_q, tol_energy))
     saved = None if checkpoint is None else _resume(checkpoint, state, identity)
     diis = lib.diis.DIIS()
     diis.space = SOLVATION_LOOP_DIIS_SPACE
+    # the gas-phase call, kept as the first cycle when its answer is zero
+    pre = None
     if saved is None:
         if q0 is None:
             r = state(*field.operator(np.zeros(field.nsites)))
             if not np.isfinite(lockstep(r.energy)):
                 return _stopped(r, np.zeros(field.nsites), [], 0)
             q0 = answer(r.dm_eff)[0]
+            pre = r
         q = lockstep(np.array(q0, float), check=True)
         history, G_old, steps, start = [], None, [], 1
     else:
@@ -287,7 +315,12 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
     dq, dG = (history[-1][2] if history else float('nan')), None
     last = None
     for cycle in range(start, max_cycle + 1):
-        r = state(*field.operator(q))
+        if pre is not None and not np.any(q):
+            # the gas-phase call was made at these charges: it is this cycle
+            r = pre
+        else:
+            r = state(*field.operator(q))
+        pre = None
         q_new, V = answer(r.dm_eff)
         q_new, V, dm_eff, E = lockstep((q_new, V, np.array(r.dm_eff), r.energy),
                                        check=True)
@@ -301,7 +334,9 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
         history.append((cycle, G, dq))
         say(f'solvation cycle {cycle}: G {G:.12f}  max|dq| {dq:.2e}'
             + ('' if dG is None else f'  |dG| {dG:.2e}'))
-        if dq < tol_q and dG is not None and dG < tol_energy:
+        # zero charges answered by zero charges: the fixed point, G exact
+        fixed = not np.any(q) and not np.any(q_new)
+        if fixed or (dq < tol_q and dG is not None and dG < tol_energy):
             return LoopResult(energy=G, state_energy=r.energy,
                               polarization=pol, q=q, dm_eff=r.dm_eff,
                               info=r.info, history=history, converged=True,
@@ -356,11 +391,13 @@ def vertical_energies(make_ground, make_state, field, **loop_kw):
     docstring). make_ground() / make_state() -> fresh state models (each loop
     warm-starts its own). Returns the four loops, their G, the two vertical
     energies (Hartree), whether every loop converged and, by loop, the names
-    of the flags each carries (none for a clean run)."""
+    of the flags each carries (none for a clean run). Both loops of the
+    state start from S0's equilibrium charges (module docstring, "Frozen
+    surfaces")."""
     g0 = equilibrate(make_ground(), field, **loop_kw)
-    gx = equilibrate(make_state(), field, **loop_kw)
+    gx = equilibrate(make_state(), field, q0=g0.q, **loop_kw)
     neq_x = equilibrate(make_state(), field, slow=slow_charges(field, g0.dm_eff),
-                        **loop_kw)
+                        q0=g0.q, **loop_kw)
     neq_0 = equilibrate(make_ground(), field, slow=slow_charges(field, gx.dm_eff),
                         **loop_kw)
     loops = dict(eq_ground=g0, eq_state=gx, neq_state=neq_x, neq_ground=neq_0)

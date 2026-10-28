@@ -43,7 +43,11 @@ modes add up their phases.
 
 The excited-state Hessian is INPUT: any object with `.mol` and `.hessian`
 (`CartesianHessian`; `read_orca_hessian` reads an ORCA .hess file as data).
-Nothing here computes one.
+Nothing here computes one. The mode sets and the displacement may come from
+different methods: `mode_sets` takes the two Hessians (a TD-DFT pair at the
+TD-DFT minima, say), and `displacement_from_minima` or
+`displacement_from_gradient` gives K from another method's own minima or
+gradient.
 
 Energies in Hartree, time in atomic units, temperature in Kelvin.
 """
@@ -56,9 +60,10 @@ from scipy.linalg import lu_factor, lu_solve
 
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
-from src.properties.franck_condon import (real_axis_density,
+from src.properties.franck_condon import (envelope_time, real_axis_density,
                                           require_vibrational_modes,
                                           thermal_energy)
+from src.properties.curvilinear import curvilinear_displacement
 from src.properties.optimize import cartesian_hessian
 from src.properties.vibronic import align_to, normal_modes
 
@@ -289,6 +294,19 @@ def duschinsky_model(ground, excited):
     J is replaced by its nearest orthogonal matrix (polar factor); a
     deviation above DUSCHINSKY_ORTHOGONALITY_TOL warns.
     """
+    sg, se, j, dev = mode_sets(ground, excited)
+    k = _displacement(se, sg.masses, sg.mol, se.mol)
+    return DuschinskyModel(sg.omega, se.omega, j, k, orthogonality=dev,
+                           source=f'{sg.source} / {se.source}')
+
+
+def mode_sets(ground, excited):
+    """(ground `HarmonicState`, excited `HarmonicState` turned onto the
+    ground minimum's frame, J, deviation): the two mode sets of
+    `duschinsky_model` and their overlap J = L_e^T L_g, replaced by its
+    nearest orthogonal matrix (polar factor); `deviation` is max |s - 1|
+    over J's singular values, and above DUSCHINSKY_ORTHOGONALITY_TOL it
+    warns (`DuschinskyNotOrthogonal`)."""
     g, e = as_cartesian_hessian(ground), as_cartesian_hessian(excited)
     if [g.mol.atom_symbol(i) for i in range(g.mol.natm)] != \
             [e.mol.atom_symbol(i) for i in range(e.mol.natm)]:
@@ -309,10 +327,71 @@ def duschinsky_model(ground, excited):
                       f'(singular values {s.min():.6f}..{s.max():.6f}); its '
                       f'nearest orthogonal matrix is used',
                       DuschinskyNotOrthogonal)
-    dx = (np.asarray(sg.mol.atom_coords()) - np.asarray(mol_e.atom_coords()))
-    k = se.modes.T @ (dx.ravel() * np.repeat(sg.masses, 3) ** 0.5)
-    return DuschinskyModel(sg.omega, se.omega, u @ vt, k, orthogonality=dev,
-                           source=f'{g.source} / {e.source}')
+    return sg, se, u @ vt, dev
+
+
+def _displacement(se, masses, mol_g, mol_e):
+    """K = L_e^T M^{1/2} (x_g - x_e) of two geometries in one frame."""
+    dx = (np.asarray(mol_g.atom_coords()) - np.asarray(mol_e.atom_coords()))
+    return se.modes.T @ (dx.ravel() * np.repeat(masses, 3) ** 0.5)
+
+
+def minima_in_frame(sg, mol_g, mol_e):
+    """(ground minimum, its rotation, excited minimum, its rotation): two
+    minima of any method, in any frame, turned into the frame of the ground
+    mode set `sg` (`mode_sets`): the ground minimum superposed on `sg.mol`,
+    the excited one on that (mass-weighted Kabsch, `align_to`). A rotation
+    turns a per-atom vector of the minimum's own frame into this one
+    (v @ rotation)."""
+    g_in, rot_g = align_to(sg.mol, mol_g, return_rotation=True)
+    e_in, rot_e = align_to(g_in, mol_e, return_rotation=True)
+    return g_in, rot_g, e_in, rot_e
+
+
+def displacement_from_minima(sg, se, mol_g, mol_e, coordinates):
+    """K of `DuschinskyModel` from the two minima of any method (the
+    displacement route): the minima are turned into the mode sets' frame
+    (`minima_in_frame`) and their mass-weighted difference is projected on
+    the excited modes. The mode sets may come from another method's
+    Hessians at that method's own minima; only the displacement is the
+    minima's.
+
+    coordinates: 'cartesian', the straight line between the minima; or
+    'curvilinear', the difference of the valence internals mapped linearly
+    to Cartesians at the excited mode set's geometry
+    (`curvilinear.curvilinear_displacement`), which puts a rotated group on
+    its torsion rather than on the stretches.
+    """
+    g_in, _, e_in, _ = minima_in_frame(sg, mol_g, mol_e)
+    if coordinates == 'cartesian':
+        return _displacement(se, sg.masses, g_in, e_in)
+    if coordinates == 'curvilinear':
+        dq, _ = curvilinear_displacement(se.mol, e_in, g_in, sg.masses)
+        return se.modes.T @ dq
+    raise ValueError(f"coordinates are 'cartesian' or 'curvilinear', got "
+                     f'{coordinates!r}')
+
+
+def displacement_from_gradient(sg, se, j, mol_g, mol_e, gradient, state):
+    """K of `DuschinskyModel` from one state's gradient at the other's
+    minimum (the gradient route, linear in the displacement).
+
+    state 'excited': `gradient` is the excited state's at the ground
+        minimum `mol_g`, K = Omega_e^-2 L_e^T M^{-1/2} g.
+    state 'ground': `gradient` is the ground state's at the excited minimum
+        `mol_e`, q_g = Omega_g^-2 L_g^T M^{-1/2} g, K = -J q_g.
+    gradient: (natm, 3) Ha/Bohr in its own geometry's frame; both minima
+    are turned into the mode sets' frame first (`minima_in_frame`).
+    """
+    _, rot_g, _, rot_e = minima_in_frame(sg, mol_g, mol_e)
+    w = np.repeat(sg.masses, 3) ** -0.5
+    if state == 'excited':
+        g = np.asarray(gradient, float) @ rot_g
+        return (se.modes.T @ (g.ravel() * w)) / se.omega ** 2
+    if state == 'ground':
+        g = np.asarray(gradient, float) @ rot_e
+        return -j @ ((sg.modes.T @ (g.ravel() * w)) / sg.omega ** 2)
+    raise ValueError(f"state is 'excited' or 'ground', got {state!r}")
 
 
 # ------------------------------------------------ the correlation function
@@ -490,7 +569,8 @@ def duschinsky_density(model, delta_e, temperature, direction,
     de = np.atleast_1d(np.asarray(delta_e, float))
     rho = real_axis_density(de, log_g, k2, k1, float(lorentzian),
                              float(max(wi.max(), wf.max())), dt_per_period,
-                             t_decay, max_points)
+                             t_decay, max_points,
+                             envelope_time(gauss, float(lorentzian)))
     rho = area * np.maximum(rho, 0.0)
     return rho if np.ndim(delta_e) else float(rho[0])
 

@@ -29,9 +29,15 @@ tile the first AO index into slabs whose derivative block stays under
 `THREE_CENTER_BLOCK_BYTES`: each (slab, tile) block of (mn|P), its two
 derivative integrals and S is made, contracted and dropped. Pass 1 gives a
 tile's rows of a, b and L^P = J^P Cd; a and b are gathered verbatim and
-solved on every rank (locked to rank 0's); for the exchange the tiles of L
-stream in tile order from their owners, each rank accumulating the rows of T
-and Kt of its own tiles. Pass 2 is each tile's (natm, 3) addend: its AO-slab
+solved on every rank (locked to rank 0's); for the exchange Kt = V^-1 L is
+solved on the metric's Cholesky factor V = Lc Lc^T by block substitution over
+the tiles, forward in tile order and back in reverse, each tile solved by its
+owner and streamed to the others, who subtract it from their own tiles; the
+tiles of Kt then stream once more, each rank forming its rows of
+Vinv T Vinv = <g Kt^P, Kt^Q>. Neither V^-1 nor the product Vinv T Vinv is
+formed: on a near-singular metric (DMABN/aug-cc-pVDZ-JKFIT, smallest
+eigenvalue 7e-8) they lose digits that the solves keep, about 1e-6 Ha/Bohr
+of a force. Pass 2 is each tile's (natm, 3) addend: its AO-slab
 contractions, its auxiliary centres and its rows of the two-centre
 derivative. Every tile's (natm, 3) addend reaches every rank and is added in
 tile order (`ordered_sum`), so the skeleton is the one-rank bits at every
@@ -54,7 +60,10 @@ stops before it, so a force contracts every skeleton's seeds with its own in
 one `isdf_fit_adjoint.fit_rows_adjoints` call. Nothing is summed across ranks, so
 the result is the same bits at every rank count, one rank included. The
 estimator is the row fit's, the one the distributed ISDF-K SCF minimized; its
-M^T and collocation tiles are reused when they are handed in.
+M^T and collocation tiles are reused when they are handed in. The AO-product
+test set takes the same seeds on its own row fit and adjoint
+(`ao_product_fit_rows`, `ao_product_fit_rows_adjoints`), so no rank holds an
+(M, M) array there either.
 
 XC skeleton on a moving grid. T = Tr[g v_xc[D]] = sum_k w_k f(r_k) with
 f = sum_i v_i rho^g_i (v = de/drho_i; rho_i = rho, grad rho, tau) is the
@@ -85,20 +94,25 @@ Coulomb half of the fitted skeleton at g = D by auxiliary tiles, and E_xc on
 the moving grid by grid tiles, the three terms above with f = e_xc and v in
 place of the kernel (the energy is first order in rho).
 """
+import ctypes
+
 import numpy as np
 import scipy.linalg
-from pyscf import gto
+from pyscf import gto, lib
 from pyscf.df import incore
 from pyscf.dft import gen_grid, numint, radi
+from pyscf.scf import _vhf
 
-from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, SKELETON_AUX_TILE,
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_TEST_SETS,
+                                         SKELETON_AUX_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
+from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.separable_ri import tile_collocation, fit_rows
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
                                             fit_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
                                               current_comm, lockstep, ordered_sum,
-                                              partition)
+                                              partition, reduce_sum)
 
 
 class FittedFockSkeleton:
@@ -204,35 +218,65 @@ class FittedFockSkeleton:
                                         check=True)
         if not self.w:
             return self
-        Vinv = scipy.linalg.cho_solve(scipy.linalg.cho_factor(V, lower=True),
-                                      np.eye(naux))
-        Vinv = lockstep(0.5 * (Vinv + Vinv.T), comm, check=True)
+        # V = Lc Lc^T; Kt = V^-1 L by substitution, never by an explicit
+        # inverse: on a near-singular metric the inverse's product loses
+        # digits that the solves keep
+        Lc = lockstep(scipy.linalg.cholesky(V, lower=True), comm, check=True)
         del V
-        gL = {t: np.matmul(L[t], self.g) for t in owned}   # (g L^P)^T
-        Kt = {t: np.zeros_like(L[t]) for t in owned}
-        T = np.zeros((naux, naux))
-        for q in range(len(self.tiles)):
+        nt = len(self.tiles)
+        # each owned tile's rows of L, (rows, nocc nao), solved in place
+        Kt = {t: L.pop(t).reshape(-1, nocc * nao) for t in owned}
+
+        def stream(q, trans):
+            # tile q's rows from their owner, who first solves them against
+            # the diagonal block (trans 'N' forward, 'T' backward, None not)
             owner = q % size
             q0, q1 = self.functions(q)
-            Lq = L[q] if rank == owner else np.empty((q1 - q0, nocc, nao))
-            broadcast_rows(Lq, owner, comm)
-            self._hold('L_stream', Lq.nbytes)
-            Lq = Lq.reshape(q1 - q0, -1)
+            if rank == owner:
+                if trans is not None:
+                    Kt[q] = np.ascontiguousarray(scipy.linalg.solve_triangular(
+                        Lc[q0:q1, q0:q1], Kt[q], lower=True, trans=trans))
+                rows = Kt[q]
+            else:
+                rows = np.empty((q1 - q0, nocc * nao))
+            broadcast_rows(rows, owner, comm)
+            self._hold('Kt_stream', rows.nbytes)
+            return q0, q1, rows
+
+        # forward, Lc Y = L, in tile order
+        for q in range(nt):
+            q0, q1, Yq = stream(q, 'N')
             for t in owned:
-                p0, p1 = self.functions(t)
-                T[p0:p1, q0:q1] = gL[t].reshape(p1 - p0, -1) @ Lq.T
-                Kt[t].reshape(p1 - p0, -1)[...] += Vinv[p0:p1, q0:q1] @ Lq
-            del Lq
-        del L, gL
-        allgather_ranges(T, ranges, comm)
-        T += T.T
-        T *= 0.5
+                if t > q:
+                    p0, p1 = self.functions(t)
+                    Kt[t] -= Lc[p0:p1, q0:q1] @ Yq
+            del Yq
+        # backward, Lc^T Kt = Y, in reverse tile order
+        for q in reversed(range(nt)):
+            q0, q1, Kq = stream(q, 'T')
+            for t in owned:
+                if t < q:
+                    p0, p1 = self.functions(t)
+                    Kt[t] -= Lc[q0:q1, p0:p1].T @ Kq
+            del Kq
+        del Lc
+        for t in owned:
+            # (g Kt^P)^T, the only form of Kt pass 2 reads
+            self.At[t] = np.matmul(Kt[t].reshape(-1, nocc, nao), self.g)
+        self._hold('At_tiles', sum(x.nbytes for x in self.At.values()))
+        # the rows of Vinv T Vinv as <g Kt^P, Kt^Q>, the tiles of Kt streamed
+        # once more: the product Vinv T Vinv loses digits as the square of
+        # the metric's condition number
         for t in owned:
             p0, p1 = self.functions(t)
-            self.VTV[t] = (Vinv[p0:p1] @ T) @ Vinv
-            # (g Kt^P)^T, the only form of Kt pass 2 reads
-            self.At[t] = np.matmul(Kt.pop(t), self.g)
-        self._hold('At_tiles', sum(x.nbytes for x in self.At.values()))
+            self.VTV[t] = np.empty((p1 - p0, naux))
+        for q in range(nt):
+            q0, q1, Kq = stream(q, None)
+            for t in owned:
+                p0, p1 = self.functions(t)
+                self.VTV[t][:, q0:q1] = self.At[t].reshape(p1 - p0, -1) @ Kq.T
+            del Kq
+        del Kt
         return self
 
     def _pair_adjoint(self, t, a0, a1):
@@ -339,9 +383,86 @@ def fitted_fock_skeleton(mol, auxmol, g_ao, dm, occ=None, coulomb=True,
                        onto=np.zeros((mol.natm, 3)))
 
 
+def _derivative_exchange_screen(mol):
+    """pyscf's prescreening of the derivative J/K (`pyscf.grad.rhf.get_jk`),
+    built the same way, for a direct pass over a shell slice."""
+    libcvhf = _vhf.libcvhf
+    vhfopt = _vhf._VHFOpt(mol, 'int2e_ip1', 'CVHFgrad_jk_prescreen',
+                          dmcondname='CVHFnr_dm_cond1')
+    ao_loc = mol.ao_loc_nr()
+    nbas = mol.nbas
+    q_cond = np.empty((2, nbas, nbas))
+    with mol.with_integral_screen(vhfopt.direct_scf_tol ** 2):
+        for out, intor, cond in ((q_cond[0], 'int2e_ip1ip2', libcvhf.CVHFnr_int2e_pp_q_cond),
+                                 (q_cond[1], 'int2e', libcvhf.CVHFnr_int2e_q_cond)):
+            cond(getattr(libcvhf, mol._add_suffix(intor)), lib.c_null_ptr(),
+                 out.ctypes, ao_loc.ctypes, mol._atm.ctypes, ctypes.c_int(mol.natm),
+                 mol._bas.ctypes, ctypes.c_int(nbas), mol._env.ctypes)
+    vhfopt.q_cond = q_cond
+    return vhfopt
+
+
+def derivative_exchange_rows(mol, dms, shells):
+    """(ndm, 3, rows, nao): the K half of `pyscf.grad.rhf.get_jk`, signs
+    included, for every density of `dms` in ONE direct pass over the
+    four-centre derivative integrals, the rows of the AO shells
+    [shells[0], shells[1]) only. The integrals and their screening are
+    pyscf's; J is not formed."""
+    sh0, sh1 = shells
+    nbas = mol.nbas
+    vk = _vhf.direct_mapdm(mol._add_suffix('int2e_ip1'), 's2kl', 'jk->s1il',
+                           np.asarray(dms, float), 3, mol._atm, mol._bas, mol._env,
+                           vhfopt=_derivative_exchange_screen(mol),
+                           shls_slice=(sh0, sh1, 0, nbas, 0, nbas, 0, nbas))
+    return -np.asarray(vk)
+
+
+def atom_share(mol, comm):
+    """[a0, a1): the contiguous atoms this rank differentiates, cut where the
+    running AO count crosses each rank's equal share (a row of the
+    four-centre pass costs the same whichever atom it sits on)."""
+    if comm is None or comm.Get_size() == 1:
+        return 0, mol.natm
+    size, rank = comm.Get_size(), comm.Get_rank()
+    nao_atom = np.array([p1 - p0 for _, _, p0, p1 in mol.aoslice_by_atom()])
+    ends = np.cumsum(nao_atom)
+    cut = [0] + [int(np.searchsorted(ends, ends[-1] * r / size, side='left')) + 1
+                 for r in range(1, size)] + [mol.natm]
+    cut = np.maximum.accumulate(np.minimum(cut, mol.natm))
+    return int(cut[rank]), int(cut[rank + 1])
+
+
+def exchange_skeleton_by_atoms(mol, g_ao, D, omega, weight, comm=None):
+    """(natm, 3) of weight * d/dR of one four-centre exchange channel
+    (`mean_field_response.exchange_channel_skeleton`): both densities through
+    one direct pass (`derivative_exchange_rows`) under the attenuation
+    `omega`. The pass costs nao^4, so over the ranks of `comm` (default
+    `current_comm()`, every rank calling) each differentiates its own atoms
+    (`atom_share`) and the (natm, 3) rows are summed: every atom's row comes
+    from one rank, so the sum adds zeros and the result is the same bits at
+    every rank count.
+    """
+    comm = current_comm() if comm is None else comm
+    a0, a1 = atom_share(mol, comm)
+    grad = np.zeros((mol.natm, 3))
+    if a1 > a0:
+        slices = mol.aoslice_by_atom()
+        sh0, p0 = int(slices[a0][0]), int(slices[a0][2])
+        sh1, p1 = int(slices[a1 - 1][1]), int(slices[a1 - 1][3])
+        with mol.with_range_coulomb(omega):
+            vk_D, vk_g = derivative_exchange_rows(mol, [D, g_ao], (sh0, sh1))
+        t = -weight * (np.einsum('ac,xac->xa', g_ao[p0:p1], vk_D, optimize=True)
+                       + np.einsum('ad,xad->xa', D[p0:p1], vk_g, optimize=True))
+        for ia in range(a0, a1):
+            q0, q1 = slices[ia][2] - p0, slices[ia][3] - p0
+            grad[ia] = t[:, q0:q1].sum(axis=1)
+    return reduce_sum(grad, comm)
+
+
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
                        prefactor=1.0, channels=((0.0, 1.0),), mt=None, X=None,
-                       block=None, numerics=None, comm=None):
+                       block=None, numerics=None, comm=None,
+                       test_set=ISDF_TEST_SETS[0]):
     """(centre, points, held) of d/dR E_K^ISDF at fixed densities on the row
     fit: the (natm, 3) centre terms of every integral and collocation, and
     the (nk, 3) adjoint on the points for the point and frame chain.
@@ -350,19 +471,29 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
     o = dm_other (dm when None), channels [(omega, w)]. mt, X: this rank's
     tiles of the row fit's M^T and of the collocation, {tile: rows}, the
     SCF's own where it holds them; None fits and collocates here. layout:
-    the pair columns the fit screened (`separable_ri.screened_layout`).
+    the pair columns the fit screened (`separable_ri.screened_layout`), None
+    on the AO-product test set (`test_set` 'ao_products', whose row fit and
+    adjoint are `ao_product_fit_rows` and `ao_product_fit_rows_adjoints`).
     `isdf_exchange_seeds`, then the fit adjoint of its seeds alone.
     """
     comm = current_comm() if comm is None else comm
     seeds, two, held = isdf_exchange_seeds(
         mol, auxmol, coords, layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=block,
-        numerics=numerics, comm=comm)
-    adjoint = fit_rows_adjoint(mol, auxmol, coords, None, layout,
-                               numerics=numerics, comm=comm,
-                               block=block, mt_bar=seeds.mt_bar,
-                               x_bar_ao=seeds.x_bar_ao,
-                               metric_bar=seeds.metric_bar)
+        numerics=numerics, comm=comm, test_set=test_set)
+    if test_set == 'ao_products':
+        # cycle: that module builds on the pieces of this one
+        from src.gradients.ao_product_fit_adjoint import (
+            ao_product_fit_rows_adjoints)
+        adjoint = ao_product_fit_rows_adjoints(
+            mol, auxmol, coords, [seeds], numerics=numerics, comm=comm,
+            block=block)[0]
+    else:
+        adjoint = fit_rows_adjoint(mol, auxmol, coords, None, layout,
+                                   numerics=numerics, comm=comm,
+                                   block=block, mt_bar=seeds.mt_bar,
+                                   x_bar_ao=seeds.x_bar_ao,
+                                   metric_bar=seeds.metric_bar)
     held.update({f'adjoint_{k}': v for k, v in adjoint.held.items()})
     centre = adjoint.fit_centre + adjoint.coll_centre + two
     return centre, adjoint.fit_points + adjoint.coll_points, held
@@ -370,14 +501,17 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
 
 def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
                         prefactor=1.0, channels=((0.0, 1.0),), mt=None,
-                        X=None, block=None, numerics=None, comm=None):
+                        X=None, block=None, numerics=None, comm=None,
+                        test_set=ISDF_TEST_SETS[0]):
     """(seeds, centre, held): what d/dR E_K^ISDF of `isdf_exchange_rows`
     hands the row fit's adjoint -- `isdf_fit_adjoint.AdjointSeeds` with MT_bar
     and X_bar on this rank's tiles and the bare metric's V_bar on rank 0 --
     and the (natm, 3) of the attenuated metrics, which reach the nuclei
     outside the fit. The fit adjoint is linear in the seeds, so a force
     gathering several of these contracts their sum once
-    (`isdf_fit_adjoint.fit_rows_adjoints`)."""
+    (`isdf_fit_adjoint.fit_rows_adjoints`). Without `mt` the row fit of
+    `test_set` is made here: `fit_rows` on `layout`, or the AO-product one
+    (`ao_product_fit_rows`)."""
     comm = current_comm() if comm is None else comm
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))
@@ -395,7 +529,13 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
     def hold(name, nbytes):
         held[name] = max(held.get(name, 0), int(nbytes))
 
-    if mt is None:
+    if mt is None and test_set == 'ao_products':
+        fit = ao_product_fit_rows(mol, auxmol, coords, numerics=numerics,
+                                  comm=comm, block=block)
+        mt = fit.mt
+        held.update({f'fit_{k}': v for k, v in fit.held.items()})
+        del fit
+    elif mt is None:
         fit = fit_rows(mol, auxmol, coords, numerics=numerics, comm=comm,
                        block=block, layout=layout)
         mt = fit.mt

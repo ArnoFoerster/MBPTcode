@@ -49,6 +49,7 @@ import pytest
 from pyscf import dft
 
 from src.environments import solvation_loop as sl
+from src.Base.numerics.constants import HARTREE_TO_MEV
 from src.Base.numerics.numerics import Numerics
 from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_screening import SolventScreening
@@ -160,7 +161,7 @@ def _args(tmp_path, **kw):
              jk_auxbasis='cc-pvdz-jkfit', solvent='toluene', frozen=1, nroots=3,
              follow='index', saddle_check=True, tol_q=1e-9, tol_energy=1e-11,
              method='adc2', xc=None, isdf_grid=None, bse_solver=None, bse_kernel=None,
-             refreeze=None, maxiter=100, out=str(tmp_path / 'rec.json'))
+             refreeze=None, maxiter=100, max_memory=4000, out=str(tmp_path / 'rec.json'))
     a.update(kw)
     return SimpleNamespace(**a)
 
@@ -239,7 +240,7 @@ def test_driver_keeps_an_unconverged_refreeze_flagged(tmp_path, monkeypatch):
     assert m == 'R*' and out['geometry'] == 'R*' and out['G'] == -2.0
     assert out['flags'] == ['refreeze_not_converged'] and out['refreeze'] == 'not converged'
     assert out['refreeze_drift_meV'] == 4.0 and len(out['refreeze_passes']) == 2
-    assert out['refreeze_denergy_meV'] == -1e-4 * mod.HARTREE_TO_MEV
+    assert out['refreeze_denergy_meV'] == -1e-4 * HARTREE_TO_MEV
 
 
 @pytest.mark.parametrize('method,kind,asked', [('gwbse', 'S0', 0), ('adc2', 'triplet', 0),
@@ -273,9 +274,9 @@ def test_walk_vs_vertical_bar(tmp_path, monkeypatch, refreeze, gap, flagged):
     REFREEZE_TOL_MEV (3 meV = 1.1e-4 Ha), of one that was not above ten loop
     tolerances."""
     mod = driver()
-    monkeypatch.setattr(mod, '_vertical', lambda *a: dict(
+    monkeypatch.setattr(mod, 'vertical', lambda *a: dict(
         emission=0.1, G={'eq_state': -1.0}, flags={}))
-    monkeypatch.setattr(mod, '_mol_of', lambda g, b: None)
+    monkeypatch.setattr(mod, '_mol_of', lambda g, b, m: None)
     args = _args(tmp_path)
     R = {'S0': dict(G=-1.2, converged=True)}
     X = {'minimum': dict(G=-1.0 + gap, geometry=[], refreeze=refreeze, converged=True)}
@@ -400,7 +401,8 @@ def make_rks(mol):
 
 def test_kohn_sham_reference_force_in_a_continuum():
     """The equilibrium PBE0 loop is pyscf's PCM-RKS (energy to 1e-9 Ha) and its
-    force pyscf's PCM-RKS gradient (to 1e-7 Ha/Bohr)."""
+    force pyscf's PCM-RKS gradient with the XC grid's motion (to 1e-7
+    Ha/Bohr)."""
     mol = molecule(ATOMS)
     field = toluene(mol)
     state = HFState(mol, make_rks)
@@ -410,7 +412,7 @@ def test_kohn_sham_reference_force_in_a_continuum():
     mf = env.mean_field(mol, lambda m: make_rks(m).run())
     assert abs(r.energy - mf.e_tot) < 1e-9, f'{r.energy - mf.e_tot:+.1e}'
     g = mf.nuc_grad_method()
-    g.verbose = 0
+    g.verbose, g.grid_response = 0, True
     d = float(np.max(np.abs(F - g.kernel())))
     assert d < 1e-7, f'max |dF| {d:.1e} Ha/Bohr'
 
@@ -557,8 +559,9 @@ def test_driver_gwbse_numerics_carry_the_qp_options(tmp_path):
 
 def test_driver_ao_product_fit_reaches_the_numerics(tmp_path):
     """--isdf-test-set and --pivot-points reach the one Numerics on the level's
-    counts and name the record's method; ADC(2) takes neither, and a pivot
-    without the AO-product test set is refused."""
+    counts and name the record's method; ADC(2) takes neither; a pivot count
+    alone is the AO-product fit (what the level means), beside the
+    Duchemin-Blase set it is refused."""
     mod = driver()
     mol = molecule(ATOMS, basis='cc-pvdz')
     args = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz',
@@ -572,10 +575,15 @@ def test_driver_ao_product_fit_reaches_the_numerics(tmp_path):
     assert 'ao_products fit on 150 pivoted points' in mod._start_record(args)['method']
     with pytest.raises(SystemExit, match='takes no --pivot-points'):
         mod._check_args(_args(tmp_path, pivot_points=150), None)
+    assert 'ao_products fit on the default count' in mod._start_record(plain)['method']
     alone = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz', pivot_points=150)
     mod._check_args(alone, mol)
-    with pytest.raises(ValueError, match="needs it"):
-        mod.gwbse_numerics(alone, mol)
+    assert mod.gwbse_numerics(alone, mol).identity() == num.identity()
+    legacy = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz',
+                   isdf_test_set='duchemin_blase', pivot_points=150)
+    mod._check_args(legacy, mol)
+    with pytest.raises(ValueError, match="test_set='ao_products'"):
+        mod.gwbse_numerics(legacy, mol)
 
 
 def test_an_older_record_resumes_without_the_later_settings(tmp_path):

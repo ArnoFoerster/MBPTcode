@@ -11,6 +11,11 @@ continuum, written as one JSON record.
 from the repository root (or with it on PYTHONPATH); `main(argv)` is the
 same run from Python. The threads are the environment's (no --threads).
 
+--solvent names the continuum: a solvent of pyscf's SMD table, or any medium
+by its two constants, eps=EPS_S,n2=N2 (src.environments.medium), on the cavity
+--cavity names. Every state model, loop and SCF of the run reads that one
+medium.
+
 For each medium (gas, and the solvent if given):
 
     S0 minimum      the ground state (MP2; the mean-field reference for
@@ -106,15 +111,22 @@ A Kohn-Sham reference is integrated on --xc-grid (pyscf's grid level; omitted
 is the Numerics default, XC_GRID_LEVEL). GW-BSE reads the frozen shift
 beyond the explicit quasiparticle set (--outside-scissor) and the residue
 route (--residues) from the command line, each the Numerics default when
-omitted. Every molecule's memory budget is pyscf's (PYSCF_MAX_MEMORY).
+omitted. Every molecule's memory budget (MB per rank, its max_memory, which
+pyscf and the tiled forces' memory check read) is --max-memory, else this
+rank's share of the SLURM allocation (allocation_max_memory_mb), else
+PYSCF_MAX_MEMORY; with none of them the budget is unknown: pyscf's default is
+kept, warned about and flagged 'memory_budget_unknown' (the record's
+`run_flags`), since a tiled force above it is then refused.
 
-On augmented bases the tabulated points miss the diffuse products. There GW-BSE
-takes the AO-product fit (--isdf-test-set ao_products) on --pivot-points
-points pivoted from the --isdf-grid level's parent grid:
+GW-BSE takes the AO-product fit, which keeps the diffuse products of an
+augmented basis, on points pivoted from the --isdf-grid level's parent grid:
+--pivot-points of them, else the default count (`ao_product_fit.pivot_count`).
+The Duchemin-Blase fit on the tabulated points is --isdf-test-set
+duchemin_blase:
 
     python -m src.photophysics solvated --method gwbse --xc lrc-wpbeh \
         --basis aug-cc-pvdz --jk-auxbasis aug-cc-pvdz-jkfit --isdf-grid G3 \
-        --isdf-test-set ao_products --pivot-points 3500 \
+        --pivot-points 3500 \
         --xyz mol.xyz --solvent toluene --out record.json
 
 The mean field stays density-fitted (--jk-auxbasis); only the GW-BSE factors
@@ -130,32 +142,36 @@ import json
 import os
 import platform
 import time
-import warnings
 
 import numpy as np
-from pyscf import dft, gto, scf
+from pyscf import dft, gto, lib, scf
 
-from src.environments import solvation_loop as sl
 from src.SingleReference.common.active_space import frozen_core
-from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
-                                         ISDF_TEST_SETS,
-                                         REFREEZE_TOL_MEV, START_NUDGE_BOHR,
-                                         WALK_VERTICAL_G_FLAG_FACTOR,
-                                         XC_GRID_LEVEL)
+from src.Base.numerics.constants import (HARTREE_TO_EV,
+                                         ISDF_DEFAULT_TEST_SET, ISDF_TEST_SETS,
+                                         PHOTOPHYSICS_LOOP_TOL_ENERGY,
+                                         PHOTOPHYSICS_LOOP_TOL_Q,
+                                         SCF_MAX_CYCLE, SCF_OPTIMIZATION_CONV_TOL,
+                                         STATE_MODEL_SCF_GRAD_TOL,
+                                         START_NUDGE_BOHR, XC_GRID_LEVEL)
+from src.Base.numerical_flags import flag
 from src.Base.numerics.numerics import Numerics
+from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, is_root
 from src.environments.reaction_field import ContinuumField, NoMedium
 from src.Base.utils.record_io import code_id, record_hash, same_code
 from src.Base.factorization.separable_ri import resolve_isdf_grid
-from src.environments.solvent_screening import SolventScreening
+from src.environments.medium import (CAVITY_CONVENTIONS, DEFAULT_CAVITY,
+                                     parse as parse_medium)
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from src.gradients.gwbse.state_model import GWBSEState
 from src.properties.excitations import (relaxation_fields,
                                         relaxation_flags, saddle_check,
                                         saddle_verdict)
 from src.properties.optimize import derived_walk, relax
 from src.gradients.solvated_surface import SolvatedSurface
+from src.photophysics.state_specific import (gwbse_states, vertical,
+                                             walk_vs_vertical)
 
 #: The ADC(2) options' values when not given (GW-BSE takes none of them).
 ADC2_DEFAULTS = dict(auxbasis='cc-pvdz-ri', nroots=3)
@@ -167,7 +183,7 @@ GWBSE_ONLY = ('xc', 'isdf_grid', 'bse_solver', 'bse_kernel', 'refreeze',
 #: The settings added after records were first written, and the value an
 #: older record that lacks them was made with.
 LATER_SETTINGS = dict(outside_scissor=None, residues=None, xc_grid=None,
-                      isdf_test_set=None, pivot_points=None)
+                      isdf_test_set=None, pivot_points=None, cavity=DEFAULT_CAVITY)
 
 
 def _parse_args(argv=None):
@@ -190,19 +206,27 @@ def _parse_args(argv=None):
                    help="gwbse: the route of Sigma's real-axis residues")
     p.add_argument('--isdf-test-set', choices=ISDF_TEST_SETS, default=None,
                    help="gwbse: the products the ISDF fit is trained on (default "
-                        "the Duchemin-Blase pair set; ao_products on augmented bases)")
+                        "ao_products; duchemin_blase, the pair set, by name)")
     p.add_argument('--pivot-points', type=int, default=None,
-                   help='gwbse: with --isdf-test-set ao_products, the points pivoted '
-                        "from the --isdf-grid level's parent grid")
+                   help="gwbse: the points pivoted from the --isdf-grid level's "
+                        'parent grid for the ao_products fit (default: '
+                        'ao_product_fit.pivot_count)')
     p.add_argument('--xc-grid', type=int, default=None,
                    help="pyscf's XC grid level of a Kohn-Sham reference "
                         '(default XC_GRID_LEVEL)')
     p.add_argument('--distribute', action='store_true',
                    help='run over the ranks of the launch')
+    p.add_argument('--max-memory', type=int, default=None,
+                   help='memory budget of one rank in MB (default: its share of '
+                        'the SLURM allocation, else PYSCF_MAX_MEMORY)')
     p.add_argument('--basis', default='cc-pvdz')
     p.add_argument('--auxbasis', default=None, help='adc2: default cc-pvdz-ri')
     p.add_argument('--jk-auxbasis', default='cc-pvdz-jkfit')
-    p.add_argument('--solvent', default=None, help="a name of pyscf's SMD table")
+    p.add_argument('--solvent', default=None,
+                   help="a name of pyscf's SMD table, or eps=EPS_S,n2=N2[,label=NAME]")
+    p.add_argument('--cavity', default=None, choices=sorted(CAVITY_CONVENTIONS),
+                   help='the cavity convention, radius set and scale (default '
+                        'the one --solvent names, else DEFAULT_CAVITY)')
     p.add_argument('--frozen', type=int, default=None,
                    help='adc2: default the core shells')
     p.add_argument('--nroots', type=int, default=None, help='adc2: default 3')
@@ -220,9 +244,9 @@ def _parse_args(argv=None):
     p.add_argument('--refreeze', action=argparse.BooleanOptionalAction, default=None,
                    help='gwbse: refreeze each S1 / T1 minimum (default on; the outer '
                         'loop of properties.optimize.relax); ADC(2) and S0 freeze nothing')
-    p.add_argument('--tol-q', type=float, default=1e-9,
+    p.add_argument('--tol-q', type=float, default=PHOTOPHYSICS_LOOP_TOL_Q,
                    help='loop: largest charge change (e) at convergence')
-    p.add_argument('--tol-energy', type=float, default=1e-11,
+    p.add_argument('--tol-energy', type=float, default=PHOTOPHYSICS_LOOP_TOL_ENERGY,
                    help='loop: change of G (Ha) at convergence')
     p.add_argument('--out', required=True)
     return p.parse_args(argv)
@@ -247,7 +271,14 @@ def _settings(args):
                 state_method=args.method, xc=args.xc, isdf_grid=args.isdf_grid,
                 bse_kernel=args.bse_kernel,
                 bse_solver=args.bse_solver, refreeze=args.refreeze,
-                **{k: getattr(args, k, None) for k in LATER_SETTINGS})
+                **{k: getattr(args, k, None) for k in LATER_SETTINGS if k != 'cavity'},
+                cavity=_cavity(args))
+
+
+def _cavity(args):
+    """The run's cavity convention: --solvent's or --cavity, else the default."""
+    medium = None if args.solvent is None else parse_medium(args.solvent, getattr(args, 'cavity', None))
+    return medium.cavity if medium is not None else getattr(args, 'cavity', None) or DEFAULT_CAVITY
 
 
 def _start_record(args):
@@ -264,12 +295,19 @@ def _start_record(args):
         if differ:
             raise SystemExit(f'{args.out} was made with other settings (record, this '
                              f'run): {differ}; write to another --out')
-    fit = ('' if getattr(args, 'isdf_test_set', None) is None else
-           f', {args.isdf_test_set} fit'
-           + ('' if args.pivot_points is None else f' on {args.pivot_points} pivoted points'))
+    # an unnamed test set is the AO-product fit (ISDF_DEFAULT_TEST_SET)
+    test_set = getattr(args, 'isdf_test_set', None) or ISDF_DEFAULT_TEST_SET
+    fit = (f', {test_set} fit'
+           + ('' if test_set != 'ao_products' else
+              ' on the default count of pivoted points'
+              if getattr(args, 'pivot_points', None) is None else
+              f' on {args.pivot_points} pivoted points'))
     what = ('ADC(2) (folded, DF) on DF-MP2' if args.method == 'adc2' else
             f'G0W0-BSE (scheme B, ISDF {args.isdf_grid}{fit}) on {args.xc}')
-    rec.update(settings, host=platform.node(), method=f'{what}, '
+    medium = None if args.solvent is None else parse_medium(args.solvent, getattr(args, 'cavity', None))
+    rec.update(settings, host=platform.node(),
+               medium=None if medium is None else medium.record(),
+               method=f'{what}, '
                'equilibrium/non-equilibrium state-specific PCM with relaxed '
                'densities (src.environments.solvation_loop)')
     return rec
@@ -284,19 +322,44 @@ def _save(rec, out):
     os.replace(out + '.tmp', out)
 
 
-def _make_scf(m, jk_auxbasis, xc='hf', xc_grid=None):
-    """The tightly converged density-fitted RHF (or RKS of xc on pyscf's
-    XC grid level xc_grid) of m."""
+def _make_scf(m, jk_auxbasis, xc='hf', xc_grid=None, converged=None):
+    """The density-fitted RHF (or RKS of xc on pyscf's XC grid level xc_grid)
+    of m, converged as `converged` (a Numerics' scf section: conv_tol,
+    conv_tol_grad, max_cycle; the ADC(2) route's, adc2_numerics) or, without
+    one, tightly (1e-12, orbital gradient 1e-10, 200 cycles)."""
     mf = (scf.RHF(m) if xc == 'hf' else dft.RKS(m, xc=xc)).density_fit(
         auxbasis=jk_auxbasis)
     if xc != 'hf':
         mf.grids.level = xc_grid
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle, mf.verbose = 1e-12, 1e-10, 200, 0
+    if converged is None:
+        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-10, 200
+    else:
+        mf.conv_tol, mf.conv_tol_grad = converged.conv_tol, converged.conv_tol_grad
+        mf.max_cycle = converged.max_cycle
+    mf.verbose = 0
     return mf
+
+
+def adc2_numerics(args):
+    """The one Numerics of an ADC(2) run: the loop's tolerances and the mean
+    field's convergence of a walk (the GW-BSE walk route's energy test
+    SCF_OPTIMIZATION_CONV_TOL, the orbital gradient a state model needs at
+    most, STATE_MODEL_SCF_GRAD_TOL, SCF_MAX_CYCLE cycles; a cap reached is
+    warned about and flagged by the state model)."""
+    return Numerics(solvent={'loop_tol_q': args.tol_q,
+                             'loop_tol_energy': args.tol_energy},
+                    scf={'conv_tol': SCF_OPTIMIZATION_CONV_TOL,
+                         'conv_tol_grad': STATE_MODEL_SCF_GRAD_TOL,
+                         'max_cycle': SCF_MAX_CYCLE})
 
 
 def _check_args(args, mol0):
     """Refuse the other method's options; fill this method's defaults."""
+    if args.solvent is not None:
+        try:
+            parse_medium(args.solvent, getattr(args, 'cavity', None))
+        except ValueError as err:
+            raise SystemExit(f'--solvent {args.solvent}: {err}') from err
     other = GWBSE_ONLY if args.method == 'adc2' else ADC2_ONLY
     given = [name for name in other if getattr(args, name, None) is not None]
     if given:
@@ -348,45 +411,28 @@ def gwbse_numerics(args, mol0):
                     solvent={'loop_tol_q': args.tol_q, 'loop_tol_energy': args.tol_energy})
 
 
-def _gwbse_states(args, make_scf, numerics):
-    """make_state(kind) of GW-BSE: each call is one surface, its first model
-    built at the first geometry and moved to every later one (module
-    docstring)."""
-    def make_state(kind):
-        first = []
-
-        def build(m, field):
-            if kind == 'S0':
-                return GWBSEState(m, make_scf, numerics=numerics)
-            tda = args.bse_kernel == 'tda'
-            lr = field.transition_environment() if kind == 'singlet' else None
-            if first:
-                return first[0].at(m, make_scf, lr)
-            first.append(GWBSEState(m, make_scf, kind, 0, bse_tda=tda,
-                                    lr_environment=lr, numerics=numerics))
-            return first[0]
-        return build
-    return make_state
-
-
 def _factories(args, medium, loop_kw):
     """(make_field, make_state) for one medium; make_state(kind) builds a state."""
     if medium == 'gas':
         make_field = NoMedium
     else:
-        make_field = lambda m: ContinuumField.from_environment(
-            SolventScreening(m, solvent=medium))
+        continuum = parse_medium(medium, getattr(args, 'cavity', None))
+        make_field = lambda m: ContinuumField.from_environment(continuum.screening(m))
 
     def make_scf(m):
         return _make_scf(m, args.jk_auxbasis, args.xc or 'hf',
                          getattr(args, 'xc_grid', None))
 
     if args.method == 'gwbse':
-        return make_field, _gwbse_states(args, make_scf, loop_kw['numerics'])
+        return make_field, gwbse_states(make_scf, loop_kw['numerics'],
+                                        args.bse_kernel == 'tda')
+
+    def make_adc2_scf(m):
+        return _make_scf(m, args.jk_auxbasis, converged=loop_kw['numerics'].scf)
 
     def make_state(kind):
         def build(m, field):
-            mp2 = MP2State(HFState(m, make_scf), args.frozen, args.auxbasis)
+            mp2 = MP2State(HFState(m, make_adc2_scf), args.frozen, args.auxbasis)
             if kind == 'S0':
                 return mp2
             lr = field.transition_environment() if kind == 'singlet' else None
@@ -401,9 +447,29 @@ def _geom(m):
             for i in range(m.natm)]
 
 
-def _mol_of(g, basis):
-    """The molecule of a geometry list from _geom."""
-    return gto.M(atom=[(a[0], tuple(a[1:])) for a in g], basis=basis, verbose=0)
+def _mol_of(g, basis, max_memory):
+    """The molecule of a geometry list from _geom, its budget max_memory (MB)."""
+    return gto.M(atom=[(a[0], tuple(a[1:])) for a in g], basis=basis, verbose=0,
+                 max_memory=max_memory)
+
+
+def memory_budget(asked=None, flags=None):
+    """The memory budget of one rank (MB, module docstring): `asked`
+    (--max-memory), else this rank's share of the SLURM allocation, else
+    PYSCF_MAX_MEMORY; unknown otherwise: pyscf's default, warned about and
+    flagged 'memory_budget_unknown' into `flags`."""
+    if asked is not None:
+        return int(asked)
+    share = allocation_max_memory_mb(default=None)
+    if share is not None:
+        return int(share)
+    if os.environ.get('PYSCF_MAX_MEMORY'):
+        return int(lib.param.MAX_MEMORY)
+    flag('memory_budget_unknown',
+         f'no --max-memory, SLURM allocation or PYSCF_MAX_MEMORY: each rank keeps '
+         f"pyscf's default of {lib.param.MAX_MEMORY} MB, and a tiled force whose "
+         'estimate exceeds it is refused', RuntimeWarning, into=flags)
+    return int(lib.param.MAX_MEMORY)
 
 
 def _refreezes(args, kind):
@@ -584,16 +650,6 @@ def _drop_unconverged(R):
             R.pop('dEST_adiabatic_flags', None)
 
 
-def _vertical(make_field, make_state, kind, m, loop_kw):
-    """Vertical S0 -> kind energies of m in the slow charges of S0 (and the reverse).
-    Both loops of the state stand on one surface: its second model is the first's moved
-    to the same nuclei (a GW-BSE chain is built and its conventions frozen once)."""
-    f = make_field(m)
-    build = make_state(kind)
-    return sl.vertical_energies(lambda: make_state('S0')(m, f),
-                                lambda: build(m, f), f, **loop_kw)
-
-
 def _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw):
     """S0 minimum of one medium into R, unless the record holds it."""
     if 'S0' not in R:
@@ -609,7 +665,7 @@ def _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw):
     """Vertical absorption at the S0 minimum into X, unless the record holds it."""
     if 'absorption_eV' not in X:
         t = time.time()
-        r = _vertical(make_field, make_state, kind, mS0, loop_kw)
+        r = vertical(make_field, make_state, kind, mS0, loop_kw)
         X.update(absorption_eV=r['absorption'] * HARTREE_TO_EV,
                  absorption_G=r['G'], absorption_wall_s=time.time() - t,
                  absorption_flags=_flag_names(R['S0'].get('flags'), r['flags']))
@@ -621,7 +677,8 @@ def _excited_minimum(args, rec, X, key, kind, medium, mS0, make_field, make_stat
     """Minimum of the state on its surface from the S0 minimum, unless recorded."""
     if 'minimum' not in X:
         surf = SolvatedSurface(mS0, make_field, make_state(kind),
-                               label=f'{key} {medium}', **loop_kw)
+                               label=f'{key} {medium}',
+                               make_ground=make_state('S0'), **loop_kw)
         path = _walk_path(args, medium, key)
         _store_minimum(rec, args.out, X, 'minimum',
                        _minimum(args, surf, mS0, START_NUDGE_BOHR, kind,
@@ -633,24 +690,17 @@ def _emission(args, rec, R, X, kind, make_field, make_state, loop_kw):
     """Vertical emission at the X minimum and the adiabatic energy, unless recorded."""
     if 'emission_eV' not in X:
         t = time.time()
-        mX = _mol_of(X['minimum']['geometry'], args.basis)
-        r = _vertical(make_field, make_state, kind, mX, loop_kw)
+        mX = _mol_of(X['minimum']['geometry'], args.basis, args.max_memory)
+        r = vertical(make_field, make_state, kind, mX, loop_kw)
         X.update(emission_eV=r['emission'] * HARTREE_TO_EV,
                  emission_G=r['G'], emission_wall_s=time.time() - t,
                  emission_flags=_flag_names(X['minimum'].get('flags'), r['flags']))
         X['adiabatic_eV'] = (X['minimum']['G'] - R['S0']['G']) * HARTREE_TO_EV
         X['adiabatic_flags'] = _flag_names(X['minimum'].get('flags'),
                                            R['S0'].get('flags'))
-        gap = X['minimum']['G'] - r['G']['eq_state']
         refrozen = X['minimum'].get('refreeze') in ('measured', 'not converged')
-        bar = (REFREEZE_TOL_MEV / HARTREE_TO_MEV if refrozen
-               else WALK_VERTICAL_G_FLAG_FACTOR * args.tol_energy)
-        X['walk_vs_vertical_G_Ha'], X['walk_vs_vertical_flag'] = gap, abs(gap) > bar
-        if abs(gap) > bar:
-            warnings.warn(f'{kind} at its minimum: G_eq on the walk\'s surface and on '
-                          f'the vertical\'s differ by {gap:.2e} Ha (> {bar:.0e}): the two '
-                          'surfaces froze their conventions at different geometries',
-                          RuntimeWarning, stacklevel=2)
+        X['walk_vs_vertical_G_Ha'], X['walk_vs_vertical_flag'] = walk_vs_vertical(
+            kind, X['minimum']['G'], r['G']['eq_state'], refrozen, args.tol_energy)
         _save(rec, args.out)
 
 
@@ -660,7 +710,7 @@ def _run_medium(args, rec, medium, mol0, loop_kw):
     _drop_unconverged(R)
     make_field, make_state = _factories(args, medium, loop_kw)
     _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw)
-    mS0 = _mol_of(R['S0']['geometry'], args.basis)
+    mS0 = _mol_of(R['S0']['geometry'], args.basis, args.max_memory)
     for kind in args.states:
         key = 'S1' if kind == 'singlet' else 'T1'
         X = R.setdefault(key, {})
@@ -687,15 +737,18 @@ def _print_summary(rec, media):
 def main(argv=None):
     """Parse `argv` (omitted: the command line) and run; the exit status."""
     args = _parse_args(argv)
-    mol0 = gto.M(atom=args.xyz, basis=args.basis, verbose=0)
+    run_flags = []
+    args.max_memory = memory_budget(args.max_memory, run_flags)
+    mol0 = gto.M(atom=args.xyz, basis=args.basis, verbose=0, max_memory=args.max_memory)
     _check_args(args, mol0)
     if args.method == 'gwbse':
         # one object: every GW-BSE model holds it, the loops are handed the same
         loop_kw = dict(numerics=gwbse_numerics(args, mol0))
     else:
-        loop_kw = dict(numerics=Numerics(solvent={'loop_tol_q': args.tol_q,
-                                                  'loop_tol_energy': args.tol_energy}))
+        loop_kw = dict(numerics=adc2_numerics(args))
     rec = _start_record(args)
+    rec.update(max_memory_mb=args.max_memory,
+               run_flags=sorted({f['flag'] for f in run_flags}))
     media = ((['gas'] if 'gas' in args.media else [])
              + ([args.solvent] if args.solvent and 'solvent' in args.media else []))
     comm = None

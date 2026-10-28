@@ -16,7 +16,12 @@ S1 (with its LR term) and T1.
      few ulp, for S0, S1 and T1.
   4. absorption and emission (vertical_energies) of S1 equal NoMedium's to
      a few ulp.
-  5. continuity: at eps_s = 1 + delta (eps_inf = 1 + delta / 2) the solvent
+  5. one call: a loop in a medium with no response (NoMedium, from no start or
+     from the empty charges a walk carries, and the continuum at eps = 1)
+     calls the state model once and stops after one cycle, converged; a
+     continuum at eps_s = 1.01 still calls it once per cycle plus the
+     gas-phase start.
+  6. continuity: at eps_s = 1 + delta (eps_inf = 1 + delta / 2) the solvent
      shift of G_eq (S0, S1) and of the S1 absorption scales with delta: the
      ratio of the shifts at delta = 1e-2 and 1e-3 lies within 10% of 10, and
      the shift at 1e-3 is nonzero (the check can fail).
@@ -109,6 +114,39 @@ def check_vertical():
                  f"absorption {r_cont['absorption']!r} vs {r_gas['absorption']!r}")
 
 
+class Counted:
+    """A state model whose calls are counted."""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, 0
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def __call__(self, h, e):
+        self.calls += 1
+        return self.inner(h, e)
+
+
+def check_one_call():
+    ok = True
+    for label, field, q0 in (('NoMedium', NoMedium(MOL), None),
+                             ('NoMedium from empty charges', NoMedium(MOL), np.zeros(0)),
+                             ('eps = 1', continuum(1.0, 1.0), None)):
+        s = Counted(state('S1', field))
+        r = sl.equilibrate(s, field, q0=q0, **SOLVATION_TIGHT)
+        ok &= check(s.calls == 1 and len(r.history) == 1 and r.converged,
+                    f'S1, {label}: the loop calls the state model once',
+                    f'{s.calls} call(s), {len(r.history)} cycle(s)')
+    f = continuum(1.01, 1.005)
+    s = Counted(state('S1', f))
+    r = sl.equilibrate(s, f, **SOLVATION_TIGHT)
+    ok &= check(r.converged and len(r.history) > 1 and s.calls == len(r.history) + 1,
+                'S1, eps_s = 1.01: one call per cycle plus the gas-phase start',
+                f'{s.calls} calls, {len(r.history)} cycles')
+    return ok
+
+
 def check_continuity():
     ok = True
     gas = NoMedium(MOL)
@@ -136,7 +174,8 @@ def run():
     all_ok = True
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        for c in (check_zero_response, check_gas_phase, check_vertical, check_continuity):
+        for c in (check_zero_response, check_gas_phase, check_vertical, check_one_call,
+                  check_continuity):
             all_ok &= c()
     print('ALL PASSED' if all_ok else 'FAILURES DETECTED')
     return all_ok

@@ -28,6 +28,7 @@ pytest test_distributed_df.py
 pytest test_distributed_scf_grid.py
 pytest test_distributed_trial_space.py
 pytest test_duschinsky.py
+pytest test_rate_chain.py
 pytest test_dyson_over_frequencies.py
 pytest test_ee_adc_channel_seeds.py
 script test_ee_adc_fold.py
@@ -76,6 +77,7 @@ script test_pbc_self_energy.py
 pytest test_pbc_solvent_screening.py
 pytest test_pbc_wav.py
 pytest test_pcm_bilinear_gradient.py
+pytest test_photophysics_scheme_b_run.py
 pytest test_polarizable_sites_shift.py
 pytest test_probe_after_davidson.py
 pytest test_production_walk_gate.py
@@ -146,6 +148,8 @@ pytest test_sigma_restricted_full.py
 pytest test_sigma_u4_laplace.py
 # GW-BSE state model in the solvation loop: 11 min on the workstation (2 threads), slow by the 60 s rule
 pytest test_gwbse_solvation_loop.py
+# any medium on a non-default cavity: the GW-BSE gas limit and FD forces of both families (slow by the 60 s rule)
+pytest test_host_medium_loops.py
 pytest test_generated_committed.py   # regenerates the committed CC, MPn and QDPT modules (pdaggerq; ~8 min)
 # Faddeev-ADC(4): slow by the 60 s rule (workstation: test_faddeev_adc4 ~4 min, test_faddeev_adc4_restricted ~3 min and test_adc4_scale_walls ~2 min on LiH/STO-3G; the complete settings are the _full twins in heavy.txt)
 pytest test_faddeev_adc4.py

@@ -78,7 +78,7 @@ from src.gradients.isdf_derivatives import (PendingFitAdjoint,
                                             one_fit_adjoint)
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.SingleReference.GW.space_time import separable_factors
-from tests.isdf_test_grid import g1, g1_kw, g1_numerics
+from tests.isdf_test_grid import g1, g1_kw, g1_numerics, LEGACY_FIT, legacy
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -129,7 +129,8 @@ def isdf_factory(xc, grid_accuracy=None):
                                for i in range(mol.natm)})
             kw['counts'], kw['n_start'] = resolve_isdf_grid(
                 grid_accuracy, BASIS, elements, auxbasis=AUX)
-        mf = isdf_jk_with_force(base, auxbasis=AUX, **g1_kw(base, kw))
+        mf = isdf_jk_with_force(base, auxbasis=AUX, numerics=legacy(),
+                                **g1_kw(base, kw))
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
         mf.max_cycle = 200
@@ -148,6 +149,7 @@ def ladder_chain(xc):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
                        numerics=numerics_of({'grid_accuracy': 'G1', 'sliced': True,
+                                 'test_set': LEGACY_FIT,
                                  'fit': 'rows', 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       isdf_factory(xc, 'G1'))
@@ -330,7 +332,7 @@ def test_the_handed_tiles_are_the_fit(size, tile):
     def rank(comm):
         warnings.simplefilter('ignore')
         mol = molecule('water')
-        mf = isdf_jk_with_force(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')))
+        mf = isdf_jk_with_force(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')), numerics=legacy())
         handle = DistributedISDFJK(mf.with_df, comm=comm, tile=tile)
         handle.build()
         tiles = handle.fit_tiles()
@@ -423,11 +425,12 @@ def test_the_energy_route_reads_the_scf_fit(size):
                                                 serial.mo_energy)
         t_handed, t_fit = {}, {}
         handed = separable_factors(mf, mol, auxbasis=AUX, fit='rows',
-                                   grid_accuracy='G1',
+                                   grid_accuracy='G1', numerics=legacy(),
                                    fit_tiles=handle.fit_tiles(),
                                    timings=t_handed)
         fitted = separable_factors(mf, mol, auxbasis=AUX, fit='rows',
-                                   grid_accuracy='G1', timings=t_fit)
+                                   grid_accuracy='G1', numerics=legacy(),
+                                   timings=t_fit)
         same = all(matches(getattr(handed, k), getattr(fitted, k),
                            RECORDING_BLAS, unit='1', quantity='root')
                    for k in ('X_mo', 'D', 'X_ao', 'coords'))
@@ -603,9 +606,9 @@ def test_the_total_force_follows_its_energy(name, xc):
         mol = molecule(name)
         chain = ExcitedStateChain(
             mol, isdf_factory(xc), spin='singlet',
-            numerics=g1_numerics(mol, Numerics(isdf={'fit': 'rows'},
+            numerics=legacy(g1_numerics(mol, Numerics(isdf={'fit': 'rows'},
                                                bse={'solver': 'davidson', 'conv_tol': BSE_CONV_TOL},
-                                               layout={'sliced': True, 'fit_block': TILE})))
+                                               layout={'sliced': True, 'fit_block': TILE}))))
         grad = np.asarray(chain.total_gradient()[0])
         misses = []
         for atom, axis in components:
