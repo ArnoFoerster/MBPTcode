@@ -41,6 +41,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients import df_correlation_force as dcf
 from src.gradients.adc import ee_gradient as eg
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
@@ -129,8 +130,9 @@ def check_energies_and_state_models():
                     f"{info['asymmetry']:.0e}")
     for spin in SPINS:
         hf = HFState(mol, make_scf_tight)
-        mp2 = MP2State(hf, NF, AUX, force_route='dense', spin_scaling='scs')
-        state = ADC2State(mp2, spin, 0, 3, conv_tol=1e-12, follow='index')
+        mp2 = MP2State(hf, NF, AUX, force_route='dense', spin_scaling='scs',
+                       numerics=Numerics(adc={'conv_tol': 1e-12}))
+        state = ADC2State(mp2, spin, 0, 3, follow='index')
         r = state(np.zeros((mol.nao, mol.nao)), 0.0)
         F, _ = state.force(np.zeros((mol.nao, mol.nao)), 0.0)
         k = SPINS.index(spin)

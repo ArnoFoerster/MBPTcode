@@ -23,9 +23,11 @@ not cover (a symmetry the caller has to adapt to) and is refused.
 """
 
 import numpy as np
+from pyscf import lib
 
 from src.Base.numerical_flags import flag
-from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
+from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
+                                         ORBITAL_MULTIPLIER_STALL_RATIO)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.cphf import CphfNotConverged
 from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
@@ -55,7 +57,11 @@ def rotation_gradient(C, fock, gamma, nocc, kernel):
     expression serves a target's own partial and the multiplier's; it needs a
     Coulomb and an exchange build and no norb^4 tensor. A gamma without a
     virtual-virtual block goes to the kernel's `factored` where it has one
-    (Base.pyscf.cphf.ResponseKernel)."""
+    (Base.pyscf.cphf.ResponseKernel). Any other gamma goes to the kernel
+    tagged `read_columns` = Co: only G Co is read here, and a distributed JK
+    fit builds the exchange of a tagged density as K Co
+    (`DistributedDF._exchange_on_columns`), nocc / nao of a general K; a
+    kernel that does not read the tag returns the whole G."""
     gs = 0.5 * (gamma + gamma.T)
     factored = getattr(kernel, 'factored', None)
     if factored is not None and not np.any(gs[nocc:, nocc:]):
@@ -63,7 +69,7 @@ def rotation_gradient(C, fock, gamma, nocc, kernel):
         P = C @ gs[:, :nocc] - 0.5 * C[:, :nocc] @ gs[:nocc, :nocc]
         G = factored(P)
     else:
-        G = kernel(C @ gs @ C.T)
+        G = kernel(lib.tag_array(C @ gs @ C.T, read_columns=C[:, :nocc]))
     Y = 2.0 * (fock @ gs)
     Y[:, :nocc] += 4.0 * (C.T @ G @ C)[:, :nocc]
     return Y
@@ -101,6 +107,13 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
     wrong force: it is warned about and flagged (module docstring), the force
     carrying the residual's error.
 
+    A solve already below the residual tolerance ends at the first outer
+    cycle that lowers its true residual by less than
+    ORBITAL_MULTIPLIER_STALL_RATIO: there the matvec's round-off floor lies
+    above `multiplier_tol`, and lgmres would otherwise restart on it up to
+    `multiplier_max_iter` (`krylov.lgmres_root_driven(stall=)`). A solve that
+    reaches `multiplier_tol` is unchanged by this to the bit.
+
     Returns (Lambda, residual norm).
     """
     s = numerics_or_default(numerics).scf
@@ -132,13 +145,15 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
         return np.where(fixed, v, v / (2.0 * np.where(fixed, 1.0, -de)))
 
     # rank 0 iterates under ranks: the matvec's Fock builds are collectives
-    x, info = lgmres_root_driven(pair_matvec, rhs, precond,
-                                 atol=tol * max(1.0, np.linalg.norm(rhs)),
-                                 maxiter=s.multiplier_max_iter)
+    scale = max(1.0, np.linalg.norm(rhs))
+    x, info = lgmres_root_driven(
+        pair_matvec, rhs, precond, atol=tol * scale,
+        maxiter=s.multiplier_max_iter,
+        stall=(residual_tol * scale, ORBITAL_MULTIPLIER_STALL_RATIO))
     res = lockstep(np.linalg.norm(pair_matvec(x) - rhs))
     if verbose:
         print(f"    [multipliers] n={rhs.size} info={info} |res|={res:.3e}")
-    if info != 0 or res > residual_tol * max(1.0, np.linalg.norm(rhs)):
+    if info != 0 or res > residual_tol * scale:
         not_converged(f'orbital-response multiplier solve not converged: '
                       f'info={info}, true residual {res:.3e} (tol '
                       f'{residual_tol:.0e} relative); its last iterate is '

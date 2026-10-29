@@ -79,6 +79,7 @@ from src.gradients.isdf_derivatives import (PendingFitAdjoint,
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.SingleReference.GW.space_time import separable_factors
 from tests.isdf_test_grid import g1, g1_kw, g1_numerics, LEGACY_FIT, legacy
+from tests.blas_bar import assert_same_within
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -556,9 +557,14 @@ def test_the_force_makes_one_fit_adjoint_call(xc, switches, monkeypatch):
     for size in (1, 2):
         out = run_simulated(unpooled, size)
         whole, separate = out[0]
-        d = np.abs(whole - separate).max() / np.abs(separate).max()
-        lines.append(f'{size} ranks unpooled: {d:.1e} rel')
-        assert d <= 1e-12, lines
+        scale = np.abs(separate).max()
+        lines.append(f'{size} ranks unpooled: '
+                     f'{np.abs(whole - separate).max() / scale:.1e} rel')
+        # a few ulp where the BLAS is the recording one; elsewhere the two
+        # arms' orbital-response solves (ORBITAL_MULTIPLIER_TOL = 1e-11) may
+        # stop at different iterations, so the force differs by that scale
+        assert_same_within(whole / scale, separate / scale, 1e-10,
+                           label=f'unpooled, {size} ranks: {lines}')
         for o in out:
             assert_same(o[0], whole, quantity='gradient', label='unpooled')
     print(f'\n{xc}: ' + '; '.join(lines))

@@ -89,12 +89,18 @@ the stage is refused. Every Huang-Rhys factor, reorganization energy and
 Franck-Condon sum of the rate table stands on these modes.
 
 SCHEME B (`Declaration.solvent_scheme` 'scheme-b-eq' or 'scheme-b-noneq',
-`declaration.SOLVENT_SCHEMES`): every state stands in
+each also '-bare', `declaration.SOLVENT_SCHEMES`): every state stands in
 the self-consistent state-specific loop of the continuum
 (`src.environments.solvation_loop`), each GW-BSE state model on the declared
-chain (`chain` module docstring, `state_specific`); the walks run on G_eq
-(`SolvatedSurface`), with the policies above (nudge, refreeze, saddle
-check, engine). The stages:
+chain (`chain` module docstring, `state_specific`), a singlet with the
+linear-response term at eps_inf (without it under '-bare': the BSE exchange
+on the bare interaction); the walks run on G_eq, or under scheme-b-noneq the
+excited ones on G_neq(X | S0) with S0's slow charges at every geometry
+(`SolvatedSurface`, its force with the response of S0's loop), with the
+policies above (nudge, refreeze, saddle check, engine), each walk's loops
+to the declared tolerances or tied to its gradient (--loop-tolerance
+gradient-tied, `SolvatedSurface`; every gradient's loop is in the record's
+`loop_log`). The stages:
 
     s0     the walk of G_eq(S0): the reference self-consistent with its own
            density in the continuum at eps_static
@@ -104,11 +110,16 @@ check, engine). The stages:
            equilibrium charges, and the absorption of the singlet and the
            triplet followed, G_neq(X | S0) - G_eq(S0), each on a chain built
            at R0 (`state_specific.vertical`)
-    s1,t1  the walk of G_eq(X), its saddle check, the loop again at the
-           minimum on the surface the last walk ran on, ONE shared evaluation
-           of every property in X's equilibrium charges there, and the
-           emission G_eq(X) - G_neq(S0 | X) on a chain built at the minimum;
-           its G_eq there against the walk's is `walk_vs_vertical`
+    s1,t1  the walk of G_eq(X) (G_neq(X | S0) out of equilibrium), its
+           saddle check, the loop again at the minimum on the surface the
+           last walk ran on, ONE shared evaluation of every property in the
+           charges X stands in there, and the emission G_eq(X) - G_neq(S0 |
+           X) on a chain built at the minimum; its G there against the walk's
+           is `walk_vs_vertical`. At the T1 minimum also T2 and T3, each in a
+           loop of its own in the slow charges T1 stands in
+           (`triplets_above`). On the full BSE a triplet walk that stops at
+           the instability gives way to the full-BSE single point at the
+           declared Tamm-Dancoff T1 minimum (`tda_single_point`), flagged
     rate   the TADF table off these records
 
 WHICH DENSITY EACH PROPERTY SEES (scheme B). A property is taken in the
@@ -135,16 +146,16 @@ its splitting from it in S0's charges. At a minimum of X:
                     G_eq(X) - emission (G_neq(S0 | X)), so omega[X] is the
                     emission; the properties in X's equilibrium charges
     scheme-b-noneq  the solvent left in S0's equilibrium: energy[X] =
-                    G_neq(X | S0) and e0 = G_eq(S0), both at X's minimum, so
-                    omega[X] is the absorption there; the properties in the
-                    charges of that non-equilibrium loop (S0's slow charges,
-                    X's fast ones)
+                    G_neq(X | S0) at the minimum of that surface (the loop
+                    there on the walk's last surface, record 'G_neq') and
+                    e0 = G_eq(S0) of S0's loop there ('G_eq_S0'), so omega[X]
+                    is the absorption there; the properties in the charges
+                    of that non-equilibrium loop (S0's slow charges, X's
+                    fast ones)
 
 every other root at energy[X] plus its splitting from X in the property
-charges. The walks and minima are the same G_eq ones in both: a walk on
-G_neq(X | S0) needs the derivative of S0's slow charges, which the loop does
-not provide. Adiabatic energies are then differences of these energies at
-each state's minimum, as the solvated driver's (`solvated`) for 'eq'. The
+charges. Adiabatic energies are then differences of these energies at each
+state's minimum, as the solvated driver's (`solvated`) for 'eq'. The
 records keep the evaluation's own numbers under props['field_e0'] and
 props['field_omega'].
 
@@ -187,6 +198,8 @@ from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distribut
                                               is_root, mpi_map, n_ranks)
 from src.SingleReference.GW.qp_selection import AdaptivePartition
 from src.SingleReference.BSE.solve import oscillator_strengths
+from src.SingleReference.LinearResponse.casida import CasidaInstability
+from src.SingleReference.LinearResponse.davidson import CasidaBreakdown
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
 from src.gradients.gwbse.state_manifold import StateManifold
@@ -203,9 +216,10 @@ from src.properties.excitations import (grid_record, relaxation_fields,
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
                                     require_hessian_counts,
                                     translation_residual)
-from src.properties.optimize import (relax, saddle_test, surface_from_record,
-                                     surface_record)
+from src.properties.optimize import (relax, resolved_conv, saddle_test,
+                                     surface_from_record, surface_record)
 from src.gradients.mean_field_surface import MeanFieldSurface
+from src.environments import solvation_loop as sl
 from src.gradients.solvated_surface import SolvatedSurface
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
@@ -271,8 +285,11 @@ class Stamps:
                                else p.far_start.sha256()),
                     engine=p.engine, scf_warm_start=p.scf_warm_start,
                     scf_finish=p.scf_finish)
-        t1 = dict(walk)
-        vib = dict(walk, hess=hess, rate_model=asdict(d.rate_model))
+        # the T1 single point's geometry, for every stage that reads t1
+        tda = ({} if p.tda_t1_minimum is None
+               else {'tda_t1_minimum': p.tda_t1_minimum.sha256()})
+        t1 = dict(walk, **tda)
+        vib = dict(walk, hess=hess, rate_model=asdict(d.rate_model), **tda)
         rate = dict(vib, temperature=d.temperature,
                     lambda_env_ev=d.lambda_env_ev, df_check=p.df_check,
                     manifold_gaps=d.manifold_gaps)
@@ -357,25 +374,36 @@ class Run:
         each model in its charges, warm-started where the declaration says,
         and the loop's tolerances the declaration's Numerics."""
         d = self.declaration
+        make_state = self.loop_states({'singlet': d.singlet - 1,
+                                       'triplet': d.triplet - 1})
+        return chain.reaction_field(d), make_state, {'numerics': d.numerics}
+
+    def loop_states(self, roots):
+        """`state_specific.gwbse_states` of scheme B (`loop`) with the
+        zero-based `roots` of each spin."""
+        d = self.declaration
         make_scf = chain.mean_field_factory(
             d.reference, d.numerics, self.max_memory, self.histories,
             finish=d.policies.scf_finish, warm_start=self.warm_start,
             span=(None, None), surface_route=d.numerics.scf.route,
             converge=False)
-        make_state = state_specific.gwbse_states(
-            make_scf, d.numerics, d.kernel == 'bse-tda',
-            roots={'singlet': d.singlet - 1, 'triplet': d.triplet - 1},
-            build_chain=chain.DeclaredChain(d))
-        return chain.reaction_field(d), make_state, {'numerics': d.numerics}
+        return state_specific.gwbse_states(
+            make_scf, d.numerics, d.kernel == 'bse-tda', roots=roots,
+            build_chain=chain.DeclaredChain(d), lr=d.scheme_b_lr)
 
     def loop_surface(self, kind, mol, where):
-        """The scheme-B surface G_eq of `kind` ('S0', 'singlet', 'triplet')
-        whose first evaluation is at `mol`; `where` names it in the log."""
+        """The scheme-B surface of `kind` ('S0', 'singlet', 'triplet') whose
+        first evaluation is at `mol`: G_eq, or for an excited state of a
+        non-equilibrium scheme G_neq(X | S0) (module docstring); `where`
+        names it in the log."""
         make_field, make_state, loop_kw = self.loop
+        noneq = self.declaration.scheme_b_noneq and kind != 'S0'
         return SolvatedSurface(mol, make_field, make_state(kind),
                                label=f'{kind} {self.declaration.environment}'
                                      f' ({where})',
-                               make_ground=make_state('S0'), **loop_kw)
+                               make_ground=make_state('S0'), noneq=noneq,
+                               final_grad_max=resolved_conv(None)['opt_grad_max'],
+                               **loop_kw)
 
     # ------------------------------------------------------------ helpers
     def mean_field_factory(self, numerics, warm_start=None, span=None):
@@ -429,16 +457,16 @@ class Run:
         ISDF_HESSIAN_MIN_GRID. Returns the factors' grid record."""
         d, mol = self.declaration, self.mol_in
         if d.numerics.scf.route == 'isdf':
-            resolve_isdf_grid(d.numerics.scf.grid_level, str(mol.basis),
+            resolve_isdf_grid(d.numerics.scf.grid_level, mol.basis,
                               elements_of(mol),
                               auxbasis=chain.factor_auxbasis(mol))
         if d.policies.hessian == 'numerical' and \
                 d.hessian_numerics.scf.route == 'isdf':
             counts, _ = resolve_isdf_grid(
-                d.hessian_numerics.scf.grid_level, str(mol.basis),
+                d.hessian_numerics.scf.grid_level, mol.basis,
                 elements_of(mol), auxbasis=chain.factor_auxbasis(mol))
             shells = shell_tuple(counts)
-            require_hessian_counts(str(mol.basis),
+            require_hessian_counts(mol.basis,
                                    {el: shells for el in
                                     elements_of(mol)})
         return grid_record(self.spec, mol)
@@ -737,7 +765,8 @@ class Run:
         if not self.declaration.policies.saddle_check:
             return mol, info, root, final, None
         name = stage.upper()
-        if (info.get('numerical_flags') or {}).get('walk_not_converged'):
+        flags = info.get('numerical_flags') or {}
+        if flags.get('walk_not_converged') or flags.get('tda_minimum_single_point'):
             log(f'{stage}: no saddle check, the walk did not relax')
             return mol, info, root, final, {
                 'status': 'not run: the walk did not relax'}
@@ -756,8 +785,10 @@ class Run:
             log(f'{stage}: {name} Hessian at the new minimum')
             return moved, dict(again, final_surface=last)
 
+        # the Hessian's forces at full loop tolerances (SolvatedSurface.untied)
+        untied = getattr(final, 'untied', None)
         moved, again, record = saddle_check(
-            final, mol, walk, verbose=self.store.root_rank,
+            final if untied is None else untied(), mol, walk, verbose=self.store.root_rank,
             cache_dir=self.store.workdir(f'hess_{stage}'))
         first = record['first']
         log(f'{stage}: {name} lowest internal curvature '
@@ -1254,8 +1285,8 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
     last walk ran on (G_eq of the state, its charges and the model whose
     chain followed it), the vertical energies on a chain built at the
     minimum, and ONE evaluation of every property in the charges the scheme
-    takes (scheme-b-eq: X's equilibrium; scheme-b-noneq: X in S0's slow
-    charges)."""
+    takes (equilibrium: X's own; non-equilibrium: X in S0's slow charges,
+    the walk's own surface)."""
     d = run.declaration
     mol, info, _, final, saddle = run.saddle_checked(stage, *walked, t0)
     kind = stage_kind(stage)
@@ -1269,32 +1300,36 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
                       couplings=(following(*s_key), following(*t_key)))
     make_field, make_state, loop_kw = run.loop
     r = state_specific.vertical(make_field, make_state, kind, mol, loop_kw)
-    if d.solvent_scheme == 'scheme-b-noneq':
-        # the solvent left in S0's equilibrium (module docstring): X in S0's
-        # slow charges, its properties in that loop's charges
-        neq = r['models']['neq_state']
-        man = run.manifold(s_key, t_key, chain=neq.chain)
-        ev = man.evaluate(mol, neq.mf,
-                          couplings=(following(*s_key), following(*t_key)))
-        anchor, e0 = r['G']['neq_state'], r['G']['eq_ground']
+    if d.scheme_b_noneq:
+        # the walk's surface is G_neq(X | S0) (module docstring): X in S0's
+        # slow charges, its properties in that loop's charges, e0 = G_eq(S0)
+        # of the loop the surface ran at the minimum
+        e0, vertical_g = final.last_ground['result'].energy, r['G']['neq_state']
     else:
-        anchor, e0 = g_walk, g_walk - r['emission']
+        e0, vertical_g = g_walk - r['emission'], r['G']['eq_state']
     props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states),
-                          {label(key): anchor}, e0)
+                          {label(key): g_walk}, e0)
     refrozen = relaxation_fields(info).get('refreeze') in ('measured',
                                                            'not converged')
     gap, gap_flagged = state_specific.walk_vs_vertical(
-        kind, g_walk, r['G']['eq_state'], refrozen,
+        kind, g_walk, vertical_g, refrozen,
         d.numerics.solvent.loop_tol_energy)
+    higher = ({} if kind != 'triplet' else
+              triplets_above(run, mol, r, label(key)))
     fields = walk_fields(info)
     fields['numerical_flags'] = merged_flags(
         fields['numerical_flags'], loop_flags(final, mol),
+        {name: [f'{state} vertical loop'] for state, v in higher.items()
+         for name in v['flags']},
         {name: [f'emission {loop} loop'] for loop, names in r['flags'].items()
          for name in names},
         {'walk_vs_vertical': [f'{gap:.2e} Ha']} if gap_flagged else {})
     record = {'props': props, 'root_followed': root,
               'solvation': d.solvation, 'solvent_scheme': d.solvent_scheme,
-              'G_eq': g_walk,
+              # G_eq(X), or G_neq(X | S0) on a non-equilibrium walk with
+              # G_eq(S0) of its ground loop there
+              **({'G_eq': g_walk} if not d.scheme_b_noneq else
+                 {'G_neq': g_walk, 'G_eq_S0': e0}),
               'emission_eV': r['emission'] * HARTREE_TO_EV,
               'emission_G': r['G'], 'emission_flags': r['flags'],
               'walk_vs_vertical_G_Ha': gap,
@@ -1308,7 +1343,10 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
               'qp_partition': (None if man.driven.resolved.qp_partition is None
                                else man.driven.resolved.qp_partition.as_record()),
               'frame_turning': frame_turning_record(mol),
-              'restarted_from': info.get('restarted_from'), **fields}
+              'restarted_from': info.get('restarted_from'),
+              # each gradient's loop: full, calibration or tied, its bar
+              'loop_log': final.loop_log,
+              'triplets_above': higher, **fields}
     run.write(stage, record)
     run.store.write_xyz(f'{stage}.xyz', mol, f'{label(key)} minimum, '
                         f'{d.environment} scheme B')
@@ -1320,6 +1358,36 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
     if record['numerical_flags']:
         log(f'{stage}: FLAGGED {record["numerical_flags"]}')
     return run.read(stage)
+
+
+def triplets_above(run, mol, r, t_label):
+    """{'T<k>': ...} of the two triplets above the followed one at its
+    minimum (T2 and T3 at the T1 minimum), each a loop of its own on a chain
+    built there (`state_specific.in_slow_charges`) in the slow charges the
+    followed triplet stands in: its own equilibrium's, or S0's under a
+    non-equilibrium scheme. The vertical energy is G_neq(T<k> | ...) minus
+    the followed triplet's G in the same charges on the vertical's chain
+    built there (`state_specific.vertical`'s 'eq_state', or 'neq_state')."""
+    d = run.declaration
+    loops, field = r['loops'], r['field']
+    noneq = d.scheme_b_noneq
+    slow = sl.slow_charges(field, (loops['eq_ground'] if noneq
+                                   else loops['eq_state']).dm_eff)
+    reference = r['G']['neq_state' if noneq else 'eq_state']
+    q0 = loops['neq_state' if noneq else 'eq_state'].q
+    out = {}
+    for k in (d.triplet, d.triplet + 1):
+        make_state = run.loop_states({'singlet': d.singlet - 1, 'triplet': k})
+        res = state_specific.in_slow_charges(make_state, 'triplet', mol, field,
+                                             slow, q0, run.loop[2])
+        name = f'T{k + 1}'
+        out[name] = {'root': k + 1, 'G_neq': res.energy,
+                     'vertical_eV': (res.energy - reference) * HARTREE_TO_EV,
+                     'converged': bool(res.converged),
+                     'flags': sorted({f['flag'] for f in res.flags})}
+        log(f'{name} at the {t_label} minimum: {out[name]["vertical_eV"]:.4f} eV '
+            f'above {t_label} in its slow charges')
+    return out
 
 
 def s1_minimum(run):
@@ -1413,8 +1481,74 @@ def t1_minimum(run):
             + ('' if hess_init is None else ' on the S1 walk\'s Hessian')
             + ('' if d.handover and not d.scheme_b
                else f', start nudged by {d.policies.nudge_bohr} Bohr'))
-        walked = walked_minimum(run, 't1', surface, mol_s1, resume, hess_init=hess_init)
+        try:
+            walked = walked_minimum(run, 't1', surface, mol_s1, resume,
+                                    hess_init=hess_init)
+        except INSTABILITY_FAILURES as exc:
+            # a refrozen pass that stops at the instability raises
+            if d.policies.tda_t1_minimum is None:
+                raise
+            return tda_single_point(run, None, f'{type(exc).__name__}: {exc}',
+                                    t0)
+    if d.policies.tda_t1_minimum is not None and \
+            stopped_at_instability(walked[1]):
+        return tda_single_point(run, walked, walked[1]['status'], t0)
     return finish_minimum(run, 't1', walked, t0, lambda info: {})
+
+
+#: The failures of a full-BSE triplet at its instability (min eig(A - B) <= 0
+#: or a projected (A - B) block not positive definite) that send a scheme-B
+#: T1 stage to the single point at the Tamm-Dancoff minimum.
+INSTABILITY_FAILURES = (CasidaInstability, CasidaBreakdown)
+
+
+def stopped_at_instability(info):
+    """Whether a walk ended unconverged because its state stopped evaluating
+    at the full kernel's instability (`INSTABILITY_FAILURES`, named in its
+    status)."""
+    status = info.get('status') or ''
+    names = {c.__name__ for c in INSTABILITY_FAILURES} | {
+        c.__name__ for base in INSTABILITY_FAILURES
+        for c in base.__subclasses__()}
+    return (not info.get('converged')
+            and any(f'{name}:' in status for name in names))
+
+
+class TdaSinglePoint(RuntimeWarning):
+    """A full-BSE T1 record taken as a single point at the Tamm-Dancoff T1
+    minimum: its triplet walk stopped at the instability (flag
+    'tda_minimum_single_point')."""
+
+
+def tda_single_point(run, walked, reason, t0):
+    """t1 of a scheme-B full-BSE run whose triplet walk stopped at the
+    instability: the record of `scheme_b_minimum` at the declared
+    Tamm-Dancoff T1 minimum (`Policies.tda_t1_minimum`), on a surface built
+    there, not walked (no saddle check), warned about and flagged
+    'tda_minimum_single_point', with why and where the walk stopped."""
+    d = run.declaration
+    tda = d.policies.tda_t1_minimum
+    at = gto.M(atom=tda.atom, basis=d.system.basis, verbose=0)
+    if at.natm != run.mol_in.natm:
+        raise StageRefused(f'the Tamm-Dancoff T1 minimum has {at.natm} atoms, '
+                           f'the system {run.mol_in.natm}')
+    mol = run.molecule_at(at.atom_coords())
+    text = (f't1: the full-BSE triplet walk stopped at the instability ({reason}); '
+            f'T1 is the full-BSE single point at the Tamm-Dancoff T1 minimum '
+            f'(sha256 {tda.sha256()[:12]})')
+    warnings.warn(text, TdaSinglePoint, stacklevel=2)
+    log(text)
+    walk = (None if walked is None else
+            {'status': walked[1].get('status'), 'cycles': walked[1].get('cycles'),
+             'coords_bohr': np.asarray(walked[0].atom_coords(), float)})
+    fallback = {'reason': reason, 'at': 'tda_t1_minimum',
+                'sha256': tda.sha256(), 'walk': walk}
+    info = {'converged': False, 'cycles': 0, 'history': [], 'energy': None,
+            'opt_grad_max': float('nan'), 'status': 'tda minimum single point',
+            'numerical_flags': {'tda_minimum_single_point': [text]}}
+    surface = run.loop_surface('triplet', mol, 'the Tamm-Dancoff T1 minimum')
+    return scheme_b_minimum(run, 't1', (mol, info, None, surface), t0,
+                            lambda _: {'tda_single_point': fallback})
 
 
 # ------------------------------------------------------------ rate models

@@ -24,6 +24,7 @@ from pyscf import gto, scf
 from pyscf.mp import dfmp2_native
 from pyscf.scf import hf as scf_hf
 
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from tests.adc_common import ATOMS, AUX, NF, five_point, make_scf_loop, molecule
 
@@ -43,7 +44,8 @@ def finite_field(model, mol):
 @pytest.mark.parametrize('route', ['dense', 'tiled'])
 def test_energy_and_density(route):
     mol = molecule(ATOMS)
-    model = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route=route)
+    model = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route=route,
+                     numerics=Numerics())
     r = model(np.zeros((mol.nao, mol.nao)), 0.0)
     mp = dfmp2_native.DFRMP2(model.mf, frozen=NF, auxbasis=AUX)
     mp.verbose = 0
@@ -81,7 +83,8 @@ def test_dropped_combinations():
     warnings.simplefilter('ignore')
     mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
                 basis='aug-cc-pvdz', verbose=0)
-    model = MP2State(HFState(mol, lindep_scf), 1, 'aug-cc-pvdz-ri', force_route='tiled')
+    model = MP2State(HFState(mol, lindep_scf), 1, 'aug-cc-pvdz-ri', force_route='tiled',
+                     numerics=Numerics())
     tr, dE = finite_field(model, mol)
     assert model.mf.mo_coeff.shape == (41, 37)
     assert abs(tr - dE) < 1e-7, (tr, dE)

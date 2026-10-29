@@ -51,8 +51,10 @@ occupied tiles, auxiliary chunks or AO shell blocks is taken in tile, chunk or
 block order (ordered_sum, ordered_chain_sum); arrays whose rows one owner
 computes travel verbatim (allgather_ranges); the Z-vector is iterated by rank
 0 with every Fock build shared over the ranks in auxiliary blocks
-(Base.pyscf.cphf.ResponseKernel); the replicated small pieces (the metric
-factors, the SCF force) are rank 0's (lockstep). At one
+(Base.pyscf.cphf.ResponseKernel); the SCF force of a density-fitted
+restricted reference is assembled in fixed tiles over the same ranks
+(`isdf_mean_field.mean_field_skeleton_force`), any other is pyscf's on rank 0;
+the replicated small pieces (the metric factors) are rank 0's (lockstep). At one
 tile size and one chunk width the force has the same bits on every rank and at
 every rank count.
 """
@@ -73,6 +75,8 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, curre
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
 from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.isdf_mean_field import (fitted_force_supported,
+                                           mean_field_skeleton_force)
 from src.gradients.skeleton_tiles import fitted_fock_skeleton, shell_runs
 
 
@@ -549,7 +553,13 @@ def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_G
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis)
     fc, gam, asym = correlation_force(mol, mf, factors, auxmol, d, frozen, Bc,
                                       Y_extra, block_gb, width, numerics, flags)
-    F = on_root(lambda: (dcf.hf_force(mf),), [(mol.natm, 3)], factors.comm)[0] + fc
+    if fitted_force_supported(mf):
+        # over the current region, the communicator the Z-vector's kernel
+        # takes too (dcf.scf_kernel)
+        F = mean_field_skeleton_force(mf) + fc
+    else:
+        F = on_root(lambda: (mean_field_skeleton_force(mf),), [(mol.natm, 3)],
+                    factors.comm)[0] + fc
     return F, (e2, gam, asym, extra)
 
 

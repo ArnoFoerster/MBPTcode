@@ -21,8 +21,8 @@ the lowest by default), on the chain `build_chain` builds where it is given
 evaluation and every later model is that one moved (`GWBSEState.at`), so a
 walk (`src.gradients.solvated_surface.SolvatedSurface`) stays on the
 conventions frozen at its first geometry. A singlet carries the
-linear-response term of the field's `transition_environment()`, a triplet
-none.
+linear-response term of the field's `transition_environment()` (unless
+`lr=False`: the bare-exchange arm), a triplet none.
 
 `vertical` takes the absorption and emission of one state at one geometry
 (`solvation_loop.vertical_energies`): both loops of the state stand on one
@@ -31,6 +31,9 @@ of its own geometry. Its result holds the medium (`field`) and the model of
 each loop (`models`: 'eq_ground', 'eq_state', 'neq_state', 'neq_ground'),
 whose mean field is the one converged in that loop's last charges; `ground`
 and `state` are the first two (the state's holds the chain).
+
+`in_slow_charges` takes another root's loop in the slow charges of a
+state's equilibrium (T2 and T3 at the T1 minimum, `src.photophysics.stages`).
 
 `walk_vs_vertical` compares G_eq of a state at a walk's minimum, on the
 walk's surface, with the vertical's there, and flags a difference above its
@@ -47,14 +50,17 @@ from src.environments import solvation_loop as sl
 from src.gradients.gwbse.state_model import GWBSEState
 
 
-def gwbse_states(make_scf, numerics, bse_tda, roots=None, build_chain=None):
+def gwbse_states(make_scf, numerics, bse_tda, roots=None, build_chain=None,
+                 lr=True):
     """make_state(kind) of GW-BSE (module docstring): each call is one
     surface, its first model built at the first geometry and moved to every
     later one. make_scf(mol): the reference's configured, unconverged mean
     field; numerics: the one `Numerics` every model holds; bse_tda: the
     Tamm-Dancoff kernel; roots: {'singlet': k, 'triplet': k}, the zero-based
     root of each spin (None: the lowest); build_chain: the chain's builder
-    (`GWBSEState`), None for its own."""
+    (`GWBSEState`), None for its own; lr: whether a singlet carries the
+    linear-response term (False: the bare-exchange arm, the medium in the
+    loop alone)."""
     roots = dict({'singlet': 0, 'triplet': 0}, **(roots or {}))
 
     def make_state(kind):
@@ -63,11 +69,12 @@ def gwbse_states(make_scf, numerics, bse_tda, roots=None, build_chain=None):
         def build(m, field):
             if kind == 'S0':
                 return GWBSEState(m, make_scf, numerics=numerics)
-            lr = field.transition_environment() if kind == 'singlet' else None
+            env = (field.transition_environment() if kind == 'singlet' and lr
+                   else None)
             if first:
-                return first[0].at(m, make_scf, lr)
+                return first[0].at(m, make_scf, env)
             first.append(GWBSEState(m, make_scf, kind, roots[kind],
-                                    bse_tda=bse_tda, lr_environment=lr,
+                                    bse_tda=bse_tda, lr_environment=env,
                                     numerics=numerics, build_chain=build_chain))
             return first[0]
         return build
@@ -113,3 +120,14 @@ def walk_vs_vertical(kind, g_walk, g_vertical, refrozen, tol_energy):
                       'surfaces froze their conventions at different geometries',
                       RuntimeWarning, stacklevel=2)
     return gap, abs(gap) > bar
+
+
+def in_slow_charges(make_state, kind, m, field, slow, q0, loop_kw):
+    """The loop of `kind` (a surface of `make_state`, its chain built at m)
+    at m in the slow charges `slow` = (q_s, c_s) of another state's
+    equilibrium there (`solvation_loop.slow_charges`), started from the
+    charges q0: G_neq(kind | that state) (a `LoopResult`), the vertical
+    energy of a state above the one the solvent equilibrated with, e.g. T2
+    and T3 at the T1 minimum."""
+    return sl.equilibrate(make_state(kind)(m, field), field, slow=slow, q0=q0,
+                          **loop_kw)

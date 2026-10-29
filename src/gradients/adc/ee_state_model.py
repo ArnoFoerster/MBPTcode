@@ -6,7 +6,7 @@ on SCS-MP2 with the same factors: energy, density and force alike; its
 triplet is the Ms = 0 component (spin-component scaling is not spin-rotation
 invariant), Turbomole's spin-adapted triplet.
 
-    state = ADC2State(MP2State(HFState(mol, make_scf), frozen, aux),
+    state = ADC2State(MP2State(HFState(mol, make_scf), frozen, aux, numerics=numerics),
                       'singlet', root=0, nroots=3,
                       lr_environment=field.transition_environment())
     G = solvation_loop.equilibrate(state, field).energy
@@ -55,8 +55,7 @@ force returns rank 0's bits on every rank (state_models docstring).
 import numpy as np
 from pyscf import gto
 
-from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_FORCE_OMEGA_MATCH, EE_RI_TILE_GB,
-                                         ROOT_FOLLOW_WEIGHT_MIN)
+from src.Base.numerics.constants import EE_FORCE_OMEGA_MATCH, ROOT_FOLLOW_WEIGHT_MIN
 from src.Base.numerical_flags import collecting as cphf_flags_into
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, distributed, lockstep
 from src.SingleReference.ADC.eeADC.ee_driver import relaxed_densities
@@ -73,7 +72,6 @@ class ADC2State:
     """One folded ADC(2) root of one spin channel (module docstring)."""
 
     def __init__(self, mp2, spin, root=0, nroots=3, lr_environment=None,
-                 conv_tol=EE_ADC_CONV_TOL, tile_gb=EE_RI_TILE_GB,
                  level='adc2', follow='overlap'):
         if follow not in ('overlap', 'index'):
             raise ValueError(f"follow must be 'overlap' or 'index', not {follow!r}")
@@ -84,7 +82,8 @@ class ADC2State:
         self.follow = follow
         self.spin, self.root, self.nroots = spin, root, nroots
         self.lr_environment = lr_environment
-        self.conv_tol, self.tile_gb = conv_tol, tile_gb
+        # the solve's tolerance and tiles: the model's one Numerics
+        self.conv_tol, self.tile_gb = mp2.numerics.adc.conv_tol, mp2.tile_gb
         self.level = level
         self.y_follow = None
         # (h, e, omega, FollowedRoot) of the last call's root: the force's root
@@ -98,6 +97,11 @@ class ADC2State:
         # amplitudes, the next call's block start (carried between geometries
         # by a walk, as y_follow is)
         self.fold_start = None
+
+    @property
+    def numerics(self):
+        """The model's one Numerics, its MP2 model's (a loop reads it)."""
+        return self.mp2.numerics
 
     def _start(self, mf):
         """The last call's roots as singles vectors (no * nv, nroots) of mf's
@@ -124,6 +128,8 @@ class ADC2State:
                                      auxbasis=self.mp2.auxbasis,
                                      environment=self.lr_environment,
                                      conv_tol=self.conv_tol, return_fold=True,
+                                     residual_tol=self.mp2.numerics.adc.residual_tol,
+                                     dense_limit=self.mp2.numerics.adc.dense_limit,
                                      tile_gb=self.tile_gb,
                                      numerics=self.mp2.numerics,
                                      spin_scaling=self.mp2.scaling,

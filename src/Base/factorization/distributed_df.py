@@ -545,7 +545,8 @@ def lockstep_density(dms, comm, timings=None):
             'its halves reduced separately')
     t0 = time.time()
     lockstep((dms, getattr(dms, 'mo_coeff', None),
-              getattr(dms, 'mo_occ', None)), comm, check=True)
+              getattr(dms, 'mo_occ', None),
+              getattr(dms, 'read_columns', None)), comm, check=True)
     add_seconds(timings, 'scf_lockstep', t0)
     return dms
 
@@ -778,15 +779,49 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         if self._cderi is None:
             self.build()
         t0 = time.time()
+        columns = getattr(dm, 'read_columns', None)
         if self._cderi.shape[0] == 0:
             zero = np.zeros(np.shape(dm))
             vj, vk = zero, zero.copy()
+        elif with_k and columns is not None and np.ndim(dm) == 2:
+            vj = (df_jk.get_jk(self, dm, hermi, True, False, direct_scf_tol)[0]
+                  if with_j else None)
+            vk = self._exchange_on_columns(np.asarray(dm), columns)
         else:
             vj, vk = df_jk.get_jk(self, dm, hermi, with_j, with_k,
                                   direct_scf_tol)
         add_seconds(self.timings, 'scf_fock_jk', t0)
         add_count(self.timings, 'scf_requests_jk')
         return (vj if with_j else None), (vk if with_k else None)
+
+    def _exchange_on_columns(self, dm, columns):
+        """This rank's rows' K[dm] where the caller reads it only as K C.
+
+        A density tagged `read_columns` = C (nao, k) belongs to a caller that
+        uses the potential only through v C (`multipliers.rotation_gradient`
+        reads the occupied columns of C^T G C). K C = sum_Q L_Q dm (L_Q C)
+        costs 3 naux nao^2 k against the 2 naux nao^3 of a general K, and
+        (K C) C^+ stands for K: it is linear in the rows, so the ranks'
+        partials add up to the total's, and (K C) C^+ C = K C because C has
+        full column rank. Any other reader of a tagged density's potential
+        would get a different matrix, which is why only the caller that
+        reads columns sets the tag.
+        """
+        C = np.ascontiguousarray(columns, dtype=float)
+        nao, k = C.shape
+        left = memory.left_mb(self.max_memory)
+        blksize = max(4, int(min(self.blockdim,
+                                 0.3e6 * max(left, 0) / 8 / nao**2)))
+        KC = np.zeros((nao, k))
+        for eri1 in self.loop(blksize):
+            L = lib.unpack_tril(eri1).reshape(-1, nao)       # (nb nao, nao)
+            nb = L.shape[0] // nao
+            X = (L @ C).reshape(nb, nao, k)                  # L_Q C
+            T = dm @ X.transpose(1, 0, 2).reshape(nao, nb * k)
+            T = np.ascontiguousarray(
+                T.reshape(nao, nb, k).transpose(1, 0, 2)).reshape(nb * nao, k)
+            KC += L.T @ T                                    # L_Q symmetric
+        return KC @ np.linalg.pinv(C)
 
     def _reduce_jk(self, vj, vk, with_j, with_k):
         """The ranks' partials added, in one reduction of both matrices.

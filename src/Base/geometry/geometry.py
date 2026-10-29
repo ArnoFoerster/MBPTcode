@@ -30,8 +30,20 @@ def coordinates(mol):
 
 
 def elements_of(mol):
-    """The element symbols of `mol`, sorted, each once."""
-    return sorted({mol.atom_pure_symbol(i) for i in range(mol.natm)})
+    """The grid keys of `mol`, sorted, each once (`grid_key`): its element
+    symbols, and the atom label of an atom that carries a basis of its own."""
+    return sorted({grid_key(mol, i) for i in range(mol.natm)})
+
+
+def grid_key(mol, ia):
+    """The key atom `ia`'s basis, auxiliary sets and interpolation grid are
+    looked up under: its element symbol, or its label ('C@1') where a
+    per-atom basis (a dict keyed by labels) gives that label a set of its
+    own."""
+    label = mol.atom_symbol(ia)
+    if isinstance(mol.basis, dict) and label in mol.basis:
+        return label
+    return mol.atom_pure_symbol(ia)
 
 
 def bond(mol, i, j):

@@ -32,7 +32,10 @@ and both dipole changes (delta_dipole_au), and density_<spin>.npz the relaxed
 densities in the full MO basis (delta_density_relaxed).
 
 --spin-scaling scs|sos runs SCS- or SOS-ADC(2) (ee_ri_fold; the factors of
-ADC2_SPIN_SCALING), gas phase or with the LR term, not with --state-specific.
+ADC2_SPIN_SCALING), gas phase or with the LR term; with --state-specific
+only on a relaxed --ss-density (a scaled root has no unrelaxed ISR density:
+the unrelaxed shifts and dipole change are null, density_<spin>.npz holds
+the relaxed densities only).
 
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
@@ -232,6 +235,10 @@ def run(args, comm):
         raise SystemExit('--state-specific needs --environment (a continuum)')
     if args.ss_density != 'unrelaxed' and args.state_specific == 'off':
         raise SystemExit('--ss-density needs --state-specific')
+    if (args.spin_scaling != 'none' and args.state_specific != 'off'
+            and args.ss_density == 'unrelaxed'):
+        raise SystemExit('--spin-scaling with --state-specific needs --ss-density '
+                         'relaxed or relaxed+pcm (a scaled root has no unrelaxed density)')
     if args.estimate_only:
         need = est['peak_gb']
         if need * MB_PER_GB > args.max_memory:
@@ -335,12 +342,14 @@ def run(args, comm):
                                   for m, v in res.ss_shifts.items()}
             ch['ss_shift_eV'] = (np.asarray(res.ss_shift) * HARTREE_TO_EV).tolist()
             ch['omega_ss_eV'] = (np.asarray(e) * HARTREE_TO_EV).tolist()
-            densities = dict(delta_density=np.asarray(res.delta_density))
+            # a spin-scaled root has no unrelaxed density (solve_ee_adc)
+            densities = ({} if res.delta_density is None else
+                         dict(delta_density=np.asarray(res.delta_density)))
             if args.ss_density != 'unrelaxed':
-                ch['ss_shifts_unrelaxed_eV'] = {
+                ch['ss_shifts_unrelaxed_eV'] = (None if res.ss_shifts_unrelaxed is None else {
                     m: (np.asarray(v) * HARTREE_TO_EV).tolist()
-                    for m, v in res.ss_shifts_unrelaxed.items()}
-                ch['delta_dipole_au'] = {k: np.asarray(v).tolist()
+                    for m, v in res.ss_shifts_unrelaxed.items()})
+                ch['delta_dipole_au'] = {k: None if v is None else np.asarray(v).tolist()
                                          for k, v in res.delta_dipole.items()}
                 densities['delta_density_relaxed'] = np.asarray(
                     res.delta_density_relaxed)

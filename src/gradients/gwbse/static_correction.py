@@ -81,7 +81,7 @@ def qp_xc_correction_Y(mf, weights, nocc):
     return Y
 
 
-def qp_xc_correction_skeleton(mf, weights, nocc):
+def qp_xc_correction_skeleton(mf, weights, nocc, pending=None):
     """(natm, 3) of d/dR sum_p w_p <p|Sigma_x - v_xc|p>, coefficients fixed;
     a matrix of weights is sum_pq w_pq <p|Sigma_x - v_xc|q>.
 
@@ -89,6 +89,11 @@ def qp_xc_correction_skeleton(mf, weights, nocc):
     the exchange half is `fock_partial_skeleton`'s K structure at weight
     -(1 - a_x) with no Coulomb term, and the rest is minus `xc_skeleton`. There
     is no one-electron part. On Hartree-Fock both halves vanish.
+
+    pending: the force's open fit-adjoint window. The four-centre exchange
+    channels and the grid skeleton are then held there, to share one pass
+    with the orbital response's skeleton (`mean_field_response.held_skeletons`),
+    and the value returned leaves them out.
     """
     is_ks, _ = xc_hybrid_coeff(mf)
     if not is_ks:
@@ -111,15 +116,17 @@ def qp_xc_correction_skeleton(mf, weights, nocc):
         # from the auxiliary basis would differentiate one operator while the
         # energy carries another.
         return (isdf_fock_partial_exchange(mf, gs, channels=delta)
-                - xc_skeleton(mf, gs))
+                + xc_skeleton(mf, gs, weight=-1.0, pending=pending))
     if getattr(mf, 'with_df', None) is not None:
         grad = fock_partial_skeleton_df(mf, auxmol_of(mf), gs, nocc,
-                                        coulomb=False, channels=delta)
-        return grad - xc_skeleton(mf, gs)
+                                        coulomb=False, channels=delta,
+                                        pending=pending)
+        return grad + xc_skeleton(mf, gs, weight=-1.0, pending=pending)
     g_ao = C @ gs @ C.T
     D = mf.make_rdm1()
     grad = np.zeros((mf.mol.natm, 3))
     for omega, weight in delta:
         if weight != 0.0:
-            grad = grad + exchange_channel_skeleton(mf, g_ao, D, omega, weight)
-    return grad - xc_skeleton(mf, gs)
+            grad = grad + exchange_channel_skeleton(mf, g_ao, D, omega, weight,
+                                                    pending=pending)
+    return grad + xc_skeleton(mf, gs, weight=-1.0, pending=pending)

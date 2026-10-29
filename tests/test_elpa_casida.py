@@ -109,9 +109,9 @@ routes = []
 _eigh_symmetric = _diag_backend.eigh_symmetric
 
 
-def recording_eigh_symmetric(M, threshold=5000):
+def recording_eigh_symmetric(M, threshold=5000, numerics=None):
     """eigh_symmetric, noting in `routes` whether it ran distributed."""
-    out = _eigh_symmetric(M, threshold=threshold)
+    out = _eigh_symmetric(M, threshold=threshold, numerics=numerics)
     routes.append(out[2])
     return out
 

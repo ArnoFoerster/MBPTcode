@@ -43,7 +43,7 @@ from pyscf import gto, scf
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.numerics import Numerics
-from src.Base.numerics.constants import HARTREE_TO_EV, SURFACE_GRID_ACCURACY
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.gwbse.excited_state import ExcitedStateChain
@@ -93,8 +93,9 @@ def main(argv=None):
     ap.add_argument('--h', type=float, default=1e-3, help='FD step in Bohr')
     ap.add_argument('--atom', default=H2O_C1)
     ap.add_argument('--basis', default='cc-pvdz')
-    ap.add_argument('--grid-accuracy', default=SURFACE_GRID_ACCURACY,
-                    help='validated ISDF grid level (no level exists for sto-3g)')
+    ap.add_argument('--grid-accuracy', required=True,
+                    help='required: a validated ISDF grid level (no level '
+                         'exists for sto-3g); no ISDF grid is a default')
     ap.add_argument('--auxbasis', default=None,
                     help='default: basis + -ri; sto-3g has none, use cc-pvdz-ri')
     ap.add_argument('--workdir', default=os.environ.get('TMPDIR', HERE),

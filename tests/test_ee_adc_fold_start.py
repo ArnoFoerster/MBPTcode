@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from tests.adc_common import ATOMS, AUX, NF, make_scf_loop, molecule
@@ -65,8 +66,9 @@ MOL_DZ = molecule(ATOMS, basis='cc-pvdz')
 
 
 def model():
-    mp2 = MP2State(HFState(MOL_DZ, make_scf_loop), NF, AUX, force_route='dense')
-    return ADC2State(mp2, 'singlet', 0, 3, None, conv_tol=TOL, follow='index')
+    mp2 = MP2State(HFState(MOL_DZ, make_scf_loop), NF, AUX, force_route='dense',
+                   numerics=Numerics(adc={'conv_tol': TOL}))
+    return ADC2State(mp2, 'singlet', 0, 3, None, follow='index')
 
 
 class Columns:

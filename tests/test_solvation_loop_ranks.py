@@ -34,8 +34,8 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT, check,
-                              make_scf_loop, molecule)
+from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, NF, check, make_scf_loop,
+                              molecule)
 from tests.pins import RECORDING_BLAS, matches
 
 KINDS = ('S0', 'S1', 'T1')
@@ -49,12 +49,13 @@ def build(kind):
     field = ContinuumField.from_environment(SolventScreening(mol, solvent='toluene'))
 
     def state():
-        mp2 = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route='dense')
+        mp2 = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route='dense',
+                       numerics=ADC_NUMERICS)
         if kind == 'S0':
             return mp2
         lr = field.transition_environment() if kind == 'S1' else None
         return ADC2State(mp2, 'singlet' if kind == 'S1' else 'triplet', 0, 3, lr,
-                         conv_tol=ROOT_CONV_TOL, follow='index')
+                         follow='index')
     return field, state
 
 
@@ -63,13 +64,13 @@ def loop_and_force(comm=None):
     for kind in KINDS:
         field, make = build(kind)
         st = make()
-        r = sl.equilibrate(st, field, **SOLVATION_TIGHT)
+        r = sl.equilibrate(st, field, **ADC_TIGHT)
         out[kind] = dict(G=r.energy, E=r.state_energy, q=r.q, dm=r.dm_eff,
                          cycles=len(r.history), converged=r.converged,
                          F=sl.force(st, field, r))
     field, make_s1 = build('S1')
     _, make_s0 = build('S0')
-    v = sl.vertical_energies(make_s0, make_s1, field, **SOLVATION_TIGHT)
+    v = sl.vertical_energies(make_s0, make_s1, field, **ADC_TIGHT)
     out['vertical'] = dict(absorption=v['absorption'], emission=v['emission'],
                            G=v['G'], converged=v['converged'])
     return out

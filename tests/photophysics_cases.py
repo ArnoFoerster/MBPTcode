@@ -40,7 +40,7 @@ def argv(*extra, out='unused', atom=FORMALDEHYDE):
     """The command line of the tests' formaldehyde run, `extra` appended
     (argparse takes the last of a repeated option)."""
     return (['--system', 'formaldehyde', '--atom', atom, '--basis', 'cc-pvdz',
-             '--environment', 'gas', '--grid-accuracy', 'G3',
+             '--environment', 'gas', '--grid-accuracy', 'G3', '--scf-grid', 'GH',
              '--scf-grad-tol', '1e-11', '--no-scf-warm-start', '--engine',
              'cartesian', '--out', str(out)] + REQUIRED + list(extra))
 

@@ -54,8 +54,24 @@ The force of G_eq (stationary in q and in the state's own parameters):
 F_state the method's force in the fixed charges with the external operator's
 own derivative left out (state.force), the second term the medium's at the
 fixed relaxed density, the last the medium's part of a method's LR terms
-(Haettig and Pausch Eqs. 40-47). Equilibrium states only: a minimum of G_eq is
-the structure an emission or an adiabatic energy starts from.
+(Haettig and Pausch Eqs. 40-47). A minimum of G_eq is the structure an
+emission or an adiabatic energy starts from.
+
+The force of G_neq(X | S0) (`force_neq`), the slow charges those of S0's own
+equilibrium at every geometry, q_s = M V_0 with M = Q_s - Q_f and V_0 the
+potential of S0's density: stationary in q_f and in X's parameters, but not
+in q_s, which follows S0's loop. With lambda = dG_neq/dq_s = V_X - V_0,
+
+    dG/dR = F_state(q) + d/dR [(1/2) V_X^T Q_f V_X]|_D_X + q_s . dV_X/dR|_D_X
+            + d/dR [(1/2) V_0^T M V_0]|_D_0 - q_s . dV_0/dR|_D_0   (q_s held)
+            + lambda . dM/dR V_0 + (M lambda) . dV_0/dR|_D_0       (q_s moving)
+            + Tr[h(M lambda) dD_0/dR]                              (S0's loop)
+            + the LR terms at eps_inf,
+
+the last line the response of S0's self-consistent loop to the charges M
+lambda (`ground.loop_response`, src.gradients.scf_loop_response). At eps_s
+= eps_inf there are no slow charges and it is the force of G_eq at eps_inf;
+for X = S0 lambda vanishes and it is the force of G_eq(S0).
 
 The loop. q from the state's gas-phase density, or the start charges q0
 handed in; then the state in the field of
@@ -89,6 +105,16 @@ reaction field when diffuse frontier orbitals rotate in it).
 `vertical_energies` starts both loops of the state from S0's; the solvated
 surface (`src.gradients.solvated_surface`) runs S0's loop first where it has
 no charges to start from.
+
+Stopping early. equilibrate(..., stop=callable) also ends a loop when
+stop(cycle, q, q_new, r) is true for a cycle (r the state's answer in the
+charges q, q_new the medium's answer to it), whatever the tolerances say: the
+result is converged at that criterion, `stopped_early` True (False for a loop
+that met its tolerances). A walk ties it to its gradient
+(src.gradients.solvated_surface): the force taken on such a loop is off by
+first order in the charges' residual q_new - q, and `residual_force` is the
+residual's direct electrostatic force on the solute, the estimate the walk
+scales. A loop with a stop criterion keeps no checkpoint.
 
 Checkpoint. equilibrate(..., checkpoint=path) writes, after every cycle,
 what the next cycle starts from (src.Base.utils.record_io, atomic): the charges, the
@@ -146,7 +172,8 @@ class LoopResult:
     q       the induced charges; dm_eff the state's relaxed density (AO)
     info    what the state returned for this cycle (method-specific)
     history [(cycle, G, max |dq|)]; converged False for a loop that reached
-            max_cycle (module docstring)
+            max_cycle (module docstring); stopped_early True for one its
+            caller's criterion ended (equilibrate's stop)
     flags   the numerical events G is built on, {'flag': name, 'message':
             text} each: the state model's of the last cycle and
             'solvation_loop_not_converged' or 'solvation_loop_stopped'
@@ -164,6 +191,20 @@ def slow_charges(field, dm_eff):
     q_s = field.charges(V, 'static') - field.charges(V, 'fast')
     q_s, V = lockstep((q_s, V), check=True)
     return q_s, 0.5 * float(q_s @ V)
+
+
+def residual_force(field, dm_eff, q, q_new):
+    """max |d/dR [(q_new - q) . V_tot(dm_eff)]| (Ha/Bohr): the direct
+    electrostatic force of a loop cycle's charge residual on the solute
+    (`ReactionField.charge_force`, the sites moving), the first-order part
+    of the error of a force taken on that cycle that needs no response of
+    the state (module docstring, Stopping early); rank 0's on every rank."""
+    r = np.asarray(q_new, float) - np.asarray(q, float)
+    if not r.size:
+        return 0.0
+    dm = np.asarray(dm_eff, float)
+    F = field.charge_force(0.5 * (dm + dm.T), r)
+    return float(lockstep(np.max(np.abs(F))))
 
 
 def polarization(field, q, slow=None):
@@ -252,7 +293,7 @@ def loop_numerics(state, numerics):
 
 
 def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
-                checkpoint=None):
+                checkpoint=None, stop=None):
     """The loop of the module docstring: G_eq of `state` in `field`, or with
     slow = (q_s, c_s) (slow_charges of another state) G_neq. q0: starting
     charges (default: the answer to the state's gas-phase density); required
@@ -262,7 +303,9 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
     loop's tolerances loop_tol_q, loop_tol_energy and its loop_max_cycle; None
     takes the state model's own, else the defaults (`loop_numerics`). checkpoint: a path (JSON, its arrays
     beside it) written after every cycle and resumed from when present
-    (module docstring)."""
+    (module docstring). stop: stop(cycle, q, q_new, r) -> bool, a criterion
+    that ends the loop before its tolerances (module docstring, Stopping
+    early); refused with checkpoint."""
     numerics = loop_numerics(state, numerics)
     loop = numerics_or_default(numerics).solvent
     tol_q, tol_energy, max_cycle = (loop.loop_tol_q, loop.loop_tol_energy,
@@ -271,6 +314,10 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
     if max_cycle < 1:
         raise ValueError(f'max_cycle={max_cycle}; the loop needs at least one cycle')
     require_field_lr(state, field)
+    if stop is not None and checkpoint is not None:
+        raise ValueError('a loop stopped by a criterion of its caller keeps no '
+                         'checkpoint: its resumed cycles would not know where '
+                         'it stopped; run it without one or without stop')
     if checkpoint is not None and not all(hasattr(state, name) for name in (
             'checkpoint', 'restore', 'identity')):
         raise ValueError(f'{type(state).__name__} has no checkpoint() / restore() / '
@@ -336,10 +383,14 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
             + ('' if dG is None else f'  |dG| {dG:.2e}'))
         # zero charges answered by zero charges: the fixed point, G exact
         fixed = not np.any(q) and not np.any(q_new)
-        if fixed or (dq < tol_q and dG is not None and dG < tol_energy):
+        met = fixed or (dq < tol_q and dG is not None and dG < tol_energy)
+        early = (not met and stop is not None
+                 and bool(lockstep(bool(stop(cycle, q, q_new, r)))))
+        if met or early:
             return LoopResult(energy=G, state_energy=r.energy,
                               polarization=pol, q=q, dm_eff=r.dm_eff,
                               info=r.info, history=history, converged=True,
+                              stopped_early=early,
                               flags=list((r.info or {}).get('flags', [])))
         last = (r, q, pol, G)
         G_old = G
@@ -370,7 +421,7 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
         {'flag': 'solvation_loop_not_converged', 'message': text}]
     return LoopResult(energy=G, state_energy=r.energy, polarization=pol, q=q,
                       dm_eff=r.dm_eff, info=r.info, history=history,
-                      converged=False, flags=flags)
+                      converged=False, stopped_early=False, flags=flags)
 
 
 def _stopped(r, q, history, cycle):
@@ -383,7 +434,7 @@ def _stopped(r, q, history, cycle):
         {'flag': 'solvation_loop_stopped', 'message': text}]
     return LoopResult(energy=np.nan, state_energy=np.nan, polarization=np.nan,
                       q=q, dm_eff=r.dm_eff, info=r.info, history=history,
-                      converged=False, flags=flags)
+                      converged=False, stopped_early=False, flags=flags)
 
 
 def vertical_energies(make_ground, make_state, field, **loop_kw):
@@ -430,6 +481,41 @@ def force(state, field, result, flags=None):
     if flags is not None:
         flags.extend(info.get('flags', []))
     F = F + field.force(info['dm_eff'])
+    for w, rho_t in info.get('lr', ()):
+        F = F + w * field.transition_force(rho_t)
+    return lockstep(np.array(F), check=True)
+
+
+def force_neq(state, ground, field, result, ground_result, flags=None):
+    """dG_neq(X | S0)/dR (natm, 3) on a loop `result` of the state in the
+    slow charges of the ground state's equilibrium loop `ground_result`
+    (`slow_charges` of its relaxed density), both at this geometry (module
+    docstring). ground.loop_response(h, field) -> (natm, 3) Tr[h dD_0/dR] of
+    the ground state's loop; flags as for `force`."""
+    for r in (result, ground_result):
+        if not np.isfinite(r.energy):
+            return np.full((state.mol.natm, 3), np.nan)
+        if not r.converged:
+            warnings.warn('the force of G_neq is taken on a solvation loop that '
+                          'did not converge (its last cycle)',
+                          SolvationNotConverged, stacklevel=2)
+    require_field_lr(state, field)
+    d0 = np.asarray(ground_result.dm_eff, float)
+    q_s = slow_charges(field, d0)[0]
+    F, info = state.force(*field.operator(result.q))
+    if flags is not None:
+        flags.extend(info.get('flags', []))
+    dx = np.asarray(info['dm_eff'], float)
+    lam = field.electronic_potential(dx - d0)
+    mu = field.charges(lam, 'static') - field.charges(lam, 'fast')
+    v0 = field.potential(d0)
+    F = (F + field.force(dx, 'fast') + field.charge_force(dx, q_s)
+         + field.force(d0, 'static') - field.force(d0, 'fast')
+         - field.charge_force(d0, q_s)
+         + field.response_force(lam, v0, 'static')
+         - field.response_force(lam, v0, 'fast')
+         + field.charge_force(d0, mu)
+         + ground.loop_response(field.operator(mu)[0], field))
     for w, rho_t in info.get('lr', ()):
         F = F + w * field.transition_force(rho_t)
     return lockstep(np.array(F), check=True)

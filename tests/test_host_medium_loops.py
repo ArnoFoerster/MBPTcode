@@ -25,8 +25,8 @@ from src.environments.reaction_field import ContinuumField, NoMedium
 from src.gradients.adc.ee_state_model import ADC2State
 from src.gradients.state_models import HFState, MP2State
 from tests import test_gwbse_solvation_loop as gw
-from tests.adc_common import (ATOMS, AUX, FD_STEP_SOLVATION, NF, ROOT_CONV_TOL,
-                              SOLVATION_TIGHT, central, make_scf_tight, molecule)
+from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, FD_STEP_SOLVATION, NF, central,
+                              make_scf_tight, molecule)
 from tests.pins import assert_same
 
 FILM = Medium.constants(5.0, 2.89, cavity='uff-1.1', label='film')
@@ -55,23 +55,23 @@ def test_gwbse_eps_one_on_the_cosmo_cavity_is_the_gas_phase():
 
 
 def adc2_singlet(mol, field):
-    mp2 = MP2State(HFState(mol, make_scf_tight), NF, AUX)
-    return ADC2State(mp2, 'singlet', 0, 3, field.transition_environment(),
-                     conv_tol=ROOT_CONV_TOL)
+    mp2 = MP2State(HFState(mol, make_scf_tight), NF, AUX,
+                   numerics=ADC_NUMERICS)
+    return ADC2State(mp2, 'singlet', 0, 3, field.transition_environment())
 
 
 def test_adc2_force_in_a_film_medium():
     mol = molecule(ATOMS)
     field = field_of(FILM, mol)
     state = adc2_singlet(mol, field)
-    r = sl.equilibrate(state, field, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, field, **ADC_TIGHT)
     assert r.converged
     d = direction(mol.natm)
 
     def G(shift):
         m = molecule(ATOMS, shift * d)
         f = field_of(FILM, m)
-        out = sl.equilibrate(adc2_singlet(m, f), f, **SOLVATION_TIGHT)
+        out = sl.equilibrate(adc2_singlet(m, f), f, **ADC_TIGHT)
         assert out.converged
         return out.energy
     an = float(np.sum(sl.force(state, field, r) * d))

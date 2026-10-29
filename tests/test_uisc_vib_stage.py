@@ -49,7 +49,7 @@ def declaration(*extra, rate_model='uisc'):
          '0.05', '--nudge', '0.01', '--no-far-start', '--refreeze', '1',
          '--saddle-check', '0', '--df-check', '0', '--hessian',
          'analytic-df', '--relaxed-solvation', 'equilibrium', '--span',
-         'full', '--manifold-gaps', 'stacked', '--scf', 'df',
+         'full', '--manifold-gaps', 'stacked', '--scf', 'df', '--grid-accuracy', 'G1',
          '--qp-states', 'frontier', '--rate-model', rate_model,
          '--uisc-modes', '2', '--uisc-blocks', '2', '2', '--out', 'x',
          *extra])

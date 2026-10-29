@@ -32,6 +32,7 @@ optional third-party one.
 | a numerical fallback warns with its own class and leaves a named flag | `test_numerical_flags` |
 | thread and memory policy | `test_blas_single_threaded`, `test_allocation_memory` |
 | basis sets read from CP2K | `test_cp2k_basis` |
+| a per-element or per-atom basis on the photophysics route: the map and its atom labels, each key's auxiliary sets and grid row, a grid level on a map, the stamps and resume refusals, a uniform map bitwise the plain name and a per-atom map bitwise its per-element map, the S1 force of a hybrid basis against its energy | `test_hybrid_basis` |
 | the shared symmetric Davidson | `test_davidson_symmetric` |
 | ADC solvers | `test_adc3`, `test_adc3_restricted`, `test_adc2x_df`, `test_adc3_df_memory_fix`, `test_spin_adapt`, `test_screened_adc2x`, `test_downfolded_seeds`, `test_unrestricted_neon`, `test_bn_unrestricted_excitations` |
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
@@ -48,8 +49,9 @@ optional third-party one.
 | any medium by eps and n^2, the cavity conventions, their records and resume keys, the gas limit and forces in such a medium | `test_host_medium`, `test_host_medium_loops` (slow) |
 | a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |
 | the state models' force of a Kohn-Sham reference carries the motion of its XC grid | `test_state_model_ks_force` |
+| the mean-field part of the MP2, ADC(2) and state-model forces is the tiled assembly, the same bits at every rank count | `test_correlated_mean_field_force` |
 | the stage pipeline's four named solvent schemes and scheme B: refusals, stamps, external S0 Hessian; forces against their own energy, the stages, their restart, the saddle check | `test_photophysics_scheme_b`, `test_photophysics_scheme_b_run` (slow) |
-| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_fitted_exchange_conditioning` |
+| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_fitted_mean_field_force`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_fitted_exchange_conditioning` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
 | couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |

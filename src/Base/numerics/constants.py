@@ -105,12 +105,12 @@ VERTICAL_FRONTIER_LISTED = 3
 VERTICAL_WORST_LISTED = 8
 
 # The production TADF run's command-line defaults (`photophysics.cli`), each
-# named in --help. The functional and the factors' grid level of the chain;
-# the BSE roots solved (above every reported one) and the roots reported per
-# spin; the frontier half-width of a declared frontier set; the shape of the
-# frozen quasiparticle shift beyond the explicit set.
+# named in --help. The functional of the chain (the factors' grid level has
+# no default: --grid-accuracy is required); the BSE roots solved (above every
+# reported one) and the roots reported per spin; the frontier half-width of a
+# declared frontier set; the shape of the frozen quasiparticle shift beyond
+# the explicit set.
 TADF_REFERENCE = 'lrc-wpbeh'
-TADF_GRID_ACCURACY = 'G1'
 TADF_NROOTS = 6
 TADF_N_STATES = 3
 TADF_QP_HALF_WIDTH = 2
@@ -701,6 +701,17 @@ ORBITAL_MULTIPLIER_DEGENERACY_TOL = 1e-8
 # It guards against a silently wrong Lagrangian: an lgmres that stagnates
 # short of `ORBITAL_MULTIPLIER_TOL` still returns info=0.
 ORBITAL_MULTIPLIER_RESIDUAL_TOL = 1e-7
+
+# A multiplier solve whose true residual is below ORBITAL_MULTIPLIER_RESIDUAL_TOL
+# ends at the first lgmres outer cycle that lowers it by less than this ratio:
+# the matvec's round-off floor lies above ORBITAL_MULTIPLIER_TOL, and lgmres
+# would restart there to its iteration ceiling. Measured on DMABN
+# aug-cc-pVDZ, LRC-wPBEh, density-fitted, the gas-phase kernel on a toluene
+# mean field (overlap eigenvalues down to 1.4e-6): true residual 4.3e-11,
+# 1.9e-11, 1.8e-11, 1.4e-11 after outer cycles 2, 3, 5 and 10 against a
+# tolerance of 1e-11, with 7 s per matvec on four ranks; a solve that reaches
+# its tolerance is unchanged to the bit.
+ORBITAL_MULTIPLIER_STALL_RATIO = 0.1
 
 # BSE Casida solver on the gradient chain: the ISDF Davidson's root count and
 # residual tolerance. Tighter than the solver's own default because
@@ -2074,6 +2085,9 @@ EE_FOLD_BLOCK_MAX_NODES = 12
 EE_FOLD_BLOCK_MARGIN = 1e-2
 # Ritz pairs carried above nroots, so the highest asked root is not the edge
 EE_FOLD_BLOCK_BUFFER = 2
+# residual to which a cold block start solves A_eff at one frequency from the
+# seeds before the block (one product per vector): only the states, not the roots
+EE_FOLD_BLOCK_AEFF_SEED_RESIDUAL = 1e-2
 # times the window may move to roots that left it, each a restart
 EE_FOLD_BLOCK_MAX_MOVES = 3
 # block iterations before the unconverged roots go to the per-root Newton
@@ -2225,6 +2239,16 @@ WALK_VERTICAL_G_FLAG_FACTOR = 10
 # 1e-11 Ha
 PHOTOPHYSICS_LOOP_TOL_Q = 1e-9
 PHOTOPHYSICS_LOOP_TOL_ENERGY = 1e-11
+# A walk's loop tied to its gradient (--loop-tolerance gradient-tied,
+# SolventNumerics.loop_force_fraction): it stops once its estimated force
+# error is at most this fraction of the current gradient.
+LOOP_FORCE_FRACTION = 1.0 / 3.0
+# The state solvers a solvation loop drives (an ADC state's roots, the BSE's)
+# converge their residual to this fraction of the loop's charge tolerance
+# loop_tol_q (`Numerics.solved_for_the_loop`): the charges answer the state's
+# density, whose error is linear in the roots' residual, so a looser solve
+# leaves the charges moving above loop_tol_q with G long converged.
+LOOP_SOLVER_TOL_FRACTION = 0.1
 # Largest distance (Bohr) of an atom of an external Hessian file's geometry
 # from R0 (`photophysics.stages.ground_modes`): the file prints its
 # coordinates to 1e-6 Bohr

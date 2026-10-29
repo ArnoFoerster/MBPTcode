@@ -64,7 +64,11 @@ FD_TOL = 1e-6
 BASELINE = GATES / 'baseline_forward_routes.json'
 RECORD = json.loads(BASELINE.read_text())
 RECORD_BLAS = recorded_blas(BASELINE)
-#: The record's energies and gradients as this tree computes them.
+#: The record's energies and gradients as this tree computes them. The
+#: gradients are re-recorded on the workstation after the exchange half of the
+#: fitted Fock skeleton moved to Cholesky solves of the JK metric (3.7e-13 to
+#: 4.7e-12 Ha/Bohr; the energies unchanged), and again after the mean field's
+#: own force moved to fixed tiles (up to 2e-14, its sums in tile order).
 PINS = json.loads(
     (GATES / 'one_fit_pins.json').read_text())['outside_scissor']
 PINS_BLAS = recorded_blas(GATES / 'one_fit_pins.json')

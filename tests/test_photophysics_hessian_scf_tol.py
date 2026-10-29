@@ -50,7 +50,8 @@ def test_the_analytic_twin_converges_to_a_reachable_threshold(tmp_path, monkeypa
 
 @pytest.mark.parametrize('run_tol, hess_tol', CASES)
 def test_the_numerical_hessian_converges_to_a_reachable_threshold(run_tol, hess_tol):
-    d = declaration('--hessian', 'numerical', '--scf-grad-tol', run_tol)
+    d = declaration('--hessian', 'numerical', '--hessian-grid', 'GH',
+                    '--scf-grad-tol', run_tol)
     assert d.hessian_numerics.scf.conv_tol_grad == hess_tol
 
 

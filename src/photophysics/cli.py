@@ -17,20 +17,34 @@ given. The numerical settings default to the production chain's
 (`production_numerics`), and the help names each default.
 
 The factors are the AO-product fit, which keeps the diffuse AO products of an
-augmented basis, on points pivoted from the --grid-accuracy level's parent
-grid (--pivot-points of them, omitted the default count), fitted by rows over
-the ranks; the Duchemin-Blase set on the tabulated grid is
---isdf-test-set duchemin_blase. On augmented bases the mean field is best
-density-fitted (--scf df, J and K on <basis>-jkfit):
+augmented basis, on points pivoted from the parent grid of the
+--grid-accuracy level (required: no ISDF grid is a default), --pivot-points
+of them (omitted, the default count), fitted by rows over the ranks; the
+Duchemin-Blase set on the tabulated grid is --isdf-test-set duchemin_blase.
+On augmented bases the mean field is best density-fitted (--scf df, J and K
+on <basis>-jkfit):
 
     srun --mpi=pmi2 -n 8 python -m src.photophysics --xyz emitter.xyz \\
         --basis aug-cc-pvdz --environment toluene ... --tda --scf df \\
         --grid-accuracy G3 --pivot-points 9000 \\
         --scf-grad-tol 1e-9 --out tadf --distribute
 
+A basis can differ by element or by atom: --basis names the set of every
+atom, --basis-for EL=NAME another for an element and atoms=I-J:NAME another
+for atoms counted from 1 (repeatable; an atom range wins over its element).
+Each atom's -jkfit and -ri sets and its grid follow its own basis, and a
+--grid-accuracy level is used where every named basis gives it the same
+counts (aug-cc-pVDZ and cc-pVDZ do at G1-G3):
+
+    python -m src.photophysics --xyz emitter.xyz --basis aug-cc-pvdz \\
+        --basis-for H=cc-pvdz --environment gas ... --scf df --grid-accuracy G3
+    python -m src.photophysics --xyz film.xyz --basis cc-pvdz \\
+        --basis-for atoms=1-41:aug-cc-pvdz ... --scf df --grid-accuracy G3
+
 In a continuum the run names how its states are solvated (--solvent-scheme,
 required there, no default): 'scheme-a', the solvated BSE of Duchemin et
-al.; 'scheme-b-eq' or 'scheme-b-noneq', every state self-consistent with its
+al.; 'scheme-b-eq' or 'scheme-b-noneq' (each also '-bare', without the
+singlets' linear response), every state self-consistent with its
 own relaxed density in the state-specific loop, the excited minima's
 energies in their own equilibrium or in S0's slow charges (`stages` module
 docstring), whose loops converge to --loop-tol-q / --loop-tol-energy. A
@@ -55,17 +69,19 @@ import.
 import argparse
 import pathlib
 
-from src.Base.numerics.constants import (HESSIAN_SCF_GRAD_TOL, ISDF_HESSIAN_MIN_GRID,
-                                         ISDF_TEST_SETS,
+from src.Base.numerics.constants import (HESSIAN_SCF_GRAD_TOL,
+                                         ISDF_TEST_SETS, LOOP_FORCE_FRACTION,
+                                         LOOP_SOLVER_TOL_FRACTION,
                                          PHOTOPHYSICS_LOOP_TOL_ENERGY,
                                          PHOTOPHYSICS_LOOP_TOL_Q,
                                          SCF_OPTIMIZATION_CONV_TOL,
                                          SCF_OPTIMIZATION_GRAD_TOL, TADF_ALLOCATION_MB,
-                                         TADF_GRID_ACCURACY, TADF_N_STATES,
+                                         TADF_N_STATES,
                                          TADF_NROOTS, TADF_OUTSIDE_SCISSOR,
                                          TADF_QP_HALF_WIDTH, TADF_REFERENCE,
                                          TADF_THREADS, UISC_BLOCKS, UISC_DQ,
                                          UISC_LAMBDA_SAMANTA_EV, UISC_N_MODES)
+from src.Base.basis.basis_map import molecule_basis, parse_basis_for
 from src.Base.declaration import QPStates
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
@@ -75,7 +91,8 @@ from src.photophysics.declaration import (ENGINES, GAS, GROUNDS,
                                           RESIDUES, SCF_FINISH, SCF_ROUTES,
                                           SCHEME_B, SOLVENT_SCHEMES, Declaration,
                                           ExternalHessian, FarStart, Policies,
-                                          System, TadfModel, UiscModel)
+                                          System, TadfModel, TdaMinimum,
+                                          UiscModel)
 from src.photophysics.stages import run_tadf
 from src.photophysics.rates import MANIFOLD_GAP_RULES
 from src.photophysics.store import Store
@@ -106,7 +123,15 @@ def add_system(ap):
     ap.add_argument('--system', default=None,
                     help='the run\'s name (its store directory); omitted is '
                          'the xyz file\'s stem')
-    ap.add_argument('--basis', required=True)
+    ap.add_argument('--basis', required=True,
+                    help='the orbital basis of every atom --basis-for does '
+                         'not name')
+    ap.add_argument('--basis-for', action='append', default=None,
+                    metavar='EL=NAME',
+                    help='another basis for one element (H=cc-pvdz) or for '
+                         'atoms counted from 1 (atoms=1-41:aug-cc-pvdz, over '
+                         'the element\'s), repeatable; each atom\'s auxiliary '
+                         'sets (-jkfit, -ri) follow its own basis')
     ap.add_argument('--environment', required=True,
                     help="'gas', a solvent of pyscf's SMD table, "
                          "'eps=EPS_S,n2=N2[,label=NAME]' or 'N2:EPS_STATIC', "
@@ -115,7 +140,8 @@ def add_system(ap):
                     choices=tuple(s for s in SOLVENT_SCHEMES if s != GAS),
                     help='in a continuum, required: how every state stands '
                          "in it ('scheme-a', 'scheme-b-eq' or "
-                         "'scheme-b-noneq'); the gas phase takes none")
+                         "'scheme-b-noneq', each also '-bare'); the gas phase "
+                         "takes none")
 
 
 def add_policies(ap):
@@ -135,6 +161,12 @@ def add_policies(ap):
                           'built there')
     far.add_argument('--no-far-start', action='store_true',
                      help='the S1 walk starts at R0')
+    pol.add_argument('--tda-t1-minimum', metavar='XYZ', default=None,
+                     help='scheme-b-* on the full BSE (no --tda), only there: '
+                          'the T1 minimum of the Tamm-Dancoff run '
+                          '(its t1.xyz), where the T1 single point is taken '
+                          'when the full kernel\'s triplet walk stops at the '
+                          'instability')
     pol.add_argument('--refreeze', type=int, choices=(0, 1), required=True)
     pol.add_argument('--saddle-check', type=int, choices=(0, 1),
                      required=True)
@@ -194,10 +226,11 @@ def add_numerics(ap):
     num = ap.add_argument_group('numerics (production defaults)')
     num.add_argument('--scf', default='isdf', choices=SCF_ROUTES)
     num.add_argument('--scf-grid', default=None,
-                     help='omitted is ISDF_HESSIAN_MIN_GRID')
-    num.add_argument('--grid-accuracy', default=TADF_GRID_ACCURACY,
-                     help=f'the factors\' grid level (default '
-                          f'{TADF_GRID_ACCURACY})')
+                     help='the ISDF-K mean field\'s grid level; required '
+                          'with --scf isdf (no ISDF grid is a default)')
+    num.add_argument('--grid-accuracy', required=True,
+                     help='required: the factors\' grid level; no ISDF '
+                          'grid is a default')
     num.add_argument('--isdf-test-set', default=None, choices=ISDF_TEST_SETS,
                      help='the products the factors\' fit is trained on; '
                           'omitted is ao_products; duchemin_blase, the pair '
@@ -207,8 +240,9 @@ def add_numerics(ap):
                           '--grid-accuracy level\'s parent grid; omitted is '
                           'ao_product_fit.pivot_count')
     num.add_argument('--hessian-grid', default=None,
-                     help='the numerical Hessian\'s grid; omitted is '
-                          'ISDF_HESSIAN_MIN_GRID')
+                     help='the numerical Hessian\'s grid level; required '
+                          'with --hessian numerical (no ISDF grid is a '
+                          'default)')
     num.add_argument('--nroots', type=int, default=TADF_NROOTS)
     num.add_argument('--track', default='overlap',
                      choices=('overlap', 'index'))
@@ -235,6 +269,13 @@ def add_numerics(ap):
                           'convergence; omitted is the larger of '
                           'PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF\'s '
                           'conv_tol (G settles no further)')
+    num.add_argument('--loop-tolerance', default=None,
+                     choices=('fixed', 'gradient-tied'),
+                     help='scheme-b-*: every walk loop to the tolerances above '
+                          '(fixed, the default), or stopped once its estimated '
+                          'force error is LOOP_FORCE_FRACTION of the walk\'s '
+                          'gradient (the first gradient of each surface and '
+                          'the converged one at the tolerances above)')
 
 
 def add_launch(ap):
@@ -260,19 +301,27 @@ def production_numerics(args):
     --isdf-test-set, `isdf_numerics_of`), the grid adjoint, the ISDF-K mean field
     on --scf-grid converged for a walk, the span cut --span declares
     (`span_cut_of`), and under scheme B the loop's tolerances
-    (`loop_numerics_of`)."""
+    (`loop_numerics_of`) with the BSE roots converged below its charge
+    tolerance (`Numerics.solved_for_the_loop`; a --bse-conv-tol above that
+    bar is refused)."""
     bse = {'nroots': args.nroots, 'adjoint': 'grid',
            'track': 'overlap' if args.track == 'overlap' else None}
     if args.bse_conv_tol is not None:
         bse['conv_tol'] = args.bse_conv_tol
     if args.no_probe:
         bse['probe'] = False
-    return Numerics(
+    loop = loop_numerics_of(args)
+    if loop and args.bse_conv_tol is not None:
+        bar = LOOP_SOLVER_TOL_FRACTION * loop['solvent']['loop_tol_q']
+        if args.bse_conv_tol > bar:
+            raise SystemExit(f'--bse-conv-tol {args.bse_conv_tol:g} is above '
+                             f'{bar:g}, LOOP_SOLVER_TOL_FRACTION of the loop\'s charge '
+                             'tolerance: the loop could not converge its charges')
+    numerics = Numerics(
         isdf=isdf_numerics_of(args),
         layout={'sliced': True},
         scf={'route': args.scf,
-             'grid_level': (None if args.scf == 'df'
-                            else args.scf_grid or ISDF_HESSIAN_MIN_GRID),
+             'grid_level': None if args.scf == 'df' else scf_grid_of(args),
              'conv_tol': scf_conv_tol_of(args),
              'conv_tol_grad': (SCF_OPTIMIZATION_GRAD_TOL
                                if args.scf_grad_tol is None
@@ -282,15 +331,27 @@ def production_numerics(args):
         qp={'outside_scissor': args.outside_scissor,
             'hamiltonian': args.qp_hamiltonian,
             'residue_route': args.residues},
-        bse=bse, **loop_numerics_of(args))
+        bse=bse, **loop)
+    return numerics.solved_for_the_loop('bse') if loop else numerics
+
+
+def scf_grid_of(args):
+    """--scf-grid, the ISDF-K mean field's grid level, refused when omitted:
+    no ISDF grid is a default."""
+    if args.scf_grid is None:
+        raise SystemExit(f'--scf {args.scf} builds the ISDF-K mean field on '
+                         f'--scf-grid, which is required: no ISDF grid is a '
+                         f'default')
+    return args.scf_grid
 
 
 def loop_numerics_of(args):
     """{'solvent': the loop's tolerances} under a scheme-b-* --solvent-scheme
     (omitted: PHOTOPHYSICS_LOOP_TOL_Q, and the larger of
-    PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF's conv_tol), else nothing:
+    PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF's conv_tol; a walk's loop tied
+    to its gradient by --loop-tolerance gradient-tied), else nothing:
     another scheme runs no loop, and a tolerance given to it is refused."""
-    given = [o for o in ('loop_tol_q', 'loop_tol_energy')
+    given = [o for o in ('loop_tol_q', 'loop_tol_energy', 'loop_tolerance')
              if getattr(args, o) is not None]
     if args.solvent_scheme not in SCHEME_B:
         if given:
@@ -303,7 +364,10 @@ def loop_numerics_of(args):
                        else args.loop_tol_q),
         'loop_tol_energy': (max(PHOTOPHYSICS_LOOP_TOL_ENERGY, scf_conv_tol_of(args))
                             if args.loop_tol_energy is None
-                            else args.loop_tol_energy)}}
+                            else args.loop_tol_energy),
+        'loop_force_fraction': (LOOP_FORCE_FRACTION
+                                if args.loop_tolerance == 'gradient-tied'
+                                else None)}}
 
 
 def scf_conv_tol_of(args):
@@ -322,7 +386,7 @@ def solvent_scheme_of(args, environment):
         return GAS
     if args.solvent_scheme is None:
         raise SystemExit(f'--environment {environment} needs --solvent-scheme '
-                         f'(scheme-a, scheme-b-eq or scheme-b-noneq)')
+                         f'(scheme-a or a scheme-b-* one)')
     return args.solvent_scheme
 
 
@@ -370,11 +434,24 @@ def system_of(args):
     (named by --system)."""
     if args.xyz is not None:
         path = pathlib.Path(args.xyz)
-        return System(args.system or path.stem, xyz_atoms(path.read_text()),
-                      args.basis)
+        return System(args.system or path.stem,
+                      *basis_of(args, xyz_atoms(path.read_text())))
     if args.system is None:
         raise SystemExit('--atom carries no name: pass --system')
-    return System(args.system, args.atom, args.basis)
+    return System(args.system, *basis_of(args, args.atom))
+
+
+def basis_of(args, atom):
+    """(atom, basis): `atom` and --basis, or with --basis-for the
+    molecule's per-element or per-atom basis and its atoms labelled for it
+    (`molecule_basis`: the plain name where every atom ends up on one
+    set)."""
+    if not args.basis_for:
+        return atom, args.basis
+    try:
+        return molecule_basis(atom, args.basis, *parse_basis_for(args.basis_for))
+    except ValueError as err:
+        raise SystemExit(f'--basis-for: {err}')
 
 
 def hessian_numerics_of(args, numerics):
@@ -384,7 +461,11 @@ def hessian_numerics_of(args, numerics):
     None for the analytic route."""
     if args.hessian != 'numerical':
         return None
-    scf = {'grid_level': args.hessian_grid or ISDF_HESSIAN_MIN_GRID,
+    if args.hessian_grid is None:
+        raise SystemExit('--hessian numerical needs --hessian-grid, the '
+                         'displaced forces\' grid level: no ISDF grid is a '
+                         'default')
+    scf = {'grid_level': args.hessian_grid,
            'conv_tol_grad': min(numerics.scf.conv_tol_grad,
                                 HESSIAN_SCF_GRAD_TOL)}
     if all(getattr(numerics.scf, k) == v for k, v in scf.items()):
@@ -408,7 +489,9 @@ def policies_of(args):
         scf_warm_start=not args.no_scf_warm_start, engine=args.engine,
         scf_finish=args.scf_finish,
         external_hessian=(None if args.hessian_file is None
-                          else ExternalHessian.of(args.hessian_file)))
+                          else ExternalHessian.of(args.hessian_file)),
+        tda_t1_minimum=(None if args.tda_t1_minimum is None else TdaMinimum(
+            xyz_atoms(pathlib.Path(args.tda_t1_minimum).read_text()))))
 
 
 def qp_states_of(args):

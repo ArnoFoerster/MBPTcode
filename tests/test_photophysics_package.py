@@ -139,6 +139,43 @@ def test_the_command_line_needs_every_policy(tmp_path, capsys):
     assert '--no-far-start' in REQUIRED
 
 
+def test_the_command_line_has_no_default_grid(tmp_path, capsys):
+    """No ISDF grid is a default: a run without --grid-accuracy is refused
+    and the refusal names the option."""
+    full = argv(out=tmp_path)
+    k = full.index('--grid-accuracy')
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(full[:k] + full[k + 2:])
+    assert '--grid-accuracy' in capsys.readouterr().err
+    assert cli.parser().parse_args(full).grid_accuracy == 'G3'
+
+
+def drop(full, flag):
+    """The command line `full` without `flag` and its value."""
+    k = full.index(flag)
+    return full[:k] + full[k + 2:]
+
+
+def test_the_isdf_mean_field_has_no_default_grid(tmp_path):
+    """--scf isdf without --scf-grid is refused, naming the option; the DF
+    mean field takes no grid."""
+    full = drop(argv(out=tmp_path), '--scf-grid')
+    with pytest.raises(SystemExit, match='--scf-grid'):
+        cli.declaration_of(cli.parser().parse_args(full + ['--scf', 'isdf']))
+    d = cli.declaration_of(cli.parser().parse_args(full + ['--scf', 'df']))
+    assert d.numerics.scf.grid_level is None
+
+
+def test_the_numerical_hessian_has_no_default_grid(tmp_path):
+    """--hessian numerical without --hessian-grid is refused, naming the
+    option; with it the Hessian's numerics carry that grid."""
+    full = argv('--hessian', 'numerical', out=tmp_path)
+    with pytest.raises(SystemExit, match='--hessian-grid'):
+        cli.declaration_of(cli.parser().parse_args(full))
+    d = cli.declaration_of(cli.parser().parse_args(full + ['--hessian-grid', 'GH']))
+    assert d.hessian_numerics.scf.grid_level == 'GH'
+
+
 def test_the_command_line_dry_run(tmp_path, capsys):
     assert cli.main(argv('--dry-run', '--threads', '2', '--max-memory',
                          '2000', out=tmp_path)) == 0

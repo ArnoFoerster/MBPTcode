@@ -73,16 +73,15 @@ from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, FD_LADDER_RATIO_FLOOR
                                          HESSIAN_FD_ASYMMETRY_TOL,
                                          HESSIAN_FD_NOISE_REL,
                                          HESSIAN_FD_STEP_RATIO,
-                                         ISDF_GRID_ACCURACY,
                                          ISDF_HESSIAN_MIN_GRID,
                                          NUCLEAR_FD_STEP)
 from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
 from src.Base.factorization.isdf_jk import (ISDFJK, FrozenFrames, frozen_frames,
                                             frozen_pair_layout)
 from src.Base.utils.record_io import record_hash
-from src.Base.geometry.geometry import displaced
+from src.Base.geometry.geometry import displaced, grid_key
 from src.Base.factorization.separable_ri import (SHELL_ORDER, frame_turning_record,
-                                                 shell_tuple)
+                                                 shell_tuple, validated_levels)
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.numerics.numerics import numerics_identity
 from src.gradients.surface_identity import force_identity
@@ -225,7 +224,7 @@ def isdf_grid_counts(with_df):
         return None
     mol = with_df.mol
     counts = shell_tuple(with_df.counts)
-    return {mol.atom_pure_symbol(i): counts for i in range(mol.natm)}
+    return {grid_key(mol, i): counts for i in range(mol.natm)}
 
 
 def require_hessian_grid(mf, level=ISDF_HESSIAN_MIN_GRID):
@@ -250,7 +249,7 @@ def require_hessian_counts(basis, counts, level=ISDF_HESSIAN_MIN_GRID):
     refuse a Hessian grid before it converges the first SCF.
     counts: {element: (A1, A2, A3, B1)}.
     """
-    floor = ISDF_GRID_ACCURACY.get(str(basis).lower(), {}).get(level)
+    floor = validated_levels(basis).get(level)
     if floor is None:
         raise NotImplementedError(
             f'no ISDF grid is validated at {level} for {basis}, so a '

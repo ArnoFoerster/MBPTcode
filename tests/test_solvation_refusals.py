@@ -60,8 +60,8 @@ from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, FollowingWarn
                                                      transition_amplitudes)
 from src.gradients.adc.ee_state_model import ADC2State
 from src.photophysics import solvated
-from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT,
-                              SOLVATION_TIGHT_LOOP, df_rhf, make_scf_loop, molecule)
+from tests.adc_common import (ADC_NUMERICS, ATOMS, AUX, NF, SOLVATION_TIGHT, SOLVATION_TIGHT_LOOP,
+                              df_rhf, make_scf_loop, molecule)
 
 
 def toluene(mol):
@@ -69,8 +69,9 @@ def toluene(mol):
 
 
 def adc(mol, spin='singlet', nroots=3, root=0, follow='overlap', lr=None):
-    mp2 = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route='dense')
-    return ADC2State(mp2, spin, root, nroots, lr, conv_tol=ROOT_CONV_TOL, follow=follow)
+    mp2 = MP2State(HFState(mol, make_scf_loop), NF, AUX, force_route='dense',
+                   numerics=ADC_NUMERICS)
+    return ADC2State(mp2, spin, root, nroots, lr, follow=follow)
 
 
 def driver():
@@ -313,9 +314,9 @@ def test_a_surface_that_freezes_nothing_is_its_own_refreeze(kind):
         if kind == 'adc2':
             return adc(m)
         hf = HFState(m, make_scf_loop)
-        return hf if kind == 'hf' else MP2State(hf, NF, AUX, force_route='dense')
-    surf = SolvatedSurface(mol, toluene, make_state, label=kind,
-                           numerics=Numerics(solvent=SOLVATION_TIGHT_LOOP))
+        return hf if kind == 'hf' else MP2State(hf, NF, AUX, force_route='dense',
+                                                         numerics=ADC_NUMERICS)
+    surf = SolvatedSurface(mol, toluene, make_state, label=kind, numerics=ADC_NUMERICS)
     surf.total_energy(mol)
     assert surf.refreeze(molecule(ATOMS)) is surf
 
@@ -417,10 +418,18 @@ def test_kohn_sham_reference_force_in_a_continuum():
     assert d < 1e-7, f'max |dF| {d:.1e} Ha/Bohr'
 
 
+def test_state_model_without_numerics_is_refused():
+    """MP2State (and so every ADC2State on it) takes the run's one Numerics:
+    the Z-vector's tolerances, the RI tiles and the ADC solve have no
+    library defaults to fall back on."""
+    with pytest.raises(ValueError, match='needs its Numerics'):
+        MP2State(HFState(molecule(ATOMS), make_scf_loop), NF, AUX)
+
+
 def test_mp2_on_a_kohn_sham_reference_is_refused():
     mol = molecule(ATOMS)
     with pytest.raises(ValueError, match='Hartree-Fock reference'):
-        MP2State(HFState(mol, make_rks), NF, AUX)
+        MP2State(HFState(mol, make_rks), NF, AUX, numerics=Numerics())
 
 
 # PCM force refusals -----------------------------------------------------------

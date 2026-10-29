@@ -101,7 +101,8 @@ def _bare(mf):
 def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
                     numerics=None, state_specific='off', ss_density='unrelaxed',
-                    scaling=None, relaxed_density=False, start=None):
+                    scaling=None, relaxed_density=False, start=None,
+                    residual_tol=None):
     """fold=True: the density-fitted tiled fold of ee_ri_fold; start the
     block solver's (ee_fold.solve_folded), level 'adc2'."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
@@ -130,10 +131,12 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
 
     def solve(o):
         if level == 'adc2':
-            # the roots' error goes as the residual squared
+            # the roots' error goes as the residual squared; a density read
+            # off them is linear in it (residual_tol)
+            tol_residual = (max(conv_tol, np.sqrt(conv_tol * EE_FOLD_RESIDUAL_GAP))
+                            if residual_tol is None else residual_tol)
             r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, tol_omega=conv_tol,
-                                     tol_residual=max(conv_tol, np.sqrt(
-                                         conv_tol * EE_FOLD_RESIDUAL_GAP)),
+                                     tol_residual=tol_residual,
                                      dense_limit=dense_limit, solver='block',
                                      verbose=int(mol.verbose >= logger.INFO),
                                      start=start)
@@ -192,24 +195,31 @@ def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb,
                     ss_density='unrelaxed', auxbasis=None):
     """res with the roots' difference densities and state-specific shifts
     (ee_state_specific); a collective over op's ranks, every rank holding the
-    same roots after ee_ri_fold.drive."""
-    res.delta_density = [
-        ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
-                                         res.t1[k], tile_gb=tile_gb)
-        for k in range(res.omega.size)]
+    same roots after ee_ri_fold.drive. A spin-scaled operator (op.scs) has
+    no unrelaxed (ISR) difference density: solve_ee_adc takes it with a
+    relaxed one only, and its unrelaxed entries are None."""
     modes = ee_state_specific.shift_modes(env, mode)
-    mo_act = _active_orbitals(mol, mf, frozen, op)
-    res.ss_shifts = ee_state_specific.state_specific_energies(
-        env, mol, mo_act, res.delta_density, modes)
+    res.delta_density = shifts = None
+    if op.scs is None:
+        res.delta_density = [
+            ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
+                                             res.t1[k], tile_gb=tile_gb)
+            for k in range(res.omega.size)]
+        mo_act = _active_orbitals(mol, mf, frozen, op)
+        shifts = ee_state_specific.state_specific_energies(
+            env, mol, mo_act, res.delta_density, modes)
+    res.ss_shifts = shifts
     res.ss_density = ss_density
     if ss_density != 'unrelaxed':
         res.delta_density_relaxed = relaxed_densities(
             res, mol, mf, frozen, tile_gb, auxbasis,
             pcm_response=ss_density == 'relaxed+pcm')
         C = np.asarray(mf.mo_coeff)
+        mo_act = (None if res.delta_density is None
+                  else _active_orbitals(mol, mf, frozen, op))
         res.delta_dipole = ee_state_specific.delta_dipoles(
             mol, mo_act, C, res.delta_density, res.delta_density_relaxed)
-        res.ss_shifts_unrelaxed = res.ss_shifts
+        res.ss_shifts_unrelaxed = shifts
         res.ss_shifts = ee_state_specific.state_specific_energies(
             env, mol, C, res.delta_density_relaxed, modes)
     res.ss_mode = mode

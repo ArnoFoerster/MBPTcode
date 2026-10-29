@@ -28,6 +28,7 @@ The fields:
                 solvation loop's convergence
     walk        the geometry optimizer and the finite-difference steps
     layout      memory and tiling: recorded, not in the identity
+    adc         the excitation-energy ADC solve of a state model
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -68,6 +69,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          WALK_TRUST_MAX_BOHR, WALK_TRUST_MIN_BOHR,
                                          XC_GRID_LEVEL, XC_GRID_LEVEL_UNRECORDED)
 from src.Base.numerics.constants import (WALK_GROUND_MAX_CYCLE, WALK_GROUND_TRUST_BOHR)
+from src.Base.numerics.constants import EE_ADC_CONV_TOL, LOOP_SOLVER_TOL_FRACTION
 from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
                                          ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                          ORBITAL_MULTIPLIER_TOL)
@@ -346,7 +348,11 @@ class SolventNumerics:
     is the environment's and is hashed through it. The self-consistent
     solvation loop (`src.environments.solvation_loop.equilibrate`) stops when the
     largest change of an induced charge is below loop_tol_q (e) and the
-    change of G below loop_tol_energy (Ha), within loop_max_cycle cycles."""
+    change of G below loop_tol_energy (Ha), within loop_max_cycle cycles.
+    loop_force_fraction: a walk's loop (`src.gradients.solvated_surface`)
+    stops instead at the first cycle whose estimated force error is at most
+    this fraction of the walk's current gradient; None runs every loop to
+    its tolerances."""
     cavity_scale: Optional[float] = None
     discretization: Optional[object] = None
     reaction_field: Optional[object] = None
@@ -354,6 +360,13 @@ class SolventNumerics:
     loop_tol_q: float = SOLVATION_LOOP_TOL_Q
     loop_tol_energy: float = SOLVATION_LOOP_TOL_ENERGY
     loop_max_cycle: int = SOLVATION_LOOP_MAX_CYCLE
+    loop_force_fraction: Optional[float] = None
+
+    def __post_init__(self):
+        f = self.loop_force_fraction
+        if f is not None and not 0.0 < f < 1.0:
+            raise ValueError(f'loop_force_fraction={f}: a fraction of the gradient '
+                             'in (0, 1), or None')
 
 
 @dataclass(frozen=True)
@@ -435,18 +448,34 @@ class ImagFreqNumerics:
     nfreq: int = IMAGFREQ_NFREQ
 
 
+@dataclass(frozen=True)
+class ADCNumerics:
+    """The excitation-energy ADC solve of a state model
+    (`gradients.adc.ee_state_model.ADC2State`, `eeADC.solve.solve_ee_adc`):
+    conv_tol, its eigenvalue tolerance, Hartree; residual_tol, the roots'
+    residual, None for the bar of their energies alone (sqrt(conv_tol
+    EE_FOLD_RESIDUAL_GAP), at least conv_tol: a root's error goes as its
+    residual squared), set where a density is read off the roots
+    (`Numerics.solved_for_the_loop`); dense_limit, the singles size below which
+    the fold is solved densely (None: EE_FOLD_DENSE_LIMIT). Its RI tiles are
+    `layout.tile_gb` (None: EE_RI_TILE_GB)."""
+    conv_tol: float = EE_ADC_CONV_TOL
+    residual_tol: Optional[float] = None
+    dense_limit: Optional[int] = None
+
+
 #: The sections of `Numerics`, by field name.
 SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'qp': QPNumerics, 'quadrature': QuadratureNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
             'walk': WalkNumerics, 'layout': LayoutNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
-            'imagfreq': ImagFreqNumerics}
+            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics}
 
 #: Sections added after records and identities were first written: a record
 #: without one reads its defaults, and one at its defaults leaves the identity
 #: what it was before the section existed.
-LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq')
+LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'adc')
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -665,7 +694,8 @@ IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
 # fields added after identities were first written: at their default they are
 # left out, so every identity written before them stays what it was
-IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'))
+IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'),
+                              ('solvent', 'loop_force_fraction'))
 
 
 @dataclass(frozen=True)
@@ -689,6 +719,7 @@ class Numerics:
     evgw: EvGWNumerics = field(default_factory=EvGWNumerics)
     qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
     imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
+    adc: ADCNumerics = field(default_factory=ADCNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None
@@ -745,6 +776,29 @@ class Numerics:
         return record_hash({name: values[name] for name in IDENTITY_FIELDS
                             if name not in LATER_SECTIONS
                             or values[name] != asdict(SECTIONS[name]())})
+
+    def solved_for_the_loop(self, solver):
+        """This Numerics with the state solver a solvation loop drives --
+        solver 'adc', the ADC roots (adc.residual_tol), or 'bse', the BSE roots
+        (bse.conv_tol, a residual) -- converged to LOOP_SOLVER_TOL_FRACTION of
+        the loop's charge tolerance where it is looser (derived, the reason
+        written down); unchanged where it is already that tight. The charges
+        answer the state's density, whose error is linear in the roots'
+        residual. Only the named solver's section moves: a realization refuses
+        a setting it does not read."""
+        bar = LOOP_SOLVER_TOL_FRACTION * self.solvent.loop_tol_q
+        if solver == 'adc':
+            loose = self.adc.residual_tol is None or self.adc.residual_tol > bar
+            change = {'adc': {'residual_tol': bar}}
+        elif solver == 'bse':
+            loose = self.bse.conv_tol > bar
+            change = {'bse': {'conv_tol': bar}}
+        else:
+            raise ValueError(f"solver={solver!r}: the loop drives 'adc' or 'bse' roots")
+        if not loose:
+            return self
+        return self.derive('the state solver a solvation loop drives converges below '
+                           'its charge tolerance', **change)
 
     def derive(self, reason, **sections):
         """Other numerics for another task, written down: `sections` maps a

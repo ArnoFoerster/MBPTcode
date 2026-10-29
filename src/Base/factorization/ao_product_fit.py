@@ -94,6 +94,7 @@ import scipy.linalg
 from pyscf import df as pyscf_df
 
 from src.Base.numerical_flags import flag
+from src.Base.geometry.geometry import grid_key
 from src.Base.numerics.constants import (BYTES_PER_GB, FIT_CHOLESKY_BLOCK,
                                          ISDF_PIVOT_FRACTION,
                                          ISDF_PIVOT_MAX_GB,
@@ -192,7 +193,7 @@ def parent_layout(mol, element_radii, origins=None,
     dense = {el: densified_radii(r, factor) for el, r in element_radii.items()}
     pts_local, owner = [], []
     for ia in range(mol.natm):
-        el = mol.atom_pure_symbol(ia)
+        el = grid_key(mol, ia)
         p = atomic_points(dense[el], centre=(0.0, 0.0, 0.0),
                           origin=bool((origins or {}).get(el, False)))
         pts_local.append(p)

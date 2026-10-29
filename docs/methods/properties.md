@@ -221,7 +221,8 @@ formaldehyde in the gas phase on a single machine, from the repository root:
 ```bash
 python -m src.photophysics --system formaldehyde \
     --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
-    --basis cc-pvdz --environment gas --temperature 300 --lambda-env 0.05 \
+    --basis cc-pvdz --environment gas --grid-accuracy G1 --scf-grid GH \
+    --temperature 300 --lambda-env 0.05 \
     --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \
     --hessian analytic-df --relaxed-solvation equilibrium --span full \
     --manifold-gaps stacked --out tadf
@@ -252,8 +253,39 @@ python -m src.photophysics --system formaldehyde \
     --temperature 300 --lambda-env 0.05 --nudge 0.02 --no-far-start \
     --refreeze 1 --saddle-check 0 --df-check 0 --hessian analytic-df \
     --relaxed-solvation equilibrium --span full --manifold-gaps stacked \
-    --tda --qp-states frontier --scf df --scf-grad-tol 1e-9 --out tadf
+    --tda --qp-states frontier --scf df --grid-accuracy G1 --scf-grad-tol 1e-9 \
+    --out tadf
 ```
+
+A basis can differ by element or by atom: `--basis` names the set of every
+atom, `--basis-for EL=NAME` another set for one element (aug-cc-pVDZ on the
+heavy atoms and cc-pVDZ on hydrogen), and `--basis-for atoms=I-J,K:NAME`
+another set for atoms counted from 1 as in the xyz file (aug-cc-pVDZ on an
+emitter's atoms and cc-pVDZ on the host molecules around it). Both repeat,
+and an atom range wins over its element. Where one element ends up on two
+sets, the atoms on the second are labelled `C@1`, `H@1`, ... (pyscf reads a
+labelled atom's basis under its label). Each atom's auxiliary sets follow
+its own basis (its -jkfit set for a density-fitted mean field, its -ri set
+for the GW and BSE factors), and so does its interpolation grid. An accuracy
+level such as G3 is used where every named basis gives it the same grid
+counts, which aug-cc-pVDZ and cc-pVDZ do at G1, G2 and G3. Every record
+carries the whole map, so a run is never continued under another one.
+Formaldehyde in the gas phase:
+
+```bash
+python -m src.photophysics --system formaldehyde \
+    --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
+    --basis aug-cc-pvdz --basis-for H=cc-pvdz --environment gas \
+    --scf df --grid-accuracy G1 --temperature 300 --lambda-env 0.05 \
+    --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \
+    --hessian analytic-df --relaxed-solvation equilibrium --span full \
+    --manifold-gaps stacked --out tadf
+```
+
+`--basis-for atoms=1-2:aug-cc-pvdz` in place of `H=cc-pvdz` puts
+aug-cc-pVDZ on C and O only. `solvated` below takes `--basis-for` the same
+way; there `--auxbasis` and `--jk-auxbasis` are left out under a map, which
+pairs them atom by atom.
 
 `python -m src.photophysics solvated` gives the absorption, emission and
 adiabatic S1 and T1 energies of one molecule in the gas phase and in a

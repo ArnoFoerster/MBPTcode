@@ -526,9 +526,6 @@
  "src/gradients/df_correlation_force_tiled.py::mp2_force_tiled": [
   "tile_gb"
  ],
- "src/gradients/state_models.py::__init__": [
-  "tile_gb"
- ],
  "src/gradients/adc/ee_gradient.py::solve_root": [
   "conv_tol",
   "nroots",
@@ -547,9 +544,7 @@
   "tile_gb"
  ],
  "src/gradients/adc/ee_state_model.py::__init__": [
-  "conv_tol",
-  "nroots",
-  "tile_gb"
+  "nroots"
  ],
  "src/gradients/gwbse/contour_deformation_adjoint.py::__init__": [
   "tol"

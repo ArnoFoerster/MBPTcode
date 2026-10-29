@@ -114,7 +114,11 @@ PINS_BLAS = recorded_blas(REPO / 'tests' / 'one_fit_pins.json')
 #: The RPABSESurface[singlet] pin is re-recorded on the workstation (water/
 #: cc-pVDZ, DF RHF, G1): the static chi0 adjoint of 22525f14 takes its
 #: auxiliary-sized products once for the tau loop, a re-association that moves
-#: the gradient by 8.6e-13 Ha/Bohr and the energies by 1 ulp.
+#: the gradient by 8.6e-13 Ha/Bohr and the energies by 1 ulp. All three
+#: gradient pins are re-recorded once more after the exchange half of the
+#: fitted Fock skeleton moved to Cholesky solves of the JK metric: 4.7e-14 to
+#: 3.3e-13 Ha/Bohr, the energies unchanged; and again after the mean field's
+#: own force moved to fixed tiles (5e-15, its sums in tile order).
 #: How far (a)'s record may sit from the pins: energy (Ha), gradient (Ha/Bohr).
 #: The record is on an earlier ISDF grid: its energies differ from the pins by
 #: 4.0e-5 and 7.5e-5 and its gradients by 1.4e-4 and 2.6e-4.

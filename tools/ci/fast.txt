@@ -8,6 +8,7 @@ script test_adc3_df_memory_fix.py
 pytest test_adc2_spectrum.py
 pytest test_adc3_restricted.py
 pytest test_adc_lanczos_handwritten.py
+pytest test_adc_matvec_distributed.py
 pytest test_adc_numerical_flags.py
 pytest test_allocation_memory.py
 script test_amplitudes_consistency.py
@@ -90,7 +91,9 @@ pytest test_geometric_walk_failures.py
 pytest test_gradients_qb.py
 script test_grids.py
 pytest test_ground_state_energy.py
+pytest test_held_skeletons.py
 pytest test_hessian_checkpoint_stamp.py
+pytest test_hybrid_basis.py
 pytest test_imaginary_axis_gw_dft.py
 pytest test_imports.py
 pytest test_inside_scissor_static_term.py
@@ -121,6 +124,8 @@ pytest test_mpi_map.py
 script test_mpn_density_restricted.py
 script test_mpn_density_unrestricted.py
 pytest test_multipliers.py
+pytest test_nondyson_fold_distributed.py
+pytest test_nondyson_restricted_df.py
 pytest test_numerical_hessian_quick.py
 script test_numroc.py
 pytest test_one_property_helper.py
@@ -183,6 +188,7 @@ pytest test_relax_hessian.py
 script test_restricted_ccsdt.py
 pytest test_ri_fallback.py
 pytest test_root_driven_solve.py
+pytest test_rotation_gradient_columns.py
 pytest test_row_fit_frozen_layout.py
 script test_rpa_correlation_energy.py
 pytest test_rpa_qp_surface.py
@@ -223,9 +229,11 @@ pytest test_static_correction_semicanonical_view.py
 pytest test_static_exchange_distributed.py
 pytest test_static_exchange_reuse.py
 pytest test_static_screening_one_routine.py
+pytest test_static_sigma_distributed.py
 pytest test_sum_over_poles.py
 pytest test_sum_over_poles_move.py
 pytest test_surface_abc.py
+pytest test_walk_state_release.py
 pytest test_surface_mean_field.py
 pytest test_surface_protocol.py
 pytest test_tadf_far_start.py
@@ -235,6 +243,7 @@ pytest test_tadf_saddle_check.py
 pytest test_tadf_walk_surface.py
 pytest test_text_names_resolve.py
 pytest test_thc_metallic_frequency_grid.py
+pytest test_threaded_einsum.py
 pytest test_time_frequency_grid.py
 script test_uhf_mp2_relaxed_finite_field.py
 script test_uhf_static_correction_df.py
@@ -362,10 +371,12 @@ pytest test_solvation_refusals.py
 pytest test_cphf_residual.py
 pytest test_ee_adc_gradient.py
 pytest test_ee_adc_gradient_tiled.py
+pytest test_correlated_mean_field_force.py
 pytest test_ee_adc_relaxed_density.py
 pytest test_scs_adc2_gradient.py
 pytest test_ee_state_model_follow.py
 pytest test_solvation_force.py
+pytest test_solvation_force_neq.py
 pytest test_solvation_gas_limit.py
 pytest test_adc2_state_reuse.py
 pytest test_response_kernel.py
@@ -373,6 +384,7 @@ pytest test_mp2_state_density.py
 pytest test_solvated_memory_budget.py
 pytest test_solvated_adc2_scf.py
 pytest test_ee_adc_fold_start.py
+pytest test_ee_adc_fold_solve_speed.py
 pytest test_host_medium.py
 pytest test_adc_davidson_degenerate_copies.py
 pytest test_codegen_optional.py
@@ -447,6 +459,11 @@ pytest test_generated_runtime_refusals.py
 pytest test_generated_runtime_flags.py
 # checkpoint restart of the solvation loop (HF, MP2, ADC(2)): 19 s on the workstation
 pytest test_solvation_loop_checkpoint.py
+pytest test_solvation_loop_tied.py
+# the solvated driver's walks tied to their gradient (--loop-tolerance): option, loop log, untied saddle check
+pytest test_solvated_walk_tied.py
+# the state solvers a solvation loop drives converge below its charge tolerance (rule, drivers, the stall it removes)
+pytest test_loop_solver_tolerance.py
 pytest test_adc_fold_refusals.py
 pytest test_ao_collocation_linear_dependence.py
 pytest test_cd_root_beside_an_orbital_energy.py

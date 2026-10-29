@@ -58,7 +58,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  dense_limit=None, threshold=5000, fold=False,
                  environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
                  numerics=None, state_specific='off', ss_density='unrelaxed',
-                 spin_scaling=None, relaxed_density=False, start=None):
+                 spin_scaling=None, relaxed_density=False, start=None,
+                 residual_tol=None):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
     an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
     per root (a Davidson or fold root that did not converge also warns).
@@ -90,8 +91,10 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     fold: True solves the folded problem on density-fitted tiles (module
     docstring): Z is then the singles part of each full eigenvector,
     sqrt(T1) y, on the flat spin-orbital singles layout (2 nocc nvir, frozen
-    orbitals dropped); conv_tol is both its residual and its frequency
-    tolerance (Hartree); tile_gb bounds a tile's working set; numerics the
+    orbitals dropped); conv_tol is its frequency tolerance (Hartree), and the
+    roots' residual residual_tol (None: sqrt(conv_tol EE_FOLD_RESIDUAL_GAP),
+    at least conv_tol, the bar of the energies alone; a density read off the
+    roots needs it tighter, `Numerics.solved_for_the_loop`); tile_gb bounds a tile's working set; numerics the
     run's Numerics (None: the defaults), whose layout.device 'gpu' runs the
     folded route's doubles kernel on each rank's GPU. return_fold
     adds the ee_fold.FoldResult (singles weights T1, steps, converged).
@@ -120,8 +123,11 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
 
     spin_scaling: None (ADC(2)), 'scs', 'sos' (ADC2_SPIN_SCALING) or factors
     (c_os, c_ss): spin-component scaled ADC(2) (ee_ri_fold), fold=True at
-    level 'adc2' without state_specific (its unrelaxed difference densities
-    are ADC(2)'s); the relaxed density is the scaled root's d omega / d h.
+    level 'adc2'; the relaxed density is the scaled root's d omega / d h.
+    With state_specific it takes a relaxed ss_density only: the unrelaxed
+    (ISR) difference density is ADC(2)'s, so a scaled root has none, and
+    the FoldResult's .delta_density, .ss_shifts_unrelaxed and
+    .delta_dipole['unrelaxed'] are None.
 
     relaxed_density (fold=True, return_fold=True): each root's orbital-relaxed
     difference density d omega / d h in the FoldResult's
@@ -137,9 +143,10 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     scaling = spin_scaling_factors(spin_scaling)
     if scaling is not None and not (fold and level == 'adc2'):
         raise ValueError("spin_scaling is wired on fold=True at level 'adc2'")
-    if scaling is not None and state_specific != 'off':
-        raise NotImplementedError('spin_scaling with state_specific: the '
-                                  'difference densities are unscaled ADC(2)')
+    if scaling is not None and state_specific != 'off' and ss_density == 'unrelaxed':
+        raise ValueError("spin_scaling with state_specific takes ss_density "
+                         "'relaxed' or 'relaxed+pcm': a spin-scaled root has "
+                         "no unrelaxed (ISR) difference density")
     if spin is not None and spin not in _drv.CHANNELS:
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
     if return_fold and not fold:
@@ -171,7 +178,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                                     en_dress, frozen, auxbasis, dense_limit,
                                     return_fold, env, tile_gb, route, numerics,
                                     state_specific, ss_density, scaling,
-                                    relaxed_density, start)
+                                    relaxed_density, start, residual_tol)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")

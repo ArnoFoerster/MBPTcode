@@ -41,8 +41,8 @@ from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT,
-                              check, make_scf_loop, molecule)
+from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, NF, check, make_scf_loop,
+                              molecule)
 from tests.pins import RECORDING_BLAS, matches
 
 
@@ -55,12 +55,12 @@ def continuum(eps_s, eps_inf):
 
 
 def state(kind, field):
-    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense')
+    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense',
+                   numerics=ADC_NUMERICS)
     if kind == 'S0':
         return mp2
     lr = field.transition_environment() if kind == 'S1' else None
-    return ADC2State(mp2, 'singlet' if kind == 'S1' else 'triplet', 0, 3, lr,
-                     conv_tol=ROOT_CONV_TOL)
+    return ADC2State(mp2, 'singlet' if kind == 'S1' else 'triplet', 0, 3, lr)
 
 
 def same(a, b, quantity, unit='Ha'):
@@ -81,8 +81,8 @@ def check_gas_phase():
     for kind in ('S0', 'S1', 'T1'):
         gas, cont = NoMedium(MOL), continuum(1.0, 1.0)
         s_gas, s_cont = state(kind, gas), state(kind, cont)
-        r_gas = sl.equilibrate(s_gas, gas, **SOLVATION_TIGHT)
-        r_cont = sl.equilibrate(s_cont, cont, **SOLVATION_TIGHT)
+        r_gas = sl.equilibrate(s_gas, gas, **ADC_TIGHT)
+        r_cont = sl.equilibrate(s_cont, cont, **ADC_TIGHT)
         ok &= check(same(r_cont.energy, r_gas.energy, 'energy')
                     and same(r_cont.state_energy, r_gas.state_energy, 'energy')
                     and same(r_cont.dm_eff, r_gas.dm_eff, 'vector', '1')
@@ -102,9 +102,9 @@ def check_gas_phase():
 def check_vertical():
     gas, cont = NoMedium(MOL), continuum(1.0, 1.0)
     r_gas = sl.vertical_energies(lambda: state('S0', gas), lambda: state('S1', gas),
-                                 gas, **SOLVATION_TIGHT)
+                                 gas, **ADC_TIGHT)
     r_cont = sl.vertical_energies(lambda: state('S0', cont), lambda: state('S1', cont),
-                                  cont, **SOLVATION_TIGHT)
+                                  cont, **ADC_TIGHT)
     return check(same(r_cont['absorption'], r_gas['absorption'], 'energy')
                  and same(r_cont['emission'], r_gas['emission'], 'energy')
                  and r_cont['G'].keys() == r_gas['G'].keys()
@@ -134,13 +134,13 @@ def check_one_call():
                              ('NoMedium from empty charges', NoMedium(MOL), np.zeros(0)),
                              ('eps = 1', continuum(1.0, 1.0), None)):
         s = Counted(state('S1', field))
-        r = sl.equilibrate(s, field, q0=q0, **SOLVATION_TIGHT)
+        r = sl.equilibrate(s, field, q0=q0, **ADC_TIGHT)
         ok &= check(s.calls == 1 and len(r.history) == 1 and r.converged,
                     f'S1, {label}: the loop calls the state model once',
                     f'{s.calls} call(s), {len(r.history)} cycle(s)')
     f = continuum(1.01, 1.005)
     s = Counted(state('S1', f))
-    r = sl.equilibrate(s, f, **SOLVATION_TIGHT)
+    r = sl.equilibrate(s, f, **ADC_TIGHT)
     ok &= check(r.converged and len(r.history) > 1 and s.calls == len(r.history) + 1,
                 'S1, eps_s = 1.01: one call per cycle plus the gas-phase start',
                 f'{s.calls} calls, {len(r.history)} cycles')
@@ -150,16 +150,16 @@ def check_one_call():
 def check_continuity():
     ok = True
     gas = NoMedium(MOL)
-    G_gas = {k: sl.equilibrate(state(k, gas), gas, **SOLVATION_TIGHT).energy for k in ('S0', 'S1')}
+    G_gas = {k: sl.equilibrate(state(k, gas), gas, **ADC_TIGHT).energy for k in ('S0', 'S1')}
     abs_gas = sl.vertical_energies(lambda: state('S0', gas), lambda: state('S1', gas),
-                                   gas, **SOLVATION_TIGHT)['absorption']
+                                   gas, **ADC_TIGHT)['absorption']
     shift = {}
     for delta in (1e-2, 1e-3):
         f = continuum(1.0 + delta, 1.0 + 0.5 * delta)
-        s = {k: sl.equilibrate(state(k, f), f, **SOLVATION_TIGHT).energy - G_gas[k]
+        s = {k: sl.equilibrate(state(k, f), f, **ADC_TIGHT).energy - G_gas[k]
              for k in ('S0', 'S1')}
         s['absorption'] = sl.vertical_energies(
-            lambda: state('S0', f), lambda: state('S1', f), f, **SOLVATION_TIGHT)['absorption'] - abs_gas
+            lambda: state('S0', f), lambda: state('S1', f), f, **ADC_TIGHT)['absorption'] - abs_gas
         shift[delta] = s
     for k in ('S0', 'S1', 'absorption'):
         a, b = shift[1e-2][k], shift[1e-3][k]

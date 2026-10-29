@@ -29,8 +29,8 @@ from src.environments.reaction_field import ContinuumField
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from tests.adc_common import (ATOMS, AUX, FD_STEP_SOLVATION, NF, ROOT_CONV_TOL,
-                              SOLVATION_TIGHT, check, make_scf_tight, molecule)
+from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, FD_STEP_SOLVATION, NF, check,
+                              make_scf_tight, molecule)
 
 
 def setup(mol, kind):
@@ -39,16 +39,16 @@ def setup(mol, kind):
     hf = HFState(mol, make_scf_tight)
     if kind == 'hf':
         return field, hf
-    mp2 = MP2State(hf, NF, AUX)
+    mp2 = MP2State(hf, NF, AUX, numerics=ADC_NUMERICS)
     if kind == 'mp2':
         return field, mp2
     lr = field.transition_environment() if kind == 'singlet' else None
-    return field, ADC2State(mp2, kind, 0, 3, lr, conv_tol=ROOT_CONV_TOL)
+    return field, ADC2State(mp2, kind, 0, 3, lr)
 
 
 def G(mol, kind):
     field, state = setup(mol, kind)
-    r = sl.equilibrate(state, field, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, field, **ADC_TIGHT)
     assert r.converged
     return r.energy
 
@@ -56,7 +56,7 @@ def G(mol, kind):
 def test_hf_force_is_pyscf_pcm_gradient():
     mol = molecule(ATOMS)
     field, state = setup(mol, 'hf')
-    r = sl.equilibrate(state, field, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, field, **ADC_TIGHT)
     assert r.converged
     F = sl.force(state, field, r)
     env = SolventScreening(mol, solvent='toluene')
@@ -82,7 +82,7 @@ def test_directional(kind):
         draws[k] = [rng.standard_normal((mol.natm, 3)) for _ in range(ndir)]
     ok = True
     field, state = setup(mol, kind)
-    r = sl.equilibrate(state, field, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, field, **ADC_TIGHT)
     assert r.converged
     F = sl.force(state, field, r)
     for d in draws[kind]:

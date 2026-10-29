@@ -15,7 +15,8 @@ by implementing this call (src.gradients.adc.ee_state_model for
 ADC(2)).
 
     HFState    the mean field in the field (the SCF re-converged): Hartree-Fock,
-               or a Kohn-Sham reference (its force is its own gradient class)
+               or a Kohn-Sham reference (its force `isdf_mean_field.
+               mean_field_skeleton_force`, the quadrature's motion included)
     MP2State   + DF-MP2 and its relaxed correlation density (Hartree-Fock
                references only: its CPHF answers with the HF kernel)
 
@@ -33,6 +34,11 @@ A model whose loop can be resumed (src.environments.solvation_loop, checkpoint)
 answers state.checkpoint() -> its warm start as arrays, state.restore(saved)
 takes it back, and state.identity() says what it computes (model, basis,
 reference, method settings, root), the key a checkpoint is written for.
+
+A mean-field model also answers state.loop_response(h, field): the
+response of its density, equilibrated in the medium, contracted with a fixed
+operator (src.gradients.scf_loop_response), which the force of a state in
+its slow charges reads (src.environments.solvation_loop.force_neq).
 
 A model that can be optimized also answers state.force(h, e) -> (F, info):
 its nuclear force in the fixed field with the external operator's own
@@ -65,7 +71,9 @@ from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distribut
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
 from src.gradients.df_factors import mp2_factors
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.SingleReference.common.df_amplitudes import spin_scaling_factors
+from src.gradients.scf_loop_response import loop_density_response
 
 
 FORCE_ROUTES = ('auto', 'dense', 'tiled')
@@ -115,8 +123,15 @@ class HFState:
 
     def force(self, h, e):
         r = self(h, e)
-        return lockstep(dcf.hf_force(self.mf)), dict(dm_eff=r.dm_eff, lr=[],
+        return lockstep(mean_field_skeleton_force(self.mf)), dict(dm_eff=r.dm_eff, lr=[],
                                                      flags=r.info['flags'])
+
+    def loop_response(self, h, field):
+        """(natm, 3) Tr[h dD/dR] of this mean field equilibrated in `field`
+        (its last call the loop's converged cycle): the density's response
+        with the continuum's at eps_static (`scf_loop_response`)."""
+        return lockstep(loop_density_response(self.mf, self._h0,
+                                              field.scf_continuum(), h))
 
     def checkpoint(self):
         """The SCF warm start (module docstring) with the orbitals it is
@@ -147,18 +162,22 @@ class HFState:
 
 class MP2State:
     """MP2 (density-fitted, `auxbasis`, `frozen` core orbitals) on an HFState.
-    force_route, tile_gb, max_memory (MB, default mol.max_memory): the force's
-    route (tiled_force_route) and the tiled route's tiles and memory bound;
-    factors: the tiled route's factor provider
+    numerics: the one `Numerics` of the calculation, required (the Z-vector's
+    tolerances, scf; the RI tiles, layout.tile_gb, None: EE_RI_TILE_GB; and an
+    ADC2State's solve on this model, adc); force_route, max_memory (MB, default
+    mol.max_memory): the force's route (tiled_force_route) and the tiled
+    route's memory bound; factors: the tiled route's factor provider
     (`df_correlation_force_tiled.mp2_force_tiled`), by default the fit's own
-    RI factors (`df_factors.mp2_factors`); numerics: the caller's `Numerics`
-    (the Z-vector's tolerances); spin_scaling: None (MP2), 'scs', 'sos'
+    RI factors (`df_factors.mp2_factors`); spin_scaling: None (MP2), 'scs', 'sos'
     (ADC2_SPIN_SCALING) or (c_os, c_ss): SCS-MP2, the ground state of an
     ADC2State on this model, which is then SCS-ADC(2) with the same factors."""
 
     def __init__(self, hf, frozen=0, auxbasis=None, force_route='auto',
-                 tile_gb=EE_RI_TILE_GB, max_memory=None, numerics=None, factors=None,
-                 spin_scaling=None):
+                 max_memory=None, numerics=None, factors=None, spin_scaling=None):
+        if numerics is None:
+            raise ValueError('MP2State needs its Numerics (the Z-vector\'s tolerances, '
+                             'the RI tiles, the ADC solve of a state on it): there are '
+                             'no defaults to fall back on')
         if isinstance(hf.mf, KohnShamDFT):
             raise ValueError('MP2State needs a Hartree-Fock reference: its relaxed '
                              'density and force solve the CPHF with the HF kernel, '
@@ -166,7 +185,9 @@ class MP2State:
         self.hf, self.frozen, self.auxbasis = hf, frozen, auxbasis
         self.mol = hf.mol
         tiled_force_route(force_route, self.mol)
-        self.force_route, self.tile_gb, self.max_memory = force_route, tile_gb, max_memory
+        tile_gb = numerics.layout.tile_gb
+        self.tile_gb = EE_RI_TILE_GB if tile_gb is None else tile_gb
+        self.force_route, self.max_memory = force_route, max_memory
         self.numerics = numerics
         self.factors = mp2_factors if factors is None else factors
         self.spin_scaling = spin_scaling

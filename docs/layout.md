@@ -43,7 +43,9 @@ src/Base/                      the foundation
                                sliced_factors.py
     geometry/                  displaced geometries, body frames, Kabsch
     basis/                     CP2K's aug-MOLOPT orbital and RI sets, read at
-                               run time (see basis-sets.md)
+                               run time (see basis-sets.md); the auxiliary
+                               pairing rules and the per-element and per-atom
+                               basis map
     utils/grids/               minimax and Gauss-Legendre imaginary-axis
                                grids, the time-frequency grid object,
                                finite-temperature (IR) grids, analytic

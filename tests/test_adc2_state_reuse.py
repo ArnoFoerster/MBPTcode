@@ -31,6 +31,7 @@ from src.Base.numerics.constants import EE_ADC_CONV_TOL
 from src.environments.reaction_field import ContinuumField
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC import ee_ri_fold
@@ -90,8 +91,9 @@ def setup(spin, route='dense', conv_tol=ROOT_CONV_TOL):
         lr = field.transition_environment()
     else:
         h, e, lr = np.zeros((MOL.nao, MOL.nao)), 0.0, None
-    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route=route)
-    return ADC2State(mp2, spin, 0, 3, lr, conv_tol=conv_tol), h, e
+    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route=route,
+                   numerics=Numerics(adc={'conv_tol': conv_tol}))
+    return ADC2State(mp2, spin, 0, 3, lr), h, e
 
 
 def check_one_density(spin):

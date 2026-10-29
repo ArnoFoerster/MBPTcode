@@ -104,7 +104,8 @@ import numpy as np
 from src.Base.numerics.numerics import numerics_of
 from src.environments.split_equilibrium import LinearResponseOnly
 from src.Base.utils.parallel.mpi_grid import lockstep
-from src.gradients.df_correlation_force import hf_force
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.gradients.scf_loop_response import loop_density_response
 from src.gradients.state_models import HFState, StateResult
 from src.gradients.gwbse.excited_state import ExcitedStateChain, dipole_change
 from src.gradients.surface import followed_root
@@ -273,13 +274,22 @@ class GWBSEState:
 
     def force(self, h, e):
         """(F, info) in the fixed charges (module docstring): the reference's
-        own gradient class on the mean field this call handed the chain
+        force (`mean_field_skeleton_force`) on the mean field this call handed the chain
         (`HFState.force` would converge it once more), plus dOmega/dR."""
         r = self(h, e)
-        F = np.asarray(hf_force(self.mf), float)
+        F = np.asarray(mean_field_skeleton_force(self.mf), float)
         if self.spin is not None:
             F = F + self.chain.excitation_gradient(self.mol, self.mf)[0]
         return lockstep(F), dict(dm_eff=r.dm_eff, lr=[], flags=r.info['flags'])
+
+    def loop_response(self, h, field):
+        """The reference's `HFState.loop_response` on the mean field of its
+        last call; an excited state has none."""
+        if self.spin is not None:
+            raise ValueError('the loop response is the reference\'s (spin None): '
+                             'the slow charges follow the ground state')
+        return lockstep(loop_density_response(self.mf, self.reference._h0,
+                                              field.scf_continuum(), h))
 
     def identity(self):
         """What this model computes (module docstring)."""

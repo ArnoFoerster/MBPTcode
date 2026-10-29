@@ -68,7 +68,7 @@ def sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
     return out
 
 
-def _z_vector_contraction(mol, mf, nocc, w_f, w_s):
+def z_vector_contraction(mol, mf, nocc, w_f, w_s):
     """(natm, 3) sum_pq w_f_pq dF_pq + sum_pq w_s_pq dS_pq, FIXED MO basis.
 
     Both derivatives are what a displaced geometry gives with the reference
@@ -168,7 +168,7 @@ def configuration_coupling(mol, mf, nocc, goo, gvv):
     w_f = 0.5 * (g + g.T)
     w_s = np.where(block, -g * eps[None, :] + 0.5 * gam, 0.0)
     w_s = 0.5 * (w_s + w_s.T)
-    return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
+    return (z_vector_contraction(mol, mf, nocc, w_f, w_s)
             + symmetric_gauge_coupling(mol, mf, nocc, goo, gvv))
 
 
@@ -207,5 +207,5 @@ def ov_coupling(mol, mf, nocc, w):
     w_s = -0.5 * _pair_matrix(u * eps[None, nocc:], nocc, norb)
     w_sig = np.zeros((norb, norb))
     w_sig[:nocc, nocc:] = w
-    return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
+    return (z_vector_contraction(mol, mf, nocc, w_f, w_s)
             + sigma_contraction(mol, mf.mo_coeff, w_sig, False))

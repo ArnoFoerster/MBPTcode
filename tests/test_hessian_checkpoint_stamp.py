@@ -22,8 +22,8 @@ FROZEN = {'pair_layout': 'reference', 'frames': REFERENCE_FRAMES}
 
 
 def hess_run(tmp_path, hessian, *extra):
-    return run_of(tmp_path, '--hessian', hessian, *extra,
-                  qp_states='admitted')
+    return run_of(tmp_path, '--hessian', hessian, '--hessian-grid', 'GH',
+                  *extra, qp_states='admitted')
 
 
 def write_hess(run, stamp):

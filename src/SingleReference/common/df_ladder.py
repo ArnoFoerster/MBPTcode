@@ -31,17 +31,23 @@ def choose_kernel(naux, rows, va, vb, kernel='auto'):
     return 'slab' if slab < aux else 'aux'
 
 
-def ladder_slabs(Bl, Br, M, mem_gb=2.0):
+def ladder_slabs(Bl, Br, M, mem_gb=2.0, pair_factor=None):
     """Yield (a0, a1, X) with X[r, a - a0, b] = sum_cd (ac|bd) M[r, c vb + d] for
     every slab a0 <= a < a1; M is (rows, va vb). The building block of `ladders`,
-    for callers that keep only part of each slab."""
+    for callers that keep only part of each slab. pair_factor: for Bl is Br, the
+    factor with the pair index leading, (va va, naux) C-contiguous with row a va + c
+    = Bl[:, a, c], when the caller holds it already."""
     naux, va = Bl.shape[0], Bl.shape[1]
     vb = Br.shape[1]
-    Bf = np.ascontiguousarray(Br).reshape(naux, vb * vb)
+    if pair_factor is None:
+        Bf = np.ascontiguousarray(Br).reshape(naux, vb * vb)
     width = max(1, min(va, int(mem_gb * 1.25e8 / (2 * va * vb * vb))))
     for a0 in range(0, va, width):
         a1 = min(a0 + width, va)
-        G = (np.ascontiguousarray(Bl[:, a0:a1]).reshape(naux, -1).T @ Bf)   # (a c, b d)
+        if pair_factor is None:
+            G = (np.ascontiguousarray(Bl[:, a0:a1]).reshape(naux, -1).T @ Bf)   # (a c, b d)
+        else:
+            G = pair_factor[a0 * va:a1 * va] @ pair_factor.T                      # (a c, b d)
         G = G.reshape(a1 - a0, va, vb, vb).transpose(0, 2, 1, 3)              # (a, b, c, d)
         G = np.ascontiguousarray(G).reshape((a1 - a0) * vb, va * vb)
         yield a0, a1, (M @ G.T).reshape(M.shape[0], a1 - a0, vb)

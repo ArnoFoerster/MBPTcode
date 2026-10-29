@@ -636,7 +636,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             return self.solver
         return solver_choice(n_ov)
 
-    def xc_chain(self, mf, weights):
+    def xc_chain(self, mf, weights, pending=None):
         """(Y_extra, skeleton) of sum_p w_p <p|Sigma_x - v_xc|p>, or (None,
         zero) on Hartree-Fock, where the operator vanishes identically.
 
@@ -650,6 +650,11 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         the caller; adding the COHSEX operator's own adjoint would enter the
         reaction field twice. An environment that does not dress the
         interaction (gas phase, fixed charges) has no static term.
+
+        pending: the open fit-adjoint window of the force the skeleton joins;
+        its linear channels are then held there for the assembly
+        (`qp_xc_correction_skeleton`), so `nuclear_gradient` must follow
+        inside the same window.
         """
         if not self.is_ks:
             return None, np.zeros((mf.mol.natm, 3))
@@ -657,7 +662,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         if getattr(getattr(self, '_orbital_capture', None), 'density_only', False):
             # a relaxed density reads Y only; the skeleton is the force's
             return y, np.zeros((mf.mol.natm, 3))
-        return y, qp_xc_correction_skeleton(mf, weights, self.nocc)
+        return y, qp_xc_correction_skeleton(mf, weights, self.nocc,
+                                            pending=pending)
 
     def xc_correction(self, mf, states, reaction_field=None):
         """<p|Sigma_x - v_xc|p> for `states`: production's static term,
@@ -976,8 +982,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                     reaction_field_backward(
                         w_env, x_mo, d, d_bare, eps, self.nocc,
                         grid=self.w_grid, screening=screening, block=block))
-        with self.one_fit_adjoint(mf):
-            y_xc, g_xc = self.xc_chain(mf, w_corr)
+        with self.one_fit_adjoint(mf) as pending:
+            y_xc, g_xc = self.xc_chain(mf, w_corr, pending=pending)
             grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 eps_bar, x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,

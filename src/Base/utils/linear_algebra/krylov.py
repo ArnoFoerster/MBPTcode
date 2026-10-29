@@ -10,6 +10,15 @@ with it, and rank 0's solution is replicated to every rank.
 `lgmres_root_driven` drives scipy's lgmres this way; `root_driven_solve`
 drives any solver on blocks of vectors, or a serial step with no operator
 whose stop or refusal must be rank 0's.
+
+An operator whose round-off floor lies above the requested tolerance stalls
+lgmres there: each outer cycle restarts on a residual it cannot lower, and
+the solve runs to its iteration ceiling. `lgmres_root_driven(stall=)` stops
+such a solve once its true residual is below a bar the caller accepts and an
+outer cycle no longer lowers it by the given ratio. The true residual is the
+one lgmres itself forms at the start of every outer cycle, so the check costs
+no operator application and leaves every iterate, and a solve that reaches
+its tolerance, unchanged to the bit.
 """
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, lgmres
@@ -18,9 +27,14 @@ from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distribut
                                               replicate)
 
 
-def lgmres_root_driven(matvec, rhs, precond, atol, maxiter, comm=None):
+def lgmres_root_driven(matvec, rhs, precond, atol, maxiter, comm=None,
+                       stall=None):
     """(x, info) of scipy's lgmres on matvec x = rhs, preconditioned by
     `precond`, with `rtol=0` and `atol`; rank 0's on every rank.
+
+    stall: None, or (bar, ratio): the solve also ends, with info 0, at the
+    first outer cycle whose true residual is above `atol`, at most `bar` and
+    above `ratio` times the previous cycle's (module docstring).
 
     Serially, and on a world of one, this is scipy's call. What rank 0
     raises is raised on every rank, with rank 0's reason attached.
@@ -29,8 +43,7 @@ def lgmres_root_driven(matvec, rhs, precond, atol, maxiter, comm=None):
     n = int(np.size(rhs))
     precond_op = LinearOperator((n, n), matvec=precond)
     if comm is None or comm.Get_size() == 1:
-        return lgmres(LinearOperator((n, n), matvec=matvec), rhs,
-                      M=precond_op, rtol=0.0, atol=atol, maxiter=maxiter)
+        return _lgmres(matvec, rhs, precond_op, atol, maxiter, stall)
     if comm.Get_rank() != 0:
         return _follow_root(matvec, n, comm)
 
@@ -41,8 +54,7 @@ def lgmres_root_driven(matvec, rhs, precond, atol, maxiter, comm=None):
         return matvec(v)
 
     try:
-        x, info = lgmres(LinearOperator((n, n), matvec=announced), rhs,
-                         M=precond_op, rtol=0.0, atol=atol, maxiter=maxiter)
+        x, info = _lgmres(announced, rhs, precond_op, atol, maxiter, stall)
     except Exception as exc:
         broadcast(None, comm)
         broadcast(('error', f'{type(exc).__name__}: {exc}'), comm)
@@ -52,6 +64,49 @@ def lgmres_root_driven(matvec, rhs, precond, atol, maxiter, comm=None):
     x = np.array(x, dtype=float, order='C')
     replicate(x, comm=comm)
     return x, int(info)
+
+
+class _Stalled(Exception):
+    """An outer cycle that no longer lowers the residual, with its iterate."""
+
+    def __init__(self, x):
+        super().__init__('stalled')
+        self.x = x
+
+
+def _lgmres(matvec, rhs, precond_op, atol, maxiter, stall):
+    """scipy's lgmres with `rtol=0`, ended early by `stall` (module
+    docstring): lgmres forms the true residual from matvec(x) just before it
+    calls back with x, so the callback reads that residual off the last
+    application instead of applying the operator again."""
+    n = int(np.size(rhs))
+    if stall is None:
+        return lgmres(LinearOperator((n, n), matvec=matvec), rhs,
+                      M=precond_op, rtol=0.0, atol=atol, maxiter=maxiter)
+    bar, ratio = stall
+    last, previous = [None, None], [None]
+
+    def recorded(v):
+        out = matvec(v)
+        last[0], last[1] = np.array(v, dtype=float).ravel(), out
+        return out
+
+    def check(xk):
+        xk = np.ravel(xk)
+        if last[0] is None or not np.array_equal(last[0], xk):
+            return
+        r = float(np.linalg.norm(np.ravel(last[1]) - rhs))
+        if (atol < r <= bar and previous[0] is not None
+                and r > ratio * previous[0]):
+            raise _Stalled(np.array(xk, dtype=float))
+        previous[0] = r
+
+    try:
+        return lgmres(LinearOperator((n, n), matvec=recorded), rhs,
+                      M=precond_op, rtol=0.0, atol=atol, maxiter=maxiter,
+                      callback=check)
+    except _Stalled as stop:
+        return stop.x, 0
 
 
 def root_driven_solve(solve, apply=None, rows=0, comm=None):

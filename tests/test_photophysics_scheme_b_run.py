@@ -1,30 +1,43 @@
 """The stage pipeline under solvent scheme B, evaluated.
 
-  1. forces: G_eq of S0, S1 and T1 on the pipeline's own scheme-B surfaces
+  1. forces: S0, S1 and T1 on the pipeline's own scheme-B surfaces
      (`Run.loop_surface`: the declared chain inside the loop, water
-     aug-cc-pVDZ in toluene, the AO-product fit on 600 points, TDA, SCF to 1e-12 / 1e-10,
-     loops to 1e-10 e / 1e-12 Ha) against five-point differences of G_eq
-     along a random direction on the same surface (h = 2e-3 Bohr), within
-     1e-8 Ha/Bohr. Scheme B has no density-fitted route: its forces are
-     gated against their own energy.
+     aug-cc-pVDZ in toluene, the AO-product fit on 600 points, SCF to 1e-12 /
+     1e-12, loops to 1e-9 e / 1e-12 Ha, a loop at its cycle cap failing the
+     gate) against five-point differences of
+     the surface's energy along a random direction on the same surface (h =
+     2e-3 Bohr), within 1e-8 Ha/Bohr, for every arm (`ARMS`): G_eq on the
+     Tamm-Dancoff and the full BSE, G_eq without the singlet's linear
+     response (scheme-b-eq-bare), and G_neq(X | S0) of scheme-b-noneq. Scheme
+     B has no density-fitted route: its forces are gated against their own
+     energy.
   2. the stages (formaldehyde cc-pVDZ in toluene, the AO-product fit on 900
      points, the frontier set, the outside scissor by tiers, TDA, geomeTRIC): s0, vert, s1, t1 and rate run;
      every record names the scheme; vert's omega of S1 and T1 are their
      absorption and the S1 (T1) minimum's its emission, its energy G_eq
-     there, the walk-versus-vertical gap flagged above the refreeze bar; the rate table's adiabatic energies are differences of G_eq; a
-     second launch reads every stage back and evaluates nothing.
+     there, the walk-versus-vertical gap flagged above the refreeze bar; T2
+     and T3 at the T1 minimum each in a loop of its own in T1's slow charges;
+     the rate table's adiabatic energies are differences of G_eq; a second
+     launch reads every stage back and evaluates nothing.
   3. restart (no refreeze, scheme-b-noneq): a T1 walk stopped after its
      first accepted step is resumed by the next launch as a new walk from
      that step's geometry on a surface built there (`restarted_from` in the
-     record), and reaches the minimum; its energies are the non-equilibrium
-     ones (T1 in S0's slow charges at its minimum, S0 in its own).
+     record), and reaches the minimum of G_neq(T1 | S0), the surface it
+     walks; its energies are that walk's (T1 in S0's slow charges at its
+     minimum, S0 in its own equilibrium there).
   4. the saddle check on a scheme-B surface (water cc-pVDZ, S0 at its loop
      minimum): a minimum, its displaced forces cached.
+  5. the full-BSE T1 single point at the Tamm-Dancoff minimum (water
+     cc-pVDZ, scheme-b-eq on the full BSE, the triplet walk stopped at the
+     instability): the t1 record is the full-BSE evaluation there, warned
+     about, flagged and labelled with why, with no saddle check and with T2
+     and T3.
 
 Run: python -m pytest tests/test_photophysics_scheme_b_run.py
 """
 import numpy as np
 import pytest
+from pyscf import gto
 
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
@@ -42,15 +55,47 @@ SCHEME_B = ('--environment', 'toluene', '--relaxed-solvation', 'equilibrium',
             '--grid-accuracy', 'G1', '--isdf-test-set', 'ao_products',
             '--pivot-points', '900', '--engine', 'auto', '--qp-states',
             'frontier')
-TIGHT = ('--scf-conv-tol', '1e-12', '--scf-grad-tol', '1e-10',
-         '--loop-tol-q', '1e-10', '--loop-tol-energy', '1e-12')
+#: each loop's G settles to ~1e-13 Ha only on an SCF converged to a gradient
+#: of 1e-12 (at 1e-10 it moves by up to 2e-11 Ha from cycle to cycle, which
+#: the differences below carry at 18 / (12 h) ~ 750 times); the charges of the
+#: noneq singlet's first loop shrink by ~0.88 a cycle below 1e-8 e and reach
+#: 1e-9 e, not 1e-10 e, within the loop's cycle cap
+TIGHT = ('--scf-conv-tol', '1e-12', '--scf-grad-tol', '1e-12',
+         '--loop-tol-q', '1e-9', '--loop-tol-energy', '1e-12')
 H = 2e-3
 FORCE_BAR = 1e-8
 
 
-@pytest.mark.parametrize('kind', ['S0', 'singlet', 'triplet'])
-def test_the_force_is_the_derivative_of_g_eq(tmp_path, kind):
-    run = run_in(tmp_path, declaration(*SCHEME_B, *WATER, *TIGHT))
+def arm(scheme, kernel, tmp_path):
+    """The declaration's options of one arm: the scheme (and its relaxed
+    states' solvation), and the kernel (a full-BSE run declares the
+    Tamm-Dancoff T1 minimum, here the input geometry)."""
+    out = ['--solvent-scheme', scheme, '--relaxed-solvation',
+           'nonequilibrium' if 'noneq' in scheme else 'equilibrium']
+    if kernel == 'full':
+        xyz = tmp_path / 'tda_t1.xyz'
+        xyz.write_text('3\nwater\n' + WATER[3].replace('; ', '\n') + '\n')
+        out += ['--tda-t1-minimum', str(xyz)]
+    return out
+
+
+#: (scheme, kernel, state) of every arm's force gate: scheme B in and out of
+#: equilibrium (the walk on G_neq(X | S0)), with and without the singlets'
+#: linear response, on the Tamm-Dancoff and the full BSE
+ARMS = [('scheme-b-eq', 'tda', 'S0'), ('scheme-b-eq', 'tda', 'singlet'),
+        ('scheme-b-eq', 'tda', 'triplet'), ('scheme-b-eq', 'full', 'singlet'),
+        ('scheme-b-eq', 'full', 'triplet'), ('scheme-b-eq-bare', 'tda', 'singlet'),
+        ('scheme-b-noneq', 'tda', 'singlet'), ('scheme-b-noneq', 'tda', 'triplet')]
+
+
+@pytest.mark.filterwarnings(
+    'error::src.environments.solvation_loop.SolvationNotConverged')
+@pytest.mark.parametrize('scheme, kernel, kind', ARMS)
+def test_the_force_is_the_derivative_of_the_surface(tmp_path, scheme, kernel,
+                                                    kind):
+    options = [o for o in SCHEME_B if kernel == 'tda' or o != '--tda']
+    run = run_in(tmp_path, declaration(*options, *WATER, *TIGHT,
+                                       *arm(scheme, kernel, tmp_path)))
     mol = run.mol_in
     surface = run.loop_surface(kind, mol, 'force gate')
     gradient = surface.total_gradient(mol)[0]
@@ -62,8 +107,8 @@ def test_the_force_is_the_derivative_of_g_eq(tmp_path, kind):
             mol, mol.atom_coords() + step * direction))
     fd = (-g(2 * H) + 8 * g(H) - 8 * g(-H) + g(-2 * H)) / (12 * H)
     analytic = float((gradient * direction).sum())
-    print(f'{kind}: dG/dx.u {analytic:.12f}, differences {fd:.12f}, '
-          f'|diff| {abs(analytic - fd):.2e} Ha/Bohr')
+    print(f'{scheme} {kernel} {kind}: dG/dx.u {analytic:.12f}, differences '
+          f'{fd:.12f}, |diff| {abs(analytic - fd):.2e} Ha/Bohr')
     assert abs(analytic - fd) < FORCE_BAR
 
 
@@ -101,6 +146,12 @@ def test_the_stages_under_scheme_b(tmp_path, monkeypatch):
     assert rate['S1_adiabatic_eV'] == pytest.approx(
         (s1['G_eq'] - vert['props']['e0']) * HARTREE_TO_EV, abs=1e-9)
 
+    # T2 and T3 at the T1 minimum, each its own loop in T1's slow charges
+    above = t1['triplets_above']
+    assert set(above) == {'T2', 'T3'}
+    assert all(v['converged'] for v in above.values())
+    assert 0.0 < above['T2']['vertical_eV'] <= above['T3']['vertical_eV']
+
     # a second launch evaluates nothing
     monkeypatch.setattr(stages.state_specific, 'vertical', refusing(
         'a stored vertical was evaluated again'))
@@ -132,9 +183,8 @@ def test_a_stopped_walk_restarts_from_its_last_step(tmp_path, monkeypatch):
     assert t1['converged']
     # scheme-b-noneq: T1 at its minimum in S0's slow charges, S0 in its own
     # equilibrium there, so omega(T1) is the absorption at the T1 minimum
-    G = t1['emission_G']
-    assert t1['props']['energy']['T1'] == G['neq_state']
-    assert t1['props']['e0'] == G['eq_ground']
+    assert t1['props']['energy']['T1'] == t1['G_neq']
+    assert t1['props']['e0'] == t1['G_eq_S0']
     assert t1['solvent_scheme'] == 'scheme-b-noneq'
     assert t1['solvation'] == 'nonequilibrium'
 
@@ -155,3 +205,27 @@ def test_a_saddle_check_on_a_scheme_b_surface(tmp_path):
     assert not record['first']['saddle']
     assert 'saddle_check' not in info['numerical_flags']
     assert any(run.store.workdir('hess_s1').iterdir())
+
+
+def test_a_triplet_walk_stopped_at_the_instability_falls_back(tmp_path):
+    xyz = tmp_path / 'tda_t1.xyz'
+    tda_atoms = 'O 0 0 0.1223; H 0 0.7772 -0.4792; H 0 -0.7772 -0.4792'
+    xyz.write_text('3\nwater\n' + tda_atoms.replace('; ', '\n') + '\n')
+    options = [o for o in SCHEME_B if o != '--tda']
+    d = declaration(*options, *WATER, '--basis', 'cc-pvdz', '--saddle-check',
+                    '1', '--tda-t1-minimum', str(xyz))
+    run = run_in(tmp_path, d)
+    stages.ground_minimum(run)
+    with pytest.warns(stages.TdaSinglePoint):
+        t1 = stages.tda_single_point(
+            run, None, 'CasidaInstability: min eig(A - B) -1.0e-03', 0.0)
+    assert t1['kernel'] == 'bse'
+    assert t1['tda_single_point']['reason'].startswith('CasidaInstability')
+    assert t1['tda_single_point']['sha256'] == d.policies.tda_t1_minimum.sha256()
+    assert 'tda_minimum_single_point' in t1['numerical_flags']
+    assert t1['saddle_check']['status'].startswith('not run')
+    assert np.allclose(np.asarray(t1['props']['coords_bohr']),
+                       run.molecule_at(gto.M(atom=tda_atoms, basis='cc-pvdz')
+                                       .atom_coords()).atom_coords())
+    assert t1['props']['energy']['T1'] == t1['G_eq']
+    assert set(t1['triplets_above']) == {'T2', 'T3'}

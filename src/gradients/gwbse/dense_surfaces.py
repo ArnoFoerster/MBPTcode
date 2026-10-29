@@ -880,7 +880,7 @@ class DenseBSESurface(PotentialEnergySurface):
         """
         if self.auxbasis is None:
             return None
-        return gto.M(atom=[(mol.atom_pure_symbol(i), tuple(c)) for i, c
+        return gto.M(atom=[(mol.atom_symbol(i), tuple(c)) for i, c
                            in enumerate(mol.atom_coords())],
                      unit='Bohr', basis=self.auxbasis, verbose=0)
 

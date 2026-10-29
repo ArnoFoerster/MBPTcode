@@ -14,14 +14,16 @@ the swap-in step below runs the torch adjoints through that same assembly.
 
 ## Run
 
-    python -m src.autograd_oracle.gate_factors                    # cc-pVDZ water in PCM(water), singlet S1
-    python -m src.autograd_oracle.gate_factors --gas              # gas-phase control
-    python -m src.autograd_oracle.gate_factors --target qp        # HOMO quasiparticle
-    python -m src.autograd_oracle.gate_factors --target qp --qp-offset -4   # O 1s: residues above the gap
-    python -m src.autograd_oracle.gate_factors --tda --spin triplet
-    python -m src.autograd_oracle.gate_factors --root-mode ift    # IFT instead of unrolled Newton
-    python -m src.autograd_oracle.gate_factors --fd 0,2 --h 1e-3  # + a four-point FD of one component
-    python -m src.autograd_oracle.gate_factors --basis sto-3g --auxbasis cc-pvdz-ri
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2            # cc-pVDZ water in PCM(water), singlet S1
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --gas      # gas-phase control
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --target qp  # HOMO quasiparticle
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --target qp --qp-offset -4  # O 1s: residues above the gap
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --tda --spin triplet
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --root-mode ift  # IFT instead of unrolled Newton
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --fd 0,2 --h 1e-3  # + a four-point FD of one component
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --basis sto-3g --auxbasis cc-pvdz-ri
+
+`--grid-accuracy` is required, because no ISDF grid is a default; these examples use G2.
 
 `TORCH_CHAIN_TRACE=1` stamps every stage of the torch forward.
 

@@ -2,7 +2,7 @@
 GW-BSE evaluation.
 
   1. one scheme per run: 'gas' in the gas phase and only there; a continuum
-     names 'scheme-a', 'scheme-b-eq' or 'scheme-b-noneq' (the command line
+     names 'scheme-a' or a scheme-B one (the command line
      refuses none of them and an unnamed one); the 'noneq' scheme declares
      its relaxed states in non-equilibrium and 'eq' in equilibrium; scheme B refuses each choice the loop does not run
      (SCHEME_B_REFUSES: among them a quasiparticle set selected per
@@ -17,6 +17,13 @@ GW-BSE evaluation.
      route and the file are declared together.
   4. `free_energies`: each root at its spin's anchor plus its splitting in
      the property field, omega against e0, the field's numbers kept.
+  5. the walk arms: the bare-exchange schemes build singlets without the
+     linear-response term; a non-equilibrium scheme's excited surfaces run
+     in S0's slow charges; the Tamm-Dancoff T1 minimum is declared by a
+     scheme-B full-BSE run alone and stamped on what reads t1; a walk stopped
+     (or raising) at the triplet instability goes to the single point there;
+     the loop tied to the gradient by name, stamped, and its surfaces handed
+     the walk's convergence bar.
 
 Run: python -m pytest tests/test_photophysics_scheme_b.py
 """
@@ -27,6 +34,7 @@ import pytest
 from pyscf import gto
 
 from src.Base.numerics.constants import (EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR,
+                                         GEOM_OPT_CONV, LOOP_FORCE_FRACTION,
                                          PHOTOPHYSICS_LOOP_TOL_ENERGY,
                                          PHOTOPHYSICS_LOOP_TOL_Q)
 from src.Base.declaration import QPStates
@@ -272,3 +280,146 @@ def test_free_energies_anchor_each_spin():
     one = stages.free_energies(props, {'S1': -0.7}, -0.9)
     assert one['energy']['T1'] == pytest.approx(-0.75)
     assert one['omega']['S1'] == pytest.approx(0.2)
+
+
+
+# -------------------------------------------------------- the walk arms
+NONEQ = TOLUENE[:2] + ('--relaxed-solvation', 'nonequilibrium', '--scf', 'df',
+                       '--qp-states', 'frontier')
+
+
+def test_the_bare_and_non_equilibrium_arms_by_name():
+    """scheme-b-*-bare: no linear response on the singlet (the loop's
+    medium alone); scheme-b-noneq(-bare): the excited surfaces are G_neq(X |
+    S0), their loop run in S0's slow charges (`SolvatedSurface(ground=)`),
+    S0's own G_eq."""
+    eq, bare = declaration(*SCHEME_B), declaration(
+        *SCHEME_B, '--solvent-scheme', 'scheme-b-eq-bare')
+    noneq = declaration(*NONEQ, '--solvent-scheme', 'scheme-b-noneq-bare')
+    assert eq.scheme_b_lr and not bare.scheme_b_lr and not noneq.scheme_b_lr
+    assert noneq.scheme_b_noneq and not bare.scheme_b_noneq
+    assert noneq.solvation == 'nonequilibrium'
+
+
+@pytest.mark.parametrize('scheme, lr', [('scheme-b-eq', True),
+                                        ('scheme-b-eq-bare', False)])
+def test_a_bare_singlet_carries_no_linear_response(tmp_path, scheme, lr):
+    run = run_in(tmp_path, declaration(*SCHEME_B, '--solvent-scheme', scheme))
+    make_field, make_state, _ = run.loop
+    field = make_field(run.mol_in)
+    singlet = make_state('singlet')(run.mol_in, field)
+    triplet = make_state('triplet')(run.mol_in, field)
+    assert (singlet.lr_environment is field.transition_environment()) == lr
+    assert (singlet.lr_environment is None) == (not lr)
+    assert triplet.lr_environment is None
+
+
+@pytest.mark.parametrize('scheme', ['scheme-b-eq', 'scheme-b-noneq'])
+def test_a_non_equilibrium_scheme_walks_in_s0s_slow_charges(tmp_path, scheme):
+    options = SCHEME_B if scheme == 'scheme-b-eq' else NONEQ + (
+        '--solvent-scheme', scheme)
+    run = run_in(tmp_path, declaration(*options))
+    noneq = scheme == 'scheme-b-noneq'
+    for kind in ('singlet', 'triplet'):
+        surface = run.loop_surface(kind, run.mol_in, 'test')
+        assert surface.noneq == noneq and surface.make_ground is not None
+    assert not run.loop_surface('S0', run.mol_in, 'test').noneq
+
+
+def test_the_tda_minimum_belongs_to_a_full_bse_scheme_b_run(tmp_path):
+    xyz = tmp_path / 't1.xyz'
+    xyz.write_text('4\nformaldehyde\nC 0 0 -0.5296\nO 0 0 0.6742\n'
+                   'H 0 0.9429 -1.1123\nH 0 -0.9429 -1.1123\n')
+    full = declaration(*SCHEME_B, '--tda-t1-minimum', str(xyz))
+    assert full.kernel == 'bse' and full.policies.tda_t1_minimum is not None
+    for options in ((*SCHEME_B, '--tda'), (*TOLUENE, '--solvent-scheme',
+                                           'scheme-a'), ()):
+        with pytest.raises(DeclarationRefused, match='tda_t1_minimum'):
+            declaration(*options, '--tda-t1-minimum', str(xyz))
+    run, plain = run_in(tmp_path / 'a', full), run_in(tmp_path / 'b',
+                                                      declaration(*SCHEME_B))
+    sha = full.policies.tda_t1_minimum.sha256()
+    for stage in ('t1', 'vib', 'rate'):
+        assert run.stamp(stage)['tda_t1_minimum'] == sha
+    assert 'tda_t1_minimum' not in run.stamp('s1')
+    assert 'tda_t1_minimum' not in plain.stamp('t1')
+
+
+def test_the_walk_stopped_at_the_instability():
+    collapsed = ('trust radius collapsed at 1.0e-03 Bohr; the state stopped '
+                 'evaluating ({}: min eig(A - B) -2.0e-04)')
+    for name, stopped in (('CasidaInstability', True), ('UnstableReference', True),
+                          ('CasidaBreakdown', True), ('QPRootNotConverged', False)):
+        info = {'converged': False, 'status': collapsed.format(name)}
+        assert stages.stopped_at_instability(info) == stopped, name
+    assert stages.stopped_at_instability({'converged': False, 'status':
+                                          'CasidaInstability: at the start'})
+    assert not stages.stopped_at_instability({'converged': True, 'status': 'ok'})
+
+
+def test_a_t1_walk_that_raises_at_the_instability_falls_back(tmp_path,
+                                                              monkeypatch):
+    """A refrozen pass that stops at the instability raises out of the walk:
+    the stage takes the single point all the same; without a declared TDA
+    minimum it raises."""
+    xyz = tmp_path / 't1.xyz'
+    xyz.write_text('4\nformaldehyde\nC 0 0 -0.5296\nO 0 0 0.6742\n'
+                   'H 0 0.9429 -1.1123\nH 0 -0.9429 -1.1123\n')
+    taken = []
+    monkeypatch.setattr(stages, 'stored_stage', lambda run, stage: None)
+    monkeypatch.setattr(stages, 'resume_point', lambda *a, **k: (None, None))
+    monkeypatch.setattr(stages, 'tda_single_point',
+                        lambda run, walked, reason, t0: taken.append(reason) or {})
+
+    def unstable(*a, **k):
+        raise stages.CasidaInstability('min eig(A - B) -1.0e-03')
+    monkeypatch.setattr(stages, 'walked_minimum', unstable)
+    for options, falls in (((*SCHEME_B, '--tda-t1-minimum', str(xyz)), True),
+                           (SCHEME_B, False)):
+        run = run_in(tmp_path / str(falls), declaration(*options))
+        monkeypatch.setattr(run, 'reusable', lambda stage: True)
+        monkeypatch.setattr(run, 'read', lambda stage: {
+            'props': {'coords_bohr': run.mol_in.atom_coords()}})
+        monkeypatch.setattr(run, 'loop_surface', lambda *a: None)
+        if falls:
+            stages.t1_minimum(run)
+            assert taken == ['CasidaInstability: min eig(A - B) -1.0e-03']
+        else:
+            with pytest.raises(stages.CasidaInstability):
+                stages.t1_minimum(run)
+
+
+def test_the_loop_tied_to_the_gradient_by_name(tmp_path):
+    tied = declaration(*SCHEME_B, '--loop-tolerance', 'gradient-tied')
+    assert tied.numerics.solvent.loop_force_fraction == LOOP_FORCE_FRACTION
+    fixed = declaration(*SCHEME_B)
+    assert fixed.numerics.solvent.loop_force_fraction is None
+    assert declaration(*SCHEME_B, '--loop-tolerance', 'fixed').numerics.identity() \
+        == fixed.numerics.identity()
+    stamped = run_in(tmp_path, tied).stamp('s0')['solvent_scheme']['loop']
+    assert stamped['loop_force_fraction'] == LOOP_FORCE_FRACTION
+    with pytest.raises(SystemExit, match='scheme-b'):
+        declaration(*TOLUENE, '--solvent-scheme', 'scheme-a',
+                    '--loop-tolerance', 'gradient-tied')
+    surface = run_in(tmp_path / 'b', tied).loop_surface('singlet', None, 'test')
+    assert surface.final_grad_max == GEOM_OPT_CONV['opt_grad_max']
+
+
+def test_the_saddle_check_takes_its_forces_on_untied_loops(tmp_path, monkeypatch):
+    """A tied walk's saddle check differences 6N displaced forces, each above
+    the walk bar: the stage hands the check the surface's untied twin."""
+    tied = declaration(*SCHEME_B, '--loop-tolerance', 'gradient-tied',
+                       '--saddle-check', '1')
+    run = run_in(tmp_path, tied)
+    surface = run.loop_surface('singlet', run.mol_in, 'test')
+    seen = {}
+
+    def saddle_check(final, mol, walk, verbose=False, cache_dir=None):
+        seen['final'] = final
+        raise RuntimeError('stop')
+    monkeypatch.setattr(stages, 'saddle_check', saddle_check)
+    with pytest.raises(RuntimeError, match='stop'):
+        run.saddle_checked('s1', run.mol_in, {'converged': True}, None, surface, 0.0)
+    final = seen['final']
+    assert final is not surface and final._untied and not surface._untied
+    assert final.loop_log is surface.loop_log and final.flags is surface.flags

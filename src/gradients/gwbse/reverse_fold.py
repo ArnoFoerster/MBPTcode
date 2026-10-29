@@ -282,13 +282,13 @@ class ReversePass:
                                    root_bar=np.linalg.solve(split.root_inf.T,
                                                             t_bar)),)
         # the Sigma_x - v_xc skeleton's fit adjoint rides the assembly's
-        with self.chain.one_fit_adjoint(mf):
+        with self.chain.one_fit_adjoint(mf) as pending:
             # the Hamiltonian's off-diagonal static term rides at its own
             # weight beside the Z-renormalized diagonal
             static = st.w_corr
             if lam is not None and self.chain.is_ks:
                 static = np.diag(st.w_corr) + lam - np.diag(np.diag(lam))
-            y_xc, g_xc = self.chain.xc_chain(mf, static)
+            y_xc, g_xc = self.chain.xc_chain(mf, static, pending=pending)
             grad, diags = self.chain.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 st.eps_bar, st.x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,

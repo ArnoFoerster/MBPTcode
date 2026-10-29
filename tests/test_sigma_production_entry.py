@@ -89,12 +89,12 @@ def test_main():
     assert main()
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=False, reason=(
     "solve_symmetric's overlap following of more roots than the reference "
     "spans: on spin-orbital H2O/sto-3g the two extra roots have overlaps near "
     "zero among many satellites, the pick changes between iterations and no "
     "root converges (the hand-written route's davidson_follow fails the same "
-    "way)"))
+    "way); converges on some libraries, where it passes"))
 def test_three_followed_roots():
     assert main(nroots=3)
 

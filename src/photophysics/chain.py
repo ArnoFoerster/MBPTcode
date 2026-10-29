@@ -18,7 +18,7 @@ The chain stands on the declaration's one `Numerics`, which `chain_spec`
 hands to `SurfaceSpec.numerics` whole; `potential_energy_surface` refuses a
 declared choice the chain does not read.
 
-SCHEME B (`solvent_scheme` 'scheme-b-eq' or 'scheme-b-noneq'): the same chain in the
+SCHEME B (`solvent_scheme` one of `declaration.SCHEME_B`): the same chain in the
 self-consistent state-specific loop (`src.environments.solvation_loop`). The
 loop's medium is the continuum's `ContinuumField` (`reaction_field`), its
 state models are `GWBSEState`s on a mean field configured here and converged
@@ -32,7 +32,7 @@ from dataclasses import asdict, replace
 from pyscf import dft
 from pyscf import df as pyscf_df
 
-from src.Base.basis.ri_fallback import paired_auxbasis
+from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
 from src.Base.numerics.constants import SCF_NEWTON_FINISH_FROM, SOLVENT_RI_RESIDUAL_MAX
 from src.Base.declaration import Excitation, GroundState
 from src.Base.numerics.numerics import SolventNumerics
@@ -52,16 +52,19 @@ from src.properties.excitations import SurfaceSpec, surface_of
 
 # -------------------------------------------------------------- molecules
 def factor_auxbasis(mol):
-    """The RI set of the GW and BSE factors (`paired_auxbasis`)."""
+    """The RI set of the GW and BSE factors (`paired_auxbasis`); a
+    per-element basis gets each element's own -ri set."""
     return paired_auxbasis(mol.basis)
 
 
 def scf_auxbasis(mol, route):
     """The auxiliary set of the mean field's J and K: <basis>-jkfit when it
-    is density-fitted (route 'df'), since -ri fits only the
-    occupied-virtual products of MP2; the factors' -ri set for ISDF-K and for
-    the DF twin of an ISDF-K surface."""
-    return f'{mol.basis}-jkfit' if route == 'df' else factor_auxbasis(mol)
+    is density-fitted (route 'df', `paired_jk_auxbasis`), since -ri fits only
+    the occupied-virtual products of MP2; the factors' -ri set for ISDF-K and
+    for the DF twin of an ISDF-K surface. Element by element for a
+    per-element basis."""
+    return paired_jk_auxbasis(mol.basis) if route == 'df' \
+        else factor_auxbasis(mol)
 
 
 def grid_content(level, mol):
@@ -70,7 +73,7 @@ def grid_content(level, mol):
     without the level, which a stamp carries beside it). A level is a name,
     and the table it names has been re-cut under it, so the content is
     stamped too."""
-    identity = grid_identity(level, str(mol.basis), elements_of(mol),
+    identity = grid_identity(level, mol.basis, elements_of(mol),
                              auxbasis=factor_auxbasis(mol))
     return {'level': level, 'counts': identity['counts'],
             'radii_sha256': identity['radii_sha256']}
@@ -162,7 +165,8 @@ class DeclaredChain:
         self.declaration = declaration
         n = declaration.numerics
         loop = {k: getattr(SolventNumerics(), k)
-                for k in ('loop_tol_q', 'loop_tol_energy', 'loop_max_cycle')}
+                for k in ('loop_tol_q', 'loop_tol_energy', 'loop_max_cycle',
+                          'loop_force_fraction')}
         #: The chain's Numerics (class docstring).
         self.numerics = (n if all(getattr(n.solvent, k) == v
                                   for k, v in loop.items()) else
@@ -237,7 +241,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
             mf = mf.density_fit(
                 auxbasis=scf_auxbasis(mol, surface_route or route))
         else:
-            counts, n_start = resolve_isdf_grid(scf.grid_level, str(mol.basis),
+            counts, n_start = resolve_isdf_grid(scf.grid_level, mol.basis,
                                                 elements_of(mol),
                                                 auxbasis=factor_auxbasis(mol))
             mf = isdf_jk_with_force(mf, auxbasis=factor_auxbasis(mol), counts=counts,

@@ -68,11 +68,13 @@ def shift_modes(env, mode):
 
 def delta_dipoles(mol, mo_act, C, delta_density, delta_density_relaxed):
     """{'unrelaxed', 'relaxed'}: (nroots, 3) dipole change of every root, from
-    the difference densities in the active orbitals mo_act and in all MOs C."""
+    the difference densities in the active orbitals mo_act and in all MOs C;
+    'unrelaxed' None without an unrelaxed density (delta_density None)."""
     r = mol.intor('int1e_r')
     return {
-        'unrelaxed': np.array([-np.einsum('xmn,mn->x', r, mo_act @ D @ mo_act.T)
-                               for D in delta_density]),
+        'unrelaxed': None if delta_density is None else
+        np.array([-np.einsum('xmn,mn->x', r, mo_act @ D @ mo_act.T)
+                  for D in delta_density]),
         'relaxed': np.array([-np.einsum('xmn,mn->x', r, C @ D @ C.T)
                              for D in delta_density_relaxed])}
 

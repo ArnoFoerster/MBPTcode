@@ -271,7 +271,7 @@ def vertical_arm(declaration, arm, max_memory):
         f'{d.reference}/{mol.basis}, {d.mean_field_name} mean field, factors '
         f'{d.numerics.isdf.level}, environment {d.environment}, arm {arm}')
     rec = dict(kind='vertical_arm', system=d.system.name, natm=mol.natm,
-               nao=mol.nao_nr(), basis=str(mol.basis), reference=d.reference,
+               nao=mol.nao_nr(), basis=mol.basis, reference=d.reference,
                environment=d.environment, arm=arm,
                scf=d.numerics.scf.route, scf_grid=d.numerics.scf.grid_level,
                kernel=d.kernel, nroots=d.numerics.bse.nroots,

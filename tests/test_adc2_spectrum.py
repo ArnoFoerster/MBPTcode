@@ -32,6 +32,7 @@ from pyscf import gto, scf
 from src.SingleReference.ADC.eeADC import ee_transition_density as etd
 from src.gradients.adc.ee_spectrum import adc2_spectrum
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.properties import spin_orbit, transition_moments
 from tests.adc_common import H2CO, check
@@ -47,7 +48,8 @@ def make_scf(m):
 
 
 def mp2_model(mol):
-    return MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri')
+    return MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri',
+                    numerics=Numerics())
 
 
 def check_energies(mol, spec):

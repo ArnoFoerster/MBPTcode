@@ -92,7 +92,12 @@ SCF differentiates term by term, each in fixed tiles gathered verbatim
 (`tile_sum`): Tr[D dh] - Tr[W dS] by atoms, E_J = Tr[D J[D]] / 2 as the
 Coulomb half of the fitted skeleton at g = D by auxiliary tiles, and E_xc on
 the moving grid by grid tiles, the three terms above with f = e_xc and v in
-place of the kernel (the energy is first order in rho).
+place of the kernel (the energy is first order in rho). A density-fitted
+SCF's exact exchange is the same skeleton's exchange half at g = D, one
+`FittedFockSkeleton` per operator: the bare one, and a range-separated
+hybrid's erf(omega r)/r on its own attenuated fit, whose singular metric is
+solved on the eigenvalue pseudo-inverse as pyscf's own gradient solves it
+(`fitted_energy_skeleton`).
 """
 import ctypes
 
@@ -100,6 +105,7 @@ import numpy as np
 import scipy.linalg
 from pyscf import gto, lib
 from pyscf.df import incore
+from pyscf.df.incore import LINEAR_DEP_THR
 from pyscf.dft import gen_grid, numint, radi
 from pyscf.scf import _vhf
 
@@ -125,12 +131,28 @@ class FittedFockSkeleton:
     g_ao, dm: the folded partial and the SCF density, AO basis, symmetric.
     occ: Cd with dm = Cd Cd^T, needed only for the exchange.
     coulomb: whether the Coulomb half is taken; exchange: the summed weight
-    of the full-range exchange channels (0 for none).
+    of the exchange channels of operator `omega` (0 for none).
+    omega: the operator, 0 the bare Coulomb one and a nonzero value the
+    erf(omega r)/r of a range-separated hybrid, on the three- and
+    two-centre integrals alike (pyscf's `range_coulomb` fit).
+
+    The metric is solved as pyscf's density-fitted gradient solves it
+    (`pyscf/df/grad/rhf.py::_gen_metric_solver`): through its Cholesky
+    factor, and where that factorization fails -- an attenuated metric is
+    singular -- through the pseudo-inverse of its eigenvalues above
+    LINEAR_DEP_THR (`metric` says which, rank 0's choice on every rank).
     """
 
     def __init__(self, mol, auxmol, g_ao, dm, occ=None, coulomb=True,
-                 exchange=0.0, tile=None, max_bytes=THREE_CENTER_BLOCK_BYTES):
+                 exchange=0.0, tile=None, max_bytes=THREE_CENTER_BLOCK_BYTES,
+                 omega=0.0):
+        self.omega = float(omega)
+        if self.omega:
+            # private copies: the attenuation lives in the molecules' env
+            mol, auxmol = mol.copy(), auxmol.copy()
+            mol.omega = auxmol.omega = self.omega
         self.mol, self.auxmol = mol, auxmol
+        self.metric = None
         self.g = np.ascontiguousarray(g_ao, dtype=float)
         self.D = np.ascontiguousarray(dm, dtype=float)
         self.coulomb, self.w = bool(coulomb), float(exchange)
@@ -209,57 +231,81 @@ class FittedFockSkeleton:
         self._hold('L_tiles', sum(x.nbytes for x in L.values()))
         ranges = [[self.functions(t) for t in own] for own in owners]
         V = self.auxmol.intor('int2c2e', aosym='s1')
+        # pyscf's rule: the Cholesky factor where it exists, else the
+        # eigenvalue pseudo-inverse; rank 0's on every rank. The bare
+        # Coulomb half alone solves V directly and needs neither.
+        Lc = Vpinv = None
+        if self.w or self.omega:
+            try:
+                Lc = scipy.linalg.cholesky(V, lower=True)
+            except np.linalg.LinAlgError:
+                w, v = scipy.linalg.eigh(V)
+                keep = w > LINEAR_DEP_THR
+                Vpinv = (v[:, keep] / w[keep]) @ v[:, keep].T
+            Lc, Vpinv = lockstep((Lc, Vpinv), comm, check=True)
+        self.metric = 'eigen' if Vpinv is not None else 'cholesky'
         if self.coulomb:
             allgather_ranges(a, ranges, comm)
             allgather_ranges(b, ranges, comm)
             # each rank's own solve, rank 0's the one every addend reads
-            self.Va, self.Vb = lockstep((np.linalg.solve(V, a),
-                                         np.linalg.solve(V, b)), comm,
-                                        check=True)
+            self.Va, self.Vb = lockstep(
+                (np.linalg.solve(V, a), np.linalg.solve(V, b))
+                if Vpinv is None else (Vpinv @ a, Vpinv @ b), comm, check=True)
         if not self.w:
             return self
-        # V = Lc Lc^T; Kt = V^-1 L by substitution, never by an explicit
-        # inverse: on a near-singular metric the inverse's product loses
-        # digits that the solves keep
-        Lc = lockstep(scipy.linalg.cholesky(V, lower=True), comm, check=True)
         del V
         nt = len(self.tiles)
-        # each owned tile's rows of L, (rows, nocc nao), solved in place
-        Kt = {t: L.pop(t).reshape(-1, nocc * nao) for t in owned}
+        # each owned tile's rows of L, (rows, nocc nao)
+        Lt = {t: L.pop(t).reshape(-1, nocc * nao) for t in owned}
 
-        def stream(q, trans):
-            # tile q's rows from their owner, who first solves them against
-            # the diagonal block (trans 'N' forward, 'T' backward, None not)
+        def stream(q, held, trans=None):
+            # tile q's rows of `held` from their owner, who first solves them
+            # against the diagonal block (trans 'N' forward, 'T' backward)
             owner = q % size
             q0, q1 = self.functions(q)
             if rank == owner:
                 if trans is not None:
-                    Kt[q] = np.ascontiguousarray(scipy.linalg.solve_triangular(
-                        Lc[q0:q1, q0:q1], Kt[q], lower=True, trans=trans))
-                rows = Kt[q]
+                    held[q] = np.ascontiguousarray(scipy.linalg.solve_triangular(
+                        Lc[q0:q1, q0:q1], held[q], lower=True, trans=trans))
+                rows = held[q]
             else:
                 rows = np.empty((q1 - q0, nocc * nao))
             broadcast_rows(rows, owner, comm)
             self._hold('Kt_stream', rows.nbytes)
             return q0, q1, rows
 
-        # forward, Lc Y = L, in tile order
-        for q in range(nt):
-            q0, q1, Yq = stream(q, 'N')
-            for t in owned:
-                if t > q:
+        if Vpinv is None:
+            # V = Lc Lc^T; Kt = V^-1 L by substitution, never by an explicit
+            # inverse: on a near-singular metric the inverse's product loses
+            # digits that the solves keep. Solved in place.
+            Kt = Lt
+            # forward, Lc Y = L, in tile order
+            for q in range(nt):
+                q0, q1, Yq = stream(q, Kt, 'N')
+                for t in owned:
+                    if t > q:
+                        p0, p1 = self.functions(t)
+                        Kt[t] -= Lc[p0:p1, q0:q1] @ Yq
+                del Yq
+            # backward, Lc^T Kt = Y, in reverse tile order
+            for q in reversed(range(nt)):
+                q0, q1, Kq = stream(q, Kt, 'T')
+                for t in owned:
+                    if t < q:
+                        p0, p1 = self.functions(t)
+                        Kt[t] -= Lc[q0:q1, p0:p1].T @ Kq
+                del Kq
+            del Lc
+        else:
+            # Kt = Vpinv L, the tiles of L streamed once in tile order
+            Kt = {t: np.zeros_like(Lt[t]) for t in owned}
+            for q in range(nt):
+                q0, q1, Lq = stream(q, Lt)
+                for t in owned:
                     p0, p1 = self.functions(t)
-                    Kt[t] -= Lc[p0:p1, q0:q1] @ Yq
-            del Yq
-        # backward, Lc^T Kt = Y, in reverse tile order
-        for q in reversed(range(nt)):
-            q0, q1, Kq = stream(q, 'T')
-            for t in owned:
-                if t < q:
-                    p0, p1 = self.functions(t)
-                    Kt[t] -= Lc[q0:q1, p0:p1].T @ Kq
-            del Kq
-        del Lc
+                    Kt[t] += Vpinv[p0:p1, q0:q1] @ Lq
+                del Lq
+            del Lt, Vpinv
         for t in owned:
             # (g Kt^P)^T, the only form of Kt pass 2 reads
             self.At[t] = np.matmul(Kt[t].reshape(-1, nocc, nao), self.g)
@@ -271,7 +317,7 @@ class FittedFockSkeleton:
             p0, p1 = self.functions(t)
             self.VTV[t] = np.empty((p1 - p0, naux))
         for q in range(nt):
-            q0, q1, Kq = stream(q, None)
+            q0, q1, Kq = stream(q, Kt)
             for t in owned:
                 p0, p1 = self.functions(t)
                 self.VTV[t][:, q0:q1] = self.At[t].reshape(p1 - p0, -1) @ Kq.T
@@ -881,19 +927,43 @@ def tile_sum(addend, ntiles, natm, comm=None):
 def fitted_coulomb_energy_skeleton(mol, auxmol, dm, comm=None, tile=None):
     """(natm, 3) of d/dR E_J = (1/2) d/dR Tr[dm J[dm]] on the fitted metric
     (the density-fitted Coulomb energy an SCF with `j_route='df-direct'`
-    minimized), dm held, rank 0's on every rank: `FittedFockSkeleton` at
-    g = dm over the auxiliary tiles, its addends summed by `tile_sum`."""
+    minimized), dm held, rank 0's on every rank: `fitted_energy_skeleton`
+    with no exchange."""
+    return fitted_energy_skeleton(mol, auxmol, dm, comm=comm, tile=tile)
+
+
+def fitted_energy_skeleton(mol, auxmol, dm, occ=None, channels=(), comm=None,
+                           tile=None):
+    """(natm, 3) of d/dR (1/2) Tr[dm (J - (1/2) sum_w w K_omega)[dm]], the
+    density-fitted Coulomb and exchange energy of a restricted SCF with dm
+    held, rank 0's on every rank.
+
+    channels: [(omega, w)] of the exchange (`exchange_channels`), each
+    operator fitted on its own metric; occ: Cd with dm = Cd Cd^T, needed with
+    any exchange. One `FittedFockSkeleton` at g = dm takes the Coulomb half
+    and the bare channels' summed weight, one more each attenuated channel;
+    their addends are summed over the auxiliary tiles by `tile_sum`.
+    """
     comm = current_comm() if comm is None else comm
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))
     if size > 1:
-        dm = lockstep(dm, comm, check=True)
-    skeleton = FittedFockSkeleton(mol, auxmol, dm, dm, tile=tile)
-    skeleton.prepare([int(t) for t in partition(len(skeleton.tiles), rank,
-                                                size)], comm)
-    # Tr[g J[dm]] at g = dm is twice the energy
-    return 0.5 * tile_sum(skeleton.addend, len(skeleton.tiles), mol.natm,
-                          comm)
+        dm, occ = lockstep((dm, occ), comm, check=True)
+    bare = sum(w for omega, w in channels if omega == 0.0)
+    parts = [(0.0, True, bare)] + [(float(omega), False, float(w))
+                                   for omega, w in channels
+                                   if omega != 0.0 and w != 0.0]
+    out = np.zeros((mol.natm, 3))
+    for omega, coulomb, w in parts:
+        skeleton = FittedFockSkeleton(mol, auxmol, dm, dm, occ=occ if w else None,
+                                      coulomb=coulomb, exchange=w, tile=tile,
+                                      omega=omega)
+        skeleton.prepare([int(t) for t in partition(len(skeleton.tiles), rank,
+                                                    size)], comm)
+        # Tr[g F[dm]] at g = dm is twice the energy
+        out += 0.5 * tile_sum(skeleton.addend, len(skeleton.tiles), mol.natm,
+                              comm)
+    return out
 
 
 def one_electron_energy_skeleton(mol, hcore_deriv, dm, dme, comm=None):

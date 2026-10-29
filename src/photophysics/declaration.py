@@ -35,6 +35,7 @@ from typing import Optional
 
 from src.Base.numerics.constants import (RESIDUE_ROUTES_ALL,
                                          STATE_MODEL_SCF_GRAD_TOL)
+from src.Base.basis.basis_map import atom_elements, basis_keys
 from src.Base.declaration import KERNELS, QPStates
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import record_hash
@@ -60,11 +61,19 @@ HESSIAN_ROUTES = ('analytic-df', 'numerical', 'external')
 #: non-equilibrium energies. The two differ in the energy an excited state
 #: has at its minimum (`stages` module docstring, THE ENERGIES): in its own
 #: equilibrium ('eq', the solvent relaxed around it) or in the slow charges
-#: of S0's equilibrium there ('noneq', the solvent left as S0 had it).
-SOLVENT_SCHEMES = ('gas', 'scheme-a', 'scheme-b-eq', 'scheme-b-noneq')
+#: of S0's equilibrium there ('noneq', the solvent left as S0 had it, walked
+#: on that non-equilibrium surface). 'scheme-b-eq-bare' and
+#: 'scheme-b-noneq-bare': the same without the singlets' linear response (the
+#: BSE exchange on the bare interaction, the medium in the loop alone).
+SOLVENT_SCHEMES = ('gas', 'scheme-a', 'scheme-b-eq', 'scheme-b-noneq',
+                   'scheme-b-eq-bare', 'scheme-b-noneq-bare')
 #: The schemes of the state-specific loop, and the relaxed states' solvation
 #: each declares (`Policies.relaxed_solvation`).
-SCHEME_B = {'scheme-b-eq': 'equilibrium', 'scheme-b-noneq': 'nonequilibrium'}
+SCHEME_B = {'scheme-b-eq': 'equilibrium', 'scheme-b-noneq': 'nonequilibrium',
+            'scheme-b-eq-bare': 'equilibrium',
+            'scheme-b-noneq-bare': 'nonequilibrium'}
+#: The scheme-B arms without the singlets' linear-response term.
+SCHEME_B_BARE = ('scheme-b-eq-bare', 'scheme-b-noneq-bare')
 #: The geometry optimizers (`properties.optimize.relax`).
 ENGINES = ('auto', 'cartesian', 'geometric')
 #: How each SCF is finished.
@@ -85,7 +94,7 @@ SCF_ROUTES = ('isdf', 'df')
 GAS = 'gas'
 #: The fields that admit None ('Class.field'); every other is required.
 OPTIONAL = ('Policies.far_start', 'Policies.external_hessian',
-            'Declaration.hessian_numerics')
+            'Policies.tda_t1_minimum', 'Declaration.hessian_numerics')
 
 
 class DeclarationRefused(ValueError):
@@ -95,10 +104,27 @@ class DeclarationRefused(ValueError):
 @dataclass(frozen=True)
 class System:
     """The molecule: a name (the store's directory), the pyscf atom string
-    in Angstrom, and the orbital basis."""
+    in Angstrom, and the orbital basis: one name, or a per-element or
+    per-atom map in the canonical form of `basis_map.molecule_basis` (every
+    element, or every symbol and atom label, of the atom string named; no
+    'default'), which every stamp carries whole with the labelled atoms."""
     name: str
     atom: str
-    basis: str
+    basis: object
+
+    def __post_init__(self):
+        if isinstance(self.basis, dict):
+            labels = set(basis_keys(self.atom))
+            keys = (labels,) if any('@' in k for k in labels) else \
+                (set(atom_elements(self.atom)), labels)
+            if set(self.basis) not in keys or not all(
+                    isinstance(v, str) for v in self.basis.values()):
+                raise DeclarationRefused(
+                    f'a per-element or per-atom basis names a set for exactly '
+                    f'the elements ({atom_elements(self.atom)}) or the symbols '
+                    f'and labels ({sorted(labels)}) of the molecule, each by '
+                    f'name: got {self.basis!r} (basis_map.molecule_basis '
+                    f'builds it)')
 
 
 @dataclass(frozen=True)
@@ -111,6 +137,19 @@ class FarStart:
     def sha256(self):
         """The digest every record of a walk from this start carries
         (`record_hash` of the atom string)."""
+        return record_hash(self.atom)
+
+
+@dataclass(frozen=True)
+class TdaMinimum:
+    """The T1 minimum of the same run on the Tamm-Dancoff kernel (Angstrom,
+    the atom order of the input, as a pyscf atom string): where a full-BSE
+    scheme-B run takes its T1 single point when its own T1 walk stops at the
+    triplet instability (`stages.t1_minimum`)."""
+    atom: str
+
+    def sha256(self):
+        """The digest the record of a single point there carries."""
         return record_hash(self.atom)
 
 
@@ -149,6 +188,9 @@ class Policies:
     hessian: the S0 Hessian's route (HESSIAN_ROUTES).
     external_hessian: the `ExternalHessian` of the 'external' route, else
         None.
+    tda_t1_minimum: a scheme-B full-BSE run's `TdaMinimum` (refused
+        elsewhere): the T1 single point of a triplet walk stopped by the full
+        kernel's instability; None leaves such a walk unrelaxed and flagged.
     relaxed_solvation: in a continuum, where the relaxed states and their
         walks stand (RELAXED_SOLVATION); the vertical stage is
         non-equilibrium either way.
@@ -168,6 +210,7 @@ class Policies:
     engine: str
     scf_finish: str
     external_hessian: Optional[ExternalHessian]
+    tda_t1_minimum: Optional[TdaMinimum]
 
 
 @dataclass(frozen=True)
@@ -205,7 +248,7 @@ class Declaration:
         older 'N2:EPS_STATIC', each optionally ',cavity=NAME'.
     solvent_scheme: SOLVENT_SCHEMES, how every state of the run stands in the
         environment: 'gas' in the gas phase and only there; in a continuum
-        'scheme-a', 'scheme-b-eq' or 'scheme-b-noneq'. One scheme per run:
+        'scheme-a' or a scheme-B one (SCHEME_B). One scheme per run:
         every record holds it and a record of another scheme is refused.
     kernel: KERNELS. singlet, triplet: the emitting singlet and the triplet
         reservoir, 1 = lowest. n_states: the roots of each spin every
@@ -275,6 +318,16 @@ class Declaration:
     def scheme_b(self):
         """Whether every state stands in the state-specific loop."""
         return self.solvent_scheme in SCHEME_B
+
+    @property
+    def scheme_b_noneq(self):
+        """Whether the excited states walk and stand in S0's slow charges."""
+        return SCHEME_B.get(self.solvent_scheme) == 'nonequilibrium'
+
+    @property
+    def scheme_b_lr(self):
+        """Whether a scheme-B singlet carries the linear-response term."""
+        return self.scheme_b and self.solvent_scheme not in SCHEME_B_BARE
 
     @property
     def environment_dir(self):
@@ -466,8 +519,8 @@ SCHEME_B_REFUSES = (
     (lambda d: d.policies.scf_finish != 'diis',
      'policies.scf_finish: the state model converges its SCF by DIIS'),
     (lambda d: d.policies.relaxed_solvation != SCHEME_B[d.solvent_scheme],
-     'policies.relaxed_solvation: scheme-b-eq declares the relaxed states in '
-     'equilibrium, scheme-b-noneq in non-equilibrium'),
+     'policies.relaxed_solvation: scheme-b-eq(-bare) declares the relaxed '
+     'states in equilibrium, scheme-b-noneq(-bare) in non-equilibrium'),
     (lambda d: d.qp_states.kind in ('admitted', 'adaptive')
      or (d.qp_states.kind == 'valence' and d.qp_states.filter_z),
      'qp_states: every scheme-B surface (each vertical, each refreeze) '
@@ -481,12 +534,19 @@ SCHEME_B_REFUSES = (
 
 def refuse_scheme(d):
     """Refuse a solvent scheme that does not match the environment, and under
-    scheme B every choice the loop does not run (SCHEME_B_REFUSES)."""
+    scheme B every choice the loop does not run (SCHEME_B_REFUSES); a TDA T1
+    minimum where it is not read."""
     if d.gas != (d.solvent_scheme == GAS):
         raise DeclarationRefused(
             f'solvent_scheme={d.solvent_scheme!r} in environment '
             f'{d.environment!r}: \'gas\' is the scheme of the gas phase, '
             f'and of it alone')
+    if d.policies.tda_t1_minimum is not None and not (
+            d.scheme_b and d.kernel == 'bse'):
+        raise DeclarationRefused(
+            'policies.tda_t1_minimum: the Tamm-Dancoff T1 minimum is the T1 '
+            'single point of a scheme-B run on the full BSE whose triplet walk '
+            'stops at the instability; no other run reads it')
     if not d.scheme_b:
         return
     for refused, why in SCHEME_B_REFUSES:

@@ -41,7 +41,6 @@ phase and in a fixed field.
 import numpy as np
 import scipy.linalg
 from pyscf import df as pyscf_df
-from pyscf.dft.rks import KohnShamDFT
 
 from src.Base.pyscf.cphf import ResponseKernel
 from src.Base.pyscf.pyscf_interface import auxmol_of
@@ -50,6 +49,7 @@ from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator, singlet_pairs)
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
 from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
 from src.gradients.skeleton_tiles import fitted_fock_skeleton
 
@@ -172,22 +172,6 @@ def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
     return f1 + fjk + fri, gamma, asym
 
 
-def hf_force(mf):
-    """pyscf's force of the SCF energy E_vac[D] + tr(h_ext D) with the
-    external operator's own derivative left out (its vacuum hcore_generator),
-    nuclear repulsion included. The mean field's own gradient class
-    (mf.nuc_grad_method()): RHF or DF-RHF, and for a Kohn-Sham reference the
-    RKS class with its exchange-correlation term (RHF's class there would
-    differentiate J - K/2 and no XC), its quadrature's motion included
-    (`grid_response`, which pyscf leaves off: without it the force of a
-    Kohn-Sham reference is not the derivative of its energy)."""
-    g = mf.nuc_grad_method()
-    g.verbose = 0
-    if isinstance(mf, KohnShamDFT):
-        g.grid_response = True
-    return g.kernel()
-
-
 def mp2_density(mf, mol, frozen, auxbasis, numerics=None, flags=None, scaling=None):
     """(e_mp2, gamma (MO, relaxed)) of DF-MP2 on the dense reference: the
     force's energy and relaxed density without its derivative integrals,
@@ -207,7 +191,9 @@ def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None
     Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout.
     numerics: the caller's (the Z-vector's tolerances); flags: the list a
     short Z-vector solve appends its flag to; scaling: (c_os, c_ss) of
-    SCS-MP2, or None (mp2_pieces)."""
+    SCS-MP2, or None (mp2_pieces). E_HF's force is
+    `isdf_mean_field.mean_field_skeleton_force`: over the current ranks, every
+    rank calling, with the external operator's own derivative left out."""
     jk_fit(mf)                     # refuses a mean field with no JK fit
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
@@ -219,4 +205,4 @@ def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None
         gamma, Gam = gamma + g1, Gam + G1
     fc, gam, asym = correlation_force(mol, mf, ri, gamma, Gam, frozen, Y_extra,
                                       numerics, flags)
-    return hf_force(mf) + fc, (e2, gam, asym, extra)
+    return mean_field_skeleton_force(mf) + fc, (e2, gam, asym, extra)

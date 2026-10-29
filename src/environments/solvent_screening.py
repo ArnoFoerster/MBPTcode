@@ -125,7 +125,8 @@ from pyscf.data import radii as pyscf_radii
 from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.smd import solvent_db
 
-from src.Base.basis.ri_fallback import auxbasis_for
+from src.Base.basis.ri_fallback import auxbasis_for, element_basis_name, pure_element
+from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.constants import (BYTES_PER_GB, BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
                                          COSMO_RADII_ANGSTROM, PCM_LEBEDEV_ORDER,
                                          SOLVENT_PLASMON_EV,
@@ -830,6 +831,23 @@ class SolventScreening:
                     f'{partner}, the auxiliary partner of {basis}: a set '
                     f'without the basis\'s diffuse functions cannot carry its '
                     f'pair densities\' potential on the cavity')
+        elif isinstance(basis, dict):
+            # a per-element or per-atom basis: each key's set against its
+            # own partner
+            for el in elements_of(mol):
+                mine = element_basis_name(basis, el)
+                have = element_basis_name(aux, el) if isinstance(aux, (dict, str)) \
+                    else None
+                try:
+                    partner = auxbasis_for(mine, [pure_element(el)])
+                except ValueError:
+                    partner = None
+                if partner is not None and have != partner:
+                    raise ValueError(
+                        f'the reaction field is represented in {have} on {el}, '
+                        f'not in {partner}, the auxiliary partner of {mine}: a '
+                        f'set without the basis\'s diffuse functions cannot '
+                        f'carry its pair densities\' potential on the cavity')
         mo_coeff = np.asarray(mo_coeff, float)
         n = SOLVENT_RI_PROBE_ORBITALS
         residual = self.fit_residual(mol, auxmol,

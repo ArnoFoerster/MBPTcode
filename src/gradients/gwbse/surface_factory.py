@@ -296,7 +296,7 @@ def resolve_grid(mol, numerics):
     than resolved to either side (`separable_factors`' rule).
     """
     isdf = numerics.isdf
-    basis = isdf.basis or str(mol.basis)
+    basis = isdf.basis or mol.basis
     auxbasis = isdf.auxbasis or paired_auxbasis(basis)
     elements = elements_of(mol)
     counts, n_start = isdf.counts, isdf.n_start

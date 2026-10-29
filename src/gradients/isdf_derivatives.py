@@ -46,6 +46,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
+from src.Base.geometry.geometry import grid_key
 from src.Base.numerics.constants import (AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS, ISDF_TEST_SETS,
                                          THREE_CENTER_BLOCK_BYTES,
@@ -179,6 +180,14 @@ class PendingFitAdjoint:
     The deposits' share of the force is `settle`'s; the mean field's
     skeleton, contracted ahead where its force follows (`mean_field`), waits
     in `stash` for that force (`take`).
+
+    The window holds a second kind of term: a skeleton channel linear in its
+    density at the SCF density (a four-centre exchange channel, the
+    exchange-correlation grid skeleton) whose caller hands the window
+    `hold_skeleton` instead of evaluating. The densities of one channel are
+    summed, so the orbital response's skeleton and the static correction's
+    take one pass between them; `take_skeletons` hands the sums to the
+    assembly (`mean_field_response.held_skeletons`).
     """
 
     def __init__(self, mf, mean_field=False):
@@ -188,6 +197,28 @@ class PendingFitAdjoint:
         self.deposits = []
         self.share = None
         self.stash = None
+        self.skeletons = {}
+
+    def hold_skeleton(self, channel, g_ao, D):
+        """Add g_ao (weight included) to the density held for `channel`,
+        ('exchange', omega) or ('xc', None), whose other density is D. Every
+        deposit of a channel must carry the same D, the SCF density: the sum
+        is one pass only because the channel is linear in g_ao at fixed D."""
+        held = self.skeletons.get(channel)
+        if held is None:
+            self.skeletons[channel] = (np.array(g_ao, dtype=float),
+                                       np.asarray(D, dtype=float))
+            return
+        if not np.array_equal(held[1], np.asarray(D, dtype=float)):
+            raise ValueError(
+                f'skeleton channel {channel} was held with another density '
+                'D: summing the densities is exact only at one D')
+        held[0][...] += g_ao
+
+    def take_skeletons(self):
+        """{channel: (summed g_ao, D)} in deposit order, emptied."""
+        held, self.skeletons = self.skeletons, {}
+        return held
 
     def deposit(self, key, chain, seeds):
         """Hold one skeleton's seeds for the assembly's call."""
@@ -261,6 +292,7 @@ class PendingFitAdjoint:
         wanted the orbital branch's inputs only (a relaxed density), so no
         force is assembled and nothing of the fit reaches the nuclei."""
         self.deposits = []
+        self.skeletons = {}
         self.open = False
 
     def settle(self):
@@ -284,7 +316,7 @@ def point_layout(mol, radii_by_element, origin_by_element=None):
     """
     pts_local, owner = [], []
     for ia in range(mol.natm):
-        sym = mol.atom_pure_symbol(ia)
+        sym = grid_key(mol, ia)
         use_origin = (origin_by_element or {}).get(sym, False)
         p = atomic_points(radii_by_element[sym], centre=(0.0, 0.0, 0.0),
                           origin=use_origin)
@@ -1344,6 +1376,11 @@ def one_fit_adjoint(mf, mean_field=False):
             f'{len(pending.deposits)} exchange skeleton(s) left row-fit '
             'adjoint seeds that no nuclear assembly contracted: the force '
             'would miss their fit and collocation terms')
+    if pending.skeletons:
+        raise RuntimeError(
+            f'skeleton channel(s) {sorted(pending.skeletons, key=str)} were '
+            'held and no nuclear assembly evaluated them: the force would '
+            'miss them')
     if pending.stash is not None:
         warnings.warn('the mean-field exchange skeleton was contracted ahead '
                       'of a force that never asked for it', RuntimeWarning)

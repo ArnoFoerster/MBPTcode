@@ -40,8 +40,8 @@ from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.adc.ee_state_model import ADC2State
 from src.gradients.state_models import HFState, MP2State
-from tests.adc_common import (ATOMS, AUX, NF, ROOT_CONV_TOL, SOLVATION_TIGHT,
-                              make_scf_loop, make_scf_tight, molecule)
+from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, NF, make_scf_loop,
+                              make_scf_tight, molecule)
 from tests.pins import assert_same
 
 MOL = molecule(ATOMS)
@@ -126,16 +126,16 @@ def test_cosmo_refuses_an_element_without_a_radius():
 
 
 def adc2_s1(field):
-    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense')
-    return ADC2State(mp2, 'singlet', 0, 3, field.transition_environment(),
-                     conv_tol=ROOT_CONV_TOL)
+    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense',
+                   numerics=ADC_NUMERICS)
+    return ADC2State(mp2, 'singlet', 0, 3, field.transition_environment())
 
 
 @pytest.fixture(scope='module')
 def gas_s1():
     gas = NoMedium(MOL)
     state = adc2_s1(gas)
-    r = sl.equilibrate(state, gas, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, gas, **ADC_TIGHT)
     return r, sl.force(state, gas, r)
 
 
@@ -152,7 +152,7 @@ def test_eps_one_is_the_gas_phase_on_every_cavity(cavity, gas_s1):
                 gas_scf.e_tot)
     # the ADC(2) state-specific loop
     state = adc2_s1(field)
-    r = sl.equilibrate(state, field, **SOLVATION_TIGHT)
+    r = sl.equilibrate(state, field, **ADC_TIGHT)
     rg, fg = gas_s1
     assert len(r.history) == len(rg.history)
     assert_same(r.energy, rg.energy)

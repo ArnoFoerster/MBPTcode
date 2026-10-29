@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.autograd_oracle import gate_factors
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec('torch') is None,
-                                reason='torch is not installed')
+needs_torch = pytest.mark.skipif(importlib.util.find_spec('torch') is None,
+                                 reason='torch is not installed')
 
 
 CASES = {
@@ -27,6 +27,15 @@ CASES = {
 }
 
 
+def test_the_gate_has_no_default_grid(tmp_path, capsys):
+    """No ISDF grid is a default: the gate without --grid-accuracy is
+    refused before any SCF, and the refusal names the option."""
+    with pytest.raises(SystemExit):
+        gate_factors.main(['--basis', 'cc-pvdz', '--workdir', str(tmp_path)])
+    assert '--grid-accuracy' in capsys.readouterr().err
+
+
+@needs_torch
 @pytest.mark.parametrize('extra', CASES.values(), ids=CASES.keys())
 def test_factor_level_adjoints_are_the_autograd_derivative(extra, tmp_path):
     out = gate_factors.main(['--basis', 'cc-pvdz', '--grid-accuracy', 'G1',

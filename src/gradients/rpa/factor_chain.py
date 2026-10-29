@@ -77,7 +77,6 @@ from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.body_frame import BodyFrame
-from src.Base.factorization.isdf_jk import ISDFJK
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.surface_identity import chain_identity
 from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
@@ -112,7 +111,7 @@ from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             product_pairs,
                                             require_whole_fit_adjoint,
                                             row_fit_adjoint)
-from src.gradients.mean_field_response import eps_chain_gradient
+from src.gradients.mean_field_response import eps_chain_gradient, held_skeletons
 from src.gradients.ao_product_fit_adjoint import ao_product_fit_adjoint_gauges
 from src.gradients.rpa.exchange_double_counting import (exx_double_counting_Y,
                                                         exx_double_counting_skeleton)
@@ -299,7 +298,7 @@ class FrozenFactorization:
                                           isdf.counts, isdf.radii)
         n_start = 1 if isdf.n_start is None else isdf.n_start
         grid_accuracy = isdf.level
-        self.basis = basis or str(mol.basis)
+        self.basis = basis or mol.basis
         self.auxbasis = auxbasis or paired_auxbasis(self.basis)
         # Resolved here and stored as plain counts, so `rebuilt_at`,
         # `settings` and `require_match` compare one kind of object and a
@@ -845,25 +844,17 @@ class FactorChain(ReferenceMeanField):
                 exx_double_counting_skeleton(mf, mol))
 
     def mean_field_gradient(self, mf):
-        """pyscf's force for this mean field, with the grid response paired.
+        """The force of this mean field's reported energy, the quadrature's
+        motion included (`mean_field_skeleton_force`).
 
         The half of `kohn_sham_gradient_correction` outside the Lagrangian:
-        `grid_response=True` on a KS gradient is the partner of the
-        double-counting skeleton, not an accuracy knob.
-
-        Rank 0's force on every rank: pyscf blocks a DF gradient's auxiliary
-        index by the process's free memory, so ranks re-associate the same
-        sums differently.
+        the grid's motion on a KS reference is the partner of the
+        double-counting skeleton, not an accuracy knob. On a fitted or
+        interpolated reference every term is divided over the ranks; rank 0's
+        force on every rank.
         """
         self.require_scf_quality(mf, 'mean_field_gradient')
-        if isinstance(getattr(mf, 'with_df', None), ISDFJK):
-            # `isdf_mean_field_gradient` sets grid_response on the reference it
-            # differentiates, so the quadrature's own motion is carried there.
-            return lockstep(np.asarray(mean_field_skeleton_force(mf)))
-        g0 = mf.Gradients()
-        if self.is_kohn_sham(mf):
-            g0.grid_response = True
-        return lockstep(np.asarray(g0.kernel()))
+        return lockstep(np.asarray(mean_field_skeleton_force(mf)))
 
     def environment_at(self, mol):
         """The environment around this geometry, built once per geometry.
@@ -1263,7 +1254,11 @@ class FactorChain(ReferenceMeanField):
                     return None, {}
             with self.phase('t_orbital'):
                 g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc,
-                                                  Y_extra=y, numerics=self.settings)
+                                                  Y_extra=y, numerics=self.settings,
+                                                  pending=pending)
+                # the skeleton channels this force's terms held (g_extra's
+                # among them), one pass each
+                g_orb = g_orb + held_skeletons(mf, pending)
             if g_extra is not None:
                 g_orb = g_orb + g_extra
             held = None

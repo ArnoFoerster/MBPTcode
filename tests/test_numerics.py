@@ -74,6 +74,8 @@ def test_every_choice_moves_the_identity(section, name):
         other = 0.5
     if (section, name) == ('qp', 'select'):
         other = QPStates('adaptive')
+    if (section, name) == ('solvent', 'loop_force_fraction'):
+        other = 1.0 / 3.0
     changed = base.derive('test', **{section: {name: other}})
     assert record_hash(changed.values()) != record_hash(base.values())
     if section == 'layout' or (section, name) in IDENTITY_EXCLUDED:
