@@ -191,7 +191,37 @@ mixing: its coupling-to-gap ratio r, read off the path's own derivative
 (`spin_vibronic.path_ratio`), switches that direction to the diabatic
 two-state model above 0.1, where the path state's exact thermal weight
 (`spin_vibronic.mixed_weight`, at most 1/2) replaces r^2; the record says
-which model each rate used, and `mixing` is a switch of its own. `ablation_ladder` removes
+which model each rate used, and `mixing` is a switch of its own. The
+Duschinsky model is checked before it is used (`duschinsky.duschinsky_guard`,
+recorded as `duschinsky_guard`): a soft mode of one state that puts more than
+1% of its weight on the other state's stretches, a sum-rule reorganization
+more than a factor 2 from the accepting state's energy difference between the
+minima, or a band whose mean vibrational energy is more than twice that
+reorganization, refuses the Duschinsky rungs. Between two minima a large
+torsion apart (4-(dimethylamino)benzonitrile S1 and T1) the Cartesian mode
+sets mix the torsions into the stretches and the band's first moment comes out
+at tens of eV. The production model therefore measures J through the valence
+internals (`RateModel.duschinsky_coordinates = 'curvilinear'`,
+`curvilinear.curvilinear_duschinsky`, after Reimers, J. Chem. Phys. 115, 9103
+(2001)): a torsion of one state maps onto the torsions of the other, and J is
+used as it is, not orthogonalized (each state keeps its own kinetic metric;
+the correlation function carries the Jacobian). On the same molecule the soft
+modes then put less than 0.5% of their weight on the stretches and the ISC
+band sits 0.76 eV above its 0-0 line at 300 K against a reorganization of
+0.54 eV; with every mode quantum, RISC is refused at 300 K, because a T1 mode at
+10 cm^-1 becomes an S1 mode at 80 cm^-1 and its harmonic thermal energy alone
+is about 1 eV. Such a mode is neither quantum nor harmonic at room
+temperature, so the production model takes the T1 modes below 100 cm^-1
+(`DUSCHINSKY_CLASSICAL_BELOW_CM`, about kT/2 at 300 K) and their image in S1
+out of the correlation function as one classical, frequency-unchanged block
+(`duschinsky.split_soft_modes`, `RateModel.classical_below_cm`): its
+reorganization joins the classical broadening, as the low-frequency modes of
+Ulstrup and Jortner (J. Chem. Phys. 63, 4358 (1975)). DMABN RISC then sits
+0.53 eV above its 0-0 line against a reorganization of 0.45 eV and is
+accepted; a cutoff of 200 cm^-1 moves its rate by 5%, one of 50 cm^-1 by a
+factor 3. With no mode below the cutoff nothing changes, bit for bit; every
+mode quantum is a rung of its own (`quantum_soft_modes`). The Cartesian J is a rung of its own (`rectilinear_duschinsky`), and the
+displaced-oscillator rung still runs. `ablation_ladder` removes
 one ingredient at a time down to a single Marcus-Levich-Jortner mode with an
 assumed reorganization energy, and every rung records its model:
 

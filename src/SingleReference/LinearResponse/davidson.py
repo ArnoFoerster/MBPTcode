@@ -346,7 +346,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     apply_AB, diag_d = casida_action(lr_solver, nocc, polarizability, W_aux,
                                       isdf_factors, conv_tol, spin=spin,
                                       comm=comm, timings=timings, tda=tda)
-    apply_AB = with_one_body(apply_AB, one_body)
+    apply_AB = with_one_body(apply_AB, one_body, comm)
     occ, virt = get_occ_virt_indices(lr_solver.eps, nocc)
     omega, X, Y = run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle,
                                 _pair_symmetry(orbsym, occ, virt),
@@ -411,7 +411,7 @@ def casida_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
     return apply_AB, diag_d
 
 
-def with_one_body(apply_AB, one_body):
+def with_one_body(apply_AB, one_body, comm=None):
     """`apply_AB` with an off-diagonal one-body term added to A.
 
     one_body: ((o, H_oo), (v, H_vv)), occupied and virtual positions (into
@@ -419,6 +419,12 @@ def with_one_body(apply_AB, one_body):
     diagonal is zero: A_ia,jb gains delta_ij H_ab - delta_ab H_ij, the
     quasiparticle Hamiltonian's coupling the diagonal eps leaves out. B is
     untouched. None returns `apply_AB` itself.
+
+    The term is formed whole on every rank, from blocks and trial vectors
+    whose threaded products differ in the last bits from rank to rank, so it
+    is lockstepped (checked: ranks that agree move nothing) before it is
+    added to the action's lockstepped output: every rank's Davidson reads one
+    set of numbers and takes the same decisions.
     """
     if one_body is None:
         return apply_AB
@@ -427,10 +433,12 @@ def with_one_body(apply_AB, one_body):
     def coupled(z):
         Az, Bz = apply_AB(z)
         z3 = np.asarray(z, float).reshape(Az.shape)
+        term = np.zeros_like(Az)
         if len(v):
-            Az[:, :, v] += z3[:, :, v] @ h_vv
+            term[:, :, v] += z3[:, :, v] @ h_vv
         if len(o):
-            Az[:, o, :] -= np.einsum('ij,kja->kia', h_oo, z3[:, o, :])
+            term[:, o, :] -= np.einsum('ij,kja->kia', h_oo, z3[:, o, :])
+        Az += lockstep(term, comm, check=True)
         return Az, Bz
 
     coupled.__dict__.update(apply_AB.__dict__)

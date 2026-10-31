@@ -49,11 +49,11 @@ def scf_in_continuum(mf, h0, continuum):
     return wrapped
 
 
-def loop_density_response(mf, h0, continuum, h_ao):
+def loop_density_response(mf, h0, continuum, h_ao, numerics=None):
     """(natm, 3) of Tr[h_ao dD_0/dR] for the ground state's loop (module
     docstring): mf its converged mean field in the loop's charges, h0 its
     vacuum core Hamiltonian, continuum the medium's pyscf continuum at
-    eps_static."""
+    eps_static; numerics the run's `Numerics` (the Z-vector's solve)."""
     if getattr(mf, 'mo_occ', None) is None or np.asarray(mf.mo_occ).ndim != 1:
         raise ValueError('the loop density response is built for a closed-shell '
                          'reference')
@@ -73,4 +73,4 @@ def loop_density_response(mf, h0, continuum, h_ao):
     w_f = w_f + w_f.T
     w_s = w_s + w_s.T
     w_s[:nocc, :nocc] = -2.0 * h[:nocc, :nocc]
-    return z_vector_contraction(m.mol, m, nocc, w_f, w_s)
+    return z_vector_contraction(m.mol, m, nocc, w_f, w_s, numerics)

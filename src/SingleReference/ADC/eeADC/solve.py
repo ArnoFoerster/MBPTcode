@@ -45,6 +45,7 @@ take their whole response to the excitation from it.
 from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_ADC_DENSE_LIMIT,
                                          EE_FOLD_DENSE_LIMIT, EE_RI_TILE_GB)
 from src.SingleReference.ADC.eeADC import ee_driver as _drv
+from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
 from src.SingleReference.ADC.eeADC import ee_state_specific
 from src.SingleReference.ADC.eeADC.ee_en import DRESS_KEYS
 from src.SingleReference.common.df_amplitudes import spin_scaling_factors
@@ -57,7 +58,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  ms_sector='auto', max_subspace=None, return_parity=False,
                  dense_limit=None, threshold=5000, fold=False,
                  environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
-                 numerics=None, state_specific='off', ss_density='unrelaxed',
+                 numerics=None, state_specific='off', ss_density=SS_DENSITY_DEFAULT,
                  spin_scaling=None, relaxed_density=False, start=None,
                  residual_tol=None):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
@@ -112,10 +113,12 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     difference density in .delta_density.
 
     ss_density: the difference density the state-specific term is built from.
-    'unrelaxed' (default) is the ISR-ADC(2) expectation value; 'relaxed' the
+    'relaxed' (default, the one ClassicalStateSpecific takes too) is the
     derivative of omega with the orbital response, the ground-state surface
     charges frozen (PTE; ee_relaxed_density); 'relaxed+pcm' the same with the
-    continuum responding inside the orbital response, a bound on that choice.
+    continuum responding inside the orbital response, a bound on that choice;
+    'unrelaxed' is the ISR-ADC(2) expectation value. Without state_specific no
+    density is built and the default is ignored; any other value is refused.
     With a relaxed density the FoldResult also holds .delta_density_relaxed
     (full MO basis, frozen core included), .ss_shifts_unrelaxed, and
     .delta_dipole {'unrelaxed', 'relaxed'} (nroots, 3) in atomic units, the
@@ -154,10 +157,10 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if dense_limit is None:
         dense_limit = EE_FOLD_DENSE_LIMIT if fold else EE_ADC_DENSE_LIMIT
     env = _drv.reaction_field_environment(mf, mol, environment, route)
-    if ss_density not in _drv.SS_DENSITIES:
+    if ss_density not in SS_DENSITIES:
         raise ValueError(f'ss_density={ss_density!r}; expected one of '
-                         f'{_drv.SS_DENSITIES}')
-    if ss_density != 'unrelaxed' and state_specific == 'off':
+                         f'{SS_DENSITIES}')
+    if ss_density != SS_DENSITY_DEFAULT and state_specific == 'off':
         raise ValueError(f'ss_density={ss_density!r} needs state_specific')
     if start is not None and not (fold and level == 'adc2'):
         raise ValueError("start needs fold=True and level 'adc2'")

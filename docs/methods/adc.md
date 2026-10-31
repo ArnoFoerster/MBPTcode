@@ -77,8 +77,9 @@ tiles that bound the memory (`tile_gb`) and split over MPI ranks.
 `spin_scaling=` applies spin-component scaling (SCS, SOS or any pair of
 factors) to the doubles. `environment=` places the molecule in a solvent
 continuum, and on the folded route `state_specific='vertical'` or
-`'equilibrium'` with `ss_density='relaxed'` adds the state-specific response
-of the solvent to the orbital-relaxed density of each root. See
+`'equilibrium'` adds the state-specific response of the solvent to the
+orbital-relaxed density of each root (`ss_density='relaxed'`, the default, as
+in the classical state-specific energy; `'unrelaxed'` takes the ISR density). See
 `examples/19_ee_adc.py` and `examples/21_ee_fold.py`.
 
 ADC(2) has analytic nuclear forces on the folded, density-fitted route; they

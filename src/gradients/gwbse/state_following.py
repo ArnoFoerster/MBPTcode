@@ -16,7 +16,7 @@ from src.Base.step_failed import StepFailed
 from src.Base.numerics.constants import (ROOT_FOLLOW_MARGIN_MIN,
                                          ROOT_FOLLOW_RESOLVE_FACTOR,
                                          ROOT_FOLLOW_WEIGHT_MIN, BSE_FORCE_RESIDUAL_TOL,
-                                         CASIDA_PHASE_TIE_TOL)
+                                         CASIDA_PHASE_TIE_TOL, CONTINUATION_ROUTE)
 from src.Base.numerical_flags import collecting, gathered
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.GW.qp_solve import add_reaction_field
@@ -356,9 +356,13 @@ class StateFollower:
                                     w_aux, shift)
             while True:
                 xc = self.chain.xc_correction(mf, self.chain.resolved.qp_set, shift)
-                out, route_out = self.chain.quasiparticles.qp_set_solve(
-                    x_mo, d_sigma, eps, mu, xc,
-                    np.zeros(len(self.chain.resolved.qp_set)))
+                if self.chain.residue_route == CONTINUATION_ROUTE:
+                    out, route_out = self.chain.quasiparticles.continued_set_solve(
+                        mol, mf, x_mo, d_sigma, eps, xc, shift)
+                else:
+                    out, route_out = self.chain.quasiparticles.qp_set_solve(
+                        x_mo, d_sigma, eps, mu, xc,
+                        np.zeros(len(self.chain.resolved.qp_set)))
                 # the set the roots belong to: settling may have shrunk it
                 xc = route_out['xc_correction']
                 # G0W0: Eq. (18) whole on each root, never Z x shift inside

@@ -44,7 +44,7 @@ optional third-party one.
 | imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
 | ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian`, `test_ao_product_fit` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_casida_subspace_eigen`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_casida_subspace_eigen`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_davidson_one_body_lockstep`, `test_qp_hamiltonian_group_span`, `test_qp_hamiltonian_large_group`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
 | environment and solvent | `test_environment`, `test_solvent_screening`, `test_ground_state_cavity_check`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_pcm_cavity_tiles`, `test_solvated_ground_surface` |
 | any medium by eps and n^2, the cavity conventions, their records and resume keys, the gas limit and forces in such a medium | `test_host_medium`, `test_host_medium_loops` (slow) |
 | a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |
@@ -57,8 +57,16 @@ optional third-party one.
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
 | the SCF record and its optional warm start and Newton finish; a relaxation's quasi-Newton Hessian | `test_scf_convergence`, `test_relax_hessian` |
 | the quasiparticle energy on the BSE diagonal: the pole model's frozen verdict, the scissors' static terms, the force against its own energy | `test_pole_model_route_frozen`, `test_inside_scissor_static_term`, `test_solvated_outside_scissor`, `test_qp_energy_assembly` (slow) |
+| the photophysics ISDF-K mean field on its own declared fit (--scf-isdf-test-set, --scf-pivot-points): it reaches the handle and the stamp, the factors' fit does not, a handle on another fit is refused, the s0 walk runs on a tabulated and on a pivoted mean field (the reference's selection frozen), the vertical stands on it | `test_isdfk_scf_numerics` (slow) |
+| the vertical stage on the analytic continuation (`--residues pade`): its energies beside the pole model's, no derivative in its record, every reverse pass, walk stage, scheme B, quasiparticle Hamiltonian and adaptive set refused, a per-element basis on a pivoted ISDF-K mean field | `test_vertical_continuation` (slow) |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
 | bands with Duschinsky rotation and frequency change: the displaced-oscillator limit, a sum over states, the branch of the square root, the model from two Hessians | `test_duschinsky` |
+| the Duschinsky guard: a rectilinear model with soft modes turned into stretches (DMABN S1/T1), a sum-rule lambda or a band first moment far from the energies, is refused and the rate chain falls back to displaced oscillators; a rigid pair passes | `test_duschinsky_guard` |
+| the curvilinear Duschinsky matrix: the non-orthogonal band against a sum over states, water against the Wilson GF route, the Cartesian overlap at one geometry, a turned methyl kept on its torsion, DMABN S1/T1 soft modes kept out of the stretches | `test_curvilinear_duschinsky` |
+| the classical soft-mode block of the Duschinsky bath: a frequency-unchanged soft mode is its quantum band at 300 K, no soft mode is bitwise the quantum bath, DMABN RISC passes the guard at 300 K | `test_duschinsky_soft_modes` |
+| the band cumulants of a wide Duschinsky band read the closed-form mean (DMABN rectilinear and curvilinear), a narrow band keeps its first-step bits, a band that never settles is refused | `test_duschinsky_cumulants` |
+| the ablation ladder records a rung whose switches make no rate model (the MLJ rung of a gas ladder with a Gaussian width, and the rungs on it) as refused and goes on | `test_rate_ladder_refusals` |
+| the Herzberg-Teller band of a curvilinear (non-orthogonal) Duschinsky model against a sum over states, its independence of the expansion point, the rectilinear band at an orthogonal J | `test_herzberg_teller_curvilinear` |
 | the ISC/RISC rate chain of any method's minima: every ablation switch moves the rate as its physics says; the Condon, single-T1 and Marcus-Levich-Jortner limits bitwise; one mode set is the displaced oscillator; the gradient route is the displacement route on a harmonic surface; another method's minima through the same protocol; the diabatic two-state mixing of a near-degenerate path: its exact thermal weight against quadrature, the perturbative rate in the weak limit to O(r^2), the switch at the stated ratio, saturation as the gap closes, a manifold that moves coupling and creates none | `test_rate_chain` (about a minute) |
 | conformers beyond the torsional grid: ring puckering (Cremer-Pople), pyramidal inversion, mirror degeneracy and free-energy weights, the restrained torsion scan and its barrier, a sweep that halves its increment where the followed state is lost or a point does not converge, the twisted-triplet pairing | `test_conformer_space` (about 4 minutes) |
 | Herzberg-Teller intensity: off = Condon, a forbidden transition's false origin, a sum over states with Condon/Herzberg-Teller interference, the dipole derivative, the radiative rate over the band | `test_herzberg_teller` |
@@ -202,6 +210,13 @@ its atoms split over the ranks against two separate pyscf passes:
 
 ```bash
 OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_exchange_skeleton_mpi.py
+```
+
+`test_df_factor_build_mpi` checks that the DF factors of the tiled MP2 force and
+of the folded ADC(2) operator are the same bytes on every rank:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_df_factor_build_mpi.py
 ```
 
 `test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:

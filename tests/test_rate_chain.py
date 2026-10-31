@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 import pytest
 from pyscf import gto
+from scipy.linalg import expm
 
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.constants import (AMU_TO_ME, HARTREE_TO_CM,
@@ -57,6 +58,9 @@ GEO = 'C 0 0 0; O 0 0 1.21; H 0 0.94 -0.59; H 0 -0.94 -0.59'
 W_T1 = np.array([900., 1150., 1250., 1500., 2900., 3000.]) * CM
 W_S1 = np.array([800., 1050., 1300., 1350., 2850., 3050.]) * CM
 LAM_SOLV = 0.08 * EV
+#: The S1 mode set is the T1 one turned by this angle (radians): the two
+#: states of one rigid molecule, whose Duschinsky model the guard accepts.
+S1_TURN = 0.3
 
 
 @pytest.fixture(scope='module')
@@ -74,15 +78,31 @@ def vibrations(mol):
     return masses, u[:, :3 * mol.natm - q.shape[1]]
 
 
-def hessian(mol, omega, seed, source):
+def rotation(n, seed, near=None):
+    """A random rotation of n modes (`seed`); with `near` = (seed, angle),
+    the rotation of that seed turned further by `angle` radians about a
+    random axis of the mode space, as two states of one molecule are."""
+    rot, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))
+    if near is None:
+        return rot
+    a = np.random.default_rng(near[0]).normal(size=(n, n))
+    a = (a - a.T) / np.linalg.norm(a - a.T, 2)
+    return rot @ expm(near[1] * a)
+
+
+def hessian(mol, omega, seed, source, near=None, like=None):
     """A Cartesian Hessian at `mol` whose vibrations are `omega`, its modes
-    a random rotation (`seed`) of the vibrational space."""
+    a random rotation (`seed`, `near`: `rotation`) of the vibrational
+    space; with `like` (another geometry) that space's basis is the one
+    closest to `like`'s, so one seed gives nearly the same modes at both."""
     masses, v = vibrations(mol)
+    if like is not None:
+        u, _, wt = np.linalg.svd(v.T @ vibrations(like)[1])
+        v = v @ (u @ wt)
     if seed is None:
         rot = np.eye(v.shape[1])
     else:
-        rot, _ = np.linalg.qr(np.random.default_rng(seed).normal(
-            size=(v.shape[1],) * 2))
+        rot = rotation(v.shape[1], seed, near)
     modes = v @ rot
     hm = modes @ np.diag(omega ** 2) @ modes.T
     s = np.repeat(masses, 3) ** 0.5
@@ -135,7 +155,8 @@ def build(mol, *, splits=SPLITS, socme=SOCME, dv_scale=1.0, same=False,
     mol_s = displaced(mol, h_t, dq)
     # same: S1's mode set is T1's own Hessian (the mode sets need not sit at
     # the method's minima)
-    h_s = h_t if same else hessian(mol_s, W_S1, 12, 'synthetic S1')
+    h_s = h_t if same else hessian(mol_s, W_S1, 11, 'synthetic S1',
+                                   near=(12, S1_TURN), like=mol)
     s_coords = mol_s.atom_coords()
     rng = np.random.default_rng(7)
     dv = rng.normal(size=(mol.natm, 3, 3)) * 2.0 * CM * dv_scale
@@ -146,11 +167,15 @@ def build(mol, *, splits=SPLITS, socme=SOCME, dv_scale=1.0, same=False,
         q *= np.sign(np.linalg.det(q))
         s_coords = s_coords @ q + np.array([0.2, -0.4, 1.0])
         dv_s = np.einsum('axe,xy->aye', dv, q)
+    # each state's energy at the other minimum on its own harmonic surface
+    dx = (mol.atom_coords() - mol_s.atom_coords()).ravel()
+    lam_s = 0.5 * dx @ h_s.hessian @ dx
+    lam_t = 0.5 * dx @ h_t.hessian @ dx
     e_s1, e_t1 = -113.8, -113.8 - 0.12 * EV
-    s1 = state_minimum('S1', s_coords, e_s1, e_t1 + 0.09 * EV, splits,
+    s1 = state_minimum('S1', s_coords, e_s1, e_t1 + lam_t, splits,
                        socme, dv_s, method=method,
                        solvation='equilibrium' if solvent else 'gas')
-    t1 = state_minimum('T1', mol.atom_coords(), e_s1 + 0.07 * EV, e_t1,
+    t1 = state_minimum('T1', mol.atom_coords(), e_s1 + lam_s, e_t1,
                        splits, socme, dv, method=method,
                        solvation='equilibrium' if solvent else 'gas')
     grads = {}
@@ -265,7 +290,9 @@ def test_the_ladder_records_every_switch(mol):
                                               for r in ladder]
     last = ladder[-1]['model']
     assert last == {'soc': 'shared', 'coupling': 'condon', 'triplets': 'T1',
-                    'duschinsky': False, 'zero_point': False,
+                    'duschinsky': False,
+                    'duschinsky_coordinates': 'curvilinear',
+                    'classical_below_cm': 100.0, 'zero_point': False,
                     'density': 'mlj', 'classical_lambda': 0.2,
                     'huang_rhys_route': 'curvilinear',
                     'gaussian_sigma_ev': 0.0, 'mixing': 'perturbative'}
@@ -295,7 +322,7 @@ def test_the_last_rung_is_the_marcus_levich_jortner_rate_bitwise(mol):
     inp = build(mol)
     ladder = ablation_ladder(inp, FULL, T, shared=inp)
     last = ladder[-1]['table']
-    sg = mode_sets(inp.hessians['T1'], inp.hessians['S1'])
+    sg = mode_sets(inp.hessians['T1'], inp.hessians['S1'], 'curvilinear')
     lam = 0.2 * EV
     de = inp.s1.energy['S1'] - inp.t1.energy['T1']
     # the S1 minimum on the T1 modes, as the chain builds it
@@ -304,7 +331,9 @@ def test_the_last_rung_is_the_marcus_levich_jortner_rate_bitwise(mol):
                                  molecule_at(mol, inp.t1.coords_bohr),
                                  molecule_at(mol, inp.s1.coords_bohr),
                                  'curvilinear')
-    s_g = sg[0].omega * (-sg[2].T @ k) ** 2 / 2.0
+    # through the curvilinear J's inverse, as the full model maps it
+    inv = np.linalg.inv(sg[2])
+    s_g = sg[0].omega * (-inv @ k) ** 2 / 2.0
     s_sum = float(s_g.sum())
     om = float((s_g * sg[0].omega).sum() / s_sum)
     v = abs(SOCME[1, 0])
@@ -402,9 +431,11 @@ def test_an_unresolved_duschinsky_density_is_flagged(mol):
     """RISC across 1.5 eV with lambda 0.08 eV sits near e^-300 below its
     band: the real-time integral cannot resolve it, and the record says so."""
     inp = build(mol)
-    far = replace(inp, s1=replace(inp.s1, energy={
+    # the singlets lifted at both minima, so each surface keeps its shape
+    far = replace(inp, **{where: replace(m, energy={
         k: v + (1.4 * EV if k[0] == 'S' else 0.0)
-        for k, v in inp.s1.energy.items()}))
+        for k, v in m.energy.items()})
+        for where, m in (('s1', inp.s1), ('t1', inp.t1))})
     with pytest.warns(FCDensityAtRoundoff):
         out = rate_chain(far, replace(FULL, triplets='T1'), T)
     assert out['numerical_flags'] == ['fc_density_at_roundoff']

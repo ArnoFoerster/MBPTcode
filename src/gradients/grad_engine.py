@@ -165,7 +165,7 @@ def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
 # ---------------------------------------------------------------------------
 
 def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
-                                    verbose=False):
+                                    verbose=False, numerics=None):
     """dL_X/dR with the Fock partial taken on the REFERENCE'S OWN Fock.
 
     `fold_fock` writes F_pq = h_pq + sum_k [2(pq|kk) - (pk|qk)], which is the
@@ -198,7 +198,8 @@ def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
         Y_E = Y_E + fock_partial_Y(mf, gammaF, nocc)
         if len(target) > 2 and target[2] is not None:
             Y_E = Y_E + target[2]
-        Lam, res = solve_lambda(mf, Y_E, nocc, verbose=verbose)
+        Lam, res = solve_lambda(mf, Y_E, nocc, numerics=numerics,
+                                verbose=verbose)
         Y_tot = Y_E + fock_partial_Y(mf, Lam, nocc)
         Mmat = -0.25 * (Y_tot + Y_tot.T)
         gam.append(0.5 * (gammaF + gammaF.T) + Lam)
@@ -219,7 +220,7 @@ def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
 
 
 def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
-                          verbose=False):
+                          verbose=False, numerics=None):
     """dL_X/dR for several targets sharing one skeleton-derivative sweep.
 
     target_list: list of (gammaF, Gamma4_E) MO-partial pairs, optionally
@@ -233,6 +234,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
              consistent when eri_mo is the RI four-index tensor from the SAME
              auxiliary basis (`SingleReference.common.eri_blocks.df_eri_mo`) -- differentiating a
              fitted energy with exact derivative integrals is not a gradient.
+    numerics: the run's `Numerics`, whose scf section sets the multipliers'
+             solve (`multipliers`); None takes its defaults.
 
     A Kohn-Sham reference is routed to `kohn_sham_correlation_gradients`: the
     fold below is the Hartree-Fock Fock and differentiates the wrong one-body
@@ -250,7 +253,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
         eri_mo = ao2mo.general(mol, (C,) * 4, compact=False).reshape((norb,) * 4)
     if xc_hybrid_coeff(mf)[0]:
         return kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo,
-                                               auxmol=auxmol, verbose=verbose)
+                                               auxmol=auxmol, verbose=verbose,
+                                               numerics=numerics)
     h_mo = C.T @ mf.get_hcore() @ C
     F_mo = np.diag(eps)
 
@@ -269,7 +273,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
         Y_E = orbital_Y(gh_E, Gamma4, h_mo, eri_mo)
         if Y_extra is not None:
             Y_E = Y_E + Y_extra
-        Lam, res = solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, verbose=verbose)
+        Lam, res = solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps,
+                                     numerics=numerics, verbose=verbose)
         Y_tot = Y_E + _y_fold_lambda(Lam, F_mo, eri_mo, nocc)
         stat = np.abs(Y_tot - Y_tot.T).max()
         if verbose:
@@ -297,9 +302,9 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
 
 
 def correlation_gradient(mol, mf, gammaF, Gamma4_E, eri_mo=None, auxmol=None,
-                         verbose=False):
+                         verbose=False, numerics=None):
     """Single-target wrapper around correlation_gradients."""
     Gs, diags = correlation_gradients(mol, mf, [(gammaF, Gamma4_E)],
                                       eri_mo=eri_mo, auxmol=auxmol,
-                                      verbose=verbose)
+                                      verbose=verbose, numerics=numerics)
     return Gs[0], diags[0]

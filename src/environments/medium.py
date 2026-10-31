@@ -33,10 +33,10 @@ from dataclasses import dataclass
 
 from pyscf.solvent.smd import solvent_db
 
+from src.environments.solvent_vocabulary import GAS
 from src.environments.solvent_screening import (RADII_SETS, SolventScreening,
                                                 solvent_dielectrics)
 
-GAS = 'gas'
 
 # A cavity convention: the radius set and the scale its radii are multiplied
 # by, named together. 'bondi-1.2' is pyscf's PCM default (modified Bondi radii

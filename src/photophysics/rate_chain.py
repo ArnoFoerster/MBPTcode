@@ -13,10 +13,21 @@ fill the same fields; nothing below knows which method it reads.
 THE FULL MODEL (`RateModel.full`). For S1 -> T1 (ISC) and T1 -> S1 (RISC):
 
 - the bath is a Duschinsky model of the two states (`duschinsky.mode_sets`
-  of the two Hessians), its displacement K taken from the METHOD's own
+  of the two Hessians), its rotation J measured through the valence
+  internals ('curvilinear', so a large torsion between S1 and T1 stays a
+  torsion; 'rectilinear', the overlap of the Cartesian mode sets, is a rung
+  of the ladder), its T1 modes below DUSCHINSKY_CLASSICAL_BELOW_CM taken out
+  as one classical, frequency-unchanged block whose reorganization (the
+  initial state's own) joins the classical broadening and whose zero-point
+  difference shifts the gap (`duschinsky.split_soft_modes`; quantum soft
+  modes are a rung of the ladder), its displacement K taken from the METHOD's own
   minima in valence internal coordinates (`displacement_from_minima`) or
   from its gradient at the other state's minimum
-  (`displacement_from_gradient`), as declared;
+  (`displacement_from_gradient`), as declared; a model that does not
+  describe a direction (`duschinsky.duschinsky_guard`: soft modes mixed into
+  stiff ones, a sum-rule lambda or a band first moment far from the
+  accepting state's energy difference between the minima) is refused, and
+  the ladder goes on to the displaced oscillators;
 - the zero-point energy difference of the two mode sets enters through the
   Duschinsky correlation function's phase;
 - the classical broadening is the solvent reorganization, the accepting
@@ -38,9 +49,11 @@ rates, and `ablation_ladder` removes them one at a time, in the order
 `ABLATION_LADDER`, down to the effective-mode protocol of Samanta, Kim,
 Coropceanu and Bredas, J. Am. Chem. Soc. 139, 4042 (2017): the method's own
 spin-orbit coupling -> a shared reference coupling; spin-vibronic -> Condon;
-the triplet manifold -> T1 alone; Duschinsky off (displaced oscillators on
-the T1 modes, the zero-point difference kept as a shift); zero-point
-difference off; every mode -> one Marcus-Levich-Jortner effective mode; the
+the triplet manifold -> T1 alone; (beside the ladder: every soft mode
+quantum, and the Cartesian Duschinsky matrix in place of the curvilinear
+one); Duschinsky off
+(displaced oscillators on the T1 modes, the zero-point difference kept as a
+shift); zero-point difference off; every mode -> one Marcus-Levich-Jortner effective mode; the
 computed classical reorganization -> an assumed one.
 
 Energies in Hartree (eV where a name says so), temperature in Kelvin, rates
@@ -48,12 +61,13 @@ in s^-1.
 """
 import re
 import warnings
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+                                         DUSCHINSKY_CLASSICAL_BELOW_CM,
                                          HARTREE_TO_CM, HARTREE_TO_EV,
                                          RATE_ASSUMED_LAMBDAS_EV,
                                          RATE_FC_DENSITY_FLOOR_REL,
@@ -65,8 +79,9 @@ from src.photophysics.records import key_of
 from src.properties.duschinsky import (DuschinskyModel, DuschinskyOscillators,
                                        displacement_from_gradient,
                                        displacement_from_minima,
-                                       duschinsky_density, minima_in_frame,
-                                       mode_sets)
+                                       duschinsky_density, duschinsky_guard,
+                                       guard_message, minima_in_frame,
+                                       mode_sets, split_soft_modes)
 from src.properties.franck_condon import (FCIntegrandNotDecayed,
                                           fc_weighted_dos)
 from src.properties.spin_vibronic import (mixed_weight, mode_derivatives,
@@ -79,6 +94,7 @@ TRIPLET_MODELS = ('manifold', 'T1')
 DENSITIES = ('multimode', 'mlj')
 MIXINGS = ('auto', 'diabatic', 'perturbative')
 HUANG_RHYS_ROUTES = ('curvilinear', 'cartesian', 'gradient')
+DUSCHINSKY_COORDINATES = ('curvilinear', 'rectilinear')
 
 #: The gradient keys of `RateInputs`: 'S1@T1' is S1's gradient at the T1
 #: minimum, 'T1@S1' T1's at the S1 minimum.
@@ -108,6 +124,15 @@ class RateModel:
         'T1', the S1 <-> T1 pair alone.
     duschinsky: the two mode sets with their rotation and frequencies; off,
         displaced oscillators on the T1 modes.
+    duschinsky_coordinates: J through the valence internals
+        ('curvilinear', `curvilinear.curvilinear_duschinsky`) or the overlap
+        of the Cartesian mode sets ('rectilinear'). It also carries the
+        displacement onto the T1 modes of the displaced oscillators.
+    classical_below_cm: the Duschinsky bath's T1 modes below this (cm^-1)
+        and their image in S1 form one classical, frequency-unchanged block
+        (`duschinsky.split_soft_modes`) whose reorganization joins the
+        classical broadening; 0 keeps every mode quantum. Read only with
+        duschinsky on.
     zero_point: the zero-point difference of the two mode sets in the gap.
     density: 'multimode', every mode at its own frequency; or 'mlj', one
         Marcus-Levich-Jortner effective mode (needs duschinsky off and no
@@ -133,6 +158,8 @@ class RateModel:
     coupling: str
     triplets: str
     duschinsky: bool
+    duschinsky_coordinates: str
+    classical_below_cm: float
     zero_point: bool
     density: str
     classical_lambda: object
@@ -145,6 +172,8 @@ class RateModel:
                               ('triplets', TRIPLET_MODELS),
                               ('density', DENSITIES),
                               ('mixing', MIXINGS),
+                              ('duschinsky_coordinates',
+                               DUSCHINSKY_COORDINATES),
                               ('huang_rhys_route', HUANG_RHYS_ROUTES)):
             if getattr(self, name) not in allowed:
                 raise ValueError(f'RateModel.{name} = {getattr(self, name)!r} '
@@ -158,6 +187,11 @@ class RateModel:
                                       and lam > 0):
             raise ValueError(f"classical_lambda is 'computed' or a positive "
                              f'energy in eV, got {lam!r}')
+        cut = self.classical_below_cm
+        if isinstance(cut, bool) or not isinstance(cut, (int, float)) \
+                or not cut >= 0.0:
+            raise ValueError(f'classical_below_cm is a cutoff >= 0 in '
+                             f'cm^-1, got {cut!r}')
         if not self.gaussian_sigma_ev >= 0.0:
             raise ValueError(f'gaussian_sigma_ev = {self.gaussian_sigma_ev} '
                              f'is negative')
@@ -172,26 +206,34 @@ class RateModel:
     def full(cls, huang_rhys_route, gaussian_sigma_ev):
         """The best affordable model: every ingredient on."""
         return cls(soc='own', coupling='spin_vibronic', triplets='manifold',
-                   duschinsky=True, zero_point=True, density='multimode',
+                   duschinsky=True, duschinsky_coordinates='curvilinear',
+                   classical_below_cm=DUSCHINSKY_CLASSICAL_BELOW_CM,
+                   zero_point=True, density='multimode',
                    classical_lambda='computed',
                    huang_rhys_route=huang_rhys_route,
                    gaussian_sigma_ev=gaussian_sigma_ev, mixing='auto')
 
 
 #: The ablation ladder: (step, the switches it changes), cumulative, each
-#: removing one ingredient from the step before; the last rung is taken at
-#: every RATE_ASSUMED_LAMBDAS_EV.
+#: removing one ingredient from the step before, except the SIDE_STEPS, which
+#: change the step before them and are not carried on; the last rung is taken
+#: at every RATE_ASSUMED_LAMBDAS_EV.
 ABLATION_LADDER = (
     ('full', {}),
     ('perturbative_mixing', {'mixing': 'perturbative'}),
     ('shared_soc', {'soc': 'shared'}),
     ('condon', {'coupling': 'condon'}),
     ('t1_only', {'triplets': 'T1'}),
+    ('quantum_soft_modes', {'classical_below_cm': 0.0}),
+    ('rectilinear_duschinsky', {'duschinsky_coordinates': 'rectilinear'}),
     ('no_duschinsky', {'duschinsky': False}),
     ('no_zero_point', {'zero_point': False}),
     ('mlj', {'density': 'mlj'}),
 ) + tuple((f'assumed_lambda_{lam:g}eV', {'classical_lambda': lam})
           for lam in RATE_ASSUMED_LAMBDAS_EV)
+#: The rungs of the ladder that are not carried on to the next.
+SIDE_STEPS = ('quantum_soft_modes', 'rectilinear_duschinsky') + tuple(
+    f'assumed_lambda_{lam:g}eV' for lam in RATE_ASSUMED_LAMBDAS_EV)
 
 
 @dataclass(frozen=True)
@@ -265,10 +307,12 @@ class _Bath:
     with the numerical flags its evaluations raised."""
 
     def __init__(self, model, dmodel, s_g, omega_g, direction, lam, zpe,
-                 temperature, reach, flags):
+                 temperature, reach, flags, zpe_block=0.0):
         self.model, self.dmodel, self.direction = model, dmodel, direction
         self.s_g, self.omega_g = s_g, omega_g
         self.lam, self.zpe, self.temperature = lam, zpe, temperature
+        # the classical block's zero-point difference, outside G's phase
+        self.zpe_block = zpe_block
         self.flags, self.values = flags, {}
         kt = BOLTZMANN_HARTREE_PER_KELVIN * float(temperature)
         self.sigma2 = (model.gaussian_sigma_ev / HARTREE_TO_EV) ** 2
@@ -321,7 +365,8 @@ class _Bath:
         if m.duschinsky:
             # the correlation function carries the zero-point phase; off,
             # the density is read where it would stand without it
-            shift = self.lam - (0.0 if m.zero_point else self.zpe)
+            shift = self.lam + (self.zpe_block if m.zero_point
+                                else -self.zpe)
             # one time grid for every point: the grid follows the largest
             # |dE| asked for, so a fixed anchor beyond them makes each value
             # independent of which others it was evaluated with
@@ -544,21 +589,36 @@ def rate_chain(inputs, model, temperature, shared=None):
     A refused input raises `RateRefused`.
     """
     s_cm, t_cm = _coupling_minima(inputs, model, shared)
-    sg, se, j, dev = mode_sets(inputs.hessians['T1'], inputs.hessians['S1'])
+    sg, se, j, dev = mode_sets(inputs.hessians['T1'], inputs.hessians['S1'],
+                               model.duschinsky_coordinates)
     ks = _displacements(inputs, sg, se, j)
     if model.huang_rhys_route not in ks:
         raise RateRefused('the gradient route needs a gradient of one state '
                           f'at the other minimum ({GRADIENT_KEYS})')
     k_vec = ks[model.huang_rhys_route]
-    dmodel = DuschinskyModel(sg.omega, se.omega, j, k_vec,
-                             orthogonality=dev, source=f'{sg.source} / '
-                                                       f'{se.source}')
-    k_g = -j.T @ k_vec                    # the S1 minimum on the T1 modes
+    try:
+        dmodel = DuschinskyModel(sg.omega, se.omega, j, k_vec,
+                                 orthogonality=dev, source=f'{sg.source} / '
+                                                           f'{se.source}',
+                                 coordinates=model.duschinsky_coordinates)
+    except ValueError as why:
+        # a curvilinear J outside its singular-value bar: the inputs cannot
+        # carry this model, every rung on it is refused, the ladder goes on
+        raise RateRefused(f'no {model.duschinsky_coordinates} Duschinsky '
+                          f'model of these Hessians: {why}') from why
+    k_g = dmodel.oriented('emission')[3]  # the S1 minimum on the T1 modes
     s_g = sg.omega * k_g ** 2 / 2.0
     zpe = dmodel.zero_point_shift()       # ZPE_S1 - ZPE_T1
     e_s1 = inputs.s1.energy[inputs.s1.emitter]
     e_t1 = inputs.t1.energy[inputs.t1.reservoir]
     de_st = e_s1 - e_t1
+    # the bath of the Duschinsky rungs: the soft block out, classical
+    bath_model, soft = dmodel, None
+    if model.duschinsky and model.classical_below_cm > 0.0:
+        bath_model, soft = split_soft_modes(
+            dmodel, model.classical_below_cm / HARTREE_TO_CM)
+    guard = (_guard(inputs, bath_model, temperature, soft)
+             if model.duschinsky else None)
     rot = _rotations(sg, s_cm, t_cm)
     # the widest gap any channel reads: every state of both minima
     levels = [e for m in (inputs.s1, inputs.t1) for e in m.energy.values()]
@@ -570,6 +630,8 @@ def rate_chain(inputs, model, temperature, shared=None):
            'dE_ST_adiabatic_eV': de_st * HARTREE_TO_EV,
            'zero_point_shift_eV': zpe * HARTREE_TO_EV,
            'duschinsky_orthogonality': dev,
+           'duschinsky_guard': guard,
+           'soft_modes': None if soft is None else soft.record(),
            'hessian_sources': [sg.source, se.source],
            'huang_rhys_sum': {
                route: float((se.omega * ks[route] ** 2 / 2.0).sum())
@@ -589,9 +651,16 @@ def rate_chain(inputs, model, temperature, shared=None):
                               f'assume a lambda')
         lam = (lam_solv if model.classical_lambda == 'computed'
                else float(model.classical_lambda) / HARTREE_TO_EV)
-        zpe_dir = -zpe if name == 'ISC' else zpe   # ZPE_final - ZPE_initial
-        bath = _Bath(model, dmodel, s_g, sg.omega, direction, lam, zpe_dir,
-                     temperature, reach, flags)
+        # ZPE_final - ZPE_initial: G's phase carries the quantum modes', the
+        # classical block's is a shift of its own
+        zpe_b = zpe if soft is None else bath_model.zero_point_shift()
+        zpe_dir = -zpe_b if name == 'ISC' else zpe_b
+        lam_soft, zpe_block = ((0.0, 0.0) if soft is None else
+                               (soft.lam(direction),
+                                soft.zero_point_shift(direction)))
+        bath = _Bath(model, bath_model, s_g, sg.omega, direction,
+                     lam + lam_soft, zpe_dir,
+                     temperature, reach, flags, zpe_block=zpe_block)
         k, k_c, k_h, rec, mixing = _pair_rate(
             at, de, average, model, modes.omega, modes.modes, modes.masses,
             rot[at.where], bath)
@@ -606,11 +675,44 @@ def rate_chain(inputs, model, temperature, shared=None):
                      'lambda_solvent_eV': (None if lam_solv is None
                                            else lam_solv * HARTREE_TO_EV),
                      'lambda_classical_eV': lam * HARTREE_TO_EV,
+                     'lambda_soft_block_eV': lam_soft * HARTREE_TO_EV,
+                     'zero_point_used_eV': ((zpe_dir + zpe_block)
+                                            * HARTREE_TO_EV),
                      'k_pair': k, 'k_condon': k_c, 'k_ht': k_h, **rec,
                      'k_eff': man['k_eff'], 'manifold': man}
     out.update(_kinetics(inputs.s1, out['ISC']['k_eff'],
                          out['RISC']['k_eff']))
     out['numerical_flags'] = list(flags)
+    return out
+
+
+def _accepting_lambda(initial, final, label):
+    """E_label at the initial minimum less at its own (the final one),
+    Hartree; None where the initial minimum has no energy of that state."""
+    if label not in initial.energy:
+        return None
+    return float(initial.energy[label]) - float(final.energy[label])
+
+
+def _guard(inputs, dmodel, temperature, soft):
+    """{'ISC': record, 'RISC': record} of `duschinsky_guard` on the S1 <-> T1
+    model (with the classical block `soft`'s reorganization in each
+    direction, or none), each against the accepting state's energy between
+    the method's two minima; a refused direction raises `RateRefused`."""
+    s1, t1 = inputs.s1, inputs.t1
+
+    def block(direction):
+        return 0.0 if soft is None else soft.lam(direction)
+    out = {'ISC': duschinsky_guard(
+               dmodel, temperature, 'emission',
+               _accepting_lambda(s1, t1, t1.reservoir), block('emission')),
+           'RISC': duschinsky_guard(
+               dmodel, temperature, 'absorption',
+               _accepting_lambda(t1, s1, s1.emitter), block('absorption'))}
+    for name, rec in out.items():
+        if rec['status'] == 'refused':
+            raise RateRefused(f'the Duschinsky model does not describe '
+                              f'{name}: {guard_message(rec)}')
     return out
 
 
@@ -659,25 +761,34 @@ def _kinetics(s1, k_isc, k_risc):
 def ablation_ladder(inputs, full, temperature, shared):
     """[{'step', 'model', 'table' or 'refused'}] down `ABLATION_LADDER`
     from the model `full`, each rung removing one more ingredient; the
-    assumed-lambda rungs both stand on the 'mlj' one. `shared` is the
+    assumed-lambda rungs both stand on the 'mlj' one, and the quantum soft
+    mode and rectilinear Duschinsky rungs on 't1_only' (the next rung keeps
+    the classical block and the curvilinear J). `shared` is the
     reference `RateInputs` of the shared-coupling rung (the method's own
-    for the reference method itself). A rung the inputs cannot carry is
-    recorded as refused with the reason, and the ladder goes on."""
-    out, base = [], full
+    for the reference method itself). A rung the inputs cannot carry, or
+    whose switches do not make a `RateModel` (the 'mlj' rung of a model with
+    an inhomogeneous width, and the rungs on it), is recorded as refused with
+    the reason, and the ladder goes on."""
+    out, base = [], asdict(full)
     for step, change in ABLATION_LADDER:
-        model = replace(base, **change)
-        if not step.startswith('assumed_lambda'):
-            base = model
+        fields = {**base, **change}
+        if step not in SIDE_STEPS:
+            base = fields
         try:
-            out.append({'step': step, 'model': asdict(model),
+            model = RateModel(**fields)
+        except ValueError as why:
+            out.append({'step': step, 'model': fields,
+                        'refused': f'not a rate model: {why}'})
+            continue
+        try:
+            out.append({'step': step, 'model': fields,
                         'table': rate_chain(inputs, model, temperature,
                                             shared=shared)})
         except RateRefused as why:
-            out.append({'step': step, 'model': asdict(model),
-                        'refused': str(why)})
+            out.append({'step': step, 'model': fields, 'refused': str(why)})
     return out
 
 
-__all__ = ['RateModel', 'RateInputs', 'ABLATION_LADDER',
+__all__ = ['RateModel', 'RateInputs', 'ABLATION_LADDER', 'SIDE_STEPS',
            'FCDensityAtRoundoff', 'solvent_reorganization', 'rate_chain',
            'ablation_ladder']

@@ -49,7 +49,7 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  resolve_grid)
 from src.Base.numerical_flags import collecting
 from src.Base.numerics.constants import HARTREE_TO_EV
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import IDENTITY_RETIRED, Numerics
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.record_io import record_hash
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
@@ -247,6 +247,9 @@ def old_identity(numerics):
     values = numerics.values()
     for name in ('test_set', 'pivot_points', 'runtime_radii'):
         values['isdf'].pop(name)
+    values['solvent'].pop('loop_force_fraction')   # left out at its default
+    for section, name, held in IDENTITY_RETIRED:   # written then, at the value held
+        values[section][name] = held
     return record_hash({k: values[k] for k in ('isdf', 'scf', 'span', 'qp',
                                                'quadrature', 'bse', 'solvent',
                                                'walk')})

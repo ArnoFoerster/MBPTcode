@@ -5,6 +5,7 @@ import numpy as np
 from pyscf.lib import param
 from pyscf.tdscf._lr_eig import MAX_SPACE_INC
 
+from src.Solvers.davidson import cluster_extended_count
 from src.Base.numerics.constants import (BYTES_PER_GB, DAVIDSON_DENOMINATOR_FLOOR,
                                          DAVIDSON_EXTRA_ROOTS_DIVISOR, DAVIDSON_GUESS_DEG_TOL,
                                          DAVIDSON_EXTRA_ROOTS_FLOOR,
@@ -31,17 +32,16 @@ def guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
     # The +4 floor is for small nroots, where guess_factor alone leaves too
     # few directions to span anything -- 2 vectors at nroots=1.
     n = min(max(guess_factor * nroots, nroots + 4), n_pair)
-    # The members of a degenerate set are the pairs that sit in
-    # different irreps, so a cut through one is what loses whole symmetry
-    # blocks; extend past the cut for as long as the gaps stay degenerate.
-    cut = d[order[n - 1]] + deg_tol
+    # The members of a degenerate set are the pairs that sit in different
+    # irreps, so a cut through one is what loses whole symmetry blocks:
+    # extend past the cut for as long as the gaps stay degenerate
+    # (`cluster_extended_count`, the rule every Davidson seed follows).
     # real_eig sizes its trial-space holders at max(4 * nroots, 2 * space_inc)
     # in the worst (memory-starved) case and a guess wider than that overruns
     # them, so stop extending there -- space_inc is at least min(20, n_pair//2).
-    n_max = min(max(4 * nroots, 20, n), n_pair)
-    while n < n_max and d[order[n]] <= cut:
-        n += 1
-    if n == n_max < n_pair and d[order[n]] <= cut:
+    n, truncated = cluster_extended_count(d[order], n, max(4 * nroots, 20, n),
+                                          deg_tol)
+    if truncated:
         if counters is not None:
             counters['guess_truncated'] = True
         warnings.warn(

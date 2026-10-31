@@ -162,7 +162,8 @@ class ADC2State:
         dflags = []
         with cphf_flags_into(dflags):
             d_k, = relaxed_densities(res, self.mol, mf, self.mp2.frozen,
-                                     self.tile_gb, self.mp2.auxbasis, roots=[k])
+                                     self.tile_gb, self.mp2.auxbasis, roots=[k],
+                                     numerics=self.mp2.numerics)
         d_k = lockstep(np.asarray(d_k))
         flags += broadcast(dflags, current_comm())
         C = np.asarray(mf.mo_coeff)

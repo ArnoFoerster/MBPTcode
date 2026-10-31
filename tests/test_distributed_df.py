@@ -361,7 +361,7 @@ def serial_column_walk(mf, blocks):
     being that same last bit.
     """
     auxmol = addons.make_auxmol(mf.mol, mf.with_df.auxbasis)
-    low, mode = distributed_df._metric_factor(mf.mol, auxmol)
+    low, mode = distributed_df.metric_factor(mf.mol, auxmol)
     env = distributed_df._int3c_env(mf.mol, auxmol)
     widest = max(width for _, _, width, _ in blocks)
     bufs = [np.empty((widest, low.shape[1])), np.empty((widest, low.shape[1]))]

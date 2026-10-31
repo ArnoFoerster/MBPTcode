@@ -33,6 +33,7 @@ from pyscf.lib.linalg_helper import LinearDependenceError
 from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
                                          DAVIDSON_DENOMINATOR_FLOOR,
                                          DAVIDSON_FOLLOW_OVERLAP_TIE,
+                                         DAVIDSON_GUESS_DEG_TOL,
                                          DAVIDSON_LINDEP_CEILING,
                                          DAVIDSON_LINDEP_FLOOR,
                                          DAVIDSON_MAX_CYCLE,
@@ -110,17 +111,48 @@ def overlap_pick(ref):
     return pick
 
 
-def diagonal_seeds(diag, count):
-    """`count` unit vectors on the lowest entries of `diag` -- the zeroth-order
-    guess for the lowest roots. Seeding wider than nroots is deliberate: a
-    bare-nroots seed can collapse a degenerate pair, because the members of a
-    degenerate set are generally distinct configurations and one seed can only
-    open one of them."""
+def cluster_extended_count(sorted_diag, count, limit, deg_tol=DAVIDSON_GUESS_DEG_TOL):
+    """(n, truncated): `count` entries of the ascending `sorted_diag`, extended
+    past the cut for as long as the next entry stays within `deg_tol` of the
+    last one kept, up to `limit` entries. The members of a degenerate set are
+    different configurations in different irreps, so a cut through one loses
+    whole symmetry blocks. truncated: `limit` stopped the extension inside a
+    cluster."""
+    size = len(sorted_diag)
+    n = min(count, size)
+    cut = sorted_diag[n - 1] + deg_tol
+    n_max = min(max(limit, n), size)
+    while n < n_max and sorted_diag[n] <= cut:
+        n += 1
+    return n, bool(n == n_max < size and sorted_diag[n] <= cut)
+
+
+def diagonal_seeds(diag, count, limit=None, counters=None, warn=True):
+    """Unit vectors on the lowest entries of `diag` -- the zeroth-order guess
+    for the lowest roots: `count` of them, extended through a degenerate
+    cluster the cut would split (`cluster_extended_count`) up to `limit`
+    (default 4 * count, at least 20). A cut that `limit` still leaves inside a cluster is
+    warned about (unless warn=False) and named in `counters['guess_truncated']`. Seeding wider than
+    nroots is deliberate: a bare-nroots seed can collapse a degenerate pair,
+    because the members of a degenerate set are generally distinct
+    configurations and one seed can only open one of them."""
     diag = np.asarray(diag, float)
     count = max(1, min(int(count), diag.size))
-    cols = np.argsort(diag)[:count]
+    order = np.argsort(diag)
+    count, truncated = cluster_extended_count(
+        diag[order], count, max(4 * count, 20) if limit is None else limit)
+    if truncated:
+        if counters is not None:
+            counters['guess_truncated'] = True
+    if truncated and warn:
+        warnings.warn(
+            f'Davidson seeds cut at {count} vectors inside a cluster of '
+            f'diagonal entries degenerate to {DAVIDSON_GUESS_DEG_TOL:g} Ha, so '
+            'the cut may split a degenerate set and lose the symmetry blocks '
+            'its other members would have opened. Ask for fewer roots and '
+            'check the roots stop moving.', RuntimeWarning, stacklevel=3)
     seeds = np.zeros((count, diag.size))
-    seeds[np.arange(count), cols] = 1.0
+    seeds[np.arange(count), order[:count]] = 1.0
     return [seeds[i] for i in range(count)]
 
 
@@ -260,8 +292,11 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     if guess is None:
         # wider than nroots for degenerate clusters, but never so wide that
         # the seed alone crowds the subspace into restarting immediately
-        guess = diagonal_seeds(diag, min(n, 2 * nroots + 4,
-                                         max(nroots, max_subspace // 2)))
+        seed_room = max(nroots, max_subspace // 2)
+        # the subspace's room is the limit here, and a cluster wider than it
+        # is opened by the corrections, so the cut is not a warning
+        guess = diagonal_seeds(diag, min(n, 2 * nroots + 4, seed_room),
+                               limit=seed_room, warn=False)
     if precond is None:
         precond = jacobi_davidson_precond(diag)
 

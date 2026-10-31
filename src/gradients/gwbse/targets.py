@@ -10,7 +10,7 @@ from scipy.sparse.linalg import LinearOperator, cg
 from src.Base.numerics.constants import (QB_Z_DEGENERATE_REL, QB_Z_MAX_ITER,
                                          QB_Z_PRECONDITIONER_FLOOR, QB_Z_RESIDUAL_REL,
                                          QB_Z_SOLVE_TOL)
-from src.gradients.multipliers import not_converged
+from src.Base.pyscf.cphf import not_converged
 
 
 def _pair_views(mat, nocc, norb):
@@ -148,7 +148,7 @@ def solve_Z(qb, t_grad, tol=QB_Z_SOLVE_TOL, verbose=False, flags=None):
     rather than a restarted Krylov method carrying thirty of length (n_ov)^2.
 
     A solve left above its residual tolerance returns its last iterate and is
-    warned about and flagged (`multipliers.not_converged`, the policy every
+    warned about and flagged (`cphf.not_converged`, the policy every
     orbital-response solve follows).
     """
     n = t_grad.shape[0]

@@ -160,7 +160,7 @@ def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cy
     Y = e_ia * dgamma_ov - 2.0 * coupling_ov
 
     X_ai = cphf_solve(fvind, e_ia.T, Y.T, numerics=Numerics(
-        scf={'cphf_tol': tol, 'cphf_max_cycle': max_cycle}))
+        scf={'multiplier_tol': tol, 'multiplier_max_iter': max_cycle}))
     relaxed_ov = X_ai.reshape(nv, no).T
 
     dgamma = np.zeros((nmo, nmo))
@@ -182,9 +182,10 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
     the finite-field dipole sum rule on open shells (both asserted in
     tests/test_uhf_mp2_relaxed_finite_field.py).
 
-    The solve is src.Base.pyscf.cphf.solve: pyscf's lib.krylov refined on the
-    true residual; a solve ending above tol warns (CphfNotConverged) and
-    returns its last iterate (lib.krylov alone stops on its
+    The solve is src.Base.pyscf.cphf.solve (lgmres to tol relative to
+    max(1, |rhs|), at most max_cycle iterations), checked on its true
+    residual; a solve ending above the bar warns (CphfNotConverged) and
+    returns its last iterate (pyscf's lib.krylov alone stops on its
     linear-dependence test on strongly spin-contaminated references).
     level_shift floors only the PRECONDITIONER's denominators (sign-
     preserving, |e_ia| >= level_shift); the operator keeps the exact e_ia, so
@@ -255,8 +256,8 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
     else:
         floor = h_diag
     X_ai_flat = cphf_solve(lambda x: fvind(np.ravel(x)), h_diag, Y_flat,
-                           numerics=Numerics(scf={'cphf_tol': tol,
-                                                  'cphf_max_cycle': max_cycle}),
+                           numerics=Numerics(scf={'multiplier_tol': tol,
+                                                  'multiplier_max_iter': max_cycle}),
                            precond=floor)
 
     X_ai_a = X_ai_flat[:nv_a * no_a].reshape(nv_a, no_a)

@@ -6,8 +6,9 @@ them cannot declare different surfaces for the same declaration.
 
 THE CHAIN: an ISDF-K mean field on the declared mean-field grid (or J and K
 density-fitted on <basis>-jkfit), E_0 = E_KS, space-time GW with the
-sum-over-poles residues on the declared quasiparticle set and the frozen
-scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
+sum-over-poles residues (or, for the vertical energies alone, the analytic
+continuation, `--residues pade`) on the declared quasiparticle set and the
+frozen scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
 the sliced factors and the row-distributed fit in the gas phase and in a
 continuum alike. The factors sit on `numerics.isdf.level`: the AO-product
 fit (what an unnamed test set means), on the points `numerics.isdf.pivot_points`
@@ -18,7 +19,7 @@ The chain stands on the declaration's one `Numerics`, which `chain_spec`
 hands to `SurfaceSpec.numerics` whole; `potential_energy_surface` refuses a
 declared choice the chain does not read.
 
-SCHEME B (`solvent_scheme` one of `declaration.SCHEME_B`): the same chain in the
+SCHEME B (`solvent_scheme` one of `solvent_vocabulary.SCHEME_B`): the same chain in the
 self-consistent state-specific loop (`src.environments.solvation_loop`). The
 loop's medium is the continuum's `ContinuumField` (`reaction_field`), its
 state models are `GWBSEState`s on a mean field configured here and converged
@@ -33,7 +34,8 @@ from pyscf import dft
 from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
-from src.Base.numerics.constants import SCF_NEWTON_FINISH_FROM, SOLVENT_RI_RESIDUAL_MAX
+from src.Base.numerics.constants import (ISDF_TEST_SETS, SCF_NEWTON_FINISH_FROM,
+                                         SOLVENT_RI_RESIDUAL_MAX)
 from src.Base.declaration import Excitation, GroundState
 from src.Base.numerics.numerics import SolventNumerics
 from src.Base.geometry.geometry import elements_of
@@ -49,6 +51,7 @@ from src.Base.utils.record_io import record_hash
 from src.environments.reaction_field import ContinuumField
 from src.gradients.surface import driven_chain
 from src.properties.excitations import SurfaceSpec, surface_of
+from src.photophysics.declaration import scf_fit
 
 # -------------------------------------------------------------- molecules
 def factor_auxbasis(mol):
@@ -204,6 +207,46 @@ class SCFNotConverged(RuntimeWarning):
     stage that built it carries 'scf_not_converged' in its record."""
 
 
+def scf_fit_keyword(numerics):
+    """The `numerics=` keyword of the ISDF-K mean field: where the run
+    declares the mean field's own fit (`declaration.scf_fit`), the run's
+    Numerics with that test set and pivot count in the isdf section the
+    handle reads; nothing where it declares none, so the mean field keeps its
+    level's tabulated fit whatever the factors are fitted on."""
+    fit = scf_fit(numerics)
+    if fit is None:
+        return {}
+    isdf = {'test_set': fit[0], 'pivot_points': fit[1]}
+    if all(getattr(numerics.isdf, k) == v for k, v in isdf.items()):
+        return {'numerics': numerics}
+    return {'numerics': numerics.derive(
+        "the ISDF-K mean field on its own declared fit", isdf=isdf)}
+
+
+class UndeclaredFit(RuntimeError):
+    """An ISDF-K mean field built on another fit than the declared one."""
+
+
+def require_declared_fit(handle, numerics):
+    """Refuse an ISDF-K handle whose test set or pivot count is not the one
+    `numerics` declares (`declaration.scf_fit`; the tabulated fit, test set
+    ISDF_TEST_SETS[0] and no pivots, where it declares none): a declared fit
+    never falls back silently to the tabulated grid."""
+    fit = scf_fit(numerics)
+    want = (ISDF_TEST_SETS[0], None) if fit is None else fit
+    if want[0] != 'ao_products':
+        want = (want[0], None)
+    got = (getattr(handle, 'test_set', None),
+           getattr(handle, 'pivot_points', None))
+    if got[0] != 'ao_products':
+        got = (got[0], None)
+    if got != want:
+        raise UndeclaredFit(
+            f'the ISDF-K mean field is built on test set {got[0]!r} with '
+            f'pivot count {got[1]!r}, the declaration asks for {want[0]!r} '
+            f'with {want[1]!r}')
+
+
 def mean_field_factory(reference, numerics, max_memory, histories, finish,
                        warm_start, span, surface_route, converge=True):
     """An SCF factory mol -> mf: `reference` Kohn-Sham on the XC grid
@@ -232,6 +275,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
     """
     scf = numerics.scf
     route = scf.route
+    fit_keyword = scf_fit_keyword(numerics)
 
     def build(mol):
         mf = dft.RKS(mol, xc=reference)
@@ -245,7 +289,8 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
                                                 elements_of(mol),
                                                 auxbasis=factor_auxbasis(mol))
             mf = isdf_jk_with_force(mf, auxbasis=factor_auxbasis(mol), counts=counts,
-                         n_start=n_start)
+                         n_start=n_start, **fit_keyword)
+            require_declared_fit(mf.with_df, numerics)
         mf.conv_tol, mf.conv_tol_grad = scf.conv_tol, scf.conv_tol_grad
         mf.max_cycle = scf.max_cycle
         mf = span_confined(mf, *span)

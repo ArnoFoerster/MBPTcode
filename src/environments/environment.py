@@ -24,9 +24,10 @@ from pyscf.qmmm import itrf as qmmm_itrf
 
 from src.Base.environment_seam import NoEnvironment
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
-from src.environments.split_equilibrium import (SOLVENT_SCHEMES,
-                                         ClassicalStateSpecific,
-                                         SplitEquilibrium)
+from src.environments.solvent_vocabulary import (CONSTRUCTION_SCHEMES,
+                                                  SS_DENSITY_DEFAULT)
+from src.environments.split_equilibrium import (ClassicalStateSpecific,
+                                                SplitEquilibrium)
 from src.Base.utils.parallel.threads import blas_single_threaded
 
 
@@ -188,9 +189,10 @@ def equilibrium_environment(environment, mode='split'):
     return environment
 
 
-def solvent_scheme(environment, scheme='duchemin', ss_density='relaxed',
+def solvent_scheme(environment, scheme, ss_density=SS_DENSITY_DEFAULT,
                    ss_equilibrium=False):
-    """`environment` as a solvated excitation reads it, by scheme.
+    """`environment` as a solvated excitation reads it, by scheme (named, with
+    no default: the two are different physics).
 
     'duchemin': the solvated BSE of Duchemin et al. as it is -- the split
     equilibrium (`equilibrium_environment`). 'classical-ss': scheme B
@@ -200,8 +202,8 @@ def solvent_scheme(environment, scheme='duchemin', ss_density='relaxed',
     `ss_equilibrium`. The gas phase comes back as it is; scheme B needs a
     continuum with eps_static.
     """
-    if scheme not in SOLVENT_SCHEMES:
-        raise ValueError(f'scheme={scheme!r}: one of {SOLVENT_SCHEMES}')
+    if scheme not in CONSTRUCTION_SCHEMES:
+        raise ValueError(f'scheme={scheme!r}: one of {CONSTRUCTION_SCHEMES}')
     if scheme == 'duchemin':
         return equilibrium_environment(environment, 'split')
     if environment is None or isinstance(environment, NoEnvironment):

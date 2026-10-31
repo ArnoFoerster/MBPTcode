@@ -53,8 +53,10 @@ script test_davidson_benzene_bse.py
 script test_davidson_casida.py
 pytest test_davidson_force_policy.py
 pytest test_davidson_lockstep.py
+pytest test_davidson_one_body_lockstep.py
 pytest test_davidson_residual_floor.py
 pytest test_davidson_small_pair_space.py
+pytest test_davidson_one_source.py
 script test_davidson_symmetric.py
 pytest test_davidson_triplet.py
 pytest test_declaration.py
@@ -300,6 +302,7 @@ pytest test_layering.py
 pytest test_surface_ingredients.py
 pytest test_drpa_equilibrium_solvation.py
 pytest test_walk_probe_default.py
+pytest test_df_force_metric_fallback.py
 # Placed by the 60 s rule on full-suite wall times on a cluster node (2 threads per lane): under 60 s
 pytest test_archive_radii.py
 pytest test_bse_entry_points_read_numerics.py
@@ -373,12 +376,14 @@ pytest test_ee_adc_gradient.py
 pytest test_ee_adc_gradient_tiled.py
 pytest test_correlated_mean_field_force.py
 pytest test_ee_adc_relaxed_density.py
+pytest test_ss_density_default.py
 pytest test_scs_adc2_gradient.py
 pytest test_ee_state_model_follow.py
 pytest test_solvation_force.py
 pytest test_solvation_force_neq.py
 pytest test_solvation_gas_limit.py
 pytest test_adc2_state_reuse.py
+pytest test_one_zvector.py
 pytest test_response_kernel.py
 pytest test_mp2_state_density.py
 pytest test_solvated_memory_budget.py
@@ -481,6 +486,7 @@ pytest test_ee_adc_vertical_flags.py
 pytest test_vibrational_modes.py
 pytest test_davidson_flags_reach_records.py
 pytest test_photophysics_walk_again.py
+pytest test_photophysics_store_mpi.py
 pytest test_unhooked_flags_recorded.py
 pytest test_isr_operator.py
 pytest test_nondyson_restricted.py
@@ -490,3 +496,12 @@ pytest test_solvated_ground_surface.py
 # Placed by the 60 s rule on workstation wall times (8 threads): test_eigh_device 0.4 s, test_bse2_static_kernel 33 s
 script test_eigh_device.py
 script test_bse2_static_kernel.py
+pytest test_qp_hamiltonian_group_span.py
+pytest test_qp_hamiltonian_large_group.py
+pytest test_qp_group_lockstep.py
+pytest test_duschinsky_guard.py
+pytest test_curvilinear_duschinsky.py
+pytest test_duschinsky_soft_modes.py
+pytest test_duschinsky_cumulants.py
+pytest test_rate_ladder_refusals.py
+pytest test_herzberg_teller_curvilinear.py

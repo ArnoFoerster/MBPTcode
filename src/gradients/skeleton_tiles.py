@@ -141,6 +141,10 @@ class FittedFockSkeleton:
     factor, and where that factorization fails -- an attenuated metric is
     singular -- through the pseudo-inverse of its eigenvalues above
     LINEAR_DEP_THR (`metric` says which, rank 0's choice on every rank).
+    The pseudo-inverse is applied as its eigenvector and eigenvalue factors
+    and never formed: its entries reach 1/LINEAR_DEP_THR, and a product
+    with it turns a last-bit change of the density into ~1e-8 Ha/Bohr of
+    the force.
     """
 
     def __init__(self, mol, auxmol, g_ao, dm, occ=None, coulomb=True,
@@ -232,25 +236,28 @@ class FittedFockSkeleton:
         ranges = [[self.functions(t) for t in own] for own in owners]
         V = self.auxmol.intor('int2c2e', aosym='s1')
         # pyscf's rule: the Cholesky factor where it exists, else the
-        # eigenvalue pseudo-inverse; rank 0's on every rank. The bare
-        # Coulomb half alone solves V directly and needs neither.
-        Lc = Vpinv = None
+        # eigenvectors U and eigenvalues e above LINEAR_DEP_THR, the
+        # pseudo-inverse U e^-1 U^T applied as three factors and never
+        # formed; rank 0's on every rank. The bare Coulomb half alone solves
+        # V directly and needs neither.
+        Lc = U = e = None
         if self.w or self.omega:
             try:
                 Lc = scipy.linalg.cholesky(V, lower=True)
             except np.linalg.LinAlgError:
                 w, v = scipy.linalg.eigh(V)
                 keep = w > LINEAR_DEP_THR
-                Vpinv = (v[:, keep] / w[keep]) @ v[:, keep].T
-            Lc, Vpinv = lockstep((Lc, Vpinv), comm, check=True)
-        self.metric = 'eigen' if Vpinv is not None else 'cholesky'
+                U, e = np.ascontiguousarray(v[:, keep]), w[keep]
+            Lc, U, e = lockstep((Lc, U, e), comm, check=True)
+        self.metric = 'eigen' if U is not None else 'cholesky'
         if self.coulomb:
             allgather_ranges(a, ranges, comm)
             allgather_ranges(b, ranges, comm)
             # each rank's own solve, rank 0's the one every addend reads
             self.Va, self.Vb = lockstep(
-                (np.linalg.solve(V, a), np.linalg.solve(V, b))
-                if Vpinv is None else (Vpinv @ a, Vpinv @ b), comm, check=True)
+                (np.linalg.solve(V, a), np.linalg.solve(V, b)) if U is None
+                else (U @ ((U.T @ a) / e), U @ ((U.T @ b) / e)), comm,
+                check=True)
         if not self.w:
             return self
         del V
@@ -274,7 +281,7 @@ class FittedFockSkeleton:
             self._hold('Kt_stream', rows.nbytes)
             return q0, q1, rows
 
-        if Vpinv is None:
+        if U is None:
             # V = Lc Lc^T; Kt = V^-1 L by substitution, never by an explicit
             # inverse: on a near-singular metric the inverse's product loses
             # digits that the solves keep. Solved in place.
@@ -297,15 +304,43 @@ class FittedFockSkeleton:
                 del Kq
             del Lc
         else:
-            # Kt = Vpinv L, the tiles of L streamed once in tile order
-            Kt = {t: np.zeros_like(Lt[t]) for t in owned}
+            # Kt = U (e^-1 (U^T L)). The explicit pseudo-inverse's product
+            # carries round-off of |V^+| ~ 1/LINEAR_DEP_THR into every
+            # direction of Kt; the factors confine it to the near-null
+            # eigenvectors, which the force reads only through the fit's
+            # residual. Y = e^-1 U^T L in fixed blocks of eigenvectors (block
+            # b rank b % size's), each summed over the tiles of L in tile
+            # order, then Kt from the blocks of Y in block order: the same
+            # bits at every rank count.
+            nkeep = len(e)
+            width = SKELETON_AUX_TILE
+            blocks = [(k, min(k + width, nkeep)) for k in range(0, nkeep, width)]
+            mine = [k for k in range(len(blocks)) if k % size == rank]
+            Y = {k: np.zeros((blocks[k][1] - blocks[k][0], nocc * nao))
+                 for k in mine}
             for q in range(nt):
                 q0, q1, Lq = stream(q, Lt)
+                for k in mine:
+                    k0, k1 = blocks[k]
+                    Y[k] += U[q0:q1, k0:k1].T @ Lq
+                del Lq
+            del Lt
+            for k in mine:
+                k0, k1 = blocks[k]
+                Y[k] /= e[k0:k1, None]
+            self._hold('Y_blocks', sum(x.nbytes for x in Y.values()))
+            Kt = {t: np.zeros((self.functions(t)[1] - self.functions(t)[0],
+                               nocc * nao)) for t in owned}
+            for k, (k0, k1) in enumerate(blocks):
+                owner = k % size
+                Yk = Y.pop(k) if rank == owner else np.empty((k1 - k0, nocc * nao))
+                broadcast_rows(Yk, owner, comm)
+                self._hold('Kt_stream', Yk.nbytes)
                 for t in owned:
                     p0, p1 = self.functions(t)
-                    Kt[t] += Vpinv[p0:p1, q0:q1] @ Lq
-                del Lq
-            del Lt, Vpinv
+                    Kt[t] += U[p0:p1, k0:k1] @ Yk
+                del Yk
+            del U, e
         for t in owned:
             # (g Kt^P)^T, the only form of Kt pass 2 reads
             self.At[t] = np.matmul(Kt[t].reshape(-1, nocc, nao), self.g)

@@ -49,6 +49,44 @@ TD-DFT minima, say), and `displacement_from_minima` or
 `displacement_from_gradient` gives K from another method's own minima or
 gradient.
 
+A rectilinear model is only as good as the straight lines it is built on.
+Between two minima a large torsion apart, the overlap of the two Cartesian
+mode sets turns the torsion into the stretches, and the thermal amplitude of
+a 10 cm^-1 torsion projected on a 3000 cm^-1 stretch puts tens of eV into
+the band. `duschinsky_guard` refuses such a model by three numbers (the J^2
+weight from soft onto stiff modes, the sum-rule lambda against the energies,
+the band's first moment against lambda), each against a bar in
+`Base.numerics.constants`.
+
+CURVILINEAR COORDINATES. `mode_sets(..., coordinates='curvilinear')` takes J
+from the valence internals instead (`curvilinear.curvilinear_duschinsky`,
+after Reimers, J. Chem. Phys. 115, 9103 (2001), and Cerezo, Zuniga, Requena,
+Avila Ferrer and Santoro, J. Chem. Theory Comput. 9, 4947 (2013)): a torsion
+of one state maps onto the torsions of the other, not onto its stretches.
+That J is not orthogonal, because each state carries its own kinetic metric,
+and it is used as it is: the trace over the nuclear positions picks up the
+Jacobian |det J|, and the correlation function above holds with J^-T in
+place of J wherever J multiplies the initial frequencies,
+
+    P0 = J^-T Omega_i + Omega_f J,   P1 = J^-T Omega_i - Omega_f J,
+    R  = J^-T Omega_i T_i J^-1,
+
+which is the same at an orthogonal J; G(0) = 1 still. The Herzberg-Teller
+factor takes the same substitution, and J^-1 for J^T. Emission reads the
+inverse map, q_g = J^-1 (q_e - K). At one geometry the curvilinear J is the
+Cartesian one.
+
+SOFT MODES. A harmonic mode at 10 cm^-1 is not harmonic at room temperature,
+and its frequency change between the two states (10 -> 90 cm^-1, say) puts
+kT (w_f^2/w_i^2 - 1)/2 of thermal energy into the band. `split_soft_modes`
+takes the 'ground' modes below a cutoff and their image in the
+'excited' coordinates out of the model as one classical, frequency-unchanged
+displaced block: in each direction its reorganization lambda_soft (the
+initial state's own along the block) is a classical broadening, a Gaussian
+of mean lambda_soft and variance 2 lambda_soft kT (Ulstrup and Jortner, J.
+Chem. Phys. 63, 4358 (1975)), its zero-point difference a shift of the gap,
+and the rest stays a Duschinsky model.
+
 Energies in Hartree, time in atomic units, temperature in Kelvin.
 """
 import re
@@ -59,11 +97,21 @@ import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 
 from src.Base.geometry.geometry import molecule_at
-from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
+from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+                                         DUSCHINSKY_CUMULANT_MAX_HALVINGS,
+                                         DUSCHINSKY_CUMULANT_TOL,
+                                         DUSCHINSKY_CURVILINEAR_SV_MIN,
+                                         DUSCHINSKY_FIRST_MOMENT_RATIO_MAX,
+                                         DUSCHINSKY_SOFT_MODE_CM,
+                                         DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX,
+                                         DUSCHINSKY_STIFF_MODE_CM,
+                                         HARTREE_TO_CM, HARTREE_TO_EV,
+                                         RATE_FC_LAMBDA_RATIO_MAX)
 from src.properties.franck_condon import (envelope_time, real_axis_density,
                                           require_vibrational_modes,
                                           thermal_energy)
-from src.properties.curvilinear import curvilinear_displacement
+from src.properties.curvilinear import (curvilinear_displacement,
+                                        curvilinear_duschinsky)
 from src.properties.optimize import cartesian_hessian
 from src.properties.vibronic import align_to, normal_modes
 
@@ -82,9 +130,13 @@ BRANCH_MAX_HALVINGS = 30
 #: Water's HF/STO-3G and HF/6-31G minima, 0.04 A and 11 degrees apart, leave
 #: 4.9e-3.
 DUSCHINSKY_ORTHOGONALITY_TOL = 2e-2
-#: Step, in units of the slowest period, at which the first two cumulants of a
-#: band are read off ln G (they set the grid of `vibronic_band_grid` and the
-#: Lorentzian kink correction of the real-axis integral).
+#: The two ways of measuring J: the overlap of the Cartesian mode sets
+#: (orthogonal), or the map between them through the valence internals.
+COORDINATES = ('rectilinear', 'curvilinear')
+#: First step, in units of the slowest period, at which the first two
+#: cumulants of a band are read off ln G (they set the grid of
+#: `vibronic_band_grid` and the Lorentzian kink correction of the real-axis
+#: integral); `cumulants_of` halves it until the estimates settle.
 CUMULANT_STEP = 1e-4
 
 
@@ -220,10 +272,13 @@ class DuschinskyModel:
     """q_e = J q_g + K between two harmonic states' mass-weighted normal
     coordinates, each state with its own frequencies.
 
-    omega_g, omega_e: (N,) Hartree. J: (N, N), orthogonal. K: (N,), the
-    ground minimum in the excited state's coordinates, Bohr sqrt(m_e).
-    `orthogonality`: max |s - 1| over J's singular values before it was made
-    orthogonal (0 for a model built from given J).
+    omega_g, omega_e: (N,) Hartree. J: (N, N). K: (N,), the ground minimum
+    in the excited state's coordinates, Bohr sqrt(m_e). coordinates:
+    'rectilinear', J orthogonal; or 'curvilinear', J the map through the
+    valence internals, its singular values within
+    [DUSCHINSKY_CURVILINEAR_SV_MIN, 1 / DUSCHINSKY_CURVILINEAR_SV_MIN].
+    `orthogonality`: max |s - 1| over J's singular values (before it was
+    made orthogonal, for a rectilinear model; 0 for one built from given J).
     """
 
     omega_g: np.ndarray
@@ -232,6 +287,7 @@ class DuschinskyModel:
     K: np.ndarray
     orthogonality: float = 0.0
     source: str = ''
+    coordinates: str = 'rectilinear'
 
     def __post_init__(self):
         n = len(self.omega_g)
@@ -244,6 +300,18 @@ class DuschinskyModel:
                 f'{np.shape(self.K)}')
         require_vibrational_modes(self.omega_g, 'DuschinskyModel (ground)')
         require_vibrational_modes(self.omega_e, 'DuschinskyModel (excited)')
+        if self.coordinates not in COORDINATES:
+            raise ValueError(f'coordinates are {COORDINATES}, got '
+                             f'{self.coordinates!r}')
+        if self.coordinates == 'curvilinear':
+            s = np.linalg.svd(self.J, compute_uv=False)
+            bar = DUSCHINSKY_CURVILINEAR_SV_MIN
+            if s.min() < bar or s.max() > 1.0 / bar:
+                raise ValueError(
+                    f'the curvilinear J has singular values {s.min():.3g}..'
+                    f'{s.max():.3g}, outside [{bar:g}, {1.0 / bar:g}]: the '
+                    f'two minima are too far apart for one linear map')
+            return
         dev = np.abs(self.J.T @ self.J - np.eye(n)).max()
         if dev > DUSCHINSKY_ORTHOGONALITY_TOL:
             raise ValueError(
@@ -267,9 +335,20 @@ class DuschinskyModel:
         if direction == 'absorption':
             return self.omega_g, self.omega_e, self.J, self.K
         if direction == 'emission':
+            if self.coordinates == 'curvilinear':
+                inv = np.linalg.inv(self.J)
+                return self.omega_e, self.omega_g, inv, -inv @ self.K
             return self.omega_e, self.omega_g, self.J.T, -self.J.T @ self.K
         raise ValueError(f"direction is 'absorption' or 'emission', got "
                          f'{direction!r}')
+
+    def correlation(self, temperature, direction, dipole=None):
+        """The `_Correlation` of one direction: ln G(t) on a time grid."""
+        wi, wf, j, k = self.oriented(direction)
+        if self.coordinates == 'rectilinear':
+            return _Correlation(wi, wf, j, k, temperature, dipole=dipole)
+        return _Correlation(wi, wf, j, k, temperature, dipole=dipole,
+                            left=np.linalg.inv(j).T)
 
     def huang_rhys(self):
         """S_k = omega_e,k K_k^2 / 2 on the excited modes: the displacement
@@ -281,7 +360,7 @@ class DuschinskyModel:
         return 0.5 * float(self.omega_e.sum() - self.omega_g.sum())
 
 
-def duschinsky_model(ground, excited):
+def duschinsky_model(ground, excited, coordinates='rectilinear'):
     """The Duschinsky model between two Hessians at their own minima.
 
     ground, excited: `CartesianHessian`s (or anything with `.mol` and
@@ -290,23 +369,35 @@ def duschinsky_model(ground, excited):
         Hessian computed in another orientation -- another program's standard
         frame -- gives the same model.
 
-    J = L_e^T L_g and K = L_e^T M^{1/2} (x_g - x_e) on the mass-weighted modes.
-    J is replaced by its nearest orthogonal matrix (polar factor); a
-    deviation above DUSCHINSKY_ORTHOGONALITY_TOL warns.
+    J = L_e^T L_g and K = L_e^T M^{1/2} (x_g - x_e) on the mass-weighted modes,
+    J replaced by its nearest orthogonal matrix (polar factor; a deviation
+    above DUSCHINSKY_ORTHOGONALITY_TOL warns); with coordinates
+    'curvilinear', J and K through the valence internals (`mode_sets`,
+    `displacement_from_minima`).
     """
-    sg, se, j, dev = mode_sets(ground, excited)
-    k = _displacement(se, sg.masses, sg.mol, se.mol)
+    sg, se, j, dev = mode_sets(ground, excited, coordinates)
+    if coordinates == 'curvilinear':
+        k = displacement_from_minima(sg, se, sg.mol, se.mol, 'curvilinear')
+    else:
+        k = _displacement(se, sg.masses, sg.mol, se.mol)
     return DuschinskyModel(sg.omega, se.omega, j, k, orthogonality=dev,
-                           source=f'{sg.source} / {se.source}')
+                           source=f'{sg.source} / {se.source}',
+                           coordinates=coordinates)
 
 
-def mode_sets(ground, excited):
+def mode_sets(ground, excited, coordinates='rectilinear'):
     """(ground `HarmonicState`, excited `HarmonicState` turned onto the
     ground minimum's frame, J, deviation): the two mode sets of
-    `duschinsky_model` and their overlap J = L_e^T L_g, replaced by its
-    nearest orthogonal matrix (polar factor); `deviation` is max |s - 1|
-    over J's singular values, and above DUSCHINSKY_ORTHOGONALITY_TOL it
-    warns (`DuschinskyNotOrthogonal`)."""
+    `duschinsky_model` and J. 'rectilinear': their overlap J = L_e^T L_g,
+    replaced by its nearest orthogonal matrix (polar factor); `deviation` is
+    max |s - 1| over J's singular values, and above
+    DUSCHINSKY_ORTHOGONALITY_TOL it warns (`DuschinskyNotOrthogonal`).
+    'curvilinear': J through the valence internals at each minimum
+    (`curvilinear.curvilinear_duschinsky`), kept as it is; `deviation` the
+    same measure, recorded."""
+    if coordinates not in COORDINATES:
+        raise ValueError(f'coordinates are {COORDINATES}, got '
+                         f'{coordinates!r}')
     g, e = as_cartesian_hessian(ground), as_cartesian_hessian(excited)
     if [g.mol.atom_symbol(i) for i in range(g.mol.natm)] != \
             [e.mol.atom_symbol(i) for i in range(e.mol.natm)]:
@@ -319,6 +410,11 @@ def mode_sets(ground, excited):
     if len(sg.omega) != len(se.omega):
         raise ValueError(f'{len(sg.omega)} ground modes against '
                          f'{len(se.omega)} excited ones: one state is linear')
+    if coordinates == 'curvilinear':
+        j = curvilinear_duschinsky(sg.mol, sg.modes, se.mol, se.modes,
+                                   sg.masses)
+        s = np.linalg.svd(j, compute_uv=False)
+        return sg, se, j, float(np.abs(s - 1.0).max())
     j = se.modes.T @ sg.modes
     u, s, vt = np.linalg.svd(j)
     dev = float(np.abs(s - 1.0).max())
@@ -407,12 +503,16 @@ class _Correlation:
     along an ascending time grid from t = 0; with a dipole (mu0, m), the
     Herzberg-Teller factor <mu(q) ... mu(q)> on top (`herzberg_teller`)."""
 
-    def __init__(self, omega_i, omega_f, J, K, temperature, dipole=None):
+    def __init__(self, omega_i, omega_f, J, K, temperature, dipole=None,
+                 left=None):
         self.wi, self.wf = np.asarray(omega_i, float), np.asarray(omega_f, float)
         self.J, self.K = np.asarray(J, float), np.asarray(K, float)
+        # J^-T of a non-orthogonal J where it multiplies Omega_i; J itself
+        # where J is orthogonal
+        self.left = self.J if left is None else np.asarray(left, float)
         self.kt, self.boltz = _beta_factors(self.wi, temperature)
-        self.p0 = self.J * self.wi[None, :] + self.wf[:, None] * self.J
-        self.p1 = self.J * self.wi[None, :] - self.wf[:, None] * self.J
+        self.p0 = self.left * self.wi[None, :] + self.wf[:, None] * self.J
+        self.p1 = self.left * self.wi[None, :] - self.wf[:, None] * self.J
         self.log_norm = float(np.sum(np.log(2.0 * np.sqrt(self.wi * self.wf)))
                               + np.sum(np.log1p(-self.boltz)))
         self.dipole = dipole
@@ -438,7 +538,7 @@ class _Correlation:
             rate += np.trace(lu_solve((lu, piv), d, check_finite=False))
         wv = w.ravel()
         ti = -1j * (1.0 - wv) / (1.0 + wv)
-        r = (J * (wi * ti)[None, :]) @ J.T
+        r = (self.left * (wi * ti)[None, :]) @ self.left.T
         c, s = np.cos(0.5 * wf * t), np.sin(0.5 * wf * t)
         f = r * c[None, :] + np.diag(wf * s)
         frk = np.linalg.solve(f, r @ K)
@@ -457,14 +557,21 @@ class _Correlation:
 
         x* = -J^T (K - C F^-1 R K) the common centre of x and y,
         (P - Q)^-1 = -J^T C F^-1 J and (P + Q)^-1 = J^T S H^-1 J with
-        H = J Omega_i T_i^-1 J^T S + Omega_f C: both finite at every t."""
+        H = J Omega_i T_i^-1 J^T S + Omega_f C: both finite at every t.
+
+        At a non-orthogonal J the two Gaussians of the sum and difference
+        coordinates are (a + J^T b J)^-1 and (c + J^T d J)^-1, which are
+        J^-1 (J^-T a J^-1 + b)^-1 J^-T and the like: the same expressions
+        with J^-T (`left`) where J stands and J^-1 where J^T stands."""
         mu0, m = self.dipole
-        J, wi, wf = self.J, self.wi, self.wf
-        x_star = -J.T @ (self.K - c * frk)
-        jm = J @ m                                   # (N, 3) in final modes
-        pq_minus = -J.T @ (c[:, None] * np.linalg.solve(f, jm))
-        h = ((J * (wi / ti)[None, :]) @ J.T) * s[None, :] + np.diag(wf * c)
-        pq_plus = J.T @ (s[:, None] * np.linalg.solve(h, jm))
+        left, wi, wf = self.left, self.wi, self.wf
+        back = left.T                       # J^T, or J^-1 at a non-orthogonal J
+        x_star = -back @ (self.K - c * frk)
+        jm = left @ m                                # (N, 3) in final modes
+        pq_minus = -back @ (c[:, None] * np.linalg.solve(f, jm))
+        h = ((left * (wi / ti)[None, :]) @ left.T) * s[None, :] \
+            + np.diag(wf * c)
+        pq_plus = back @ (s[:, None] * np.linalg.solve(h, jm))
         mean = mu0 + m.T @ x_star
         value = (complex(np.sum(mean ** 2))
                  + 0.5j * complex(np.sum(m * (pq_minus - pq_plus))))
@@ -517,20 +624,40 @@ def log_correlation(model, t, temperature, direction, dipole=None):
     dipole: (mu0, m) in the initial state's coordinates
     (`herzberg_teller.TransitionDipole.in_initial`), G then the dipole
     correlation function, G(0) = <|mu|^2>."""
-    return _Correlation(*model.oriented(direction), temperature,
-                        dipole=dipole)(t)
+    return model.correlation(temperature, direction, dipole=dipole)(t)
 
 
-def cumulants_of(log_g, omega_min):
-    """(kappa_1, kappa_2), mean and variance of the energy x left in the
-    nuclei, read off ln G at two short times (Richardson); ln G(0) must be
-    0."""
-    h = CUMULANT_STEP * 2.0 * np.pi / omega_min
+def _richardson(log_g, h):
+    """(kappa_1, kappa_2) from ln G at h and 2h, the t^3 terms cancelled."""
     lg = log_g(np.array([0.0, h, 2.0 * h]))
     lg = lg - lg[0]
     k1 = -(4.0 * lg[1].imag - lg[2].imag / 2.0) / (3.0 * h)
     k2 = -(16.0 * lg[1].real - lg[2].real) * 2.0 / (12.0 * h ** 2)
     return float(k1), float(k2)
+
+
+def cumulants_of(log_g, omega_min):
+    """(kappa_1, kappa_2), mean and variance of the energy x left in the
+    nuclei, read off ln G at two short times (Richardson); ln G(0) must be
+    0. The step starts at CUMULANT_STEP of the slowest period and is halved
+    until the estimates at h and h/2 agree to DUSCHINSKY_CUMULANT_TOL (kappa_1
+    in units of sqrt(kappa_2)); the estimate at the accepted h is returned,
+    so a band that agrees at the first step keeps its bits. A wide band (a
+    soft mode turned into a stiff one) needs steps far below the slowest
+    period."""
+    h = CUMULANT_STEP * 2.0 * np.pi / omega_min
+    k1, k2 = _richardson(log_g, h)
+    for _ in range(DUSCHINSKY_CUMULANT_MAX_HALVINGS):
+        h1, h2 = _richardson(log_g, 0.5 * h)
+        scale = np.sqrt(abs(h2))
+        if (abs(h1 - k1) <= DUSCHINSKY_CUMULANT_TOL * scale
+                and abs(h2 - k2) <= DUSCHINSKY_CUMULANT_TOL * abs(h2)):
+            return k1, k2
+        h, k1, k2 = 0.5 * h, h1, h2
+    raise RuntimeError(f'the band cumulants did not settle in '
+                       f'{DUSCHINSKY_CUMULANT_MAX_HALVINGS} halvings of the '
+                       f'step (h = {h:.3g} a.u., kappa_1 {k1:.6g}, kappa_2 '
+                       f'{k2:.6g})')
 
 
 def duschinsky_density(model, delta_e, temperature, direction,
@@ -552,8 +679,7 @@ def duschinsky_density(model, delta_e, temperature, direction,
                          'Gaussian or a Lorentzian width): without one it is '
                          'a set of delta lines')
     wi, wf, _, _ = model.oriented(direction)
-    corr = _Correlation(*model.oriented(direction), temperature,
-                        dipole=dipole)
+    corr = model.correlation(temperature, direction, dipole=dipole)
     gauss = 0.5 * float(broadening) ** 2
     area = 1.0
     if dipole is not None:
@@ -595,8 +721,8 @@ class DuschinskyOscillators:
                                   dipole=self.initial_dipole(direction))
 
     def cumulants(self, temperature, direction):
-        corr = _Correlation(*self.model.oriented(direction), temperature,
-                            dipole=self.initial_dipole(direction))
+        corr = self.model.correlation(temperature, direction,
+                                      dipole=self.initial_dipole(direction))
         wmin = float(min(self.model.omega_g.min(), self.model.omega_e.min()))
         return cumulants_of(corr, wmin)
 
@@ -605,13 +731,216 @@ def mean_energy_transfer(model, temperature, direction):
     """<H_f - H_i> over the initial state's thermal ensemble, in closed form:
     the first moment of the band, an independent check of G.
 
-    With p_f = J p_i and <q_i q_i^T> = diag(coth(beta w/2) / 2w):
-    sum w_i coth/4 + Tr(J^T W_f^2 J C_i)/2 + K^T W_f^2 K/2 - sum w_i coth/2.
+    With p_f = J^-T p_i (J p_i at an orthogonal J) and <q_i q_i^T> =
+    diag(coth(beta w/2) / 2w), <p_i p_i^T> = diag(w coth(beta w/2) / 2):
+    Tr(J^-1 J^-T P_i)/2 + Tr(J^T W_f^2 J C_i)/2 + K^T W_f^2 K/2
+    - sum w_i coth/2, the first term sum w_i coth/4 at an orthogonal J.
     """
     wi, wf, J, K = model.oriented(direction)
     kt = BOLTZMANN_HARTREE_PER_KELVIN * float(temperature)
     coth = 1.0 / np.tanh(wi / (2.0 * kt))
     ci = coth / (2.0 * wi)
     jw = (J ** 2 * (wf ** 2)[:, None]).sum(0)        # diag of J^T W_f^2 J
-    return float(0.25 * (wi * coth).sum() + 0.5 * (jw * ci).sum()
+    kinetic = 0.25 * (wi * coth).sum()
+    if model.coordinates == 'curvilinear':
+        inv = np.linalg.inv(J)
+        kinetic = 0.25 * float(((inv ** 2).sum(1) * wi * coth).sum())
+    return float(kinetic + 0.5 * (jw * ci).sum()
                  + 0.5 * (K ** 2 * wf ** 2).sum() - 0.5 * (wi * coth).sum())
+
+
+# ------------------------------------------------------------------ the guard
+def soft_stiff_weight(model, direction):
+    """The largest weight a soft mode (below DUSCHINSKY_SOFT_MODE_CM) of the
+    initial state puts on the final state's stiff modes (above
+    DUSCHINSKY_STIFF_MODE_CM): over the stiff rows of its column of the
+    oriented J, sum J_lk^2; 0 where either class is empty. A thermally
+    excited soft mode carries that weight of its large amplitude into the
+    stretches."""
+    wi, wf, j, _ = model.oriented(direction)
+    soft, stiff = (DUSCHINSKY_SOFT_MODE_CM / HARTREE_TO_CM,
+                   DUSCHINSKY_STIFF_MODE_CM / HARTREE_TO_CM)
+    j2 = np.asarray(j, float) ** 2                 # rows final, columns initial
+    return float(j2[wf > stiff][:, wi < soft].sum(0).max(initial=0.0))
+
+
+def sum_rule_lambda(model, direction):
+    """K^T W_f^2 K / 2: the final state's harmonic energy at the initial
+    minimum above its own, the reorganization the model carries."""
+    _, wf, _, k = model.oriented(direction)
+    return float(0.5 * np.sum((wf * k) ** 2))
+
+
+def _ratio(value, reference):
+    """value / reference, 1 where both vanish, inf against a reference at or
+    below zero; None without a reference."""
+    if reference is None:
+        return None
+    if reference > 0.0:
+        return value / reference
+    return 1.0 if value == 0.0 and reference == 0.0 else float('inf')
+
+
+def duschinsky_guard(model, temperature, direction, lambda_energy,
+                     classical=0.0):
+    """Whether the harmonic Duschinsky model describes one crossing direction.
+
+    classical: the reorganization of a classical block the model leaves out
+    (`split_soft_modes`), Hartree, added to its sum-rule lambda and to its
+    band's first moment.
+
+    lambda_energy: the accepting state's energy at the initial minimum above
+    its own minimum, Hartree (None: no energy to check against). Refused
+    ('status' 'refused', the failed tests in 'refused_by') when
+      - mixing: a soft mode of the initial state puts more than
+        DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX of its J^2 weight on the final
+        state's stiff modes (`soft_stiff_weight`);
+      - sum_rule: the model's lambda (`sum_rule_lambda`) and lambda_energy
+        differ by more than RATE_FC_LAMBDA_RATIO_MAX either way;
+      - first_moment: the band's mean vibrational energy less the zero-point
+        difference (`mean_energy_transfer`) and lambda_energy differ by more
+        than DUSCHINSKY_FIRST_MOMENT_RATIO_MAX either way;
+    every test is refused without lambda_energy but mixing. The record
+    carries every number, eV.
+    """
+    weight = soft_stiff_weight(model, direction)
+    lam = sum_rule_lambda(model, direction) + classical
+    zpe = model.zero_point_shift() * (1.0 if direction == 'absorption'
+                                      else -1.0)
+    moment = mean_energy_transfer(model, temperature, direction) + classical
+    r_lam = _ratio(lam, lambda_energy)
+    r_mom = _ratio(moment - zpe, lambda_energy)
+
+    def inside(r, bar):
+        return r is not None and 1.0 / bar <= r <= bar
+
+    refused = [name for name, ok in (
+        ('mixing', weight <= DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX),
+        ('sum_rule', inside(r_lam, RATE_FC_LAMBDA_RATIO_MAX)),
+        ('first_moment', inside(r_mom, DUSCHINSKY_FIRST_MOMENT_RATIO_MAX)))
+        if not ok]
+    return {'status': 'refused' if refused else 'computed',
+            'refused_by': refused,
+            'soft_stiff_weight': weight,
+            'soft_stiff_weight_max': DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX,
+            'lambda_classical_block_eV': classical * HARTREE_TO_EV,
+            'lambda_sum_rule_eV': lam * HARTREE_TO_EV,
+            'lambda_energy_eV': (None if lambda_energy is None
+                                 else lambda_energy * HARTREE_TO_EV),
+            'lambda_ratio': r_lam, 'lambda_ratio_max': RATE_FC_LAMBDA_RATIO_MAX,
+            'first_moment_eV': moment * HARTREE_TO_EV,
+            'zero_point_eV': zpe * HARTREE_TO_EV,
+            'first_moment_ratio': r_mom,
+            'first_moment_ratio_max': DUSCHINSKY_FIRST_MOMENT_RATIO_MAX}
+
+
+def guard_message(record):
+    """One line saying why `duschinsky_guard` refused, with its numbers."""
+    def num(x):
+        return 'none' if x is None else f'{x:.4g}'
+    centre = record['first_moment_eV'] - record['zero_point_eV']
+    lam_e = num(record['lambda_energy_eV'])
+    parts = {'mixing': f'a soft mode puts {record["soft_stiff_weight"]:.3g} '
+                       f'of its J^2 weight on stiff modes (bar '
+                       f'{record["soft_stiff_weight_max"]:g})',
+             'sum_rule': f'sum-rule lambda {record["lambda_sum_rule_eV"]:.4g} '
+                         f'eV against {lam_e} eV from the energies',
+             'first_moment': f'band first moment less the zero-point shift '
+                             f'{centre:.4g} eV against lambda {lam_e} eV'}
+    return '; '.join(parts[name] for name in record['refused_by'])
+
+
+# -------------------------------------------------------------- soft modes
+@dataclass(frozen=True)
+class ClassicalSoftBlock:
+    """The soft modes `split_soft_modes` takes out of a Duschinsky model.
+
+    cutoff: Hartree. omega_ground: the 'ground' modes below it; omega_excited:
+    the frequencies of the 'excited' Hessian on their image. lambda_ground,
+    lambda_excited: each state's own reorganization along the block (the
+    'excited' minimum on the ground soft modes on the ground surface, and the
+    reverse), Hartree. coupling: |Q_s^T W_e^2 Q_c| / |Q_c^T W_e^2 Q_c|, the
+    excited Hessian's coupling between the block and the rest, which the
+    split drops. zero_point: ZPE_excited - ZPE_ground the split takes out of
+    the correlation function's phase, the full model's less the stiff one's,
+    so the two together keep the zero-point difference of the two Hessians.
+    """
+
+    cutoff: float
+    omega_ground: np.ndarray
+    omega_excited: np.ndarray
+    lambda_ground: float
+    lambda_excited: float
+    coupling: float
+    zero_point: float
+
+    def lam(self, direction):
+        """The block's classical reorganization out of the initial state of
+        `direction`: the ground's own for absorption, the excited's for
+        emission (the Marcus and Marcus-Levich-Jortner convention)."""
+        if direction == 'absorption':
+            return self.lambda_ground
+        if direction == 'emission':
+            return self.lambda_excited
+        raise ValueError(f"direction is 'absorption' or 'emission', got "
+                         f'{direction!r}')
+
+    def zero_point_shift(self, direction):
+        """ZPE_final - ZPE_initial the block carries, the sign of
+        `direction` (`zero_point`)."""
+        return self.zero_point if direction == 'absorption' \
+            else -self.zero_point
+
+    def record(self):
+        return {'cutoff_cm': self.cutoff * HARTREE_TO_CM,
+                'omega_ground_cm': (self.omega_ground * HARTREE_TO_CM).tolist(),
+                'omega_excited_cm': (self.omega_excited
+                                     * HARTREE_TO_CM).tolist(),
+                'lambda_ground_eV': self.lambda_ground * HARTREE_TO_EV,
+                'lambda_excited_eV': self.lambda_excited * HARTREE_TO_EV,
+                'zero_point_shift_eV': (self.zero_point_shift('absorption')
+                                        * HARTREE_TO_EV),
+                'coupling': self.coupling}
+
+
+def split_soft_modes(model, cutoff):
+    """(stiff `DuschinskyModel`, `ClassicalSoftBlock`): the 'ground' modes
+    below `cutoff` (Hartree) and their image in the 'excited' coordinates
+    taken out as a classical block; (model, None), the model itself, where
+    no mode is below the cutoff.
+
+    The image is the span Q_s of J's soft columns; the excited Hessian on the
+    rest Q_c is diagonalized again for the stiff excited modes E_c, and the
+    stiff model is J_c = E_c^T J (stiff columns), K_c = E_c^T K, ground
+    frequencies the stiff ones. At an orthogonal J, J_c is orthogonal.
+    """
+    soft = np.asarray(model.omega_g) < cutoff
+    n_soft = int(soft.sum())
+    if n_soft == 0:
+        return model, None
+    if n_soft == len(soft):
+        raise ValueError(f'every mode is below {cutoff * HARTREE_TO_CM:g} '
+                         f'cm^-1: no quantum modes are left')
+    q, _ = np.linalg.qr(model.J[:, soft], mode='complete')
+    q_s, q_c = q[:, :n_soft], q[:, n_soft:]
+    w2 = model.omega_e ** 2
+    h_c = (q_c * w2[:, None]).T @ q_c
+    h_s = (q_s * w2[:, None]).T @ q_s
+    w2_c, u = np.linalg.eigh(h_c)
+    e_c = q_c @ u
+    stiff = DuschinskyModel(
+        model.omega_g[~soft], np.sqrt(w2_c), e_c.T @ model.J[:, ~soft],
+        e_c.T @ model.K, orthogonality=model.orthogonality,
+        source=model.source, coordinates=model.coordinates)
+    k_g = model.oriented('emission')[3]       # the excited minimum, ground
+    k_s = q_s.T @ model.K                     # the ground minimum, excited
+    block = ClassicalSoftBlock(
+        cutoff=float(cutoff), omega_ground=np.asarray(model.omega_g)[soft],
+        omega_excited=np.sqrt(np.linalg.eigvalsh(h_s)),
+        lambda_ground=float(0.5 * np.sum((model.omega_g[soft]
+                                          * k_g[soft]) ** 2)),
+        lambda_excited=float(0.5 * k_s @ h_s @ k_s),
+        coupling=float(np.linalg.norm((q_s * w2[:, None]).T @ q_c)
+                       / np.linalg.norm(h_c)),
+        zero_point=model.zero_point_shift() - stiff.zero_point_shift())
+    return stiff, block

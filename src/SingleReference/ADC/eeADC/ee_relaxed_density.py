@@ -79,9 +79,7 @@ import numpy as np
 from pyscf import lib, scf
 from pyscf import df as pyscf_df
 
-from src.Base.numerics.constants import (CORRELATION_CPHF_TOL, CPHF_MAX_CYCLE,
-                                         DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB
 from src.Base.pyscf import cphf
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
                                               reduce_sum)
@@ -532,15 +530,17 @@ def _gas_jk(mf):
 
 
 def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
-                    env=None, pcm_response=False, tol=CORRELATION_CPHF_TOL,
-                    max_cycle=CPHF_MAX_CYCLE):
+                    env=None, pcm_response=False, numerics=None, flags=None):
     """Delta rho_rel (nmo, nmo), the full MO basis of mf (frozen core
     included), spin-summed, times t1: d omega / d h_pq. Bc core_factors when
     frozen; back_vv as in orbital_gradient (default: the operator's own B_vv
     back-transformation, a collective over its ranks); env the continuum of
     the reaction field (its potentials for pc.lr); pcm_response adds mf's
     continuum (its eps, the static one of a solvated SCF) to the orbital
-    response (module docstring)."""
+    response (module docstring). The orbital response is the force's solve
+    (cphf.solve), its tolerances from `numerics`, the run's one object; a
+    short solve flagged into `flags`. Under ranks a collective: rank 0
+    iterates."""
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)
     nmo = C.shape[1]
@@ -592,8 +592,8 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
 
     nocc_v = (nmo - nocc, nocc)
     e_ai = eps[nocc:, None] - eps[None, :nocc]
-    z = cphf.solve(fvind, e_ai, -X, numerics=Numerics(
-        scf={'cphf_tol': tol, 'cphf_max_cycle': max_cycle})).reshape(nocc_v)
+    z = cphf.solve(fvind, e_ai, -X, numerics=numerics,
+                   flags=flags).reshape(nocc_v)
     G[nocc:, :nocc] += 0.5 * z
     G[:nocc, nocc:] += 0.5 * z.T
     return t1 * G

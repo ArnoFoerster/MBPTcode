@@ -598,6 +598,20 @@ def allgather_ranges(a, ranges, comm):
     return a
 
 
+def node_comm(comm):
+    """The ranks of `comm` that share this rank's node, in `comm`'s rank
+    order: an MPI shared-memory split of a genuine mpi4py communicator (a
+    collective on `comm`; the caller frees it), and `comm` itself -- one node
+    -- serially, on a world of one and on a `SimulatedComm`. A kernel that
+    would send every rank the same large block computed on demand can compute
+    it once per node instead and move it only inside the node."""
+    mod = sys.modules.get('mpi4py.MPI')
+    if (comm is None or comm.Get_size() == 1 or mod is None
+            or not isinstance(comm, mod.Comm)):
+        return comm
+    return comm.Split_type(_mpi().COMM_TYPE_SHARED, key=comm.Get_rank())
+
+
 class NodeShared:
     """A float64 array held once per node: every rank of `comm` on one node maps
     the same memory (an MPI-3 shared window on the node's communicator), so an

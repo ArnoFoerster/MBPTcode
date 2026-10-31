@@ -168,6 +168,24 @@ def test_the_loop_tolerances_belong_to_scheme_b():
                     '--loop-tol-q', '1e-9')
 
 
+# ------------------------------------------------- the quasiparticle Hamiltonian
+def test_scheme_b_solves_the_quasiparticle_hamiltonian_by_default():
+    """Scheme B's loop moves the charges under which a near-degenerate
+    explicit pair (DMABN's LUMO and LUMO+1) mixes, so the pair has to be one
+    frozen group: scheme B declares `qp.hamiltonian` on unless the command
+    line turns it off; the other schemes keep it off. The choice is in the
+    numerics identity the vertical stage's stamp carries."""
+    on = declaration(*SCHEME_B)
+    assert on.numerics.qp.hamiltonian
+    off = declaration(*SCHEME_B, '--no-qp-hamiltonian')
+    assert not off.numerics.qp.hamiltonian
+    assert not declaration(*TOLUENE, '--solvent-scheme', 'scheme-a'
+                           ).numerics.qp.hamiltonian
+    assert declaration(*TOLUENE, '--solvent-scheme', 'scheme-a',
+                       '--qp-hamiltonian').numerics.qp.hamiltonian
+    assert on.numerics.identity() != off.numerics.identity()
+
+
 # ------------------------------------------------------------- the stamps
 def test_one_scheme_per_store(tmp_path):
     gas = run_in(tmp_path, declaration())

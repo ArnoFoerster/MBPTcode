@@ -57,7 +57,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
+from src.Base.numerics.constants import (CONTINUATION_ROUTE,
+                                         EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
                                          RESIDUE_ROUTES_ALL,
                                          LAPLACE_SCREENING_TOL, QP_ROOT_TOL,
                                          SOP_N_POLES)
@@ -95,8 +96,9 @@ ANALYTIC_ROUTES = frozenset({'sop', 'scissor'})
 #: `fallback_route` from the problem's dimensions alone.
 FALLBACK_ROUTE = 'fallback'
 #: The residue routes the kernels take: a residue backend, the pole model,
-#: 'none' (refuse a residue) or 'auto' (a backend decided per geometry).
-KERNEL_RESIDUE_ROUTES = frozenset(RESIDUE_ROUTES_ALL)
+#: 'none' (refuse a residue) or 'auto' (a backend decided per geometry); the
+#: continuation takes no contour and is solved by the chain itself.
+KERNEL_RESIDUE_ROUTES = frozenset(RESIDUE_ROUTES_ALL) - {CONTINUATION_ROUTE}
 
 
 

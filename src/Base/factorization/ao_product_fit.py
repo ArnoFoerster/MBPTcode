@@ -73,10 +73,12 @@ nk-indexed array, whole:
   Gram     G_ik = (X_i X_k^T)^2 o d_i d_k^T + reg I, i >= k, i owned, the
            column tiles' collocation streamed (every rank evaluates each
            once), d_k = 1/s_k from the tile's own rows;
-  pass     the shell runs in rounds of one run per rank, largest first: the
-           run's owner evaluates its (m n|P) and broadcasts it, and every
-           rank adds sum_mn (P|mn) X_gm X_gn of the run into its own tiles of
-           E^T, in the fixed run order; then E^T_i V^-1 per tile;
+  pass     every node evaluates every shell run, largest first, in rounds
+           of one run per rank of the node: the run's owner evaluates its
+           (m n|P) and broadcasts it inside the node, and every rank adds
+           sum_mn (P|mn) X_gm X_gn of the run into its own tiles of E^T, in
+           the fixed run order; then E^T_i V^-1 per tile. The integral
+           blocks, nao^2 naux doubles in all, never cross a node;
   Cholesky `separable_ri.cholesky_tiles` and `backward_tiles`, the row
            fit's right-looking sweep, M^T_i = d_i (G^-1 d F^T)_i.
 
@@ -109,7 +111,8 @@ from src.Base.factorization.separable_ri import (RowFit, ao_values,
                                                  total_bytes)
 from src.Base.utils.parallel.mpi_grid import (broadcast_rows, contiguous_block,
                                               current_comm, lockstep,
-                                              ordered_chain_sum, partition)
+                                              node_comm, ordered_chain_sum,
+                                              partition)
 
 
 #: Pivots and fits already made, by content: the ISDF-K mean field and the
@@ -427,22 +430,28 @@ def product_gram_tiles(mol, coords, tiles, owners, rank, numerics, ext,
 
 
 def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
-                    also=None):
+                    also=None, node=None):
     """{t: E^T_t}, E[P, g] = sum_mn (P|mn) X_gm X_gn on this rank's tiles
     (X_own, {tile: collocation}), one pass over the shell runs
     (`shell_runs`), largest first.
 
-    The runs go in rounds of one per rank: each rank evaluates its run's
-    (m n|P) and every run is broadcast by its owner in turn, so each tile
-    adds the runs in the one fixed order whoever evaluated them, the same
-    calls on the same shapes: the same bits at every rank count. also(t, T,
-    a0, a1), where given, is called with each tile's half-transformed run
+    Every node makes the whole pass itself: the runs go in rounds of one per
+    rank of the node, each rank evaluates its run's (m n|P) and every run is
+    broadcast by its owner in turn inside the node, so no integral block
+    crosses a node and each tile adds the runs in the one fixed order
+    whoever evaluated them, the same calls on the same shapes: the same bits
+    at every rank and node count. node: the ranks that share the block
+    (`node_comm` of `comm` when None; a test hands smaller groups). also(t,
+    T, a0, a1), where given, is called with each tile's half-transformed run
     T[m, P, g] = sum_n (m n|P) X[g, n] (`half_transformed`) and its AO span
     (the adjoint reads the pass through it).
     """
     comm = current_comm() if comm is None else comm
-    rank, nranks = (0, 1) if comm is None else (comm.Get_rank(),
-                                                comm.Get_size())
+    split = node is None
+    if split:
+        node = node_comm(comm)
+    rank, nranks = (0, 1) if node is None else (node.Get_rank(),
+                                                node.Get_size())
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     runs = shell_runs(mol, auxmol, numerics)
     width = [a1 - a0 for _, _, a0, a1 in runs]
@@ -450,28 +459,32 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
     Et = {t: np.zeros((len(x), naux)) for t, x in X_own.items()}
     if hold is not None:
         hold('E_rows', total_bytes(Et.values()))
-    for c0 in range(0, len(order), nranks):
-        batch = order[c0:c0 + nranks]
-        own = None
-        if rank < len(batch):
-            own = half_transform_operand(three_centre_block(mol, auxmol,
-                                                            runs[batch[rank]]))
-        for pos, ib in enumerate(batch):
-            a0, a1 = runs[ib][2], runs[ib][3]
-            nb = a1 - a0
-            operand = own if pos == rank else np.empty((nb * naux, nao))
-            broadcast_rows(operand, pos, comm)
-            if hold is not None:
-                hold('run_block', operand.nbytes
-                     + (0 if own is None or pos == rank else own.nbytes))
-            for t, X_t in X_own.items():
-                T = half_transformed(operand, X_t, 0, len(X_t), nb)
-                Et[t] += np.einsum('mPg,gm->gP', T, X_t[:, a0:a1])
-                if also is not None:
-                    also(t, T, a0, a1)
-                del T
-            del operand
-        own = None
+    try:
+        for c0 in range(0, len(order), nranks):
+            batch = order[c0:c0 + nranks]
+            own = None
+            if rank < len(batch):
+                own = half_transform_operand(three_centre_block(
+                    mol, auxmol, runs[batch[rank]]))
+            for pos, ib in enumerate(batch):
+                a0, a1 = runs[ib][2], runs[ib][3]
+                nb = a1 - a0
+                operand = own if pos == rank else np.empty((nb * naux, nao))
+                broadcast_rows(operand, pos, node)
+                if hold is not None:
+                    hold('run_block', operand.nbytes
+                         + (0 if own is None or pos == rank else own.nbytes))
+                for t, X_t in X_own.items():
+                    T = half_transformed(operand, X_t, 0, len(X_t), nb)
+                    Et[t] += np.einsum('mPg,gm->gP', T, X_t[:, a0:a1])
+                    if also is not None:
+                        also(t, T, a0, a1)
+                    del T
+                del operand
+            own = None
+    finally:
+        if split and node is not None and node is not comm:
+            node.Free()
     return Et
 
 

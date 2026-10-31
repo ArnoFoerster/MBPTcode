@@ -190,3 +190,24 @@ def test_charge_transfer_root_shifts_like_the_full_equilibrium():
           f'{lr * HARTREE_TO_MEV:+.1f}')
     assert abs(full - split) < 0.05 * abs(full)
     assert split < 0.0
+
+
+def test_the_split_forwards_only_what_it_delegates(water):
+    """An attribute outside the allow-list is the optical continuum's answer to
+    one interaction, and the split has two: it raises instead of answering."""
+    from src.environments.split_equilibrium import (ClassicalStateSpecific,
+                                                    LinearResponseOnly,
+                                                    SplitEquilibrium)
+    env = SolventScreening(water, eps=1.7764, eps_static=2.5)
+    env.planted = 'optical'
+    split = SplitEquilibrium(env)
+    assert split.aux_kernel.__func__ is env.aux_kernel.__func__
+    for name in ('planted', 'response_matrix', 'ov_grid_potential',
+                 'state_specific_energy', 'cohsex_correction', 'static_partner',
+                 'eps'):
+        with pytest.raises(AttributeError):
+            getattr(split, name)
+    assert not hasattr(ClassicalStateSpecific(env), 'response_matrix')
+    loop = LinearResponseOnly(env)
+    with pytest.raises(AttributeError):
+        loop.static_partner()

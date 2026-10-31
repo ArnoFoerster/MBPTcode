@@ -345,7 +345,7 @@ def _restore_methods(mf, saved):
             setattr(mf, name, original)
 
 
-def _metric_factor(mol, auxmol):
+def metric_factor(mol, auxmol):
     """(L, mode) with (P|Q) = L L^T, or the eigen-replacement where it is not
     positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes.
 
@@ -370,7 +370,7 @@ def _replicated_metric_factor(mol, auxmol, comm):
     broadcast, once.
     """
     if comm.Get_rank() == 0:
-        low, mode = _metric_factor(mol, auxmol)
+        low, mode = metric_factor(mol, auxmol)
         header = (mode, low.shape, low.dtype.str)
     else:
         low, header = None, None

@@ -67,6 +67,7 @@ from src.Base.numerics.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,
                                          EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import code_id
+from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
 from src.environments.medium import CAVITY_CONVENTIONS, describe, parse as parse_medium
 from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
                                               lockstep_mean_field)
@@ -183,12 +184,12 @@ def main(argv=None):
                    choices=('off', 'vertical', 'equilibrium'),
                    help='add the state-specific reaction field of each '
                         "root's difference density (needs a continuum)")
-    p.add_argument('--ss-density', default='unrelaxed',
-                   choices=('unrelaxed', 'relaxed', 'relaxed+pcm'),
+    p.add_argument('--ss-density', default=SS_DENSITY_DEFAULT,
+                   choices=SS_DENSITIES,
                    help='difference density of the state-specific term: '
-                        'unrelaxed ISR-ADC(2), orbital-relaxed with the '
-                        'ground-state charges frozen, or relaxed with the '
-                        'continuum responding')
+                        'orbital-relaxed with the ground-state charges '
+                        'frozen (default), unrelaxed ISR-ADC(2), or relaxed '
+                        'with the continuum responding')
     p.add_argument('--spin-scaling', default='none', choices=('none', 'scs', 'sos'),
                    help='spin-component scaled ADC(2), factors (c_os, c_ss) of '
                         'ADC2_SPIN_SCALING')
@@ -233,7 +234,7 @@ def run(args, comm):
                         omp_threads=openmp_threads())), flush=True)
     if args.state_specific != 'off' and args.environment == 'gas':
         raise SystemExit('--state-specific needs --environment (a continuum)')
-    if args.ss_density != 'unrelaxed' and args.state_specific == 'off':
+    if args.ss_density != SS_DENSITY_DEFAULT and args.state_specific == 'off':
         raise SystemExit('--ss-density needs --state-specific')
     if (args.spin_scaling != 'none' and args.state_specific != 'off'
             and args.ss_density == 'unrelaxed'):

@@ -33,11 +33,15 @@ import pathlib
 from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
-from src.Base.numerics.constants import (RESIDUE_ROUTES_ALL,
+from src.Base.numerics.constants import (CONTINUATION_ROUTE,
+                                         ISDF_DEFAULT_TEST_SET,
+                                         RESIDUE_ROUTES_ALL,
                                          STATE_MODEL_SCF_GRAD_TOL)
 from src.Base.basis.basis_map import atom_elements, basis_keys
 from src.Base.declaration import KERNELS, QPStates
 from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_vocabulary import (GAS, SCHEME_B, SCHEME_B_BARE,
+                                                 SOLVENT_SCHEMES)
 from src.Base.utils.record_io import record_hash
 from src.environments.medium import parse as parse_medium
 from src.photophysics.rates import MANIFOLD_GAP_RULES
@@ -48,32 +52,6 @@ RELAXED_SOLVATION = ('equilibrium', 'nonequilibrium')
 #: central differences of the declared mean field's force, or a Hessian
 #: computed elsewhere at R0 and read from its file (`ExternalHessian`).
 HESSIAN_ROUTES = ('analytic-df', 'numerical', 'external')
-#: How the states stand in the environment, each by name. 'gas': no medium.
-#: 'scheme-a': the solvated BSE of Duchemin, Guido, Jacquemin and Blase
-#: (Chem. Sci. 9, 4430 (2018)): the ground state in PCM at eps_static, the
-#: response screened by the continuum (non-equilibrium at R0), the relaxed
-#: states in the split or non-equilibrium response (`relaxed_solvation`).
-#: 'scheme-b-eq' and 'scheme-b-noneq': every state self-consistent with its
-#: own orbital-relaxed density in the continuum
-#: (`src.environments.solvation_loop`, the state-specific loop of
-#: `src.gradients.gwbse.state_model`), its singlets' linear response at
-#: eps_inf, the walks on G_eq; absorption and emission are the loop's
-#: non-equilibrium energies. The two differ in the energy an excited state
-#: has at its minimum (`stages` module docstring, THE ENERGIES): in its own
-#: equilibrium ('eq', the solvent relaxed around it) or in the slow charges
-#: of S0's equilibrium there ('noneq', the solvent left as S0 had it, walked
-#: on that non-equilibrium surface). 'scheme-b-eq-bare' and
-#: 'scheme-b-noneq-bare': the same without the singlets' linear response (the
-#: BSE exchange on the bare interaction, the medium in the loop alone).
-SOLVENT_SCHEMES = ('gas', 'scheme-a', 'scheme-b-eq', 'scheme-b-noneq',
-                   'scheme-b-eq-bare', 'scheme-b-noneq-bare')
-#: The schemes of the state-specific loop, and the relaxed states' solvation
-#: each declares (`Policies.relaxed_solvation`).
-SCHEME_B = {'scheme-b-eq': 'equilibrium', 'scheme-b-noneq': 'nonequilibrium',
-            'scheme-b-eq-bare': 'equilibrium',
-            'scheme-b-noneq-bare': 'nonequilibrium'}
-#: The scheme-B arms without the singlets' linear-response term.
-SCHEME_B_BARE = ('scheme-b-eq-bare', 'scheme-b-noneq-bare')
 #: The geometry optimizers (`properties.optimize.relax`).
 ENGINES = ('auto', 'cartesian', 'geometric')
 #: How each SCF is finished.
@@ -81,17 +59,21 @@ SCF_FINISH = ('diis', 'newton')
 #: E_0 under the excited state: E_KS of the reference ('dft'), or
 #: E_HF + E_c^dRPA on it ('rpa').
 GROUNDS = ('dft', 'rpa')
-#: How the self-energy's real-axis residues are taken on the chain: the two
-#: of the one vocabulary (`RESIDUE_ROUTES_ALL`) a production run declares,
-#: the pole model first (the default).
-RESIDUES = ('sop', 'explicit')
+#: How the self-energy reaches the real axis on the chain: the three of the
+#: one vocabulary (`RESIDUE_ROUTES_ALL`) a production run declares, the pole
+#: model first (the default), then the explicit residues and the analytic
+#: continuation (CONTINUATION_ROUTE), which has no adjoint and so serves the
+#: energy stages alone (`CONTINUATION_STAGES`).
+RESIDUES = ('sop', 'explicit', CONTINUATION_ROUTE)
 if not set(RESIDUES) <= set(RESIDUE_ROUTES_ALL):
     raise ImportError(f'declaration residues {RESIDUES} leave the one '
                       f'vocabulary {RESIDUE_ROUTES_ALL}')
+#: The stages a run on the continuation can take: the ground state, its
+#: Hessian and the vertical energies. Every other walks an excited state or
+#: reads a derivative the continuation has no adjoint for.
+CONTINUATION_STAGES = ('s0', 'hess', 'vert')
 #: The mean-field routes of the production chain.
 SCF_ROUTES = ('isdf', 'df')
-#: What the gas phase is called.
-GAS = 'gas'
 #: The fields that admit None ('Class.field'); every other is required.
 OPTIONAL = ('Policies.far_start', 'Policies.external_hessian',
             'Policies.tda_t1_minimum', 'Declaration.hessian_numerics')
@@ -343,9 +325,19 @@ class Declaration:
 
     @property
     def mean_field_name(self):
-        """The mean field's route and, for ISDF-K, its grid."""
+        """The mean field's route and, for ISDF-K, its grid and a declared
+        fit (`scf_fit`): the test set and the pivoted points."""
         scf = self.numerics.scf
-        return 'DF jkfit' if scf.route == 'df' else f'ISDF-K {scf.grid_level}'
+        if scf.route == 'df':
+            return 'DF jkfit'
+        fit = scf_fit(self.numerics)
+        if fit is None:
+            return f'ISDF-K {scf.grid_level}'
+        test_set, points = fit
+        count = ('' if test_set != 'ao_products' else
+                 ' on the default count of pivoted points' if points is None
+                 else f' on {points} pivoted points')
+        return f'ISDF-K {scf.grid_level}, {test_set} fit{count}'
 
     def to_record(self):
         """The declaration as plain values (`record_io`), numerics by their
@@ -368,6 +360,19 @@ class Declaration:
         out['hessian_numerics'] = (None if self.hessian_numerics is None
                                    else self.hessian_numerics.identity())
         return record_hash(out)
+
+
+def scf_fit(numerics):
+    """(test_set, pivot_points) the ISDF-K mean field is fitted on, or None
+    for its level's tabulated fit (and for a density-fitted one): the mean
+    field's own declaration (`ScfNumerics.test_set`, `pivot_points`; the
+    parent is the --scf-grid level's), a pivot count alone meaning the
+    AO-product fit. The factors' fit (`IsdfNumerics`) never reaches it."""
+    scf = numerics.scf
+    if scf.route != 'isdf' or (scf.test_set is None
+                               and scf.pivot_points is None):
+        return None
+    return (scf.test_set or ISDF_DEFAULT_TEST_SET, scf.pivot_points)
 
 
 def refuse_missing(obj):
@@ -423,6 +428,19 @@ def refuse_choices(d):
     choose('policies.scf_finish', p.scf_finish, SCF_FINISH)
     choose('solvent_scheme', d.solvent_scheme, SOLVENT_SCHEMES)
     choose('numerics.scf.route', d.numerics.scf.route, SCF_ROUTES)
+    if d.numerics.qp.residue_route == CONTINUATION_ROUTE:
+        if d.qp_states.kind == 'adaptive':
+            raise DeclarationRefused(
+                f'qp_states adaptive with residues {CONTINUATION_ROUTE!r}: the '
+                'selection budgets the pole model against the continuation, '
+                'which here solves the set itself; declare admitted, frontier, '
+                'valence or all')
+        if d.numerics.qp.hamiltonian:
+            raise DeclarationRefused(
+                f'numerics.qp.hamiltonian with residues {CONTINUATION_ROUTE!r}: '
+                "the quasiparticle Hamiltonian's groups are solved on the pole "
+                "model's poles, which the continuation does not build "
+                '(--no-qp-hamiltonian)')
     cut = d.numerics.span.cut
     if cut is not None and not 0 < cut < 1:
         raise DeclarationRefused(
@@ -529,6 +547,9 @@ SCHEME_B_REFUSES = (
      'index (frontier, valence without the Z filter, or all)'),
     (lambda d: not isinstance(d.rate_model, TadfModel),
      'rate_model: the UISC stage rebuilds chains outside the loop'),
+    (lambda d: d.numerics.qp.residue_route == CONTINUATION_ROUTE,
+     f'numerics.qp.residue_route: every loop cycle takes a relaxed density, '
+     f'whose reverse pass {CONTINUATION_ROUTE!r} does not have'),
 )
 
 

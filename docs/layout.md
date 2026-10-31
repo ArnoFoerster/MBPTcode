@@ -144,8 +144,8 @@ src/gradients/                 the method-neutral core: surface.py (the
 src/properties/                optimize.py (walks, refreeze), vibronic.py,
                                hessian.py, mode_hessian.py (force constants
                                along chosen normal modes), curvilinear.py
-                               (displacements in valence internal
-                               coordinates, for Huang-Rhys factors),
+                               (displacements and the Duschinsky
+                               matrix in valence internal coordinates),
                                conformers.py, ring_conformers.py,
                                conformer_weights.py, torsion_scan.py,
                                spin_orbit.py,

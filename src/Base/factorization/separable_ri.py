@@ -1752,27 +1752,22 @@ def _balanced_gram(D, numerics):
 def fit_M(D, F, numerics=None):
     """Their eqs 8-9: balanced, Tikhonov-regularized least-squares estimator.
 
-    Cost is one (nk x nk) Gram matrix, one inversion and two products -- O(N^3)
-    with the test set linear in system size.
-    """
-    Dt, d, G = _balanced_gram(D, numerics)
-    return ((F @ Dt.T) @ np.linalg.inv(G)) * d[None, :]
-
-
-def fit_M_stable(D, F, numerics=None):
-    """`fit_M` with the explicit inverse replaced by a Cholesky solve.
-
-    The same estimator, a better numerical realization of it. `fit_M` forms
-    np.linalg.inv(G) at cond(G) ~ 2e8, which costs digits in the forward pass;
-    production's default `fit_M_streaming` already solves rather than inverts,
-    and `build_separable_ri` calls it "the better conditioned of the two". D is
-    explicit, so the estimator is whatever columns D and F carry: the fit
-    adjoints formed whole rebuild `fit_M_streaming`'s estimator with it from D
-    over every product pair and F zero on the screened ones.
+    The Gram matrix is solved with a Cholesky factorization, not inverted:
+    an explicit inverse at cond(G) ~ 2e8 costs digits, and production's
+    default `fit_M_streaming` solves too. Cost is one (nk x nk) Gram matrix,
+    one factorization and two products -- O(N^3) with the test set linear in
+    system size. D is explicit, so the estimator is whatever columns D and F
+    carry: the fit adjoints formed whole rebuild `fit_M_streaming`'s estimator
+    with it from D over every product pair and F zero on the screened ones.
     """
     Dt, d, G = _balanced_gram(D, numerics)
     cho = scipy.linalg.cho_factor(G, lower=True)
     return scipy.linalg.cho_solve(cho, (F @ Dt.T).T).T * d[None, :]
+
+
+def fit_M_stable(D, F, numerics=None):
+    """`fit_M`, kept as the name the gradient refits call."""
+    return fit_M(D, F, numerics)
 
 
 def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,

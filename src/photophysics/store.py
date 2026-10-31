@@ -25,18 +25,24 @@ record of another surface. The provenance is recorded and not compared: a
 resume on another commit or BLAS is allowed and visible.
 
 Under ranks the store reads the communicator of the enclosing
-`distributed(comm)` block: rank 0 writes, a barrier follows every write, every
-rank reads. The stages themselves hold no communicator.
+`distributed(comm)` block: rank 0 alone touches the disk, to write (a barrier
+follows every write) and to read or look: what it finds is broadcast, so every
+rank holds the same record whatever its view of the filesystem, and no rank
+reads a file that rank 0 is replacing. Every call of `has`, `names`, `held`,
+`read`, `reusable`, `update`, `write`, `write_xyz`, `set_aside` and `workdir`
+is therefore collective: every rank makes it. The stages themselves hold no
+communicator.
 """
 import datetime
 import functools
+import json
 import os
 import pathlib
 import platform
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
 from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
-from src.Base.utils.parallel.mpi_grid import current_comm, is_root, n_ranks
+from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, is_root, n_ranks
 from src.Base.utils.parallel.threads import blas_libraries
 from src.environments.medium import parse as parse_medium
 
@@ -57,6 +63,24 @@ def provenance():
             'host': platform.node(), 'ranks': n_ranks(),
             'slurm_job': os.environ.get('SLURM_JOB_ID'),
             'written': datetime.datetime.now().isoformat(timespec='seconds')}
+
+
+def _sync(path):
+    """Force the file or directory `path` to stable storage."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_record(path):
+    """The record at `path` and the arrays file it names, then their
+    directory, forced to stable storage."""
+    path = pathlib.Path(path)
+    for name in (path.name, json.loads(path.read_text())['arrays']):
+        _sync(path.with_name(name))
+    _sync(path.parent)
 
 
 class Store:
@@ -82,22 +106,44 @@ class Store:
     def barrier():
         """Wait for every rank of the distribution."""
         comm = current_comm()
-        if comm is not None:
+        if comm is None:
+            return
+        if hasattr(comm, 'Barrier'):
             comm.Barrier()
+        else:                   # a simulated communicator has no Barrier
+            comm.allgather(None)
 
     # ------------------------------------------------------------- paths
     def path(self, name):
         """The file of record `name` (a stage record is name.json)."""
         return self.dir / (name if '.' in name else f'{name}.json')
 
+    def on_root(self, look):
+        """`look()` made on rank 0 alone and its value, or the exception it
+        raised, on every rank: what the disk shows is one fact, however each
+        rank's view of the filesystem is cached or delayed."""
+        comm = current_comm()
+        if comm is None:
+            return look()
+        verdict = None
+        if self.root_rank:
+            try:
+                verdict = ('value', look())
+            except Exception as exc:
+                verdict = ('raised', exc)
+        kind, got = broadcast(verdict, comm)
+        if kind == 'raised':
+            raise got
+        return got
+
     def has(self, name):
         """Whether record `name` is in the store."""
-        return self.path(name).exists()
+        return self.on_root(lambda: self.path(name).exists())
 
     def names(self):
         """Every file in the run's directory, sorted."""
-        return sorted(p.name for p in self.dir.iterdir()) \
-            if self.dir.is_dir() else []
+        return self.on_root(lambda: sorted(p.name for p in self.dir.iterdir())
+                            if self.dir.is_dir() else [])
 
     # ----------------------------------------------------------- records
     def write(self, name, record, stamp):
@@ -108,11 +154,12 @@ class Store:
                 'stamp': dict(stamp, identity=record_hash(stamp)),
                 'provenance': provenance(), 'medium': self.medium,
                 'record': record})
+            _sync_record(self.path(name))
         self.barrier()
 
     def held(self, name):
         """The whole stored tree of `name`: stamp, provenance, record."""
-        return read_record(self.path(name))
+        return self.on_root(lambda: read_record(self.path(name)))
 
     def read(self, name, stamp):
         """The record `name` written under `stamp`; another stamp refuses."""
@@ -150,7 +197,12 @@ class Store:
             for ia, c in enumerate(mol.atom_coords() * BOHR_TO_ANGSTROM):
                 lines.append(f'{mol.atom_pure_symbol(ia):2s} {c[0]:20.14f} '
                              f'{c[1]:20.14f} {c[2]:20.14f}')
-            self.path(name).write_text('\n'.join(lines) + '\n')
+            path = self.path(name)
+            tmp = path.with_name(path.name + '.tmp')
+            tmp.write_text('\n'.join(lines) + '\n')
+            _sync(tmp)
+            os.replace(tmp, path)
+            _sync(path.parent)
         self.barrier()
 
     def set_aside(self, names, under):
@@ -158,12 +210,14 @@ class Store:
         into its subdirectory `under` (made by rank 0, every rank waits),
         where the store no longer finds them: nothing is deleted. Returns
         the names moved."""
-        moved = [n for n in names if (self.dir / n).exists()]
+        moved = self.on_root(
+            lambda: [n for n in names if (self.dir / n).exists()])
         if self.root_rank and moved:
             target = self.dir / under
             target.mkdir(parents=True, exist_ok=True)
             for n in moved:
                 os.replace(self.dir / n, target / n)
+            _sync(self.dir)
         self.barrier()
         return moved
 

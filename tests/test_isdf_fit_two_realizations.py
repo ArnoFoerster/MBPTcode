@@ -250,3 +250,13 @@ def test_two_realizations_carry_one_two_electron_energy(fits):
                               - 0.25 * np.einsum('ij,ij', dm, K)))
     assert abs(energies[0] - energies[1]) < ENERGY_TOL
     assert min(energies) > 1.0
+
+
+def test_the_reference_fit_is_the_stable_fit_bit_for_bit():
+    """`fit_M`, which the radius objective and the unstreamed build read, is
+    the Cholesky solve the gradient refits use: one realization, not two that
+    agree to the conditioning of the Gram matrix."""
+    rng = np.random.default_rng(7)
+    D = rng.standard_normal((40, 300)) * np.logspace(0, -3, 40)[:, None]
+    F = rng.standard_normal((25, 300))
+    assert np.array_equal(separable_ri.fit_M(D, F), fit_M_stable(D, F))

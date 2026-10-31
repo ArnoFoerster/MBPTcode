@@ -216,3 +216,32 @@ def test_df_picks_the_integrals_and_size_only_the_solver(monkeypatch):
     w_free, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
                                      df=True)
     assert np.abs(np.sort(w_free) - w_dense).max() < 1e-7
+
+
+def test_a_non_positive_root_is_dropped_with_a_flag():
+    """A planted operator with one negative root: the solvers return the
+    lowest positive roots, and say that a root with Re <= 0 was left out
+    ('upfolded_bse_dropped_roots')."""
+    H = np.diag([-0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    H[2, 3] = 0.1
+    diag = np.diag(H).copy()
+    flags = []
+    with pytest.warns(RuntimeWarning, match='non-positive root'):
+        w, _ = B.davidson_nonsymmetric(lambda v: H @ v, diag, nroots=2,
+                                       max_space=6, flags=flags)
+    assert 'upfolded_bse_dropped_roots' in [f['flag'] for f in flags]
+    assert (w > 0).all() and abs(w[0] - 1.0) < 1e-6
+    ev = np.sort(np.linalg.eigvals(H).real)
+    assert abs(w[1] - ev[2]) < 1e-6
+
+
+def test_the_dense_solve_flags_a_dropped_root(monkeypatch):
+    """solve_dense keeps positive eigenvalues only and flags the others."""
+    n = 6
+    H = np.diag([-0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    monkeypatch.setattr(B, 'build_hamiltonian', lambda *a, **k: H)
+    flags = []
+    with pytest.warns(RuntimeWarning, match='non-positive root'):
+        w, _ = B.solve_dense(None, None, None, 1, 1, nroots=2, flags=flags)
+    assert [f['flag'] for f in flags] == ['upfolded_bse_dropped_roots']
+    assert np.allclose(w, [1.0, 2.0])

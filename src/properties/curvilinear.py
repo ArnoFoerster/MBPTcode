@@ -24,6 +24,23 @@ displacement in another frame than the one the modes live in. Directions the
 primitives do not span (the rigid-body ones, a bend through a linear angle) keep
 their Cartesian displacement, so a small displacement reproduces the Cartesian
 projection exactly.
+
+The same linear map gives the Duschinsky matrix in curvilinear coordinates
+(Reimers 2001; Cerezo, Zuniga, Requena, Avila Ferrer and Santoro, J. Chem.
+Theory Comput. 9, 4947 (2013)): a normal coordinate of the ground state moves
+the internals by A_g l_g, A = B M^-1/2 at each state's own minimum, and the
+excited normal coordinates that move them alike are
+
+    J = L_e^T [ A_e^+ A_g + (1 - A_g^+ A_g) ] L_g,
+
+which is the Wilson GF route's L_e^-1 L_g (with each state's own G matrix)
+where the primitives span every vibration; what they do not span at the
+ground minimum (an out-of-plane wag of a planar molecule, a bend through a
+linear angle) keeps its Cartesian displacement. A torsion stays a torsion in both
+states instead of turning into the stretches its chord shortens. J is not
+orthogonal: the two G matrices differ, and the deviation measures how far
+the two linearizations disagree. At one geometry J is the Cartesian overlap
+L_e^T L_g.
 """
 import itertools
 
@@ -157,3 +174,40 @@ def huang_rhys_curvilinear(mol_ref, mol_a, mol_b, omega, modes, masses):
     dq, _ = curvilinear_displacement(mol_ref, mol_a, mol_b, masses)
     return huang_rhys_of(np.asarray(modes).T @ dq, omega,
                          'huang_rhys_curvilinear')
+
+
+def common_primitives(mol_a, mol_b):
+    """`primitives` of `mol_a` less every angle (and the dihedrals through
+    it) that is linear at `mol_b`: one list both geometries define."""
+    bonds, angles, dihedrals = primitives(mol_a)
+    x = np.asarray(mol_b.atom_coords())
+    linear = np.radians(CURVILINEAR_LINEAR_ANGLE_DEG)
+
+    def bent(i, j, k):
+        return _angle(x[i], x[j], x[k]) < linear
+
+    return (bonds, [a for a in angles if bent(*a)],
+            [d for d in dihedrals if bent(*d[:3]) and bent(*d[1:])])
+
+
+def curvilinear_duschinsky(mol_g, modes_g, mol_e, modes_e, masses):
+    """The Duschinsky matrix J (N, N) of two mode sets in curvilinear
+    coordinates, q_e = J q_g to first order (rows excited, columns ground).
+
+    mol_g, mol_e: the two minima, in one frame (`align_to`); modes_g,
+    modes_e: (3 natm, N) mass-weighted modes at them; masses: (natm,) the
+    masses of both. The internals are `common_primitives`, each Wilson B
+    matrix taken at its own minimum; directions the primitives do not span
+    at the ground minimum keep their Cartesian component. J is NOT
+    orthogonalized.
+    """
+    prims = common_primitives(mol_g, mol_e)
+    w = np.repeat(np.asarray(masses, float), 3) ** -0.5
+    a_g = wilson_b(mol_g.atom_coords(), prims) * w[None, :]
+    a_e = wilson_b(mol_e.atom_coords(), prims) * w[None, :]
+    a_g_pinv = np.linalg.pinv(a_g, rcond=CURVILINEAR_PINV_RCOND)
+    a_e_pinv = np.linalg.pinv(a_e, rcond=CURVILINEAR_PINV_RCOND)
+    lg = np.asarray(modes_g, float)
+    ds = a_g @ lg
+    moved = a_e_pinv @ ds + lg - a_g_pinv @ ds
+    return np.asarray(modes_e, float).T @ moved

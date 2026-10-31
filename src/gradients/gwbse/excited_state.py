@@ -98,7 +98,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from src.Base.numerics.constants import KAPPA, CD_NFREQ
+from src.Base.numerics.constants import CD_NFREQ, CONTINUATION_ROUTE, KAPPA
 from src.gradients.rpa.chain_settings import CarriedGrids, chain_setting
 from src.gradients.gwbse.diagnostics import chain_diagnostics
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
@@ -138,6 +138,29 @@ from src.gradients.gwbse.adaptive_selection import QuasiparticleSelection
 from src.gradients.gwbse.qp_set import QuasiparticleSet
 from src.gradients.gwbse.reverse_fold import ReversePass
 from src.gradients.gwbse.state_following import StateFollower
+
+
+def refuse_continuation_choices(numerics):
+    """Refuse what the continuation (residue_route CONTINUATION_ROUTE) does
+    not carry: the quasiparticle Hamiltonian, whose groups are solved on the
+    pole model's common poles, and the adaptive set, which budgets the pole
+    model's cost against the continuation's own shifts."""
+    qp = numerics.qp
+    if qp.residue_route != CONTINUATION_ROUTE:
+        return
+    if qp.hamiltonian:
+        raise ValueError(
+            f"residues={CONTINUATION_ROUTE!r} with the quasiparticle "
+            'Hamiltonian: its groups are solved on the pole model\'s common '
+            'poles fitted to the contour\'s screening, which the continuation '
+            "does not build; solve the set diagonally (qp.hamiltonian False, "
+            "--no-qp-hamiltonian) or take residues='sop'.")
+    if qp.select is not None:
+        raise ValueError(
+            f"residues={CONTINUATION_ROUTE!r} with an adaptive set: the "
+            'selection budgets the pole model against the continuation, '
+            'which here solves the set itself; declare the set by kind '
+            "(admitted, frontier, valence or all).")
 
 
 #: The records `surface_of` stamps on the surface it returns, which
@@ -360,6 +383,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # evaluation, so copies sharing the cache never adopt each other's;
         # a freed chain's identity, reused by another object, claims neither.
         self.selection_owner = object()
+        refuse_continuation_choices(numerics)
         self.selection.init_adaptive(numerics.qp.select, qp_partition)
 
     @property
@@ -432,8 +456,23 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
     @property
     def reverse(self):
         """The reverse pass (`ReversePass`): the Casida-level adjoints carried
-        back to the nuclei."""
+        back to the nuclei. Refused on the continuation, which has none
+        (`require_adjoint`)."""
+        self.require_adjoint()
         return held_part(self, 'reverse', ReversePass)
+
+    def require_adjoint(self):
+        """Refuse every reverse pass -- a force, a relaxed density, a
+        derivative coupling -- of a chain whose quasiparticle energies are
+        the analytic continuation's (residue_route CONTINUATION_ROUTE)."""
+        if self.residue_route == CONTINUATION_ROUTE:
+            raise NotImplementedError(
+                f"residues={CONTINUATION_ROUTE!r} has no adjoint: the "
+                'analytically continued quasiparticle energies are an energy '
+                'at one geometry, and no reverse pass differentiates the Pade '
+                'continuation. A force, a relaxed density, a derivative '
+                "coupling, a walk or a saddle check needs residues='sop' (or "
+                "'explicit').")
 
     @property
     def ntau_w(self):

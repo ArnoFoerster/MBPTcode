@@ -58,6 +58,20 @@ scheme-B run of the AO-product route:
         --scf-conv-tol 1e-10 --scf-grad-tol 1e-9 \\
         --hessian external --hessian-file s0.hess --out tadf --distribute
 
+The vertical energies alone may take the analytic continuation instead of
+the pole model (--residues pade): the Pade continuation of the space-time
+self-energy, with no residues and no adjoint, on a set declared by kind and
+without the quasiparticle Hamiltonian, in the gas phase or scheme A, on the
+stages s0, hess and vert. Its record holds the energies, oscillator strengths
+and spin-orbit table and no derivative coupling; every walk, the rates and
+scheme B are refused. R0 is the s0 record's:
+
+    srun --mpi=pmi2 -n 32 python -m src.photophysics --xyz film.xyz \\
+        --basis cc-pvdz --basis-for atoms=1-41:aug-cc-pvdz --environment gas \\
+        ... --residues pade --qp-states admitted --scf isdf --scf-grid G3 \\
+        --scf-pivot-points 60000 --grid-accuracy G3 --pivot-points 60000 \\
+        --stages vert --out tadf --distribute
+
 The S0 Hessian may come from elsewhere (--hessian external): an ORCA .hess
 file at R0, the geometry the s0 stage writes to s0.xyz; another geometry is
 refused.
@@ -86,10 +100,11 @@ from src.Base.declaration import QPStates
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
-from src.photophysics.declaration import (ENGINES, GAS, GROUNDS,
+from src.environments.solvent_vocabulary import GAS, SCHEME_B, SOLVENT_SCHEMES
+from src.photophysics.declaration import (ENGINES, GROUNDS,
                                           HESSIAN_ROUTES, RELAXED_SOLVATION,
                                           RESIDUES, SCF_FINISH, SCF_ROUTES,
-                                          SCHEME_B, SOLVENT_SCHEMES, Declaration,
+                                          Declaration,
                                           ExternalHessian, FarStart, Policies,
                                           System, TadfModel, TdaMinimum,
                                           UiscModel)
@@ -213,7 +228,11 @@ def add_physics(ap):
                          'ADAPTIVE_QP_TOL_MEV')
     ap.add_argument('--qp-window', type=int, default=TADF_QP_HALF_WIDTH,
                     help='the frontier set\'s half-width')
-    ap.add_argument('--residues', default='sop', choices=RESIDUES)
+    ap.add_argument('--residues', default='sop', choices=RESIDUES,
+                    help='how Sigma reaches the real axis: the pole model, '
+                         'the explicit residues, or the analytic (Pade) '
+                         'continuation, which has no adjoint and serves the '
+                         'stages s0, hess and vert alone')
     ap.add_argument('--rate-model', default='tadf', choices=('tadf', 'uisc'))
     ap.add_argument('--uisc-modes', type=int, default=UISC_N_MODES)
     ap.add_argument('--uisc-dq', type=float, default=UISC_DQ)
@@ -239,6 +258,16 @@ def add_numerics(ap):
                      help='the AO-product fit\'s points pivoted from the '
                           '--grid-accuracy level\'s parent grid; omitted is '
                           'ao_product_fit.pivot_count')
+    num.add_argument('--scf-isdf-test-set', default=None,
+                     choices=ISDF_TEST_SETS,
+                     help='the ISDF-K mean field\'s own fit, apart from the '
+                          'factors\': omitted is the --scf-grid level\'s '
+                          'tabulated fit')
+    num.add_argument('--scf-pivot-points', type=int, default=None,
+                     help='the ISDF-K mean field\'s AO-product points pivoted '
+                          'from the --scf-grid level\'s parent (alone, it '
+                          'means --scf-isdf-test-set ao_products); omitted, '
+                          'the tabulated fit')
     num.add_argument('--hessian-grid', default=None,
                      help='the numerical Hessian\'s grid level; required '
                           'with --hessian numerical (no ISDF grid is a '
@@ -246,7 +275,13 @@ def add_numerics(ap):
     num.add_argument('--nroots', type=int, default=TADF_NROOTS)
     num.add_argument('--track', default='overlap',
                      choices=('overlap', 'index'))
-    num.add_argument('--qp-hamiltonian', action='store_true')
+    num.add_argument('--qp-hamiltonian', action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help='solve the quasiparticle set\'s near-degenerate '
+                          'groups as one Hamiltonian; omitted is on under '
+                          'a scheme-b-* solvent scheme (the loop moves the '
+                          'charges under which a near-degenerate explicit '
+                          'pair mixes) and off otherwise')
     num.add_argument('--outside-scissor', default=TADF_OUTSIDE_SCISSOR)
     num.add_argument('--bse-conv-tol', type=float, default=None,
                      help='omitted is BSE_DAVIDSON_CONV_TOL')
@@ -326,10 +361,13 @@ def production_numerics(args):
              'conv_tol_grad': (SCF_OPTIMIZATION_GRAD_TOL
                                if args.scf_grad_tol is None
                                else args.scf_grad_tol),
-             **({} if args.xc_grid is None else {'xc_grid': args.xc_grid})},
+             **({} if args.xc_grid is None else {'xc_grid': args.xc_grid}),
+             **scf_fit_of(args)},
         span={'cut': span_cut_of(args)},
         qp={'outside_scissor': args.outside_scissor,
-            'hamiltonian': args.qp_hamiltonian,
+            'hamiltonian': (args.solvent_scheme in SCHEME_B
+                            if args.qp_hamiltonian is None
+                            else args.qp_hamiltonian),
             'residue_route': args.residues},
         bse=bse, **loop)
     return numerics.solved_for_the_loop('bse') if loop else numerics
@@ -388,6 +426,19 @@ def solvent_scheme_of(args, environment):
         raise SystemExit(f'--environment {environment} needs --solvent-scheme '
                          f'(scheme-a or a scheme-b-* one)')
     return args.solvent_scheme
+
+
+def scf_fit_of(args):
+    """The ISDF-K mean field's own fit, --scf-isdf-test-set and
+    --scf-pivot-points, refused beside --scf df; empty where neither is
+    given (the --scf-grid level's tabulated fit)."""
+    fit = {k: v for k, v in (('test_set', args.scf_isdf_test_set),
+                             ('pivot_points', args.scf_pivot_points))
+           if v is not None}
+    if fit and args.scf != 'isdf':
+        raise SystemExit('--scf-isdf-test-set and --scf-pivot-points are the '
+                         'ISDF-K mean field\'s fit; --scf df has none')
+    return fit
 
 
 def isdf_numerics_of(args):

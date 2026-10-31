@@ -649,3 +649,17 @@ def test_walk_restarts_from_its_checkpoint(tmp_path, monkeypatch):
         mod._minimum(args, _Surface(-1.0), start, 0.02, 'singlet', checkpoint=path)
     mod._drop_checkpoint(path)
     assert not os.path.exists(path)
+
+
+def test_ee_adc_refuses_an_equilibrium_mode_continuum():
+    """The EE-ADC singles term is the optical reaction field; a continuum built
+    with equilibrium=True answers at eps_static, so handing it over would label
+    the static response 'vertical': refused, not unwrapped."""
+    from pyscf import gto, scf
+    from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+                verbose=0)
+    env = SolventScreening(mol, eps=1.78, eps_static=78.0, equilibrium=True)
+    mf = scf.RHF(mol).run()
+    with pytest.raises(ValueError, match='equilibrium-mode continuum'):
+        solve_ee_adc(mf, mol, nroots=1, fold=True, environment=env)

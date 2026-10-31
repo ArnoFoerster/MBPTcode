@@ -68,7 +68,7 @@ def sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
     return out
 
 
-def z_vector_contraction(mol, mf, nocc, w_f, w_s):
+def z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics=None):
     """(natm, 3) sum_pq w_f_pq dF_pq + sum_pq w_s_pq dS_pq, FIXED MO basis.
 
     Both derivatives are what a displaced geometry gives with the reference
@@ -83,7 +83,8 @@ def z_vector_contraction(mol, mf, nocc, w_f, w_s):
 
     The occupied-occupied rotation never enters: its antisymmetric part cancels
     out of the density derivative, leaving dD dependent on the
-    occupied-virtual block and on dS_oo alone.
+    occupied-virtual block and on dS_oo alone. numerics: the run's `Numerics`
+    (the Z-vector's solve); None takes its defaults.
     """
     c = np.asarray(mf.mo_coeff, float)
     eps = np.asarray(mf.mo_energy, float)
@@ -94,7 +95,7 @@ def z_vector_contraction(mol, mf, nocc, w_f, w_s):
     y_e = np.zeros((norb, norb))
     y_e[:nocc, nocc:] = 2.0 * ghat[nocc:, :nocc].T
     y_e[nocc:, :nocc] = -2.0 * ghat[nocc:, :nocc]
-    z = solve_lambda(mf, y_e, nocc)[0]
+    z = solve_lambda(mf, y_e, nocc, numerics=numerics)[0]
 
     v = np.zeros((norb, norb))
     v[nocc:, :nocc] = z[nocc:, :nocc] * eps[None, :nocc]
@@ -121,7 +122,7 @@ def _pair_matrix(block, nocc, norb):
     return out + out.T
 
 
-def configuration_coupling(mol, mf, nocc, goo, gvv):
+def configuration_coupling(mol, mf, nocc, goo, gvv, numerics=None):
     """(natm, 3) the configuration term between two EXCITED states.
 
     Writing A = A^sym + kappa, the canonical condition gives, for p != q inside
@@ -168,7 +169,7 @@ def configuration_coupling(mol, mf, nocc, goo, gvv):
     w_f = 0.5 * (g + g.T)
     w_s = np.where(block, -g * eps[None, :] + 0.5 * gam, 0.0)
     w_s = 0.5 * (w_s + w_s.T)
-    return (z_vector_contraction(mol, mf, nocc, w_f, w_s)
+    return (z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics)
             + symmetric_gauge_coupling(mol, mf, nocc, goo, gvv))
 
 
@@ -187,7 +188,7 @@ def symmetric_gauge_coupling(mol, mf, nocc, goo, gvv):
     return sigma_contraction(mol, c, gam, True)
 
 
-def ov_coupling(mol, mf, nocc, w):
+def ov_coupling(mol, mf, nocc, w, numerics=None):
     """(natm, 3) sum_ia W_ia A_ia, A_ia = <phi_i | d phi_a / dR>, canonical.
 
     The occupied-virtual block of the derivative overlap, which is the
@@ -207,5 +208,5 @@ def ov_coupling(mol, mf, nocc, w):
     w_s = -0.5 * _pair_matrix(u * eps[None, nocc:], nocc, norb)
     w_sig = np.zeros((norb, norb))
     w_sig[:nocc, nocc:] = w
-    return (z_vector_contraction(mol, mf, nocc, w_f, w_s)
+    return (z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics)
             + sigma_contraction(mol, mf.mo_coeff, w_sig, False))

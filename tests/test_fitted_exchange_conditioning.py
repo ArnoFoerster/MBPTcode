@@ -10,6 +10,12 @@ reference, every coordinate. Its two-centre term Vinv T Vinv formed by
 matrix products loses digits as the square of the metric's condition number:
 2.7e-8 Ha/Bohr from the difference here (about 1e-6 on a 21-atom
 aug-cc-pVDZ molecule); taken as <g Kt^P, Kt^Q> it is 1.4e-10 from it.
+
+The long-range channel of a range-separated hybrid (omega 0.2) fits on the
+attenuated metric, singular here (Cholesky fails), through the eigenvalues
+above pyscf's LINEAR_DEP_THR. With that pseudo-inverse formed and multiplied,
+a last-bit change of the density moved the skeleton by 2.5e-8 to 1.2e-7
+Ha/Bohr; applied as its eigenvector and eigenvalue factors, by about 1e-14.
 """
 import pathlib
 import sys
@@ -20,7 +26,8 @@ from pyscf import df, gto, scf
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from src.gradients.skeleton_tiles import fitted_fock_skeleton  # noqa: E402
+from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
+                                          fitted_fock_skeleton)
 
 GEOM = ('C 0.02 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
         'H 0 -0.9589 1.2321; H 0.03 0.9289 -1.2321; H 0 -0.9289 -1.2021')
@@ -30,6 +37,13 @@ AUX = 'aug-cc-pvdz-jkfit'
 STEP = 1e-3
 #: What the skeleton may miss the difference by (Ha/Bohr), forces up to 0.7.
 FD_BAR = 2e-9
+#: Long-range operator of the range-separated channel (LRC-wPBEh's).
+OMEGA = 0.2
+#: Relative size of the last-bit change of the occupied factor.
+LAST_BIT = 1e-16
+#: How far that change may move the long-range skeleton (Ha/Bohr), forces
+#: up to 3.9: a linear response of the change, not a fresh rounding draw.
+LAST_BIT_BAR = 1e-12
 
 
 def densities():
@@ -76,3 +90,25 @@ def test_exchange_skeleton_is_the_derivative_on_an_ill_conditioned_metric():
     print(f'metric smallest eigenvalue {lam:.1e}; |skeleton - difference| '
           f'{d:.2e} of {np.abs(fd).max():.2e}')
     assert d <= FD_BAR, d
+
+
+def test_long_range_skeleton_is_stable_to_a_last_bit_change():
+    mol, g, D, Cd = densities()
+    aux = df.addons.make_auxmol(mol, AUX)
+
+    def skeleton(Cd):
+        sk = FittedFockSkeleton(mol, aux, g, Cd @ Cd.T, occ=Cd, coulomb=True,
+                                exchange=1.0, omega=OMEGA)
+        sk.prepare(range(len(sk.tiles)), None)
+        assert sk.metric == 'eigen'
+        return sum(sk.addend(t) for t in range(len(sk.tiles)))
+
+    ref = skeleton(Cd)
+    worst = 0.0
+    for seed in range(4):
+        r = np.random.default_rng(seed).standard_normal(Cd.shape)
+        worst = max(worst, float(np.abs(skeleton(Cd * (1.0 + LAST_BIT * r))
+                                        - ref).max()))
+    print(f'long-range skeleton moved by {worst:.2e} of '
+          f'{np.abs(ref).max():.2e} under a last-bit change')
+    assert worst <= LAST_BIT_BAR, worst

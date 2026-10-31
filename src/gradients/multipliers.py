@@ -10,28 +10,23 @@ The routes differ only in how Y[fold(Lambda)] is applied (from the four-index
 MO tensor in `grad_engine`, or from Coulomb/exchange builds through
 `rotation_gradient`, which the cubic GW-BSE route and the density-fitted
 correlation forces share), so that map is the argument; the antisymmetric
-packing, degenerate-pair projection, energy-denominator preconditioner, lgmres
-call and residual check live here. A route whose Lagrangian is stationary in
-some pairs by construction solves only the others (`free`). The tolerances are
-the `scf` section's `multiplier_*` fields of the caller's `Numerics`.
-
-A solve that ends above its residual tolerance is a numerical event: its last
-iterate is returned, `CphfNotConverged` is warned, and the flag
-'orbital_response_not_converged' is appended to `flags` where the caller hands
-a list. A degenerate pair that carries gradient is an input the equation does
+packing, degenerate-pair projection and energy-denominator preconditioner live
+here. A route whose Lagrangian is stationary in some pairs by construction
+solves only the others (`free`). The solve itself is `Base.pyscf.cphf`'s, the
+one every relaxed density solves too: its tolerances are the `scf` section's
+`multiplier_*` fields of the caller's `Numerics`, and a solve that ends above
+its residual tolerance is warned about and flagged there
+('orbital_response_not_converged', appended to `flags` where the caller hands
+a list). A degenerate pair that carries gradient is an input the equation does
 not cover (a symmetry the caller has to adapt to) and is refused.
 """
 
 import numpy as np
 from pyscf import lib
 
-from src.Base.numerical_flags import flag
-from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_DEGENERACY_TOL,
-                                         ORBITAL_MULTIPLIER_STALL_RATIO)
+from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
 from src.Base.numerics.numerics import numerics_or_default
-from src.Base.pyscf.cphf import CphfNotConverged
-from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
-from src.Base.utils.parallel.mpi_grid import lockstep
+from src.Base.pyscf import cphf
 
 
 def antisym_to_vec(Mmat, iu):
@@ -93,31 +88,21 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
         whose Lagrangian is stationary there by construction reads it as a
         check). None solves every pair.
 
-    lgmres on the pair-space operator, preconditioned by the energy
-    denominator (the operator's diagonal at the Hartree-Fock limit). Under
-    ranks the solve is root-driven (`lgmres_root_driven`): rank 0 iterates
-    and every rank ends on its Lambda.
+    `cphf.solve_operator` on the pair-space operator, preconditioned by the
+    energy denominator (the operator's diagonal at the Hartree-Fock limit).
+    Under ranks the solve is root-driven: rank 0 iterates and every rank
+    ends on its Lambda.
 
     Exactly degenerate pairs are projected out (identity operator, zero
     solution): a rotation inside a degenerate set does not change the energy.
     Their right-hand side vanishes by symmetry, so a non-vanishing one above
-    the residual tolerance is refused. The residual is recomputed from the
-    solution and checked against the residual tolerance because lgmres
-    reports info=0 on stagnation too, and a short solve gives a plausible but
-    wrong force: it is warned about and flagged (module docstring), the force
-    carrying the residual's error.
-
-    A solve already below the residual tolerance ends at the first outer
-    cycle that lowers its true residual by less than
-    ORBITAL_MULTIPLIER_STALL_RATIO: there the matvec's round-off floor lies
-    above `multiplier_tol`, and lgmres would otherwise restart on it up to
-    `multiplier_max_iter` (`krylov.lgmres_root_driven(stall=)`). A solve that
-    reaches `multiplier_tol` is unchanged by this to the bit.
+    the residual tolerance is refused. A short solve gives a plausible but
+    wrong force: it is warned about and flagged (`cphf.solve_operator`), the
+    force carrying the residual's error.
 
     Returns (Lambda, residual norm).
     """
-    s = numerics_or_default(numerics).scf
-    tol, residual_tol = s.multiplier_tol, s.multiplier_residual_tol
+    residual_tol = numerics_or_default(numerics).scf.multiplier_residual_tol
     eps = np.asarray(eps, float)
     norb = len(eps)
     iu = np.triu_indices(norb, k=1)
@@ -141,30 +126,11 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
         out = antisym_to_vec(matvec(vec_to_sym(v, norb, iu)), iu)
         return np.where(fixed, v, out)
 
-    def precond(v):
-        return np.where(fixed, v, v / (2.0 * np.where(fixed, 1.0, -de)))
-
+    # a fixed pair's operator is the identity: its denominator 1
+    denominators = np.where(fixed, 1.0, 2.0 * -de)
     # rank 0 iterates under ranks: the matvec's Fock builds are collectives
-    scale = max(1.0, np.linalg.norm(rhs))
-    x, info = lgmres_root_driven(
-        pair_matvec, rhs, precond, atol=tol * scale,
-        maxiter=s.multiplier_max_iter,
-        stall=(residual_tol * scale, ORBITAL_MULTIPLIER_STALL_RATIO))
-    res = lockstep(np.linalg.norm(pair_matvec(x) - rhs))
+    x, res, info = cphf.solve_operator(pair_matvec, rhs, denominators,
+                                       numerics, flags)
     if verbose:
         print(f"    [multipliers] n={rhs.size} info={info} |res|={res:.3e}")
-    if info != 0 or res > residual_tol * scale:
-        not_converged(f'orbital-response multiplier solve not converged: '
-                      f'info={info}, true residual {res:.3e} (tol '
-                      f'{residual_tol:.0e} relative); its last iterate is '
-                      f'returned', flags)
     return vec_to_sym(np.where(fixed, 0.0, x), norb, iu), res
-
-
-def not_converged(text, flags=None):
-    """Warn `CphfNotConverged` with `text` and raise the named flag
-    'orbital_response_not_converged' (`numerical_flags.flag`), also into
-    `flags` where it is a list: the one failure policy of every
-    orbital-response solve, `Base.pyscf.cphf.solve`'s too."""
-    flag('orbital_response_not_converged', text, CphfNotConverged,
-         stacklevel=3, into=flags)

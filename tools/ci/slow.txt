@@ -29,6 +29,7 @@ pytest test_distributed_scf_grid.py
 pytest test_distributed_trial_space.py
 pytest test_duschinsky.py
 pytest test_fitted_mean_field_force.py
+pytest test_isdfk_scf_numerics.py
 pytest test_nondyson_df_handwritten.py
 pytest test_nondyson_otf.py
 pytest test_rate_chain.py
@@ -114,6 +115,7 @@ pytest test_transfer_rates.py
 pytest test_tta_coupling.py
 pytest test_unrestricted_imaginary_axis.py
 pytest test_vertical_arms.py
+pytest test_vertical_continuation.py
 pytest test_xc_grid_response.py
 script test_davidson_isdf_bse.py
 pytest test_davidson_tda.py

@@ -89,7 +89,7 @@ the stage is refused. Every Huang-Rhys factor, reorganization energy and
 Franck-Condon sum of the rate table stands on these modes.
 
 SCHEME B (`Declaration.solvent_scheme` 'scheme-b-eq' or 'scheme-b-noneq',
-each also '-bare', `declaration.SOLVENT_SCHEMES`): every state stands in
+each also '-bare', `solvent_vocabulary.SOLVENT_SCHEMES`): every state stands in
 the self-consistent state-specific loop of the continuum
 (`src.environments.solvation_loop`), each GW-BSE state model on the declared
 chain (`chain` module docstring, `state_specific`), a singlet with the
@@ -184,7 +184,8 @@ import numpy as np
 from pyscf import gto
 
 from src.Base.numerical_flags import collecting, gathered
-from src.Base.numerics.constants import (EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR,
+from src.Base.numerics.constants import (CONTINUATION_ROUTE,
+                                         EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR,
                                          HARTREE_TO_CM, HARTREE_TO_EV, HARTREE_TO_MEV,
                                          HESSIAN_SCF_GRAD_TOL)
 from src.Base.declaration import Excitation
@@ -204,6 +205,7 @@ from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
 from src.gradients.gwbse.state_manifold import StateManifold
 from src.photophysics import chain, df_check, rate_models, state_specific, uisc
+from src.photophysics.declaration import CONTINUATION_STAGES
 from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
@@ -223,7 +225,7 @@ from src.environments import solvation_loop as sl
 from src.gradients.solvated_surface import SolvatedSurface
 from src.properties.spin_orbit import spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
-                                          spin_vibronic_coupling)
+                                          condon_element, spin_vibronic_coupling)
 from src.gradients.surface import lockstep_geometry
 from src.gradients.surface import driven_chain, followed_root
 from src.gradients.gwbse.surface_factory import reference_mean_field
@@ -236,6 +238,17 @@ CHECKED_STAGES = ('vert', 's1', 't1')
 
 
 # ----------------------------------------------------------------- stamps
+def scf_stamp(numerics):
+    """The scf section a stamp holds: its record, the mean field's own fit
+    (test_set, pivot_points) left out where undeclared, so every stamp
+    written before those fields existed stays what it was."""
+    record = numerics.to_record()['scf']
+    for name in ('test_set', 'pivot_points'):
+        if record.get(name) is None:
+            record.pop(name, None)
+    return record
+
+
 class Stamps:
     """What each stage's record is a function of, for one declaration at
     the input molecule: the declared fields the stage reads, each grid by its
@@ -252,7 +265,7 @@ class Stamps:
         ground = {'system': (d.system.name, d.system.atom, d.system.basis),
                   'reference': d.reference, 'environment': d.environment,
                   'mean_field': mean_field,
-                  'scf': n.to_record()['scf'],
+                  'scf': scf_stamp(n),
                   'span': span}
         if d.scheme_b:
             # stamped under scheme B alone, so that the gas and scheme-A
@@ -948,17 +961,34 @@ def merged_flags(*parts):
 
 
 # ------------------------------------------------------------ properties
-def geometry_properties(ev, s_key, t_key, n_states):
+def geometry_properties(ev, s_key, t_key, n_states, derivatives=True):
     """Everything a rate needs at one geometry, off ONE evaluation: the
     energies of every reported root, the oscillator strengths and transition
     dipoles, the spin-orbit table, d(S0, S), d(S, S+1), d(T, T+1) and the
     second-order derivative of <S|H_SO|T> through S+1, T+1 and the ground
-    state, with the couplings' `scf_flags` (empty when clean)."""
+    state, with the couplings' `scf_flags` (empty when clean).
+
+    derivatives=False (an evaluation with no adjoint, the continuation's):
+    the energies, oscillator strengths, spin-orbit table and |V(S, T)|, and
+    None for every derivative (d_ground, nac, soc_dv_cart, soc_dv_paths)."""
     nocc = occupied_count(ev.mf)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     f_osc, dipole = oscillator_strengths(ev.mf, ev.mol, nocc, *singlet)
     soc = spin_orbit_couplings(ev.mf, ev.mol, nocc, singlet, triplet,
                                nroots=n_states, two_electron='somf')
+    keys = list(ev.energy)
+    common = {'coords_bohr': ev.mol.atom_coords(), 'e0': ev.e0,
+              'energy': {label(k): float(ev.energy[k]) for k in keys},
+              'omega': {label(k): float(ev.omega[k]) for k in keys},
+              'root': {label(k): int(ev.root[k]) for k in keys},
+              'emitter': label(s_key), 'reservoir': label(t_key),
+              'f_osc': f_osc[:n_states], 'dipole': dipole[:n_states],
+              'socme': soc['socme']}
+    if not derivatives:
+        v0, v0_vector = condon_element(ev, soc['h_mo'], s_key, t_key)
+        return dict(common, d_ground=None, nac=None, soc_v0=v0,
+                    soc_v0_vector=v0_vector, soc_dv_cart=None,
+                    soc_dv_paths=None, scf_flags=[])
     s_next, t_next = following(*s_key)[1], following(*t_key)[1]
     d01, diags = analytic_ground_coupling(None, s_key, evaluation=ev)
     # the couplings' mean-field flags (above scf_force_tol, warned about and
@@ -973,17 +1003,9 @@ def geometry_properties(ev, s_key, t_key, n_states):
                                 singlet_paths=(s_next,),
                                 triplet_paths=(t_next,))
     merge_scf_flags(scf, sv.get('scf_flags'))
-    keys = list(ev.energy)
-    return {'coords_bohr': ev.mol.atom_coords(), 'e0': ev.e0,
-            'energy': {label(k): float(ev.energy[k]) for k in keys},
-            'omega': {label(k): float(ev.omega[k]) for k in keys},
-            'root': {label(k): int(ev.root[k]) for k in keys},
-            'emitter': label(s_key), 'reservoir': label(t_key),
-            'f_osc': f_osc[:n_states], 'dipole': dipole[:n_states],
-            'socme': soc['socme'], 'd_ground': d01, 'nac': nac,
-            'soc_v0': sv['v0'], 'soc_v0_vector': sv['v0_vector'],
-            'soc_dv_cart': sv['dv_cart'],
-            'soc_dv_paths': sv['paths'], 'scf_flags': scf}
+    return dict(common, d_ground=d01, nac=nac, soc_v0=sv['v0'],
+                soc_v0_vector=sv['v0_vector'], soc_dv_cart=sv['dv_cart'],
+                soc_dv_paths=sv['paths'], scf_flags=scf)
 
 
 def report_properties(where, props):
@@ -998,6 +1020,11 @@ def report_properties(where, props):
     for i, row in enumerate(soc):
         log(f'    |<{"S0" if i == 0 else f"S{i}"}|H_SO|T_j>| / cm^-1 '
             + ' '.join(f'{x:9.4f}' for x in row))
+    if props['soc_dv_cart'] is None:
+        log(f'    |V({props["emitter"]},{props["reservoir"]})| '
+            f'{props["soc_v0"] * HARTREE_TO_CM:.4f} cm^-1; no derivative '
+            f'couplings (the continuation has no adjoint)')
+        return
     log(f'    |V({props["emitter"]},{props["reservoir"]})| '
         f'{props["soc_v0"] * HARTREE_TO_CM:.4f} cm^-1, max |dV/dR| '
         f'{np.abs(props["soc_dv_cart"]).max() * HARTREE_TO_CM:.4f} '
@@ -1118,8 +1145,11 @@ def vertical(run, walks_next=False):
     if d.scheme_b:
         return scheme_b_vertical(run)
     shared = run.relaxed_spec is run.spec
-    walks = (shared and walks_next and d.policies.far_start is None
-             and not run.reusable('s1'))
+    # the continuation has no adjoint: energies, oscillator strengths and the
+    # spin-orbit table, and no derivative coupling (`geometry_properties`)
+    derivatives = d.numerics.qp.residue_route != CONTINUATION_ROUTE
+    walks = (shared and walks_next and derivatives
+             and d.policies.far_start is None and not run.reusable('s1'))
     want_force = walks and d.handover
     if run.reusable('vert') and not want_force:
         run.accept('vert')
@@ -1127,15 +1157,18 @@ def vertical(run, walks_next=False):
         return run.read('vert')
     t0 = time.time()
     man, ev = run.reference(gradients=(run.s_key,) if want_force else (),
-                            couplings=run.couplings, relaxed=shared)
+                            couplings=run.couplings if derivatives else (),
+                            relaxed=shared)
     if walks:
         run.first['s1'] = (man, ev)
     if run.store.has('vert'):
         log('vert stored; R0 evaluated again for the S1 walk\'s first point',
             t0)
         return run.read('vert')
-    props = geometry_properties(ev, run.s_key, run.t_key, d.n_states)
+    props = geometry_properties(ev, run.s_key, run.t_key, d.n_states,
+                                derivatives=derivatives)
     record = {'props': props, 'seconds': time.time() - t0,
+              'residues': d.numerics.qp.residue_route,
               'qp_states': man.chain.realization.qp_states,
               'qp_bookkeeping': qp_bookkeeping(man.chain, run.mol0),
               **chain.span_fields(man, run.mol0, run.span),
@@ -1769,6 +1802,22 @@ def walk_again(run, stages):
     return out
 
 
+def refuse_continuation_stages(declaration, stages):
+    """Refuse, before any SCF, a stage the continuation cannot carry: every
+    stage outside CONTINUATION_STAGES walks an excited state (with its saddle
+    check) or reads a derivative, and the continuation has no adjoint."""
+    if declaration.numerics.qp.residue_route != CONTINUATION_ROUTE:
+        return
+    refused = [s for s in stages if s not in CONTINUATION_STAGES]
+    if refused:
+        raise StageRefused(
+            f'stages {refused} with residues {CONTINUATION_ROUTE!r}: the '
+            'analytic continuation has no adjoint, so it gives the vertical '
+            'energies alone; a walk, its saddle check, the promoting modes '
+            f"and the rates need residues 'sop' (--stages "
+            f'{",".join(CONTINUATION_STAGES)} on the continuation)')
+
+
 def run_tadf(declaration, store, *, max_memory, stages=None, dry_run=False):
     """Every asked stage of `declaration` (all of its rate model's,
     `stages_of`, when None) in order on `store`, inside the caller's
@@ -1781,6 +1830,7 @@ def run_tadf(declaration, store, *, max_memory, stages=None, dry_run=False):
     unknown = set(stages) - set(STAGE_ORDER)
     if unknown:
         raise ValueError(f'stages {sorted(unknown)} not in {STAGE_ORDER}')
+    refuse_continuation_stages(declaration, stages)
     run = Run(declaration, store, max_memory)
     describe_run(run, stages, run.refuse_early())
     if dry_run:

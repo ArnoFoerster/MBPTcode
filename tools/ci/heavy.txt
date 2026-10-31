@@ -1,6 +1,7 @@
 pytest test_davidson_timings.py  # timing gates, run on the cluster
 script test_davidson_warm_start_mpi.py  # real MPI: mpirun script
 script test_distributed_fit_mpi.py  # real MPI: mpirun script
+script test_df_factor_build_mpi.py  # real MPI: mpirun script; the tiled force's DF factors against the fold's, bitwise
 script test_distributed_isdf_scf_mpi.py  # real MPI: mpirun script
 script test_elpa_casida.py  # real MPI: mpirun script (needs pyelpa; prints SKIPPED without it)
 script test_exchange_skeleton_mpi.py  # real MPI: mpirun script

@@ -14,6 +14,9 @@ Gated on C1 water/cc-pVDZ, 150 points pivoted from the G1 parent, tiles of
     the rounding of the balanced Gram matrix's solve (measured 3e-10 on D,
     1.6e-9 on random M^T seeds, which meet G^-1 first), and three ranks
     give the one-rank force bit for bit;
+  * the three-centre pass over two nodes of two ranks: every node evaluates
+    every shell run once and no block leaves its node, and the projection's
+    rows are the one-rank rows bit for bit;
   * `separable_factors(fit='rows')` on the AO-product test set gives the
     replicated factors to the same rounding;
   * the excited-state chain on the row fit (sliced) is the chain on the
@@ -37,7 +40,9 @@ from src.Base.geometry.body_frame import BodyFrame
 from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.mpi_grid import partition
-from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.Base.factorization.separable_ri import tile_collocation
+from src.Base.utils.parallel.simulated_comm import (run_simulated,
+                                                    simulated_world)
 from src.SingleReference.GW.space_time import separable_factors
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.ao_product_fit_adjoint import (ao_product_fit_adjoint,
@@ -57,6 +62,8 @@ ADJOINT_ROUNDING = 1e-8
 TILE = 40
 #: Small enough a working set that the three-centre pass runs in many runs.
 RUNS = Numerics().derive('several shell runs', layout={'fit_gb': 1e-3})
+#: More shell runs than one round of a node's ranks.
+MANY_RUNS = Numerics().derive('many shell runs', layout={'fit_gb': 2e-4})
 
 
 @pytest.fixture(scope='module')
@@ -96,6 +103,39 @@ def test_the_rows_are_the_replicated_fit_on_any_rank_count(water):
     for part in run_simulated(rows, 3):
         assert not set(part) & set(held)
         held.update(part)
+    assert sorted(held) == sorted(serial)
+    assert all(np.array_equal(held[t], serial[t]) for t in serial)
+
+
+def test_every_node_makes_the_whole_three_centre_pass(water, monkeypatch):
+    mol, auxmol, coords, _ = water
+    tiles = tiles_of(len(coords))
+    runs = apf.shell_runs(mol, auxmol, MANY_RUNS)
+    assert len(runs) > 4
+    evaluated = []
+    block = apf.three_centre_block
+
+    def counted(mol, auxmol, run, *args, **kwargs):
+        evaluated.append(run)
+        return block(mol, auxmol, run, *args, **kwargs)
+    monkeypatch.setattr(apf, 'three_centre_block', counted)
+
+    def projection(comm, node=None):
+        _, own = mine(comm, len(tiles))
+        X_own = {t: tile_collocation(mol, coords[slice(*tiles[t])])
+                 for t in own}
+        return apf.projection_rows(mol, auxmol, X_own, MANY_RUNS, comm, node=node)
+    serial = projection(None)
+    assert len(evaluated) == len(runs)
+    evaluated.clear()
+    # ranks 0, 1 on one node and 2, 3 on the other
+    nodes = [simulated_world(2), simulated_world(2)]
+    held = {}
+    for part in run_simulated(
+            lambda comm: projection(comm, nodes[comm.Get_rank() // 2]
+                                    [comm.Get_rank() % 2]), 4):
+        held.update(part)
+    assert sorted(evaluated) == sorted(runs + runs)
     assert sorted(held) == sorted(serial)
     assert all(np.array_equal(held[t], serial[t]) for t in serial)
 

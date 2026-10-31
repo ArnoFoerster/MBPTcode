@@ -203,6 +203,29 @@ def merge_scf_flags(held, flags):
     return held
 
 
+def _condon(ev, h_mo, singlet, triplet):
+    """(V(S, T), (X_S, Y_S), (X_T, Y_T)) off `ev`: the Condon element's
+    vector and the two roots it is taken between, each checked for its spin
+    and its normalization."""
+    for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
+        if ev.target[key][0] != spin:
+            raise ValueError(f'{key!r} is not a {spin}')
+    _, xs, ys, _ = _root(ev, singlet)
+    _, xt, yt, _ = _root(ev, triplet)
+    check_normalization(np.c_[xs], np.c_[ys])
+    check_normalization(np.c_[xt], np.c_[yt])
+    return (soc_vectors(h_mo, occupied_count(ev.mf), (xs, ys), (xt, yt)),
+            (xs, ys), (xt, yt))
+
+
+def condon_element(ev, h_mo, singlet, triplet):
+    """(|V(S, T)|, V(S, T)) off ONE evaluation, the spin-orbit element alone:
+    what an evaluation with no derivative coupling (no adjoint) still gives
+    of `spin_vibronic_coupling`."""
+    v0 = _condon(ev, h_mo, singlet, triplet)[0]
+    return float(np.linalg.norm(v0)), v0
+
+
 def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
                            triplet_paths=(), modes=None, masses=None,
                            omega=None, rotation=None, direct=None):
@@ -230,14 +253,7 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     """
     coupling = require(ev, 'coupling', 'spin_vibronic_coupling')
     nocc = occupied_count(ev.mf)
-    for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
-        if ev.target[key][0] != spin:
-            raise ValueError(f'{key!r} is not a {spin}')
-    _, xs, ys, _ = _root(ev, singlet)
-    _, xt, yt, _ = _root(ev, triplet)
-    check_normalization(np.c_[xs], np.c_[ys])
-    check_normalization(np.c_[xt], np.c_[yt])
-    v0 = soc_vectors(h_mo, nocc, (xs, ys), (xt, yt))
+    v0, (xs, ys), (xt, yt) = _condon(ev, h_mo, singlet, triplet)
     v_s, d_s, v_t, d_t, labels = {}, {}, {}, {}, {}
     scf = []
     for key in triplet_paths:

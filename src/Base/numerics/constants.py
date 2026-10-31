@@ -253,19 +253,13 @@ DF_EXCHANGE_METRIC_FLOOR = 1e-12
 AMB_PROBE_TOL = 1e-6
 AMB_PROBE_SIGN_TOLS = (1e-2, 1e-3, 1e-4)
 
-# CPHF/CPKS Z-vector solve (GWDensityMatrixSolver.solve_relaxation).
+# CPHF/CPKS Z-vector solve of a ground-state correlated density
+# (GWDensityMatrixSolver.solve_relaxation): its lgmres tolerance (relative to
+# max(1, |rhs|)) and iteration ceiling, src.Base.pyscf.cphf.solve.
 CPHF_MAX_CYCLE = 100
 CPHF_TOL = 1e-9
-# src.Base.pyscf.cphf.solve: rounds of solving again for the true residual
-CPHF_REFINEMENTS = 10
-# ... and pyscf's lib.krylov inside one round, on a unit right-hand side: its
-# own tolerance and the dependence threshold that ends it (the round stops on
-# the dependence test, so both sit below any true-residual tolerance)
-CPHF_KRYLOV_TOL = 1e-14
-CPHF_KRYLOV_LINDEP = 1e-20
-# Z-vector of a correlated force or relaxed excited-state density
-# (df_correlation_force, ee_relaxed_density), tighter than CPHF_TOL: the
-# force is first order in the multipliers' error
+# The static correction's relaxed density on the tighter tolerance of a
+# correlated force (test_uhf_static_correction_df's bar).
 CORRELATION_CPHF_TOL = 1e-10
 
 # QP root-finding (src/Solvers/qp_equation.py).
@@ -682,8 +676,9 @@ ISDF_ROW_FORCE_ENERGY_TOL = 4e-8
 # couplings by eigenvector overlap.
 NUCLEAR_FD_STEP = 1e-3
 
-# Convergence of the orbital-response (Z-vector) equation
-# antisym(Y_E + Y[fold(Lambda)]) = 0 solved in src/gradients/multipliers.py:
+# Convergence of the orbital-response (Z-vector) equation of every relaxed
+# density and every force (src/Base/pyscf/cphf.py; the multipliers'
+# antisym(Y_E + Y[fold(Lambda)]) = 0 of src/gradients/multipliers.py too):
 # lgmres runs to an absolute residual of this times max(1, |rhs|).
 ORBITAL_MULTIPLIER_TOL = 1e-11
 
@@ -1706,6 +1701,25 @@ QP_SUBSPACE_TOL = 1e-13
 
 QP_SUBSPACE_MAX_ITER = 200
 
+# A group of more orbitals than QP_SUBSPACE_DENSE_MAX is solved without its
+# n^2 x n^2 Jacobian: Newton's equation (1 - J) dH = residual by GMRES on the
+# operator J (batched products over the poles, QP_SUBSPACE_POLE_CHUNK at a
+# time, each rank taking its share of the poles), to the relative residual
+# QP_SUBSPACE_GMRES_RTOL, restarted every QP_SUBSPACE_GMRES_RESTART
+# iterations, at most QP_SUBSPACE_GMRES_MAXITER restart cycles. The fixed
+# point is the same one: the Newton residual the iteration stops on is exact.
+# A group of at most QP_SUBSPACE_DENSE_MAX orbitals takes the dense solve, as
+# before.
+QP_SUBSPACE_DENSE_MAX = 24
+
+QP_SUBSPACE_GMRES_RTOL = 1e-11
+
+QP_SUBSPACE_GMRES_RESTART = 64
+
+QP_SUBSPACE_GMRES_MAXITER = 100
+
+QP_SUBSPACE_POLE_CHUNK = 256
+
 # Interior samples of an interval between neighbouring poles that no bound
 # certifies as holding exactly one root (`qp_equation.PoleSum`): a negative
 # fitted amplitude at one of its ends, or negative ones nearby strong enough
@@ -2131,6 +2145,72 @@ RATE_THERMAL_WINDOW_KT = 10.0
 # the rate chain's numerical flags. 1e-13 is about 450 eps.
 RATE_FC_DENSITY_FLOOR_REL = 1e-13
 
+# The Duschinsky guard (`properties.duschinsky.duschinsky_guard`): a pair of
+# Hessians and a displacement whose harmonic Duschinsky model does not
+# describe the crossing is refused, not run. Three tests per direction:
+# - mixing: a soft mode (below DUSCHINSKY_SOFT_MODE_CM, a torsion or a ring
+#   pucker) of the initial state may put at most
+#   DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX of its J^2 weight on the final state's
+#   stiff modes (above
+#   DUSCHINSKY_STIFF_MODE_CM, the skeletal and C-H stretches). A rectilinear J
+#   between two minima a large torsion apart turns the torsion into the
+#   stretches (0.21 on 4-(dimethylamino)benzonitrile S1/T1, TDA-wB97X-D3/
+#   def2-SVP). A soft mode at 10 cm^-1 with 1% of its weight on a 3000 cm^-1
+#   stretch adds ~12 eV to the band's first moment at 300 K.
+# - sum rule: the model's reorganization of the accepting state, K^T W_f^2 K/2,
+#   against the accepting state's energy difference between the two minima,
+#   within RATE_FC_LAMBDA_RATIO_MAX either way (`photophysics.rates`).
+# - first moment: the band's mean vibrational energy <x> (closed form) less
+#   the zero-point difference is lambda plus the distortion energy of the
+#   frequency change and rotation, sum J_lk^2 (w_f,l - w_i,k)^2 / 4 w_i,k at
+#   T = 0. It must lie within DUSCHINSKY_FIRST_MOMENT_RATIO_MAX of the energy
+#   lambda either way, so the band is centred near the adiabatic gap plus
+#   lambda. The rectilinear model of 4-(dimethylamino)benzonitrile S1/T1
+#   puts the distortion energy at 46 eV at 300 K (lambda 0.45 eV).
+DUSCHINSKY_SOFT_MODE_CM = 200.0
+DUSCHINSKY_STIFF_MODE_CM = 1000.0
+DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX = 1e-2
+DUSCHINSKY_FIRST_MOMENT_RATIO_MAX = 2.0
+# A curvilinear Duschinsky matrix (`properties.curvilinear.
+# curvilinear_duschinsky`) is not orthogonal: its singular values measure how
+# far the two states' linearizations of the internals disagree (0.70..1.43 for
+# 4-(dimethylamino)benzonitrile S1/T1, 0.89..1.12 for ethane with a methyl
+# turned by 60 degrees). One outside [bar, 1/bar] is refused: the two minima
+# are too far apart for a linear map between their normal coordinates.
+DUSCHINSKY_CURVILINEAR_SV_MIN = 0.5
+# Modes of the Duschinsky bath below this many cm^-1 are taken out of the
+# quantum correlation function and treated as one classical, frequency-
+# unchanged displaced block (`properties.duschinsky.split_soft_modes`): their
+# reorganization joins the classical broadening, as the low-frequency modes of
+# Ulstrup and Jortner, J. Chem. Phys. 63, 4358 (1975) and Jortner, J. Chem.
+# Phys. 64, 4860 (1976). Two reasons fix the value. (1) Classical: at 300 K
+# (kT = 208.5 cm^-1) a mode at 100 cm^-1 is at kT/2, where the quantum
+# correction to its thermal energy, (hbar w / kT)^2 / 12, is 2%. (2) Not
+# harmonic: torsions and pyramidalizations below ~100 cm^-1 have barriers
+# within a few kT and thermal amplitudes sqrt(kT) / w of tens of degrees, so
+# their harmonic frequency CHANGE between two states (a T1 mode at 10 cm^-1
+# becoming an S1 mode at 90 cm^-1 in 4-(dimethylamino)benzonitrile, ~1 eV
+# of harmonic thermal energy at 300 K) is not data. On that molecule the RISC
+# band's first moment less the zero-point shift is 0.76 / 0.53 / 0.52 eV at
+# 50 / 100 / 200 cm^-1 (lambda 0.45 eV; 2.21 eV with no classical block). The
+# bar is for room temperature: at 77 K (kT = 53.5 cm^-1) a 100 cm^-1 mode is
+# not classical and the cutoff is the caller's to lower.
+DUSCHINSKY_CLASSICAL_BELOW_CM = 100.0
+# The first two cumulants of a Duschinsky band are read off ln G at two short
+# times (Richardson, `properties.duschinsky.cumulants_of`). The first step is
+# a fixed fraction of the slowest period; a wide band needs a shorter one (its
+# expansion parameter is h sqrt(kappa_2), not h omega_min: 4-(dimethylamino)
+# benzonitrile's rectilinear RISC band, kappa_1 46.7 eV, reads 4.2 eV at the
+# first step). The step is halved until the estimates at h and h/2 agree:
+# kappa_1 to this fraction of sqrt(kappa_2), kappa_2 to this fraction of
+# itself. A band that agrees at the first step keeps its bits. The bar sits
+# above the roundoff of kappa_2, which grows as 1/h^2 (7.6e-8 between the
+# first two steps of a narrow 800-3050 cm^-1 band), and far below what the
+# grid and the roundoff floor of the rate chain need.
+DUSCHINSKY_CUMULANT_TOL = 1e-6
+# Halvings of the cumulant step before the estimate is refused.
+DUSCHINSKY_CUMULANT_MAX_HALVINGS = 40
+
 # The classical reorganization energies, eV, the effective-mode literature
 # assumes instead of computing one (the last rung of the rate chain's
 # ablation ladder, `photophysics.rate_chain.ablation_ladder`).
@@ -2352,9 +2432,16 @@ FESHBACH_ROOT_MAX_ITER = 100
 # differences (Richardson), below which the ratio is not formed.
 FD_LADDER_RATIO_FLOOR = 1e-12
 
-# Every residue route of the contour quasiparticle energy; each consumer takes
-# a named subset of this one vocabulary.
-RESIDUE_ROUTES_ALL = ('explicit', 'laplace', 'sop', 'none', 'auto')
+# Every route by which a quasiparticle energy of the cubic chain reaches the
+# real axis; each consumer takes a named subset of this one vocabulary. The
+# contour's residue backends ('explicit', 'laplace'), the pole model ('sop'),
+# 'none' (refuse a residue) and 'auto' (a backend decided per geometry), and
+# CONTINUATION_ROUTE, the Pade continuation of the space-time Sigma_c(i.omega)
+# (`GW.qp_energy.MODE_CONTINUATIONS`), which takes no residues and has no
+# adjoint: energies at one geometry only.
+CONTINUATION_ROUTE = 'pade'
+RESIDUE_ROUTES_ALL = ('explicit', 'laplace', 'sop', 'none', 'auto',
+                      CONTINUATION_ROUTE)
 
 # The spin-coupling factors of a spin-orbit element: with |S_ia>, |T^M_ia> the
 # orthonormal spin-adapted singles and h the coefficient of sigma,

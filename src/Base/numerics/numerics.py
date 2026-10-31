@@ -41,8 +41,7 @@ from typing import Optional
 
 from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
-                                         BSE_SOLVERS, CD_NTAU, CPHF_MAX_CYCLE,
-                                         CPHF_REFINEMENTS, CPHF_TOL,
+                                         BSE_SOLVERS, CD_NTAU,
                                          DAVIDSON_GUESS_FACTOR,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
@@ -177,14 +176,15 @@ class ScfNumerics:
     route's auxiliary basis or ISDF-K grid level, pyscf's
     exchange-correlation grid level of a Kohn-Sham one (xc_grid,
     XC_GRID_LEVEL), and its convergence; and
-    the orbital response of that mean field (`src.Base.pyscf.cphf.solve`):
-    the true residual its solution reaches (cphf_tol), the Krylov cycles of
-    one solve (cphf_max_cycle) and the rounds of solving again for the
-    residual left (cphf_refinements); and the orbital-response (Z-vector)
-    solve of every gradient (`src.gradients.multipliers`): its lgmres
-    tolerance (multiplier_tol), iteration ceiling (multiplier_max_iter) and
-    the true residual it must reach (multiplier_residual_tol), each relative
-    to max(1, |rhs|)."""
+    the orbital-response (Z-vector) solve of every relaxed density and every
+    gradient (`src.Base.pyscf.cphf.solve`, which `src.gradients.multipliers`
+    wraps): its lgmres tolerance (multiplier_tol), iteration ceiling
+    (multiplier_max_iter) and the true residual it must reach
+    (multiplier_residual_tol), each relative to max(1, |rhs|). On the
+    ISDF-K route, its own fit apart from the factors': test_set (None, the
+    level's tabulated fit; or one of ISDF_TEST_SETS) and pivot_points (the
+    AO-product fit's points pivoted from the grid_level's parent; a count
+    alone means 'ao_products')."""
     route: Optional[str] = None
     auxbasis: Optional[str] = None
     grid_level: Optional[str] = None
@@ -193,12 +193,28 @@ class ScfNumerics:
     conv_tol: float = SCF_DIFFERENTIABLE_CONV_TOL
     conv_tol_grad: float = SCF_DIFFERENTIABLE_GRAD_TOL
     max_cycle: int = SCF_MAX_CYCLE
-    cphf_tol: float = CPHF_TOL
-    cphf_max_cycle: int = CPHF_MAX_CYCLE
-    cphf_refinements: int = CPHF_REFINEMENTS
     multiplier_tol: float = ORBITAL_MULTIPLIER_TOL
     multiplier_max_iter: int = ORBITAL_MULTIPLIER_MAX_ITER
     multiplier_residual_tol: float = ORBITAL_MULTIPLIER_RESIDUAL_TOL
+    test_set: Optional[str] = None
+    pivot_points: Optional[int] = None
+
+    def __post_init__(self):
+        if self.test_set is not None and self.test_set not in ISDF_TEST_SETS:
+            raise ValueError(f'scf test_set={self.test_set!r} not in '
+                             f'{ISDF_TEST_SETS}')
+        if self.pivot_points is not None and (
+                int(self.pivot_points) != self.pivot_points
+                or self.pivot_points < 1):
+            raise ValueError(f'scf pivot_points={self.pivot_points!r}: a '
+                             'positive point count')
+        if self.pivot_points is not None and self.test_set == 'duchemin_blase':
+            raise ValueError("scf pivot_points selects points for "
+                             "test_set='ao_products', not 'duchemin_blase'")
+        if (self.test_set, self.pivot_points) != (None, None) and \
+                self.route not in (None, 'isdf'):
+            raise ValueError(f'scf test_set and pivot_points are the ISDF-K '
+                             f'fit\'s; route {self.route!r} has none')
 
 
 @dataclass(frozen=True)
@@ -219,7 +235,9 @@ class QPNumerics:
         QPStates('adaptive') to select the set out of those candidates at
         the first forward.
     residue_route: how the real-axis residues of Sigma^c are taken
-        ('explicit', 'laplace', 'sop', or 'none' where there are none).
+        ('explicit', 'laplace', 'sop', or 'none' where there are none), or
+        'pade' (CONTINUATION_ROUTE): the set's energies by the analytic
+        continuation of Sigma^c(i.omega), with no residues and no adjoint.
     scissor: 'calibrate' freezes a shift for each set member the pole model
         does not admit, from its root at the reference geometry; None keeps
         those on the fallback route.
@@ -695,7 +713,15 @@ IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
 # fields added after identities were first written: at their default they are
 # left out, so every identity written before them stays what it was
 IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'),
-                              ('solvent', 'loop_force_fraction'))
+                              ('solvent', 'loop_force_fraction'),
+                              ('scf', 'test_set'), ('scf', 'pivot_points'))
+# fields retired after identities were first written, with the one value every
+# object held: hashed at it, so every identity written before stays what it
+# was; a record naming one at that value is read without it, at any other
+# value refused (the orbital-response solve's tolerances are the scf section's
+# multiplier_* fields)
+IDENTITY_RETIRED = (('scf', 'cphf_tol', 1e-9), ('scf', 'cphf_max_cycle', 100),
+                    ('scf', 'cphf_refinements', 10))
 
 
 @dataclass(frozen=True)
@@ -750,6 +776,12 @@ class Numerics:
         sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
                     else dict(record[name]) for name in SECTIONS}
         sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
+        for section, name, held in IDENTITY_RETIRED:
+            if name in sections[section] and sections[section].pop(name) != held:
+                raise ValueError(f'the record sets {section}.{name}, a retired '
+                                 f'field, to another value than {held!r}: '
+                                 'the orbital response reads the multiplier_* '
+                                 'fields; write those')
         return cls(**{name: SECTIONS[name](**sections[name])
                       for name in SECTIONS},
                    parent=record.get('parent'),
@@ -773,6 +805,8 @@ class Numerics:
             default = getattr(SECTIONS[section](), name)
             if values[section][name] == default:
                 values[section].pop(name)
+        for section, name, held in IDENTITY_RETIRED:
+            values[section][name] = held
         return record_hash({name: values[name] for name in IDENTITY_FIELDS
                             if name not in LATER_SECTIONS
                             or values[name] != asdict(SECTIONS[name]())})

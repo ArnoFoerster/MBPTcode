@@ -31,9 +31,9 @@ re-solved. That is the gate; the rest pins the pieces it is made of.
   7. solve_ee_adc(ss_density='relaxed'): e = omega + the relaxed shift; the
      unrelaxed shifts and both dipole changes are recorded; the relaxed SS
      shift is smaller in magnitude than the unrelaxed one (formaldehyde
-     cc-pVDZ toluene, singlet and triplet); unrelaxed is the default (two
+     cc-pVDZ toluene, singlet and triplet); relaxed is the default (two
      solves: to a few ulp, `matches` of tests/pins.py); refusals
-     (unknown density, relaxed without state_specific).
+     (unknown density, unrelaxed without state_specific).
   8. over simulated MPI ranks (2 and 3, one occupied orbital per tile) the
      pieces and the relaxed density are the serial ones to a few ulp.
   9. a check that can fail: the pieces with the B^P_ab derivative (the
@@ -277,7 +277,7 @@ def check_driver():
               environment=env, return_fold=True, state_specific='vertical')
     for spin in ('singlet', 'triplet'):
         e, _, res = solve_ee_adc(sol, spin=spin, ss_density='relaxed', **kw)
-        e_u, _, res_u = solve_ee_adc(sol, spin=spin, **kw)
+        e_u, _, res_u = solve_ee_adc(sol, spin=spin, ss_density='unrelaxed', **kw)
         ok &= check(np.array_equal(e, res.omega + res.ss_shifts['vertical']),
                     f'{spin}: e = omega + the relaxed shift')
         # two solves of the state: its shift to a few ulp
@@ -291,13 +291,13 @@ def check_driver():
                     f'{su * 27211.386:+.1f} meV; d mu_z relaxed {mr[2]:+.3f}, '
                     f'unrelaxed {mu[2]:+.3f} a.u.')
     e_d, _ = solve_ee_adc(sol, spin='singlet', **dict(kw, return_fold=False))
-    e_x, _ = solve_ee_adc(sol, spin='singlet', ss_density='unrelaxed',
+    e_x, _ = solve_ee_adc(sol, spin='singlet', ss_density='relaxed',
                           **dict(kw, return_fold=False))
     ok &= check(matches(e_d, e_x, RECORDING_BLAS, quantity='root'),
-                'unrelaxed is the default (two solves: to a few ulp)')
+                'relaxed is the default (two solves: to a few ulp)')
     for label, args in (('an unknown density', dict(kw, ss_density='orbital')),
-                        ('relaxed without state_specific',
-                         dict(kw, state_specific='off', ss_density='relaxed'))):
+                        ('unrelaxed without state_specific',
+                         dict(kw, state_specific='off', ss_density='unrelaxed'))):
         try:
             solve_ee_adc(sol, spin='singlet', **args)
             ok &= check(False, f'{label} raises')

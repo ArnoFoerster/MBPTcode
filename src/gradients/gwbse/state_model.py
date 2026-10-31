@@ -282,14 +282,15 @@ class GWBSEState:
             F = F + self.chain.excitation_gradient(self.mol, self.mf)[0]
         return lockstep(F), dict(dm_eff=r.dm_eff, lr=[], flags=r.info['flags'])
 
-    def loop_response(self, h, field):
+    def loop_response(self, h, field, numerics=None):
         """The reference's `HFState.loop_response` on the mean field of its
         last call; an excited state has none."""
         if self.spin is not None:
             raise ValueError('the loop response is the reference\'s (spin None): '
                              'the slow charges follow the ground state')
         return lockstep(loop_density_response(self.mf, self.reference._h0,
-                                              field.scf_continuum(), h))
+                                              field.scf_continuum(), h,
+                                              numerics))
 
     def identity(self):
         """What this model computes (module docstring)."""
