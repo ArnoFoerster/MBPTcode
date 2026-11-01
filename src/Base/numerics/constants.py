@@ -1792,6 +1792,15 @@ QP_SUBSPACE_GMRES_MAXITER = 100
 
 QP_SUBSPACE_POLE_CHUNK = 256
 
+# The QP-set reverse pass (`gradients.gwbse.qp_space_time.QPSetPass`) joins each
+# state's B_p_bar terms in frequency order, the running sum handed from the
+# owner of one frequency to the next (`ordered_chain_sum`, one collective of
+# every rank per hand-over). Consecutive states of one slice owner are chained
+# together as one stacked sum, up to this many GB a rank (the busiest rank's
+# share of their terms, stacked, and the running sums), so one hand-over
+# carries several states: fewer collectives, the same additions and bits.
+QP_CHAIN_BATCH_GB = 0.5
+
 # Interior samples of an interval between neighbouring poles that no bound
 # certifies as holding exactly one root (`qp_equation.PoleSum`): a negative
 # fitted amplitude at one of its ends, or negative ones nearby strong enough

@@ -448,10 +448,6 @@ class QuasiparticleSet:
         key = tuple(int(p) for p in self.chain.resolved.qp_set)
         subspaces = self.chain.resolved.qp_subspaces
         if subspaces is None or subspaces[0] != key:
-            groups = []
-            for side in ([p for p in key if p < self.chain.nocc],
-                         [p for p in key if p >= self.chain.nocc]):
-                groups += window_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
             before = self.chain.resolved.carried_subspaces
             carried = {int(p) for b in before for p in b}
             # a carried member the explicit set no longer holds leaves its
@@ -462,9 +458,7 @@ class QuasiparticleSet:
                         'remaining': [int(q) for q in b if q in set(key)]}
                        for b in before for p in b if int(p) not in set(key)]
             kept = []
-            for b in merged_blocks(key, groups, before):
-                if len(b) < 2:
-                    continue
+            for b in self._window_subspaces(key, eps):
                 pole = tuple(p for p in b if routes.get(p) == 'sop')
                 dropped += [{'orbital': p, 'subspace': list(b),
                              'route': routes.get(p), 'carried': p in carried,
@@ -492,6 +486,38 @@ class QuasiparticleSet:
                 'carried': [list(b) for b in self.chain.resolved.carried_subspaces],
                 'dropped': dropped})
         return self.chain.resolved.qp_subspaces[1]
+
+    def _window_subspaces(self, key, eps):
+        """The subspaces of two or more of the set `key` before any member
+        leaves for another route: complete linkage within
+        QP_HAMILTONIAN_WINDOW on each side of the gap (`window_blocks`),
+        joined with the carried subspaces."""
+        groups = []
+        for side in ([p for p in key if p < self.chain.nocc],
+                     [p for p in key if p >= self.chain.nocc]):
+            groups += window_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
+        return [b for b in merged_blocks(
+            key, groups, self.chain.resolved.carried_subspaces) if len(b) > 1]
+
+    def _forward_pairs(self, eps, states):
+        """(i, j) positions into `states` of every pair the quasiparticle
+        Hamiltonian can ask for at this forward, in its own orientation, so
+        the set solve's frequency pass takes their contractions on the same
+        solves (`qp_set_gradient`'s wc_pairs): the frozen subspaces' pairs,
+        or before the freeze the subspaces `_frozen_qp_subspaces` cuts its
+        groups from. Members that leave a group keep the order of the rest,
+        so every pair `qp_hamiltonian` forms is one of these. None without a
+        quasiparticle Hamiltonian, or for a solve of part of the set."""
+        key = tuple(int(p) for p in self.chain.resolved.qp_set)
+        if (not self.chain.qp_hamiltonian
+                or tuple(int(p) for p in states) != key):
+            return ()
+        frozen = self.chain.resolved.qp_subspaces
+        subspaces = (frozen[1] if frozen is not None and frozen[0] == key
+                     else self._window_subspaces(key, eps))
+        pos = {p: i for i, p in enumerate(key)}
+        return [(pos[p], pos[q]) for b in subspaces
+                for a, p in enumerate(b) for q in b[a + 1:]]
 
     def qp_hamiltonian(self, mf, eps, ws, route_out, continuum=None):
         """The `QPHamiltonian` of this forward, or None where the set has no
@@ -865,7 +891,8 @@ class QuasiparticleSet:
                 grid.wt, states, weights, mu=mu,
                 xc_correction=xc_correction, route_out=route_out,
                 tape=tape, rows_block=rows_block, timer=self.chain.timer,
-                pairs=pairs, **self.qp_kw())
+                pairs=pairs, wc_pairs=self._forward_pairs(eps, states),
+                **self.qp_kw())
             tape = route_out.get('tape', tape)
             if whole_set:
                 self._flag_z_outside(route_out, states)

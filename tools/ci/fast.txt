@@ -363,6 +363,7 @@ pytest test_qp_hamiltonian_member_lost_inside_frozen_set.py
 pytest test_qp_hamiltonian_rotation_invariance.py
 pytest test_qp_pairs_reuse_solves.py
 pytest test_qp_pairs_by_subspace.py
+pytest test_qp_chain_batches.py
 pytest test_qp_selection_window_edge.py
 pytest test_qp_subspace_carried_member_not_explicit.py
 pytest test_rate_manifold.py

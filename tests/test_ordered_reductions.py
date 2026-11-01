@@ -95,10 +95,14 @@ def water():
                 grid=grid, mu=0.5 * (eps[nocc - 1] + eps[nocc]))
 
 
-def recording(monkeypatch, module, name, plant=False):
+def recording(monkeypatch, module, name, plant=False, stacked=False):
     """Every call of `module.<name>` (an ordered sum) logged per rank as
     (call number, result copy); with `plant`, the largest element of rank
-    1's first addend moved by MOVE before the sum."""
+    1's first addend moved by MOVE before the sum. stacked: the call sums
+    several states' terms as one stacked array, which states share a call
+    following their slices' owners and so the rank count; each state is
+    logged as its own entry, so the serial run and every rank count compare
+    state for state."""
     real = getattr(mpi_grid, name)
     log = {}
 
@@ -119,8 +123,13 @@ def recording(monkeypatch, module, name, plant=False):
                 a.flat[np.abs(a).argmax()] *= 1 + MOVE
                 terms[k] = a
         out = real(terms, *args, **kwargs)
-        log.setdefault(rank, []).append(None if out is None
-                                        else np.array(out, copy=True))
+        if stacked:
+            log.setdefault(rank, []).extend(
+                [None] * np.shape(args[2])[0] if out is None
+                else [np.array(x, copy=True) for x in out])
+        else:
+            log.setdefault(rank, []).append(None if out is None
+                                            else np.array(out, copy=True))
         return out
 
     monkeypatch.setattr(module, name, wrapped)
@@ -260,18 +269,20 @@ SITES = {
     'chi0(0)': (chi0_static, space_time, 'ordered_chain_sum'),
     'E_c': (rpa_energy, space_time, 'ordered_sum'),
     'qp_set eps_bar': (qp_set, qp_space_time, 'ordered_sum'),
-    'qp_set B_p_bar': (qp_set, qp_space_time, 'ordered_chain_sum'),
+    'qp_set B_p_bar': (qp_set, qp_space_time, 'ordered_chain_sum'),  # stacked
     'fitted skeleton': (skeleton, skeleton_tiles, 'ordered_sum'),
     'trial-space joins': (pair_joins, trial_space, 'ordered_sum'),
 }
 
+#: sites whose sums stack several states per call (`recording`, stacked)
+STACKED = ('qp_set B_p_bar',)
 
 @pytest.mark.parametrize('site', list(SITES))
 def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
     """Every call of the site's ordered sum, at 2, 3, 5 and 8 ranks, every
     rank, the serial call to a few ulp; chi0(0)'s W and E_c themselves too."""
     run, module, name = SITES[site]
-    log = recording(monkeypatch, module, name)
+    log = recording(monkeypatch, module, name, stacked=site in STACKED)
     with distributed(None):
         ref_out = run(water)
     ref = log.pop(0)
@@ -295,12 +306,13 @@ def test_every_site_fails_a_moved_addend(water, monkeypatch, site):
     """Rank 1's first addend moved by MOVE at the site: some call is no
     longer the serial one."""
     run, module, name = SITES[site]
-    log = recording(monkeypatch, module, name)
+    log = recording(monkeypatch, module, name, stacked=site in STACKED)
     with distributed(None):
         run(water)
     ref = log.pop(0)
     monkeypatch.undo()
-    log = recording(monkeypatch, module, name, plant=True)
+    log = recording(monkeypatch, module, name, plant=True,
+                    stacked=site in STACKED)
     run_simulated(lambda comm: run(water), 3)
     assert not all(bitwise_calls(ref, log.get(r, [])) for r in range(3)), site
 

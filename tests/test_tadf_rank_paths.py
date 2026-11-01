@@ -236,7 +236,7 @@ def test_a_wrong_rank_fails_the_gate(pyscf_one_thread, monkeypatch):
     """Rank 1's half of the frequency pass off by DEFECT, relative: the
     ranks still agree with each other (the sum they reduce is the same),
     and parts (i) and (ii) both fail."""
-    real = qp_space_time.cd_screening_contraction_multi
+    real = qp_space_time.cd_pair_contraction_multi
 
     def wrong(*args, **kwargs):
         out = real(*args, **kwargs)
@@ -247,8 +247,7 @@ def test_a_wrong_rank_fails_the_gate(pyscf_one_thread, monkeypatch):
 
     serial_fits, ranked_fits = PoleFits(), PoleFits()
     serial = block_with(monkeypatch, serial_fits, None)
-    monkeypatch.setattr(qp_space_time, 'cd_screening_contraction_multi',
-                        wrong)
+    monkeypatch.setattr(qp_space_time, 'cd_pair_contraction_multi', wrong)
     ranked = block_with(monkeypatch, ranked_fits, None, ranks=2)
     wc_ratio, rest = verdicts(serial, serial_fits.fits, ranked[0],
                               ranked_fits.fits)

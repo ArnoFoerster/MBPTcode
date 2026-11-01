@@ -13,7 +13,7 @@ from src.Base.numerics.constants import FIT_CHOLESKY_BLOCK
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.gradients.gwbse.bse_isdf import screening_backward
 from src.gradients.gwbse.reaction_field_adjoint import (
-    added_reaction_field_adjoint, offdiagonal_reaction_field_backward,
+    added_reaction_field_adjoint, offdiagonal_reaction_field_seeds,
     reaction_field_backward)
 from src.gradients.isdf_derivatives import GaugeAdjoint
 from src.gradients.rpa.space_time_adjoint import chi0_backward, chi0_backward_rows
@@ -266,23 +266,27 @@ class ReversePass:
         w_env[st.mask] = eqp_bar[st.mask]
         if shift is not None:
             with self.chain.phase('t_reaction_field_backward'):
+                seeds = (st.chi0_bar, None)
+                if lam is not None and st.h_bar is not None:
+                    # the quasiparticle Hamiltonian's <p|Sigma^env|q>, added
+                    # to the solved H, at the seed H_bar itself (zero without
+                    # one); its chi0 seeds ride on Eq. (18)'s two sweeps
+                    terms, (dressed, bare) = offdiagonal_reaction_field_seeds(
+                        [2.0 * st.h_bar[p, q] for _, _, p, q in qp_h.pairs],
+                        [(p, q) for _, _, p, q in qp_h.pairs], x_mo, d_w,
+                        d_bare, eps, self.chain.nocc, grid=self.chain.w_grid,
+                        screening=screening, block=st.block)
+                    st.eps_bar = added_reaction_field_adjoint(
+                        st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare, terms)
+                    seeds = (dressed if st.chi0_bar is None
+                             else st.chi0_bar + dressed, bare)
                 st.eps_bar = added_reaction_field_adjoint(
                     st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare,
                     reaction_field_backward(
                         w_env, x_mo, d_w, d_bare, eps, self.chain.nocc,
                         grid=self.chain.w_grid, screening=screening,
-                        block=st.block, dressed_chi0_bar=st.chi0_bar))
-            if lam is not None and st.h_bar is not None:
-                # the quasiparticle Hamiltonian's <p|Sigma^env|q>, added to
-                # the solved H, at the seed H_bar itself (zero without one)
-                with self.chain.phase('t_reaction_field_backward'):
-                    st.eps_bar = added_reaction_field_adjoint(
-                        st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare,
-                        offdiagonal_reaction_field_backward(
-                            [2.0 * st.h_bar[p, q] for _, _, p, q in qp_h.pairs],
-                            [(p, q) for _, _, p, q in qp_h.pairs], x_mo, d_w,
-                            d_bare, eps, self.chain.nocc, grid=self.chain.w_grid,
-                            screening=screening, block=st.block))
+                        block=st.block, dressed_chi0_bar=seeds[0],
+                        bare_chi0_bar=seeds[1]))
         st.w_corr = w_corr
 
     def _fold_integrals(self, shared, st):
