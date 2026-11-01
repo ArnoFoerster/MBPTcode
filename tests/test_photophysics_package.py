@@ -6,6 +6,10 @@ method-neutral minimum through the rate table.
     a default), and so is a numerical choice the chain could not read;
   * a record written under one declaration is refused under another, by the
     fields it differs in, and read back to the bit under its own;
+  * a record stamped while the scf section held the retired orbital-response
+    fields at their only values is read under today's stamp, the Hessian's
+    scf section inside a later stage's stamp too; one at another value is
+    refused, and a current stamp is read as it is;
   * `run_tadf` on a store that holds s0 and hess runs neither again: no walk,
     no Hessian, the records as written;
   * the command line refuses a run without its policies and, given them, makes
@@ -29,6 +33,7 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import Excitation
+from src.Base.utils.record_io import record_hash
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.photophysics import cli, stages
 from src.photophysics.declaration import DeclarationRefused, Policies
@@ -36,7 +41,7 @@ from src.photophysics.minimum import (GroundModes, StateMinimum, from_adc2,
                                       from_gw_bse_record)
 from src.photophysics.rate_models import RateRefused, tadf_rate_table
 from src.photophysics.stages import Run, run_tadf
-from src.photophysics.store import Store, StoreRefused
+from src.photophysics.store import Store, StoreRefused, stamp_as_read
 from src.properties.excitations import surface_of
 from src.properties.vibronic import normal_modes
 from tests.photophysics_cases import (REQUIRED, argv, declaration, refusing,
@@ -106,6 +111,48 @@ def test_a_record_of_another_declaration_is_refused(tmp_path):
     run.write('s1', {'k': 1})
     with pytest.raises(StoreRefused, match='nudge_bohr'):
         run_in(tmp_path, nudged).read('s1')
+
+
+#: The scf fields stamps held before the orbital response read the
+#: multiplier_* fields, at the one value each always had.
+RETIRED_SCF = {'cphf_tol': 1e-9, 'cphf_max_cycle': 100, 'cphf_refinements': 10}
+
+
+def with_old_scf(stamp, **fields):
+    """`stamp` as written while the scf sections held `fields`: the stage's,
+    and the Hessian's inside a later stage's."""
+    old = dict(stamp, scf=dict(stamp['scf'], **fields))
+    if 'hess' in old:
+        old['hess'] = with_old_scf(old['hess'], **fields)
+    return old
+
+
+def test_a_record_stamped_with_the_retired_scf_fields_is_read(tmp_path):
+    d = declaration()
+    run = run_in(tmp_path, d)
+    coords = run.mol_in.atom_coords()
+    for name in ('s0', 's1_progress', 'rate'):
+        run.store.write(name, {'coords_bohr': coords},
+                        with_old_scf(run.stamp(name), **RETIRED_SCF))
+        assert np.array_equal(run.read(name)['coords_bohr'], coords)
+        assert run.reusable(name)
+    # rewritten under today's stamp, without the retired fields
+    run.store.update('s0', run.stamp('s0'), x=1)
+    stamp = run.stamp('s0')
+    assert run.store.held('s0')['stamp'] == dict(stamp,
+                                                 identity=record_hash(stamp))
+    assert not set(RETIRED_SCF) & set(run.store.held('s0')['stamp']['scf'])
+    # a retired field at another value than it always held is refused
+    for name, field in (('s0', 'cphf_tol'), ('rate', 'cphf_max_cycle')):
+        moved = dict(RETIRED_SCF, **{field: 2 * RETIRED_SCF[field]})
+        run.store.write(name, {'k': 1}, with_old_scf(run.stamp(name), **moved))
+        with pytest.raises(StoreRefused, match=f'scf.{field}, a retired'):
+            run.read(name)
+    # a current stamp is read as it is
+    run.write('vert', {'k': 2})
+    held = run.store.held('vert')['stamp']
+    assert stamp_as_read(held) is held
+    assert run.read('vert')['k'] == 2
 
 
 # ---------------------------------------------------------------- resume

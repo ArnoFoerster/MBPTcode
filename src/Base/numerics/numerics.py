@@ -723,6 +723,24 @@ IDENTITY_RETIRED = (('scf', 'cphf_tol', 1e-9), ('scf', 'cphf_max_cycle', 100),
                     ('scf', 'cphf_refinements', 10))
 
 
+def without_retired(values):
+    """`values` ({section: {name: value}}, choices as a record wrote them)
+    without the `IDENTITY_RETIRED` fields: one at the value it always held
+    is dropped, one at any other value refused. Sections it changes are
+    copied; `values` itself is left as it is."""
+    out = dict(values)
+    for section, name, held in IDENTITY_RETIRED:
+        if name not in out.get(section, {}):
+            continue
+        out[section] = dict(out[section])
+        if out[section].pop(name) != held:
+            raise ValueError(f'the record sets {section}.{name}, a retired '
+                             f'field, to another value than {held!r}: '
+                             'the orbital response reads the multiplier_* '
+                             'fields; write those')
+    return out
+
+
 @dataclass(frozen=True)
 class Numerics:
     """Every numerical choice of one calculation (module docstring).
@@ -774,12 +792,7 @@ class Numerics:
         sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
                     else dict(record[name]) for name in SECTIONS}
         sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
-        for section, name, held in IDENTITY_RETIRED:
-            if name in sections[section] and sections[section].pop(name) != held:
-                raise ValueError(f'the record sets {section}.{name}, a retired '
-                                 f'field, to another value than {held!r}: '
-                                 'the orbital response reads the multiplier_* '
-                                 'fields; write those')
+        sections = without_retired(sections)
         return cls(**{name: SECTIONS[name](**sections[name])
                       for name in SECTIONS},
                    parent=record.get('parent'),

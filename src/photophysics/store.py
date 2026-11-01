@@ -21,7 +21,9 @@ beside an .npz of its arrays, read back to the bit) and carries
 
 A record is READ only under the stamp it was written with: another stamp
 refuses the run (`StoreRefused`), since every later stage would build on a
-record of another surface. The provenance is recorded and not compared: a
+record of another surface. A stamp whose scf sections still name the retired
+fields at the values they always held is that stamp without them
+(`stamp_as_read`). The provenance is recorded and not compared: a
 resume on another commit or BLAS is allowed and visible.
 
 Under ranks the store reads the communicator of the enclosing
@@ -41,6 +43,7 @@ import pathlib
 import platform
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.numerics import without_retired
 from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, is_root, n_ranks
 from src.Base.utils.parallel.threads import blas_libraries
@@ -63,6 +66,34 @@ def provenance():
             'host': platform.node(), 'ranks': n_ranks(),
             'slurm_job': os.environ.get('SLURM_JOB_ID'),
             'written': datetime.datetime.now().isoformat(timespec='seconds')}
+
+
+def _without_retired_scf(tree):
+    """`tree` with every scf section in it (a stage's, and the Hessian
+    stage's inside a later stage's stamp) read through `without_retired`."""
+    out = {}
+    for key, value in tree.items():
+        if key == 'scf' and isinstance(value, dict):
+            value = without_retired({'scf': value})['scf']
+        elif isinstance(value, dict):
+            value = _without_retired_scf(value)
+        out[key] = value
+    return out
+
+
+def stamp_as_read(stamp):
+    """The held `stamp` as the current code writes it: the retired fields
+    (`numerics.IDENTITY_RETIRED`) at the values they always held left out
+    and its identity hashed again; a retired field at another value refuses.
+    A stamp that names no retired field is returned as it is."""
+    bare = {k: v for k, v in stamp.items() if k != 'identity'}
+    try:
+        now = _without_retired_scf(bare)
+    except ValueError as exc:
+        raise StoreRefused(str(exc)) from exc
+    if now == bare:
+        return stamp
+    return dict(now, identity=record_hash(now))
 
 
 def _sync(path):
@@ -165,9 +196,13 @@ class Store:
         """The record `name` written under `stamp`; another stamp refuses."""
         held = self.held(name)
         want = dict(stamp, identity=record_hash(stamp))
-        if held['stamp'] != want:
-            differ = sorted(k for k in set(held['stamp']) | set(want)
-                            if held['stamp'].get(k) != want.get(k)
+        try:
+            was = stamp_as_read(held['stamp'])
+        except StoreRefused as exc:
+            raise StoreRefused(f'{self.path(name)}: {exc}') from exc
+        if was != want:
+            differ = sorted(k for k in set(was) | set(want)
+                            if was.get(k) != want.get(k)
                             and k != 'identity')
             raise StoreRefused(
                 f'{self.path(name)} was computed under another declaration '
