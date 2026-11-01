@@ -109,7 +109,8 @@ from src.Base.factorization.separable_ri import (RowFit, ao_values,
                                                  fit_settings,
                                                  tile_collocation,
                                                  total_bytes)
-from src.Base.utils.parallel.mpi_grid import (broadcast_rows, contiguous_block,
+from src.Base.utils.parallel.mpi_grid import (allgather_blocks, broadcast_rows,
+                                              contiguous_block,
                                               current_comm, lockstep,
                                               node_comm, ordered_chain_sum,
                                               partition)
@@ -628,8 +629,14 @@ def column_pivots(mol, coords, count, numerics=None, comm=None):
             k = int(np.argmax(r[t]))
             if r[t][k] > best[0]:
                 best = (float(r[t][k]), t0 + k)
-        cands = [best] if comm is None else comm.allgather(best)
-        value, p = min(cands, key=lambda c: (-c[0], c[1]))
+        # one row (value, point) per rank, gathered as floats: a point index
+        # is exact in a double, and a buffer moves without pickling
+        cands = np.empty((1 if comm is None else comm.Get_size(), 2))
+        cands[rank] = best
+        if comm is not None:
+            allgather_blocks(cands, comm)
+        k = int(np.lexsort((cands[:, 1], -cands[:, 0]))[0])
+        value, p = float(cands[k, 0]), int(cands[k, 1])
         if value <= tol:
             flag('isdf_pivot_rank_short',
                  f'the parent grid spans the AO products to numerical rank '
