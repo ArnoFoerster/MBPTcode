@@ -236,6 +236,17 @@ DMRG_N_SWEEPS = 20
 DMRG_NOISE = 1e-4
 DMRG_DAVIDSON_TOL = 1e-12
 
+# The active-space coupled cluster (pyscf's CCSDT / CCSDTQ): the amplitude
+# iteration stops when the energy moves by less than CC_ACTIVE_ENERGY_TOL and
+# the residual norm is below CC_ACTIVE_RESIDUAL_TOL, or after
+# CC_ACTIVE_MAX_CYCLE cycles; its Hartree-Fock reference in the active space
+# converges to CC_ACTIVE_SCF_TOL within CC_ACTIVE_SCF_MAX_CYCLE cycles.
+CC_ACTIVE_ENERGY_TOL = 1e-10
+CC_ACTIVE_RESIDUAL_TOL = 1e-8
+CC_ACTIVE_MAX_CYCLE = 200
+CC_ACTIVE_SCF_TOL = 1e-12
+CC_ACTIVE_SCF_MAX_CYCLE = 200
+
 # |element| below which an active-space vertex counts as absent, or a spin or
 # Hermiticity residual of the effective Hamiltonian as round-off.
 ACTIVE_SPACE_VERTEX_TOL = 1e-10

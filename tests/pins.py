@@ -49,6 +49,12 @@ PIN_CROSS_BLAS_BARS = {'energy': PIN_CROSS_BLAS_BAR,
                        'continued': PIN_CROSS_BLAS_CONTINUED_BAR,
                        'vector': PIN_CROSS_BLAS_VECTOR_BAR,
                        'root': PIN_CROSS_BLAS_ROOT_BAR}
+#: The relative bar between two DIFFERENT computation paths of one quantity
+#: (a batched against a looped contraction, other GEMM shapes, another split
+#: over ranks): equal in exact arithmetic, their round-off differs with the BLAS
+#: and its kernels' blocking, so they are compared to this, never to the bit.
+#: A same-path reproducibility pin on the recording machine stays bitwise.
+CROSS_PATH_RTOL = 1e-12
 #: The bar per pin unit.
 PIN_UNIT_SCALE = {'Ha': 1.0, 'eV': HARTREE_TO_EV, '1': 1.0}
 #: The thread caps of a subprocess gate: one thread count for every pool.

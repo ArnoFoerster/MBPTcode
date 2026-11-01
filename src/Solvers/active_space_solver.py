@@ -12,19 +12,30 @@ and two-particle density matrices of a state in pyscf's make_rdm12 convention,
     E = sum_pq h1_pq dm1_qp + (1/2) sum_pqrs (pq|rs) dm2_pqrs,
 
 which is the pair a Hellmann-Feynman derivative of the active space contracts
-with. Three engines satisfy the interface: pyscf's FCI, the determinant basis
+with. Four engines satisfy the interface: pyscf's FCI, the determinant basis
 of exact_diagonalization.py (the only one that carries a three-body vertex),
-and DMRG through block2, whose cost is polynomial in the number of orbitals at
-fixed bond dimension and so reaches active spaces the two exact engines cannot.
+DMRG through block2, whose cost is polynomial in the number of orbitals at
+fixed bond dimension and so reaches active spaces the two exact engines cannot,
+and high-order coupled cluster (CCSDT, CCSDTQ) on a Hartree-Fock reference in
+the active space, a ground-state energy per spin sector at a cost polynomial in
+the number of orbitals and electrons.
 """
 import os
 import tempfile
+import types
 
 import numpy as np
-from pyscf import fci
+from pyscf import fci, gto, scf
 
-from src.Base.numerics.constants import (DMRG_BOND_DIM, DMRG_DAVIDSON_TOL,
-                                         DMRG_N_SWEEPS, DMRG_NOISE, FCI_CONV_TOL)
+from src.Base.numerical_flags import collecting, flag
+from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL,
+                                         CC_ACTIVE_ENERGY_TOL,
+                                         CC_ACTIVE_MAX_CYCLE,
+                                         CC_ACTIVE_RESIDUAL_TOL,
+                                         CC_ACTIVE_SCF_MAX_CYCLE,
+                                         CC_ACTIVE_SCF_TOL, DMRG_BOND_DIM,
+                                         DMRG_DAVIDSON_TOL, DMRG_N_SWEEPS,
+                                         DMRG_NOISE, FCI_CONV_TOL)
 from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
                                                spatial_to_spin_orbitals)
 
@@ -225,6 +236,195 @@ class Block2DMRGSolver(ActiveSpaceSolver):
         dm1 = np.asarray(driver.get_1pdm(ket)).T
         dm2 = np.asarray(driver.get_2pdm(ket)).transpose(0, 3, 1, 2)
         return dm1, dm2
+
+
+class ActiveSpaceCCNotConverged(RuntimeWarning):
+    """The active-space Hartree-Fock reference or the coupled-cluster amplitudes
+    ran out of cycles; the last iterate's energy is returned."""
+
+
+class CoupledClusterSolver(ActiveSpaceSolver):
+    """High-order coupled cluster on a Hartree-Fock reference in the active space.
+
+    order 3 is CCSDT, order 4 CCSDTQ, both pyscf's implementations by Jin,
+    Hillenbrand, Berkelbach and Zhai (J. Chem. Phys. 165, 144109 (2026)): the
+    closed-shell solver is spin-free (spin-adapted, RHF reference) and keeps the
+    highest amplitudes only for i <= j <= k (<= l). An open-shell sector (spin
+    != 0, or n_alpha != n_beta) is solved by spin-unrestricted CCSDT on a UHF
+    reference of the high-spin determinant; it is not spin-adapted, and there is
+    no open-shell CCSDTQ.
+
+    The reference is the Hartree-Fock solution of (h1, eri) inside the active
+    space, started from the aufbau occupation of the orbitals the Hamiltonian is
+    written in, so the canonical orbitals of a downfolding are its first guess.
+    The engine gives energies only: one root per spin sector (the lowest state
+    of that symmetry, so a triplet T1 at spin=2 but no S1), and no density
+    matrices. It takes any real Hermitian one- and two-body operator: the
+    integrals of the reference orbitals are transformed from the full (pq|rs),
+    so an effective vertex without the p <-> q symmetry of real-orbital
+    integrals (a downfolded one) is solved as it is, never averaged. Threads are
+    pyscf's (the OpenMP environment); the contractions run on pytblis when it is
+    importable, else on pyscf's einsum.
+
+    `last_result` holds the reference and correlation energies of the last solve,
+    its convergence and the named flags it raised.
+    """
+
+    max_roots = 1
+
+    #: excitation order -> method name
+    ORDERS = {3: 'CCSDT', 4: 'CCSDTQ'}
+
+    def __init__(self, order=3):
+        if order not in self.ORDERS:
+            raise ValueError(f'CoupledClusterSolver has orders {sorted(self.ORDERS)} '
+                             f'(CCSDT, CCSDTQ), asked for {order!r}')
+        self.order = order
+        self.last_result = None
+
+    def roots(self, h1, eri, norb, nelec, nroots=1, spin=0):
+        if nroots is None:
+            raise ValueError('coupled cluster gives the lowest state of a spin '
+                             'sector, not a spectrum; give nroots=1')
+        self._check_roots(nroots)
+        h1, eri = np.asarray(h1, dtype=float), np.asarray(eri, dtype=float)
+        _require_hermitian(h1, eri, norb)
+        n_alpha, n_beta = spin_sector(nelec, spin)
+        if n_alpha != n_beta and self.order != 3:
+            raise NotImplementedError(
+                f'{self.ORDERS[self.order]} is closed-shell only; the open-shell '
+                f'sector ({n_alpha}, {n_beta}) has spin-unrestricted CCSDT (order 3)')
+        if min(n_alpha, n_beta) < 0 or max(n_alpha, n_beta) > norb:
+            raise ValueError(f'({n_alpha}, {n_beta}) electrons do not fit in '
+                             f'{norb} orbitals')
+        flags = []
+        with collecting(flags):
+            reference = _active_space_reference(h1, eri, norb, n_alpha, n_beta)
+            if not reference.converged:
+                flag('active_space_reference_not_converged',
+                     f'the active-space Hartree-Fock reference did not converge in '
+                     f'{CC_ACTIVE_SCF_MAX_CYCLE} cycles; coupled cluster runs on its '
+                     f'last iterate', ActiveSpaceCCNotConverged)
+            mycc = self._engine(reference, eri, n_alpha == n_beta)
+            mycc.kernel()
+            if not mycc.converged:
+                flag('active_space_cc_not_converged',
+                     f'{type(mycc).__name__} in the active space did not converge '
+                     f'in {CC_ACTIVE_MAX_CYCLE} cycles; its last energy is returned',
+                     ActiveSpaceCCNotConverged)
+        energy = float(mycc.e_tot)
+        self.last_result = {
+            'method': type(mycc).__name__, 'energy': energy,
+            'e_reference': float(reference.e_tot), 'e_corr': float(mycc.e_corr),
+            'reference_converged': bool(reference.converged),
+            'converged': bool(mycc.converged), 'cycles': int(mycc.cycles),
+            'numerical_flags': flags}
+        return np.array([energy]), [dict(self.last_result)]
+
+    def _engine(self, reference, eri, closed_shell):
+        """The pyscf CC object of this order and sector on the full tensor eri,
+        its settings set."""
+        from pyscf.cc import rccsdt, rccsdtq, uccsdt
+        if closed_shell:
+            mycc = (rccsdt.RCCSDT if self.order == 3 else rccsdtq.RCCSDTQ)(reference)
+            mycc.ao2mo = types.MethodType(_restricted_eris(eri), mycc)
+        else:
+            mycc = uccsdt.UCCSDT(reference)
+            mycc.ao2mo = types.MethodType(_unrestricted_eris(eri), mycc)
+        mycc.verbose = 0
+        mycc.conv_tol = CC_ACTIVE_ENERGY_TOL
+        mycc.conv_tol_normt = CC_ACTIVE_RESIDUAL_TOL
+        mycc.max_cycle = CC_ACTIVE_MAX_CYCLE
+        mycc.set_einsum_backend(_einsum_backend())
+        return mycc
+
+    def rdms(self, vector, norb, nelec, spin=0):
+        raise NotImplementedError(
+            'the coupled-cluster engine gives energies only (no Lambda equations); '
+            'use PyscfFCISolver or Block2DMRGSolver where dm1/dm2 are needed')
+
+
+def _einsum_backend():
+    """'pytblis' when it is importable, else pyscf's own einsum."""
+    try:
+        import pytblis  # noqa: F401
+    except ImportError:
+        return 'pyscf'
+    return 'pytblis'
+
+
+def _require_hermitian(h1, eri, norb):
+    """Refuse a Hamiltonian that is not a real Hermitian operator in the form
+    the reference and the amplitudes read: h1 symmetric, (pq|rs) = (qp|sr), and
+    (pq|rs) = (rs|pq), which only relabels the same operator (the dispatcher
+    writes it so). Neither is enforced by averaging."""
+    if h1.shape != (norb, norb) or eri.shape != (norb,) * 4:
+        raise ValueError(f'h1 {h1.shape} and eri {eri.shape} do not match '
+                         f'norb={norb}')
+    scale = max(1.0, float(np.max(np.abs(eri))))
+    residual = max(float(np.max(np.abs(h1 - h1.T))),
+                   float(np.max(np.abs(eri - eri.transpose(1, 0, 3, 2)))),
+                   float(np.max(np.abs(eri - eri.transpose(2, 3, 0, 1)))))
+    if residual > ACTIVE_SPACE_VERTEX_TOL * scale:
+        raise ValueError(
+            f'CoupledClusterSolver needs a real Hermitian Hamiltonian with '
+            f'(pq|rs) = (rs|pq), and this one breaks it by {residual:.2e}; it is '
+            f'not symmetrized here (active_space.solve takes the Hermitian part '
+            f'on request).')
+
+
+def _mo_tensor(eri, c1, c2, c3, c4):
+    """(ij|kl) of the full chemist tensor in the orbitals c1..c4, no symmetry assumed."""
+    return np.einsum('pqrs,pi,qj,rk,sl->ijkl', eri, c1, c2, c3, c4, optimize=True)
+
+
+def _restricted_eris(eri):
+    """The `ao2mo` of a closed-shell CC object, reading the full tensor eri
+    instead of pyscf's packed integrals; <pq|rs> = (pr|qs) as the engine keeps it."""
+    def ao2mo(mycc, mo_coeff=None):
+        from pyscf.cc import rccsdt
+        eris = rccsdt._PhysicistsERIs()
+        eris._common_init_(mycc, mo_coeff)
+        c = eris.mo_coeff
+        eris.pppp = np.ascontiguousarray(_mo_tensor(eri, c, c, c, c).transpose(0, 2, 1, 3))
+        return eris
+    return ao2mo
+
+
+def _unrestricted_eris(eri):
+    """The `ao2mo` of a spin-unrestricted CC object on the full tensor eri: the
+    alpha-alpha, beta-beta and alpha-beta blocks the engine keeps."""
+    def ao2mo(mycc, mo_coeff=None):
+        from pyscf.cc import uccsdt
+        eris = uccsdt._PhysicistsERIs()
+        eris._common_init_(mycc, mo_coeff)
+        a, b = eris.mo_coeff
+        eris.pppp = np.ascontiguousarray(_mo_tensor(eri, a, a, a, a).transpose(0, 2, 1, 3))
+        eris.PPPP = np.ascontiguousarray(_mo_tensor(eri, b, b, b, b).transpose(0, 2, 1, 3))
+        eris.pPpP = np.ascontiguousarray(_mo_tensor(eri, a, a, b, b).transpose(0, 2, 1, 3))
+        return eris
+    return ao2mo
+
+
+def _active_space_reference(h1, eri, norb, n_alpha, n_beta):
+    """The converged (or last) Hartree-Fock solution of (h1, eri) in the active
+    space: RHF for n_alpha == n_beta, else UHF, from the aufbau occupation of
+    the orbitals the Hamiltonian is written in. eri is kept as the full tensor,
+    so J and K are its own; the energy is in-space, ecore = 0."""
+    mol = gto.M(verbose=0)
+    mol.nelectron = n_alpha + n_beta
+    mol.spin = n_alpha - n_beta
+    mol.incore_anyway = True
+    mf = scf.RHF(mol) if n_alpha == n_beta else scf.UHF(mol)
+    mf.get_hcore = lambda *args: h1
+    mf.get_ovlp = lambda *args: np.eye(norb)
+    mf._eri = eri
+    mf.conv_tol = CC_ACTIVE_SCF_TOL
+    mf.max_cycle = CC_ACTIVE_SCF_MAX_CYCLE
+    occ_a = np.diag((np.arange(norb) < n_alpha).astype(float))
+    occ_b = np.diag((np.arange(norb) < n_beta).astype(float))
+    mf.kernel(occ_a + occ_b if n_alpha == n_beta else np.array([occ_a, occ_b]))
+    return mf
 
 
 def spin_sector(nelec, spin=0):

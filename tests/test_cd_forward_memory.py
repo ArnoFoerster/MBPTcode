@@ -8,7 +8,8 @@ of them on every rank is a cost no rank count divides.
   * `cd_screening_contraction_multi` holds one [W - I] B_j at a time: on a
     synthetic screening of 24 slices its tracemalloc peak stays within
     WTB_HELD_MAX slices beside its outputs and the chi0 block (holding every
-    [W - I] B_j adds 24), the wc to the bit of the contraction written out;
+    [W - I] B_j adds 24), the wc the contraction written out per frequency
+    to CROSS_PATH_RTOL (batched and per-frequency GEMMs round differently);
   * `qp_set_gradient` on water/cc-pVDZ Hartree-Fock over 1, 2 and 3 simulated
     ranks: each rank holds at most its `contiguous_block` of the slices
     (the tape's and pass 1's) and of the slice adjoints B_p_bar (pass 3),
@@ -36,6 +37,7 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse import qp_space_time
 from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from tests.isdf_test_grid import g1
+from tests.pins import CROSS_PATH_RTOL
 
 #: the synthetic screening: auxiliary size, orbitals, slices, frequencies
 NAUX, NORB, NSLICE, NFREQ_SYNTH = 40, 300, 24, 3
@@ -74,8 +76,11 @@ def test_one_screened_slice_at_a_time():
     for k in range(NFREQ_SYNTH):
         solve = screening_solver(eye - np.tensordot(cosft[k], proj, axes=1))
         for s, B in enumerate(slices):
-            assert np.array_equal(got[s][k],
-                                  np.einsum('Pq,Pq->q', B, solve(B) - B))
+            # the contraction's batched frequencies against this
+            # per-frequency reference: two GEMM shapes
+            np.testing.assert_allclose(got[s][k],
+                                       np.einsum('Pq,Pq->q', B, solve(B) - B),
+                                       rtol=CROSS_PATH_RTOL, atol=0.0)
 
 
 @pytest.fixture(scope='module')
