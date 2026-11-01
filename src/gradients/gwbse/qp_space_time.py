@@ -51,6 +51,7 @@ D once at entry, holds them for the solve and its reverse pass and drops them
 on return; the gathered arrays are the whole ones verbatim and every output is
 the whole factors' bit for bit.
 """
+import pickle
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -473,6 +474,16 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     return w_star, z, eps_bar, X_bar, D_bar
 
 
+def portable_error(err):
+    """`err` itself where it pickles, else a RuntimeError carrying its type
+    and text: an exception one rank hands the others in place of a result."""
+    try:
+        pickle.dumps(err)
+    except Exception:
+        return RuntimeError(f'{type(err).__name__}: {err}')
+    return err
+
+
 @dataclass
 class QPSetTape:
     """What `qp_set_gradient`'s forward built, for a later call to read back.
@@ -667,12 +678,14 @@ class QPSetPass:
         """PASS 1 -- every state's route, root and residue set, and the
         states that carry an adjoint (`active`).
 
-        Replicated: a root search on wc and, for a residue, a rank-one push into
-        its backend. A state's slice is fetched only on the routes that read
-        it (the contour roots); the pole model and the scissor take wc alone. The pole fits are the exception, striped over the ranks
-        a round at a time, one fit a rank, as the loop reaches them: the same
-        owner and the same bits as one striped call, and a pass stopped at an
-        unresolved root leaves the later rounds unfitted.
+        The states go in rounds of one a rank. The pole-model roots, which
+        read wc alone, are taken one a rank and shared (`_pole_model_roots`);
+        the contour roots are replicated, each on its state's slice, fetched
+        only there; a scissor takes no root search. The pole fits are striped
+        over the ranks a round at a time, one fit a rank, as the loop reaches
+        them: the same owner and the same bits as one striped call. A pass
+        stopped at an unresolved root raises it at that state on every rank
+        and leaves the rounds after its own unfitted.
         """
         states, weights, eps, nocc, grid = (self.states, self.weights,
                                             self.eps, self.nocc, self.grid)
@@ -691,103 +704,148 @@ class QPSetPass:
         fit_round = {si: need[i - i % nranks:i - i % nranks + nranks]
                      for i, si in enumerate(need)}
         active = []
-        for si, (p, wgt) in enumerate(zip(states, weights)):
-            p = int(p)
-            wc = wcs[si]
-            if si in fit_round and (sop_poles is None or p not in sop_poles):
-                rnd = fit_round[si]
-                sop_poles = fit_poles_over_ranks(
-                    states[rnd], [wcs[i] for i in rnd], nu_points, eps, nocc,
-                    residue_route, scissor, w0, sop_poles,
-                    self.n_poles, self.sop_stride, self.comm)
-            # PER STATE. <p|Sigma_x - v_xc|p> is a different number for every
-            # orbital, so a scalar shared across the set would put the HOMO's
-            # correction on the LUMO. A scalar is still accepted, and is the
-            # right thing on Hartree-Fock, where every entry is zero.
-            xc_p = static_term(self.xc_correction, si)
-            # after the reference, every geometry follows the branch the last
-            # accepted one kept, whatever its weight
-            follow, branch = followed_branch(follow_of, w0, p), {}
-            # A state Eq. (27) does not admit cannot be carried by the pole
-            # model at any M, so it takes the residue route instead and the
-            # record says so. On a valence quasiparticle set some states
-            # always will.
-            route, shift, start = pole_model_route(residue_route, scissor, p,
-                                                   eps, nocc, w0, sop_poles)
-            if route == FALLBACK_ROUTE:
-                route = fallback_route(naux, nocc, len(eps) - nocc)
-            if route == 'auto':
-                route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
-            if route == 'laplace':
-                rs = LaplaceRealScreening(proj_tau, grid, eps, nocc,
-                                          tol=laplace_tol)
-            elif route == 'explicit':
-                if C_ov is None:
-                    require_explicit_fits(naux, nocc, len(eps) - nocc, p)
-                    C_ov = (tape.C_ov if same and tape.C_ov is not None else
-                            three_index_ov(*self.factors(), eps, nocc,
-                                           tile_gb=tile_gb))
-                    if route_out is not None and self.keep_tape:
-                        route_out['tape'].C_ov = C_ov
-                rs = ExplicitRealScreening(C_ov, eps, nocc)
-            elif route in ('sop', 'scissor', 'none'):
-                rs = None
-            else:
-                raise ValueError(f'residue_route {route!r}')
-            poles = amp = None
-            if route == 'scissor':
-                w_star, z, res = float(eps[p] + xc_p + shift), 1.0, []
-            else:
+        # the states in rounds of one a rank: a round's routes are set in
+        # state order on every rank, its pole-model roots, which read wc
+        # alone, are taken one a rank (`_pole_model_roots`), and the round
+        # is then finished in state order with every root in hand
+        for r0 in range(0, len(states), max(nranks, 1)):
+            prep = []
+            for si in range(r0, min(r0 + max(nranks, 1), len(states))):
+                p, wgt = int(states[si]), weights[si]
+                wc = wcs[si]
+                if si in fit_round and (sop_poles is None or p not in sop_poles):
+                    rnd = fit_round[si]
+                    sop_poles = fit_poles_over_ranks(
+                        states[rnd], [wcs[i] for i in rnd], nu_points, eps, nocc,
+                        residue_route, scissor, w0, sop_poles,
+                        self.n_poles, self.sop_stride, self.comm)
+                # PER STATE. <p|Sigma_x - v_xc|p> is a different number for every
+                # orbital, so a scalar shared across the set would put the HOMO's
+                # correction on the LUMO. A scalar is still accepted, and is the
+                # right thing on Hartree-Fock, where every entry is zero.
+                xc_p = static_term(self.xc_correction, si)
+                # after the reference, every geometry follows the branch the last
+                # accepted one kept, whatever its weight
+                follow = followed_branch(follow_of, w0, p)
+                # A state Eq. (27) does not admit cannot be carried by the pole
+                # model at any M, so it takes the residue route instead and the
+                # record says so. On a valence quasiparticle set some states
+                # always will.
+                route, shift, start = pole_model_route(residue_route, scissor, p,
+                                                       eps, nocc, w0, sop_poles)
+                if route == FALLBACK_ROUTE:
+                    route = fallback_route(naux, nocc, len(eps) - nocc)
+                if route == 'auto':
+                    route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
+                if route == 'laplace':
+                    rs = LaplaceRealScreening(proj_tau, grid, eps, nocc,
+                                              tol=laplace_tol)
+                elif route == 'explicit':
+                    if C_ov is None:
+                        require_explicit_fits(naux, nocc, len(eps) - nocc, p)
+                        C_ov = (tape.C_ov if same and tape.C_ov is not None else
+                                three_index_ov(*self.factors(), eps, nocc,
+                                               tile_gb=tile_gb))
+                        if route_out is not None and self.keep_tape:
+                            route_out['tape'].C_ov = C_ov
+                    rs = ExplicitRealScreening(C_ov, eps, nocc)
+                elif route in ('sop', 'scissor', 'none'):
+                    rs = None
+                else:
+                    raise ValueError(f'residue_route {route!r}')
+                poles = amp = None
                 if route == 'sop':
                     # the poles ride on to the adjoint (`sigma_sop_backward`)
                     poles, amp = sop_model(wc, nu_points, eps, nocc, p,
                                            sop_poles, self.n_poles,
                                            self.sop_stride)
+                prep.append(dict(si=si, p=p, wgt=wgt, wc=wc, xc_p=xc_p,
+                                 follow=follow, route=route, shift=shift,
+                                 rs=rs, poles=poles, amp=amp))
+            roots = self._pole_model_roots(
+                [r for r in prep if r['route'] == 'sop'])
+            for r in prep:
+                si, p, wgt, route, rs = (r['si'], r['p'], r['wgt'], r['route'],
+                                         r['rs'])
+                poles, amp, follow, branch = r['poles'], r['amp'], r['follow'], {}
+                if route == 'scissor':
+                    w_star, z, res = float(eps[p] + r['xc_p'] + r['shift']), 1.0, []
+                elif route == 'sop':
                     fitted[p] = poles
-                # the one per-state root of the contour quasiparticle energy;
-                # the pole model reads wc alone, so its slice is not fetched
-                # (the route is the same on every rank: the fetch stays
-                # collective)
-                Bp = None if route == 'sop' else Bps.fetch(si)
-                w_star, z, res = contour_state_root(
-                    route, p, Bp, wc, eps, nocc, nu_points, nu_weights, xc_p,
-                    real_screening=rs, pole_model=(poles, amp), tol=tol,
-                    follow=follow, branch=branch,
-                    rescan=rescans_beside(self.z0, p))
-            self.w_stars[si] = w_star
-            self.z_of[si] = z
-            self.routes[p] = route
-            self.weights_of[p] = float(z)
-            self.roots[p] = float(w_star)
-            self.labels[p] = branch.get('labels')
-            if follow is not None:
-                self.branches[p] = branch
-            self.residues[p] = res
-            if wgt == 0.0 and si not in self.paired:
-                continue
+                    found = roots[si]
+                    if isinstance(found, BaseException):
+                        raise found
+                    w_star, z, res, taken = found
+                    branch.update(taken)
+                else:
+                    # the one per-state root of the contour quasiparticle
+                    # energy, on the state's slice (the route is the same on
+                    # every rank: the fetch stays collective)
+                    w_star, z, res = contour_state_root(
+                        route, p, Bps.fetch(si), r['wc'], eps, nocc, nu_points,
+                        nu_weights, r['xc_p'], real_screening=rs,
+                        pole_model=(poles, amp), tol=tol, follow=follow,
+                        branch=branch, rescan=rescans_beside(self.z0, p))
+                self.w_stars[si] = w_star
+                self.z_of[si] = z
+                self.routes[p] = route
+                self.weights_of[p] = float(z)
+                self.roots[p] = float(w_star)
+                self.labels[p] = branch.get('labels')
+                if follow is not None:
+                    self.branches[p] = branch
+                self.residues[p] = res
+                if wgt == 0.0 and si not in self.paired:
+                    continue
 
-            zw = z * wgt
-            if route == 'scissor':
-                if si in self.paired:
-                    raise ValueError(f'orbital {p} carries a frozen scissor '
-                                     f'and has no screening contraction to '
-                                     f'pair')
-                eps_bar[p] += zw
-                continue
-            wc_bar = None
-            if route == 'sop':
-                # The pole model's whole omega dependence is analytic, so its
-                # adjoint on the imaginary-axis data is one transpose and
-                # enters the screening exactly where the integral term's own
-                # weights do.
-                eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles,
-                                                        eps, nocc, nu_points,
-                                                        sigma_bar=zw)
-                eps_bar += eps_sop
-            active.append(integral_state(zw, w_star, eps, nu_points,
-                                         nu_weights, wc_bar, si=si, p=p,
-                                         res=res, rs=rs, route=route))
+                zw = z * wgt
+                if route == 'scissor':
+                    if si in self.paired:
+                        raise ValueError(f'orbital {p} carries a frozen scissor '
+                                         f'and has no screening contraction to '
+                                         f'pair')
+                    eps_bar[p] += zw
+                    continue
+                wc_bar = None
+                if route == 'sop':
+                    # The pole model's whole omega dependence is analytic, so its
+                    # adjoint on the imaginary-axis data is one transpose and
+                    # enters the screening exactly where the integral term's own
+                    # weights do.
+                    eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles,
+                                                            eps, nocc, nu_points,
+                                                            sigma_bar=zw)
+                    eps_bar += eps_sop
+                active.append(integral_state(zw, w_star, eps, nu_points,
+                                             nu_weights, wc_bar, si=si, p=p,
+                                             res=res, rs=rs, route=route))
         self.active, self.sop_poles, self.C_ov = active, sop_poles, C_ov
+
+    def _pole_model_roots(self, prep):
+        """{si: (w_star, z, residues, branch)} of the pole-model states in
+        `prep`, one state a rank (`mpi_map`), the same on every rank. The
+        root reads the state's wc and poles alone, so the rank that takes it
+        needs nothing from the others and gets the bits any rank would. A
+        root search that raises hands its exception back in the state's
+        place, so every rank raises it at the same state."""
+        eps, nocc, tol = self.eps, self.nocc, self.tol
+        nu_points, nu_weights = self.nu_points, self.nu_weights
+
+        def root(r):
+            branch = {}
+            try:
+                w_star, z, res = contour_state_root(
+                    'sop', r['p'], None, r['wc'], eps, nocc, nu_points,
+                    nu_weights, r['xc_p'], real_screening=None,
+                    pole_model=(r['poles'], r['amp']), tol=tol,
+                    follow=r['follow'], branch=branch,
+                    rescan=rescans_beside(self.z0, r['p']))
+            except Exception as err:
+                return portable_error(err)
+            return w_star, z, res, branch
+
+        comm = self.comm if self.nranks > 1 else None
+        return {r['si']: got for r, got in zip(prep, mpi_map(root, prep, comm))}
 
     def reverse_frequencies(self):
         """PASS 2 -- the integral term's reverse pass over the frequencies

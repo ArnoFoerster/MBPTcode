@@ -167,9 +167,6 @@ def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
             same(b, ref[i], 'B_p', unit='1')
 
 
-if __name__ == '__main__':
-    sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))
-
 
 @pytest.mark.parametrize('size', SIZES)
 def test_the_root_search_fetches_no_slice_on_the_pole_model(water, size,
@@ -194,3 +191,35 @@ def test_the_root_search_fetches_no_slice_on_the_pole_model(water, size,
     for out, route_out in got:
         same(out[0], ref[0], 'roots', quantity='energy')
         same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_each_pole_model_root_is_searched_on_one_rank(water, size,
+                                                      monkeypatch):
+    """Pass 1 takes each pole-model root on one rank and shares it, so the
+    ranks together search as many roots as one rank alone (the search was
+    replicated, the same seconds per rank at every rank count), and the roots
+    and Z are the serial ones."""
+    n = len(water['states'])
+    calls, lock = [], threading.Lock()
+    real = qp_space_time.contour_state_root
+
+    def counted(route, *args, **kwargs):
+        with lock:
+            calls.append(route)
+        return real(route, *args, **kwargs)
+    monkeypatch.setattr(qp_space_time, 'contour_state_root', counted)
+    ref, ref_out = solve(water, np.zeros(n))
+    serial = calls.count('sop')
+    del calls[:]
+    got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
+                        size)
+    assert serial > 0
+    assert calls.count('sop') == serial
+    for out, route_out in got:
+        same(out[0], ref[0], 'roots', quantity='energy')
+        same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
+
+
+if __name__ == '__main__':
+    sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))
