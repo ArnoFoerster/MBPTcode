@@ -372,6 +372,11 @@ ISDF_PIVOT_POINTS_PER_ATOM = 200
 # anything is formed: run it over more ranks.
 ISDF_PIVOT_MAX_GB = 64.0
 
+# Points the blocked pivot (`ao_product_fit.column_pivots`) takes as
+# candidates for one block: their residual Gram matrix is formed and pivoted
+# until its largest residual falls below the best point outside them.
+ISDF_PIVOT_CANDIDATES = 1024
+
 # The most a composed force may move, in Ha/Bohr, when the Casida-level seeds
 # its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
 # A fit adjoint formed from single solves of the Gram matrix (cond ~ 2e8)

@@ -16,7 +16,9 @@ Gated on C1 water/cc-pVDZ, 150 points pivoted from the G1 parent, tiles of
     give the one-rank force bit for bit;
   * the three-centre pass over two nodes of two ranks: every node evaluates
     every shell run once and no block leaves its node, and the projection's
-    rows are the one-rank rows bit for bit;
+    rows are the one-rank rows bit for bit; the pass reads each AO pair once
+    (nu up to the end of mu's run) and gives the explicit sum over every AO
+    product to rounding;
   * `separable_factors(fit='rows')` on the AO-product test set gives the
     replicated factors to the same rounding;
   * the excited-state chain on the row fit (sliced) is the chain on the
@@ -113,12 +115,12 @@ def test_every_node_makes_the_whole_three_centre_pass(water, monkeypatch):
     runs = apf.shell_runs(mol, auxmol, MANY_RUNS)
     assert len(runs) > 4
     evaluated = []
-    block = apf.three_centre_block
+    block = apf.lower_block
 
     def counted(mol, auxmol, run, *args, **kwargs):
         evaluated.append(run)
         return block(mol, auxmol, run, *args, **kwargs)
-    monkeypatch.setattr(apf, 'three_centre_block', counted)
+    monkeypatch.setattr(apf, 'lower_block', counted)
 
     def projection(comm, node=None):
         _, own = mine(comm, len(tiles))
@@ -138,6 +140,32 @@ def test_every_node_makes_the_whole_three_centre_pass(water, monkeypatch):
     assert sorted(evaluated) == sorted(runs + runs)
     assert sorted(held) == sorted(serial)
     assert all(np.array_equal(held[t], serial[t]) for t in serial)
+
+
+def test_the_pass_reads_each_ao_pair_once(water, monkeypatch):
+    """Over several shell runs the projection evaluates (mu nu|P) for nu up
+    to the end of mu's run alone, nao (nao + 1) / 2 pairs plus the runs'
+    upper triangles, and its rows are the explicit sum over every AO product
+    to rounding (1e-13 of their scale)."""
+    mol, auxmol, coords, _ = water
+    runs = apf.shell_runs(mol, auxmol, MANY_RUNS)
+    assert len(runs) > 4
+    rows = []
+    block = apf.lower_block
+
+    def counted(mol, auxmol, run):
+        out = block(mol, auxmol, run)
+        rows.append(out.shape[0])
+        return out
+    monkeypatch.setattr(apf, 'lower_block', counted)
+    X = tile_collocation(mol, coords)
+    got = apf.projection_rows(mol, auxmol, {0: X}, MANY_RUNS, None)[0]
+    nao = mol.nao_nr()
+    assert sum(rows) == sum((a1 - a0) * a1 for _, _, a0, a1 in runs)
+    assert sum(rows) < 0.6 * nao * nao
+    e3c = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1')
+    want = np.einsum('mnP,gm,gn->gP', e3c, X, X)
+    assert np.abs(got - want).max() < 1e-13 * np.abs(want).max()
 
 
 def seeds_and_reference(water, kind):

@@ -9,7 +9,8 @@ Gates, on water (C1 geometry):
     rounding of the balanced Gram matrix (cc-pVDZ);
   * the selection, its Gram columns formed on demand, is the greedy pivoted
     Cholesky of the whole Gram matrix (largest remaining residual first), its
-    prefixes nested; a count above the parent and a pivot above its memory
+    prefixes nested, taken in blocks of candidates at any candidate count and
+    rank count, in far fewer blocks than pivots; a count above the parent and a pivot above its memory
     bound are refused, a parent of lower numerical rank keeps that rank and
     flags it; three simulated ranks give the one-rank selection bit for bit
     and its projection and fit to rounding, the same bits on every rank;
@@ -148,6 +149,27 @@ def test_the_pivot_is_the_greedy_pivot_on_the_whole_gram_matrix(water):
     assert np.array_equal(got, want)
     # every count's selection is a prefix of the next one's
     assert np.array_equal(apf.column_pivots(mol, coords, 60), want[:60])
+
+
+def test_the_blocked_pivot_takes_the_greedy_pivots_in_few_blocks(water):
+    """The pivot in blocks of candidates picks what the textbook pivot picks,
+    at any candidate count (one candidate is the one-at-a-time pivot) and
+    over three simulated ranks, and with 64 candidates it reads the factor
+    columns in far fewer blocks than pivots."""
+    mol = water[0]
+    coords = parent(mol)
+    G, _ = apf.balanced_gram(mol.eval_gto('GTOval_sph', coords))
+    np.fill_diagonal(G, 1.0 + REG)
+    want = greedy(G, 300)
+    for candidates in (1, 7, 64):
+        timings = {}
+        got = apf.column_pivots(mol, coords, 300, candidates=candidates,
+                                timings=timings)
+        assert np.array_equal(got, want), candidates
+    assert timings['pivot_blocks'] < 300 // 4
+    for got in run_simulated(lambda comm: apf.column_pivots(
+            mol, coords, 300, candidates=7), 3):
+        assert np.array_equal(got, want)
 
 
 def test_a_count_beyond_the_parent_is_refused_and_a_short_rank_flagged():
