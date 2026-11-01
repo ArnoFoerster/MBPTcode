@@ -53,8 +53,8 @@ it is a sum over tiles of one VIRTUAL index d instead, (ic|kd) for every i,
 c, k and the tile's d. Four passes in all (amplitudes; amplitudes and
 doubles; the T products of r and p2_ov; the virtual tiles), each about one
 folded product's work, the tiles dealt over the operator's ranks and summed
-in tile order (ordered_sum), so the density is the same bits at every rank
-count.
+in tile order (ordered_chain_sum), so the density is the same bits at every
+rank count.
 """
 import numpy as np
 
@@ -62,7 +62,7 @@ from src.Base.numerics.constants import (EE_RI_DENSITY_OCC_TILE_ARRAYS,
                                          EE_RI_DENSITY_VIRT_TILE_ARRAYS, EE_RI_TILE_GB)
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.memory import tile_width
-from src.Base.utils.parallel.mpi_grid import ordered_sum
+from src.Base.utils.parallel.mpi_grid import ordered_chain_sum
 from src.SingleReference.common.df_amplitudes import doubles_denominator
 from src.SingleReference.ADC.eeADC.ee_density import assemble
 from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
@@ -76,7 +76,11 @@ def tile_ranges(n, per, tile_gb, ranks):
 
 
 class Pass:
-    """Addends of one pass, one flat array per tile, summed in tile order."""
+    """Addends of one pass, one flat array per tile, summed in tile order.
+
+    The running sum travels from each tile's rank to the next tile's
+    (ordered_chain_sum): no rank receives another rank's addends, which at
+    many tiles of a large pass would be more than one gather can carry."""
 
     def __init__(self, op, shapes):
         self.op, self.shapes = op, shapes
@@ -94,8 +98,15 @@ class Pass:
         self.parts.append((t, flat))
 
     def total(self):
-        tot = ordered_sum(self.parts, self.op.comm, shape=(self.size,),
-                          onto=np.zeros(self.size))
+        comm = self.op.comm
+        mine = [t for t, _ in self.parts]
+        held = (comm.allgather(mine) if comm is not None and comm.Get_size() > 1
+                else [mine])
+        owner = {t: r for r, ts in enumerate(held) for t in ts}
+        order = sorted(owner)
+        at = {t: k for k, t in enumerate(order)}
+        tot = ordered_chain_sum({at[t]: a for t, a in self.parts},
+                                [owner[t] for t in order], comm, np.zeros(self.size))
         out, p = {}, 0
         for name, shape in self.shapes.items():
             m = int(np.prod(shape))
@@ -104,7 +115,7 @@ class Pass:
         return out
 
 
-def _amplitudes(op, k0, k1):
+def tile_amplitudes(op, k0, k1):
     """(tau, ts) of the occupied rows k0..k1-1, shape (kt, nv, no, nv)."""
     f = op.f
     I = op.ints(k0, k1)
@@ -114,7 +125,7 @@ def _amplitudes(op, k0, k1):
     return tau, tau - tau.transpose(0, 3, 2, 1)
 
 
-def _doubles(op, BtT, k0, k1, omega, scale, s):
+def tile_doubles(op, BtT, k0, k1, omega, scale, s):
     """(Z, W) of the occupied rows k0..k1-1 (module docstring), from the
     auxiliary-major dressed factor BtT (naux, no nv)."""
     f = op.f
@@ -139,7 +150,7 @@ def root_doubles(op, y, omega, t1):
     (no, nv, no, nv) each: its doubles held whole, for molecules whose
     o^2 v^2 fits in memory."""
     s = 1.0 if op.spin == 'singlet' else -1.0
-    return _doubles(op, op.dressed(np.asarray(y, float).ravel()), 0, op.no,
+    return tile_doubles(op, op.dressed(np.asarray(y, float).ravel()), 0, op.no,
                     omega, np.sqrt(t1) / (2.0 * np.sqrt(2.0)), s)
 
 
@@ -171,7 +182,7 @@ def _pass_amplitudes(op, x, s, p1_oo, p1_vv):
     gams = {}
     for t, (k0, k1) in op.my_tiles:
         kt = k1 - k0
-        tau, ts = _amplitudes(op, k0, k1)
+        tau, ts = tile_amplitudes(op, k0, k1)
         r = np.zeros((no, nv))
         r[k0:k1] = ((ts + s * tau).reshape(kt * nv, -1) @ x.ravel()).reshape(kt, nv)
         G = (ts + tau).reshape(kt * nv, -1) @ f.L                  # G_icP
@@ -225,14 +236,14 @@ def _pass_doubles(op, y, x, omega, t1, s, mine):
     scale = np.sqrt(t1) / (2.0 * np.sqrt(2.0))
     for t, (k0, k1) in mine:
         kt = k1 - k0
-        Z, W = _doubles(op, BtT, k0, k1, omega, scale, s)
+        Z, W = tile_doubles(op, BtT, k0, k1, omega, scale, s)
         p2_ov = np.zeros((no, nv))
         p2_ov[k0:k1] = -2.0 * ((W + s * Z).reshape(kt * nv, -1) @ x.ravel()
                                ).reshape(kt, nv)
         blocks = {'oo_dd': -2.0 * (oo_contract(W, W) + 2.0 * oo_contract(Z, Z)),
                   'vv_dd': 2.0 * (vv_contract(W, W) + 2.0 * vv_contract(Z, Z)),
                   'p2_ov': p2_ov}
-        tau, ts = _amplitudes(op, k0, k1)
+        tau, ts = tile_amplitudes(op, k0, k1)
         blocks['tu_oo'] = oo_contract(ts, W) + 2.0 * s * oo_contract(tau, Z)
         blocks['tu_vv'] = vv_contract(ts, W) + 2.0 * vv_contract(tau, Z)
         del Z, W, tau, ts
@@ -250,7 +261,7 @@ def _pass_t_products(op, x, s, r, p2_ov, mine):
     p3 = Pass(op, {'tr': (no, nv), 'tp': (no, nv)})
     for t, (k0, k1) in mine:
         kt = k1 - k0
-        tau, ts = _amplitudes(op, k0, k1)
+        tau, ts = tile_amplitudes(op, k0, k1)
         tr, tp = np.zeros((no, nv)), np.zeros((no, nv))
         tr[k0:k1] = ((ts + s * tau).reshape(kt * nv, -1) @ r.ravel()).reshape(kt, nv)
         tp[k0:k1] = ((ts + tau).reshape(kt * nv, -1) @ p2_ov.ravel()).reshape(kt, nv)

@@ -2142,6 +2142,12 @@ EE_RI_FOLD_TILE_ARRAYS = 5
 # and in one virtual tile of its vv pass
 EE_RI_DENSITY_OCC_TILE_ARRAYS = 9
 EE_RI_DENSITY_VIRT_TILE_ARRAYS = 6
+# ... in one occupied tile of the RI transition densities
+# (`eeADC.ee_ri_transition`) besides the two doubles of every root, in one of
+# their virtual tiles, and in one tile of their ground row's second-order pass
+EE_RI_TRANSITION_TILE_ARRAYS = 6
+EE_RI_TRANSITION_VIRT_TILE_ARRAYS = 6
+EE_RI_TRANSITION_GROUND_TILE_ARRAYS = 16
 
 # The configuration-dependent part of the folded doubles' diagonal, for the
 # block solver's seeds: a configuration (i, a) is pulled down by the

@@ -43,9 +43,10 @@ def spectrum_properties(spectrum, n_states, two_electron='somf',
     """The rate layer's ingredients of one geometry from a spectrum that
     supplies transition densities -- any object with `mol`, `mf`, `omega`
     ({'singlet', 'triplet'}: (n,) Hartree), `flags` (its named numerical
-    flags, a list) and `transition_density(bra,
-    ket)` -> (charge, spin) in the MO basis of mf (bra ('ground', 0) or
-    ('singlet', i), ket (spin, k)), as `gradients.adc.ee_spectrum`'s:
+    flags, a list) and `transition_densities(pairs)` -> {(bra, ket):
+    (charge, spin)} in the MO basis of mf (bra ('ground', 0) or
+    ('singlet', i), ket (spin, k)), as `gradients.adc.ee_spectrum`'s, all
+    pairs asked in one call:
 
         socme   (n_states + 1, n_states) |<S_I|H_SO|T_J>|, row 0 the ground
                 state (`spin_orbit.socme_table_from_densities`)
@@ -56,14 +57,17 @@ def spectrum_properties(spectrum, n_states, two_electron='somf',
     """
     h_mo = spin_orbit.soc_operator_mo(spectrum.mf, spectrum.mol, two_electron,
                                       one_electron)
+    ground, singlets = ('ground', 0), [('singlet', i) for i in range(n_states)]
     triplets = [('triplet', j) for j in range(n_states)]
-    ground = [spectrum.transition_density(('ground', 0), t)[1] for t in triplets]
-    pairs = [[spectrum.transition_density(('singlet', i), t)[1] for t in triplets]
-             for i in range(n_states)]
-    charge = [spectrum.transition_density(('ground', 0), ('singlet', i))[0]
-              for i in range(n_states)]
-    dipole = transition_dipoles(spectrum.mol, spectrum.mf.mo_coeff, charge)
-    return {'socme': spin_orbit.socme_table_from_densities(h_mo, ground, pairs),
+    pairs = ([(ground, t) for t in triplets] + [(s, t) for s in singlets for t in triplets]
+             + [(ground, s) for s in singlets])
+    gam = spectrum.transition_densities(pairs)
+    table = spin_orbit.socme_table_from_densities(
+        h_mo, [gam[ground, t][1] for t in triplets],
+        [[gam[s, t][1] for t in triplets] for s in singlets])
+    dipole = transition_dipoles(spectrum.mol, spectrum.mf.mo_coeff,
+                                [gam[ground, s][0] for s in singlets])
+    return {'socme': table,
             'dipole': dipole,
             'f_osc': oscillator_strengths(spectrum.omega['singlet'][:n_states], dipole),
             'h_mo': h_mo,

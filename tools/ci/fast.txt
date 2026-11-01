@@ -7,6 +7,7 @@ pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
 pytest test_adc2_spectrum.py
+pytest test_ee_ri_transition.py
 pytest test_adc3_restricted.py
 pytest test_adc_lanczos_handwritten.py
 pytest test_adc_matvec_distributed.py

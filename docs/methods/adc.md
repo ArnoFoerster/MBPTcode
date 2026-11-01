@@ -82,6 +82,50 @@ orbital-relaxed density of each root (`ss_density='relaxed'`, the default, as
 in the classical state-specific energy; `'unrelaxed'` takes the ISR density). See
 `examples/19_ee_adc.py` and `examples/21_ee_fold.py`.
 
+**Spin-orbit couplings and transition dipoles.** The folded roots of one
+geometry, singlets and Ms = 0 triplets, and the ADC(2) one-particle
+transition densities between them (ground to excited, singlet to triplet,
+triplet to triplet) come from `gradients.adc.ee_spectrum.adc2_spectrum`. The
+densities are built one occupied tile at a time and split over MPI ranks, so
+they run at the size the fold does. `properties.transition_moments
+.spectrum_properties` turns them into the spin-orbit table (SOMF + X2C
+operator), the transition dipoles and the oscillator strengths, and
+`photophysics.minimum.from_adc2_spectrum` hands them to the rate layer.
+SCS-ADC(2) (`MP2State` with `spin_scaling='scs'`) gives energies and
+geometries only: spin-component scaling breaks spin-rotation symmetry, so
+SCS spin-orbit couplings are not well defined, and the rate layer refuses
+them and takes ADC(2)'s.
+
+```python
+from pyscf import gto, scf
+
+from src.Base.numerics.numerics import Numerics
+from src.gradients.adc.ee_spectrum import adc2_spectrum
+from src.gradients.state_models import HFState, MP2State
+from src.properties.transition_moments import spectrum_properties
+
+
+def make_scf(mol):
+    mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-jkfit')
+    mf.conv_tol, mf.conv_tol_grad = 1e-10, 1e-9
+    return mf
+
+
+mol = gto.M(atom='C 0 0 0; O 0 0 1.205; H 0 0.94 -0.587; H 0 -0.94 -0.587',
+            basis='cc-pvdz', verbose=0)
+spec = adc2_spectrum(MP2State(HFState(mol, make_scf), frozen=2,
+                              auxbasis='cc-pvdz-ri', numerics=Numerics()), 3)
+props = spectrum_properties(spec, 3)
+print(props['socme'] * 219474.63, 'cm-1')   # rows S0, S1, S2, S3; columns T1-T3
+```
+
+Spin-component scaling is not invariant under spin rotations, so the three
+sublevels of an SCS-ADC(2) triplet are not degenerate.
+`SingleReference.ADC.eeADC.ee_ri_flip.RIFoldSpinFlip` solves the Ms = +-1
+components on the same fold, which measures the splitting (tenths of an eV
+for the T1 of an organic emitter); that is why the rate layer takes no
+SCS-ADC(2) spin-orbit couplings.
+
 ADC(2) has analytic nuclear forces on the folded, density-fitted route; they
 drive the gas-phase and solvated ADC(2) geometry optimizations of `python -m
 src.photophysics solvated` ([Gradients](gradients.md),
