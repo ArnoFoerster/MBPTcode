@@ -668,7 +668,8 @@ class QPSetPass:
         states that carry an adjoint (`active`).
 
         Replicated: a root search on wc and, for a residue, a rank-one push into
-        its backend. The pole fits are the exception, striped over the ranks
+        its backend. A state's slice is fetched only on the routes that read
+        it (the contour roots); the pole model and the scissor take wc alone. The pole fits are the exception, striped over the ranks
         a round at a time, one fit a rank, as the loop reaches them: the same
         owner and the same bits as one striped call, and a pass stopped at an
         unresolved root leaves the later rounds unfitted.
@@ -692,7 +693,7 @@ class QPSetPass:
         active = []
         for si, (p, wgt) in enumerate(zip(states, weights)):
             p = int(p)
-            Bp, wc = Bps.fetch(si), wcs[si]
+            wc = wcs[si]
             if si in fit_round and (sop_poles is None or p not in sop_poles):
                 rnd = fit_round[si]
                 sop_poles = fit_poles_over_ranks(
@@ -743,7 +744,11 @@ class QPSetPass:
                                            sop_poles, self.n_poles,
                                            self.sop_stride)
                     fitted[p] = poles
-                # the one per-state root of the contour quasiparticle energy
+                # the one per-state root of the contour quasiparticle energy;
+                # the pole model reads wc alone, so its slice is not fetched
+                # (the route is the same on every rank: the fetch stays
+                # collective)
+                Bp = None if route == 'sop' else Bps.fetch(si)
                 w_star, z, res = contour_state_root(
                     route, p, Bp, wc, eps, nocc, nu_points, nu_weights, xc_p,
                     real_screening=rs, pole_model=(poles, amp), tol=tol,

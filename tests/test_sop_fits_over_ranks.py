@@ -8,7 +8,8 @@ which is reduced and identical on every rank, so the poles, the roots and Z
 are gated to a few ulp against serial.
 
 Water/cc-pVDZ (HF, DF), the admitted window on the ISDF factors, a 24-point
-contour grid. Over n ranks every state is fitted once in all.
+contour grid. Over n ranks every state is fitted once in all, and the root
+search fetches no slice from its owner.
 """
 import os
 import sys
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.Base.declaration import QPStates
 from src.Base.utils.grids.grids import gauss_legendre_grid
+import src.Base.utils.parallel.mpi_grid as mpi_grid
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.qp_states import resolve_qp_states
@@ -167,3 +169,28 @@ def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_the_root_search_fetches_no_slice_on_the_pole_model(water, size,
+                                                            monkeypatch):
+    """The pole model's roots read the state's wc alone, so pass 1 broadcasts
+    no slice over the ranks on that route (a slice is O(M naux norb) per
+    state, the whole set many GB on a large molecule), and the roots and Z
+    are the serial ones."""
+    n = len(water['states'])
+    ref, ref_out = solve(water, np.zeros(n))
+    callers, lock = [], threading.Lock()
+    real = mpi_grid.OwnedSlices.fetch
+
+    def fetch(self, i):
+        with lock:
+            callers.append(sys._getframe(1).f_code.co_name)
+        return real(self, i)
+    monkeypatch.setattr(mpi_grid.OwnedSlices, 'fetch', fetch)
+    got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
+                        size)
+    assert 'solve_states' not in callers
+    for out, route_out in got:
+        same(out[0], ref[0], 'roots', quantity='energy')
+        same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
