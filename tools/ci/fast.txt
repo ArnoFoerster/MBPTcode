@@ -1,11 +1,13 @@
 pytest test_ac_quasiparticle_shifts.py
 pytest test_active_space.py
+pytest test_active_space_cc.py
 pytest test_active_space_solver.py
 pytest test_adaptive_partition_carried.py
 pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
 pytest test_adc2_spectrum.py
+pytest test_ee_ri_transition.py
 pytest test_adc3_restricted.py
 pytest test_adc_lanczos_handwritten.py
 pytest test_adc_matvec_distributed.py
@@ -334,6 +336,7 @@ pytest test_gca_qp_set_memory.py
 pytest test_gca_refreeze_one_scf.py
 pytest test_gca_views_own_keys.py
 pytest test_geometric_step_failed_retry.py
+pytest test_walk_convention_events.py
 pytest test_ground_reads_numerics.py
 pytest test_ground_state_residual_force.py
 pytest test_ground_surface_stands_on_excited_numerics.py
@@ -361,6 +364,7 @@ pytest test_qp_hamiltonian_member_lost_inside_frozen_set.py
 pytest test_qp_hamiltonian_rotation_invariance.py
 pytest test_qp_pairs_reuse_solves.py
 pytest test_qp_pairs_by_subspace.py
+pytest test_qp_chain_batches.py
 pytest test_qp_selection_window_edge.py
 pytest test_qp_subspace_carried_member_not_explicit.py
 pytest test_rate_manifold.py

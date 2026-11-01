@@ -81,6 +81,15 @@ density) and two states as (u1, u2) pairs:
                             reference_from_factors: the particle ladder of
                             t2_2 from slabs of the four-virtual block)
 
+Spin-component scaling (SCS-ADC(2), ee_ri_fold's `scaling` (c_os, c_ss)).
+The scaled fold is the symmetric problem whose couplings of a single to a
+doubles configuration carry sqrt(c) of the doubles' pair class; its
+eigenvector's doubles are sqrt(c_os) Z and sqrt(c_ss) W. The transition
+densities are the ISR terms above in that model: the reference's couplings to
+the doubles carry the same sqrt(c), so t2 is sqrt(c) times MP1's, p0 and t1_2
+are c weighted (the SCS-MP2 density), and t2_2 is built from the scaled t2
+(ee_equations.amplitudes). At c_os = c_ss = 1 every term is ADC(2)'s.
+
 Both hold doubles-sized arrays (o^2 v^2), so they serve molecules where that
 fits. A closed shell's blocks are flip-symmetric, so every contraction forms
 the alpha-first spin blocks alone (ee_spin_blocks.SB parity). A singlet and
@@ -233,10 +242,11 @@ class Reference(NamedTuple):
     t2_2: object
 
 
-def _reference(gb, eps, no, level, ground, vk=None):
+def _reference(gb, eps, no, level, ground, vk=None, scaling=None):
     """`Reference` from spin-blocked integral blocks gb (ee_equations'
     amplitudes): t2_2, which needs the particle ladder, only for the ground
-    row."""
+    row; scaling (c_os, c_ss) the spin-component scaled ground state
+    (ee_equations.amplitudes)."""
     if level == 'adc1' and not ground:
         return Reference(None, None, None, None)
     # a closed shell's integral blocks are flip-symmetric (each beta-first
@@ -247,7 +257,8 @@ def _reference(gb, eps, no, level, ground, vk=None):
             blk.parity = 1.0
     d_ijab, d_ia, _ = ee_utils.orbital_denominators(np.asarray(eps, float), no)
     order = 3 if ground and level != 'adc1' else 2
-    amps = _eq.amplitudes(_eq.SPIN_BLOCKED, gb, d_ijab, d_ia, order=order, vk=vk)
+    amps = _eq.amplitudes(_eq.SPIN_BLOCKED, gb, d_ijab, d_ia, order=order, vk=vk,
+                          scaling=scaling)
     if level == 'adc1':
         return Reference(amps['t2_1'], None, None, None)
     return Reference(amps['t2_1'], _eq.density2(_eq.SPIN_BLOCKED, amps),
@@ -260,13 +271,14 @@ def reference_from_integrals(eps, V, no, level='adc2', ground=True):
     return _reference(_sb.g_blocks_sb(V, no, len(eps)), eps, no, level, ground)
 
 
-def reference_from_factors(eps, B, no, level='adc2', ground=True):
+def reference_from_factors(eps, B, no, level='adc2', ground=True, scaling=None):
     """`Reference` of the DF factor B (naux, norb, norb) of the active
     orbitals: the four-virtual block is never held whole (ee_r_sigma_df's
-    blocks and particle ladder, in slabs of (ac|bd))."""
+    blocks and particle ladder, in slabs of (ac|bd)). scaling (c_os, c_ss):
+    the ground state of SCS-ADC(2) (module docstring)."""
     norb = len(eps)
     return _reference(_df.g_blocks_df(B, no, norb), eps, no, level, ground,
-                      vk=_df.DFVvvvKernels(B, no, norb))
+                      vk=_df.DFVvvvKernels(B, no, norb), scaling=scaling)
 
 
 def transition_density(ref, left, right, terms=False):
@@ -321,8 +333,10 @@ def fold_state(op, y, omega, t1):
     """(u1, u2) spin-blocked of one root of the folded operator `op`
     (ee_ri_fold.RIFoldADC2): the singles sqrt(t1) y and the doubles rebuilt
     from them (ee_ri_density.root_doubles), together the unit full
-    eigenvector, in the paper scaling. The doubles are held whole: the
-    route of molecules whose o^2 v^2 fits in memory."""
+    eigenvector, in the paper scaling; a spin-component scaled operator's
+    doubles carry sqrt(c) of their pair class (module docstring). The
+    doubles are held whole: the route of molecules whose o^2 v^2 fits in
+    memory (ee_ri_transition is the tiled one)."""
     no, nv = op.no, op.nv
     s = 1.0 if op.spin == 'singlet' else -1.0
     x = np.sqrt(t1 / 2.0) * np.asarray(y, float).reshape(no, nv)
@@ -332,6 +346,8 @@ def fold_state(op, y, omega, t1):
     # (i a j b) tiles -> (i j a b); u2[i_a j_b a_b b_a] = -Z_ibja, and the
     # beta-first blocks are the flip partners, times the parity
     Z, W = _rd.root_doubles(op, y, omega, t1)
+    if op.scs is not None:
+        Z, W = np.sqrt(op.scs[0]) * Z, np.sqrt(op.scs[1]) * W
     return u1, _sb.SB.from_half({'aaaa': W.transpose(0, 2, 1, 3),
                                  'abab': Z.transpose(0, 2, 1, 3),
                                  'abba': -Z.transpose(0, 2, 3, 1)}, s)

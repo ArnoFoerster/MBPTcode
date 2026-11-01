@@ -189,8 +189,9 @@ def pair_term_backward(Bi, Bj, WtBi, WtBj, weights, want_chi0=True):
     W is symmetric, so each slice takes the other's (W - I) B; chi0 takes the
     symmetric part of W Bi diag(g) Bj^T W, the only part a symmetric chi0
     reads. With Bi = Bj it is `integral_term_backward`'s pair of terms.
-    want_chi0=False returns None for chi0_bar (`pairs_chi0_backward` takes
-    a whole set of pairs at once).
+    want_chi0=False returns None for chi0_bar. The reverse pass takes a
+    subspace's pairs at once (`subspace_terms_backward`); this is its
+    one-by-one reference.
     """
     bi_bar = (WtBj - Bj) * weights
     bj_bar = (WtBi - Bi) * weights
@@ -200,31 +201,56 @@ def pair_term_backward(Bi, Bj, WtBi, WtBj, weights, want_chi0=True):
     return bi_bar, bj_bar, 0.5 * (half + half.T)
 
 
-def pairs_chi0_backward(WtB, pairs):
-    """chi0_bar of sum over `pairs` (i, j, g) of sum_q g_q Bi[:,q]^T (W - I)
-    Bj[:,q] at ONE frequency: the sum of `pair_term_backward`'s chi0_bar over
-    the pairs, in one product per state instead of one per pair.
+def subspace_terms_backward(B, WtB, diagonal, pairs, block_gb):
+    """({state: B_bar}, chi0_bar) of one subspace at ONE frequency: its states'
+    own integral terms and its pairs' off-diagonal ones, taken at once.
 
-    WtB: {state: W B_state}, (naux, norb) each. With Y_s = sum over the pairs
-    holding s of the partner's W B diag(g) (a pair (i, i) puts W B_i diag(g)
-    into Y_i twice), the sum is 1/2 sum_s W B_s Y_s^T, symmetric in exact
-    arithmetic and made so in the bits, as the pairs' own are: g states cost g products of naux^2 norb, against g(g + 1)/2 for the pairs
-    of a group one by one. The summation order differs from the one-by-one
-    sum, so the bits move at round-off.
+    B, WtB: {state: (naux, norb)} slices and W B; diagonal {state: g_s}, the
+    state's own weights (norb,) (`integral_term_backward`); pairs [(i, j, g)]
+    within the states. With H[q] the symmetric (g, g) matrix of each orbital's
+    weights -- g_s on the diagonal, g/2 on both sides of a pair (a pair (i, i)
+    gives g on the diagonal) -- the sum is sum_q sum_st H[q]_st
+    B_s[:, q]^T (W - I) B_t[:, q], so
+
+        B_bar_s = 2 sum_t H_st (W B_t - B_t),   chi0_bar = sum_st W B_s H_st (W B_t)^T,
+
+    the sum of `integral_term_backward`'s and `pair_term_backward`'s terms to
+    round-off. Both run as products over the states, one orbital block at a
+    time (three (naux, block, g) buffers within block_gb): g states cost two
+    products of naux norb g^2 and one of naux^2 norb g, where the terms one
+    by one are g(g + 1)/2 passes over (naux, norb) arrays and 2g products of
+    naux^2 norb. The order is fixed by the states' order and the block: the
+    bits do not depend on the ranks.
     """
-    partners = {}
-    for i, j, g in pairs:
-        partners.setdefault(i, []).append((j, g))
-        partners.setdefault(j, []).append((i, g))
-    out = None
-    for s, near in partners.items():
-        Y = None
-        for t, g in near:
-            Y = WtB[t] * g if Y is None else Y + WtB[t] * g
-        term = WtB[s] @ Y.T
-        out = term if out is None else out + term
-        Y = term = None
-    return 0.25 * (out + out.T)
+    states = list(B)
+    at = {s: n for n, s in enumerate(states)}
+    g = len(states)
+    naux, norb = B[states[0]].shape
+    H = np.zeros((norb, g, g))
+    for s in states:
+        H[:, at[s], at[s]] += diagonal[s]
+    for i, j, w in pairs:
+        H[:, at[i], at[j]] += 0.5 * w
+        H[:, at[j], at[i]] += 0.5 * w
+    bars = {s: np.empty((naux, norb)) for s in states}
+    chi0_bar = np.zeros((naux, naux))
+    block = max(1, min(norb, int(block_gb * 1e9 / (3 * 8 * naux * g))))
+    for q0 in range(0, norb, block):
+        q1 = min(norb, q0 + block)
+        X = np.empty((naux, q1 - q0, g))
+        for s in states:
+            X[:, :, at[s]] = WtB[s][:, q0:q1]
+        Y = np.empty_like(X)
+        np.matmul(X.transpose(1, 0, 2), H[q0:q1], out=Y.transpose(1, 0, 2))
+        flat = (naux, (q1 - q0) * g)
+        chi0_bar += X.reshape(flat) @ Y.reshape(flat).T
+        for s in states:
+            X[:, :, at[s]] -= B[s][:, q0:q1]
+        np.matmul(X.transpose(1, 0, 2), H[q0:q1], out=Y.transpose(1, 0, 2))
+        for s in states:
+            np.multiply(Y[:, :, at[s]], 2.0, out=bars[s][:, q0:q1])
+        X = Y = None
+    return bars, 0.5 * (chi0_bar + chi0_bar.T)
 
 
 def residue_terms_backward(p, omega, Bp, eps, _nocc, residues, sigma_bar,

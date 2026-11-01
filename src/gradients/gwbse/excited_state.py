@@ -111,6 +111,7 @@ from src.Base.geometry.geometry import molecule_at
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
+from src.SingleReference.GW.qp_selection import merged_blocks
 from src.SingleReference.LinearResponse.casida import solver_choice
 from src.SingleReference.LinearResponse.davidson import DavidsonWarmStart
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
@@ -1203,6 +1204,10 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         which the conventions are carried over on; else this chain's own
         (`mean_field`). A composed surface hands both, so its refreeze
         stands on one new SCF and the one the walk already converged.
+
+        Orbitals a frozen group mixed with on the walk
+        (`FrozenConventions.absorb`) join the explicit set and that group
+        here, and every later refreeze carries them (`absorb_groups`).
         """
         # the tracked index as the starting guess; a followed state is handed
         # over as its eigenvector below
@@ -1242,9 +1247,32 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # its follow_log says how well the two surfaces' states agree.
         if self.following() is not None:
             chain.hand_over(self.following())
-        # what shared a quasiparticle Hamiltonian here still does
+        # what shared a quasiparticle Hamiltonian here still does, and the
+        # orbitals a group mixed with on the walk
         chain.conventions.carried_subspaces = carried['subspaces']
+        chain.absorb_groups(carried['absorbed'])
         return chain
+
+    def absorb_groups(self, groups):
+        """Before the first forward: each of `groups` (orbital tuples here)
+        one quasiparticle-Hamiltonian group, its orbitals in the explicit set
+        (an adaptive set's candidates and floor), joined with the groups
+        carried, and kept as `absorbed` for every later refreeze; the orbitals
+        a frozen group mixed with on a walk (`FrozenConventions.absorb`)."""
+        groups = tuple(tuple(int(p) for p in g) for g in groups)
+        if not groups:
+            return
+        c = self.conventions
+        members = {p for g in groups for p in g}
+        c.qp_set = np.asarray(sorted(set(int(p) for p in c.qp_set) | members),
+                              int)
+        if self.qp_select is not None:
+            c.qp_floor = tuple(sorted(set(c.qp_floor or ()) | members))
+        joined = tuple(c.carried_subspaces) + groups
+        c.carried_subspaces = tuple(
+            b for b in merged_blocks(sorted({p for g in joined for p in g}),
+                                     joined) if len(b) > 1)
+        c.absorbed = groups
 
     def carried_grids(self, window=None):
         """The grids this chain resolved, which a refrozen or restored chain

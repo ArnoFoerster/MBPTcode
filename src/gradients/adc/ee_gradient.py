@@ -35,7 +35,8 @@ import numpy as np
 
 from src.Base.numerics.constants import (DF_FORCE_AUX_CHUNK, DF_FORCE_BLOCK_GB,
                                  EE_FORCE_POLISH_STEPS, EE_FORCE_ROOT_RESIDUAL,
-                                 EE_FORCE_ROOT_TOL, EE_RI_TILE_GB,
+                                 EE_FORCE_ROOT_TOL, EE_FOLD_DENSE_LIMIT, EE_FOLD_RESIDUAL_GAP,
+                                 EE_RI_TILE_GB,
                                  ROOT_FOLLOW_WEIGHT_MIN)
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
@@ -85,7 +86,8 @@ def adc2_pieces(op, y, omega, t1, spin, nf, nocc, nmo, rf=None, env=None,
 
 def solve_root(mol, mf, spin, nroots, frozen, auxbasis, env=None,
                conv_tol=EE_FORCE_ROOT_TOL, tile_gb=EE_RI_TILE_GB, comm=None, aux_chunk=None,
-               factors=None, scaling=None):
+               factors=None, scaling=None, solver='newton', residual_tol=None,
+               dense_limit=0, numerics=None):
     """(op, rf, {omega, y, t1}) of the folded ADC(2) roots on mf, the LR term
     of singlets when env (a transition environment) is given. Over comm's
     ranks (default: none, serial) the operator is distributed and rank 0
@@ -94,21 +96,32 @@ def solve_root(mol, mf, spin, nroots, frozen, auxbasis, env=None,
     factors: the bare factors (ee_ri_fold.bare_factors) of the same mf,
     frozen, auxbasis, comm and aux_chunk when already built (the other spin
     of one geometry); None builds them. scaling: (c_os, c_ss) of SCS-ADC(2)
-    or None."""
+    or None. solver 'newton' (the force's): every root to conv_tol and the
+    residual EE_FORCE_ROOT_RESIDUAL; 'block' (a state model's, with its
+    Numerics `numerics`): the block solver to conv_tol and residual_tol (None:
+    sqrt(conv_tol EE_FOLD_RESIDUAL_GAP), at least conv_tol), dense below
+    dense_limit (None: EE_FOLD_DENSE_LIMIT)."""
     f = factors if factors is not None else ee_ri_fold.bare_factors(
         mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm, aux_chunk=aux_chunk)
     rf = (ee_ri_fold.TransitionReactionField.from_environment(env, mol, mf, frozen)
           if env is not None and spin == 'singlet' else None)
     op = ee_ri_fold.RIFoldADC2(f, spin, level='adc2', reaction_field=rf,
                                tile_gb=tile_gb, comm=comm, aux_chunk=aux_chunk,
-                               scaling=scaling)
+                               scaling=scaling, numerics=numerics)
+    if solver == 'newton':
+        tol_residual = max(conv_tol, EE_FORCE_ROOT_RESIDUAL)
+    elif solver == 'block':
+        tol_residual = (max(conv_tol, np.sqrt(conv_tol * EE_FOLD_RESIDUAL_GAP))
+                        if residual_tol is None else residual_tol)
+        dense_limit = EE_FOLD_DENSE_LIMIT if dense_limit is None else dense_limit
+    else:
+        raise ValueError(f"solver={solver!r}: 'newton' or 'block'")
 
     def solve(o):
-        # the force's root is polished by Newton, named so a changed default
-        # cannot switch it
-        r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, dense_limit=0,
-                                 solver='newton', tol_omega=conv_tol,
-                                 tol_residual=max(conv_tol, EE_FORCE_ROOT_RESIDUAL))
+        # the solver is named so a changed default cannot switch it
+        r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, dense_limit=dense_limit,
+                                 solver=solver, tol_omega=conv_tol,
+                                 tol_residual=tol_residual)
         return dict(omega=np.asarray(r.omega), y=np.asarray(r.y),
                     t1=np.asarray(r.t1),
                     converged=np.array(np.atleast_1d(r.converged), bool),

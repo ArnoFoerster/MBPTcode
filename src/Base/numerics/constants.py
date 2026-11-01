@@ -236,6 +236,17 @@ DMRG_N_SWEEPS = 20
 DMRG_NOISE = 1e-4
 DMRG_DAVIDSON_TOL = 1e-12
 
+# The active-space coupled cluster (pyscf's CCSDT / CCSDTQ): the amplitude
+# iteration stops when the energy moves by less than CC_ACTIVE_ENERGY_TOL and
+# the residual norm is below CC_ACTIVE_RESIDUAL_TOL, or after
+# CC_ACTIVE_MAX_CYCLE cycles; its Hartree-Fock reference in the active space
+# converges to CC_ACTIVE_SCF_TOL within CC_ACTIVE_SCF_MAX_CYCLE cycles.
+CC_ACTIVE_ENERGY_TOL = 1e-10
+CC_ACTIVE_RESIDUAL_TOL = 1e-8
+CC_ACTIVE_MAX_CYCLE = 200
+CC_ACTIVE_SCF_TOL = 1e-12
+CC_ACTIVE_SCF_MAX_CYCLE = 200
+
 # |element| below which an active-space vertex counts as absent, or a spin or
 # Hermiticity residual of the effective Hamiltonian as round-off.
 ACTIVE_SPACE_VERTEX_TOL = 1e-10
@@ -360,6 +371,11 @@ ISDF_PIVOT_POINTS_PER_ATOM = 200
 # 119-atom molecule in aug-cc-pVDZ). Above it the pivot is refused before
 # anything is formed: run it over more ranks.
 ISDF_PIVOT_MAX_GB = 64.0
+
+# Points the blocked pivot (`ao_product_fit.column_pivots`) takes as
+# candidates for one block: their residual Gram matrix is formed and pivoted
+# until its largest residual falls below the best point outside them.
+ISDF_PIVOT_CANDIDATES = 1024
 
 # The most a composed force may move, in Ha/Bohr, when the Casida-level seeds
 # its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
@@ -1684,6 +1700,14 @@ WALK_STEP_SHRINK = 0.25
 
 WALK_TRUST_MIN_BOHR = 2e-3
 
+# A trial step refused because a frozen orbital group MIXED with orbitals
+# outside it (`ConventionsLost` naming them) is not a step too long: the walk
+# refreezes the conventions at the last accepted geometry with those orbitals
+# absorbed into the group and retries the step at the same radius. At most
+# WALK_CONVENTION_REFREEZES_MAX such refreezes per walk; past them, or when
+# absorbing grows nothing, the refusal is an ordinary rejected step.
+WALK_CONVENTION_REFREEZES_MAX = 4
+
 # The walk's step cap and its trust radius (Bohr, the norm of the 3N-vector
 # step). The first step is taken on a guessed Hessian, and a longer one can
 # carry a quasiparticle root far enough that the root followed from the last
@@ -1772,6 +1796,15 @@ QP_SUBSPACE_GMRES_RESTART = 64
 QP_SUBSPACE_GMRES_MAXITER = 100
 
 QP_SUBSPACE_POLE_CHUNK = 256
+
+# The QP-set reverse pass (`gradients.gwbse.qp_space_time.QPSetPass`) joins each
+# state's B_p_bar terms in frequency order, the running sum handed from the
+# owner of one frequency to the next (`ordered_chain_sum`, one collective of
+# every rank per hand-over). Consecutive states of one slice owner are chained
+# together as one stacked sum, up to this many GB a rank (the busiest rank's
+# share of their terms, stacked, and the running sums), so one hand-over
+# carries several states: fewer collectives, the same additions and bits.
+QP_CHAIN_BATCH_GB = 0.5
 
 # Interior samples of an interval between neighbouring poles that no bound
 # certifies as holding exactly one root (`qp_equation.PoleSum`): a negative
@@ -2114,6 +2147,12 @@ EE_RI_FOLD_TILE_ARRAYS = 5
 # and in one virtual tile of its vv pass
 EE_RI_DENSITY_OCC_TILE_ARRAYS = 9
 EE_RI_DENSITY_VIRT_TILE_ARRAYS = 6
+# ... in one occupied tile of the RI transition densities
+# (`eeADC.ee_ri_transition`) besides the two doubles of every root, in one of
+# their virtual tiles, and in one tile of their ground row's second-order pass
+EE_RI_TRANSITION_TILE_ARRAYS = 6
+EE_RI_TRANSITION_VIRT_TILE_ARRAYS = 6
+EE_RI_TRANSITION_GROUND_TILE_ARRAYS = 16
 
 # The configuration-dependent part of the folded doubles' diagonal, for the
 # block solver's seeds: a configuration (i, a) is pulled down by the

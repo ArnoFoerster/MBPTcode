@@ -2,7 +2,7 @@
 
 `StateMinimum` is one geometry's record: a relaxed excited minimum, or the
 vertical point R0. GW-BSE (`from_gw_bse_record`, the stages' own records) and
-ADC(2) (`from_adc2`) fill the same fields, so `rate_models` takes either and
+ADC(2) (`from_adc2`, `from_adc2_spectrum`) fill the same fields, so `rate_models` takes either and
 a table says which method each geometry came from. A field a method does not
 provide is None, and the rate model refuses the channel that needs it by name
 rather than reading a zero.
@@ -15,8 +15,18 @@ from typing import Optional
 
 import numpy as np
 
+from src.properties.transition_moments import spectrum_properties
+
 #: The method label of a GW-BSE minimum (a record without one is GW-BSE).
 GW_BSE = 'gw-bse'
+#: The method labels of an ADC(2) and an SCS-ADC(2) minimum.
+ADC2_METHODS = ('adc2', 'scs-adc2')
+#: Why an SCS-ADC(2) minimum carries no spin-orbit coupling.
+SCS_SOC_REFUSAL = ('SCS is not well-defined for spin-orbit coupling: spin-component scaling breaks '
+                   'spin-rotation symmetry and splits the sublevels of a triplet (Ms = +-1 against Ms = 0, '
+                   'SingleReference.ADC.eeADC.ee_ri_flip; 0.38 eV for the T1 of '
+                   '4-(dimethylamino)benzonitrile in aug-cc-pVDZ), so SCS-ADC(2) gives energies and '
+                   'geometries only; take the spin-orbit couplings from ADC(2)')
 
 
 @dataclass(frozen=True)
@@ -116,7 +126,7 @@ def from_gw_bse_record(record, where):
 def from_adc2(where, coords_bohr, e0, omega_singlet, omega_triplet,
               socme=None, dipole=None, f_osc=None, d_ground=None,
               soc_dv_cart=None, solvation='gas', emitter='S1',
-              reservoir='T1', provenance=None):
+              reservoir='T1', provenance=None, method='adc2'):
     """The `StateMinimum` of an ADC(2) evaluation at one geometry: E_0 (the
     MP2 ground state there, or its solvated G), and the excitation energies
     of the singlets and triplets (Hartree, lowest first), which make every
@@ -125,14 +135,20 @@ def from_adc2(where, coords_bohr, e0, omega_singlet, omega_triplet,
     method's own evaluation provides; each left None removes the channels
     that need it (`rate_models.refused_channels`). `provenance` names the
     route of each (an SOC table of the ADC(2) singles block, a dipole of the
-    unrelaxed transition density)."""
+    unrelaxed transition density); `method` is 'adc2' or 'scs-adc2', and an
+    SCS-ADC(2) minimum takes no spin-orbit table or derivative
+    (`SCS_SOC_REFUSAL`)."""
+    if method not in ADC2_METHODS:
+        raise ValueError(f'method={method!r}: one of {ADC2_METHODS}')
+    if method == 'scs-adc2' and (socme is not None or soc_dv_cart is not None):
+        raise ValueError(f'an scs-adc2 minimum with spin-orbit couplings: {SCS_SOC_REFUSAL}')
     energy, omega = {}, {}
     for spin, values in (('S', omega_singlet), ('T', omega_triplet)):
         for i, w in enumerate(np.asarray(values, float)):
             omega[f'{spin}{i + 1}'] = float(w)
             energy[f'{spin}{i + 1}'] = float(e0) + float(w)
     return StateMinimum(
-        method='adc2', where=where,
+        method=method, where=where,
         coords_bohr=np.asarray(coords_bohr, float), e0=float(e0),
         energy=energy, omega=omega, emitter=emitter, reservoir=reservoir,
         socme=None if socme is None else np.asarray(socme, float),
@@ -142,3 +158,29 @@ def from_adc2(where, coords_bohr, e0, omega_singlet, omega_triplet,
         f_osc=None if f_osc is None else np.asarray(f_osc, float),
         d_ground=None if d_ground is None else np.asarray(d_ground, float),
         solvation=solvation, provenance=dict(provenance or {}))
+
+
+def from_adc2_spectrum(spectrum, where, n_states, solvation='gas', emitter='S1',
+                       reservoir='T1', two_electron='somf', one_electron='x2c'):
+    """The `StateMinimum` of an ADC(2) spectrum at one geometry
+    (`gradients.adc.ee_spectrum.ADC2Spectrum`): E_0, the n_states lowest
+    roots of each spin, and the method's own spin-orbit table, transition
+    dipoles and oscillator strengths from its ISR transition densities
+    (`properties.transition_moments.spectrum_properties`, the operator
+    two_electron + one_electron). The triplet sublevels follow from the Ms = 0
+    element by the Wigner-Eckart theorem, exact for ADC(2). An SCS-ADC(2)
+    spectrum is refused (`SCS_SOC_REFUSAL`); its minimum comes from
+    `from_adc2` without a table."""
+    if spectrum.method != 'adc2':
+        raise ValueError(f'spectrum method {spectrum.method!r}: {SCS_SOC_REFUSAL}')
+    props = spectrum_properties(spectrum, n_states, two_electron, one_electron)
+    return from_adc2(where, spectrum.mol.atom_coords(), spectrum.e0,
+                     spectrum.omega['singlet'][:n_states],
+                     spectrum.omega['triplet'][:n_states], socme=props['socme'],
+                     dipole=props['dipole'], f_osc=props['f_osc'],
+                     solvation=solvation, emitter=emitter, reservoir=reservoir,
+                     provenance={'socme': f'ISR transition densities, {two_electron} '
+                                          f'+ {one_electron}',
+                                 'soc_sublevels': 'Ms = 0 element, Wigner-Eckart (exact)',
+                                 'dipole': 'ISR ground-state transition density',
+                                 'flags': props['flags']})

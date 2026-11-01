@@ -32,7 +32,8 @@ import numpy as np
 import pyscf.lib
 from threadpoolctl import threadpool_info
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
+from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_GRADIENT_FLOOR,
+                                         PIN_CROSS_BLAS_BAR,
                                          PIN_CROSS_BLAS_CONTINUED_BAR,
                                          PIN_CROSS_BLAS_GRADIENT_BAR,
                                          PIN_CROSS_BLAS_ROOT_BAR,
@@ -49,6 +50,12 @@ PIN_CROSS_BLAS_BARS = {'energy': PIN_CROSS_BLAS_BAR,
                        'continued': PIN_CROSS_BLAS_CONTINUED_BAR,
                        'vector': PIN_CROSS_BLAS_VECTOR_BAR,
                        'root': PIN_CROSS_BLAS_ROOT_BAR}
+#: The relative bar between two DIFFERENT computation paths of one quantity
+#: (a batched against a looped contraction, other GEMM shapes, another split
+#: over ranks): equal in exact arithmetic, their round-off differs with the BLAS
+#: and its kernels' blocking, so they are compared to this, never to the bit.
+#: A same-path reproducibility pin on the recording machine stays bitwise.
+CROSS_PATH_RTOL = 1e-12
 #: The bar per pin unit.
 PIN_UNIT_SCALE = {'Ha': 1.0, 'eV': HARTREE_TO_EV, '1': 1.0}
 #: The thread caps of a subprocess gate: one thread count for every pool.
@@ -231,6 +238,15 @@ def assert_pin(got, pin, blas, unit='Ha', quantity='energy', label=None):
 #: (the pin file of the one fit, which is the workstation's).
 RECORDING_BLAS = recorded_blas(
     pathlib.Path(__file__).resolve().parent / 'one_fit_pins.json')
+
+
+def isdf_gradient_bar():
+    """What an ISDF force may miss another computation of itself by (the
+    finite difference of its energy, another fit layout, other ranks, a rotated
+    frame): ISDF_GRADIENT_FLOOR, measured on the recording workstation, under
+    `RECORDING_BLAS`; the gradient class bar under any other BLAS, where the
+    fit's conditioning turns other last bits into a larger miss."""
+    return bar_under(RECORDING_BLAS, ISDF_GRADIENT_FLOOR, quantity='gradient')
 
 
 def assert_same(got, want, unit='Ha', quantity='energy', label=None):

@@ -137,7 +137,7 @@ def test_active_space_solvers():
     assert run()
 
 
-@pytest.mark.parametrize('name', ['pyscf-fci', 'fci', 'ccsdt', None])
+@pytest.mark.parametrize('name', ['pyscf-fci', 'fci', 'ccsd', None])
 def test_an_unknown_backend_is_refused_by_name(name):
     """A name `solve` does not dispatch on (a typo, a backend it does not have)
     is refused, never handed to the default exact diagonalization."""

@@ -72,7 +72,7 @@ src/Base/                      the foundation
 src/Solvers/                   the quasiparticle root finder (one for every
                                route), the symmetric Davidson eigensolver,
                                and the active-space solvers (FCI,
-                               determinant basis, DMRG)
+                               determinant basis, DMRG, coupled cluster)
 src/environments/              medium.py (a medium by name or by eps and
                                n^2, and the cavity conventions),
                                solvent_screening.py (PCM reaction field and

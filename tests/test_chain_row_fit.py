@@ -67,8 +67,7 @@ from src.Base.numerics.constants import ISDF_FIT_REGULARIZATION
 from src.gradients.rpa.chain_settings import with_setting
 from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.numerics.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIATION_K,
-                                         HARTREE_TO_EV,
-                                         ISDF_GRADIENT_FLOOR)
+                                         HARTREE_TO_EV)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base.factorization import separable_ri
@@ -98,7 +97,7 @@ from tests.test_chain_sliced_factors import (COMPOSED_GATHERS, H2O,
                                              own_water, reachable_arrays,
                                              reachable_rows)
 from tests.isdf_test_grid import g1, g1_kw, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
-from tests.pins import assert_same, bitwise_arrays
+from tests.pins import assert_same, bitwise_arrays, isdf_gradient_bar
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 #: The package the memory scan traces: every frame whose code lives here.
@@ -707,7 +706,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
     assert max(bare_beside.values()) <= FIT_REASSOCIATION_K, bare_same
     for key in ('force', 'drpa_force'):
         assert (np.abs(replicated[key] - rows[key]).max()
-                < ISDF_GRADIENT_FLOOR), key
+                < isdf_gradient_bar()), key
     assert min(apart.values()) > FIT_REASSOCIATION_K, other
 
 

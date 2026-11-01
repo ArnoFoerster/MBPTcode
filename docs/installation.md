@@ -47,6 +47,12 @@ first works; so `block2` must be imported before `numpy` in any process that
 uses both. `KMP_DUPLICATE_LIB_OK=TRUE` suppresses the abort but can deadlock
 the DMRG sweep.
 
+The coupled-cluster active-space solver
+(`Solvers.active_space_solver.CoupledClusterSolver`) uses pyscf's CCSDT and
+CCSDTQ, which ship with recent pyscf (2.12.1 has them). Its tensor
+contractions run on `pytblis` when that is installed (`pip install pytblis`),
+else on pyscf's own einsum; the results are the same.
+
 `psutil` is optional: off Linux, where pyscf cannot read a process's resident
 size, the memory budgets of the ISDF and DF builds and of the EE-ADC Davidson
 (`Base.utils.parallel.memory.current_memory_mb`) subtract what the process

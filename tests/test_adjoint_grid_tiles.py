@@ -39,7 +39,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
+from src.Base.numerics.constants import (NUCLEAR_FD_STEP,
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
@@ -60,7 +60,7 @@ from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_chain_row_fit import TILE, molecule
 from tests.test_chain_sliced_factors import H2O
 from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
-from tests.pins import RECORDING_BLAS, matches
+from tests.pins import RECORDING_BLAS, isdf_gradient_bar, matches
 
 SIZES = (1, 2, 3, 5, 8)
 ULP = np.finfo(float).eps
@@ -348,7 +348,7 @@ def test_the_ranked_force_is_the_tau_split_and_one_ranks():
         d_one = float(np.abs(new[0] - one).max())
         lines.append(f'{size} ranks: |F - tau split| {d_old:.1e}, '
                      f'|F - one rank| {d_one:.1e}')
-        assert max(d_old, d_one) < ISDF_GRADIENT_FLOOR, lines
+        assert max(d_old, d_one) < isdf_gradient_bar(), lines
     assert np.abs(one).max() > 1e-3
     print('\n' + '; '.join(lines))
 
@@ -372,7 +372,7 @@ def test_the_ranked_force_follows_its_energy():
 
     diff = run_simulated(rank, 2)[0]
     print(f'\n2 ranks: analytic - FD {np.array2string(diff, precision=2)}')
-    assert np.abs(diff).max() < ISDF_GRADIENT_FLOOR, diff
+    assert np.abs(diff).max() < isdf_gradient_bar(), diff
 
 
 class AdjointCensus:

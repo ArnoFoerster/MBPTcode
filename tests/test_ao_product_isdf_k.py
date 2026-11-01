@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.factorization.distributed_df import (distributed_mean_field,
                                                    release_distributed)
 from src.Base.factorization.isdf_jk import frozen_frames, reference_frames
-from src.Base.numerics.constants import HARTREE_TO_EV, ISDF_GRADIENT_FLOOR
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.isdf_mean_field import (isdf_jk_with_force,
@@ -46,6 +46,7 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from tests.test_body_fixed_frames import (ENERGY_TOL, RIGID_TOL, five_point,
                                           moved, rigid_part, rotation, water)
+from tests.pins import isdf_gradient_bar
 
 H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 HCHO_C1 = ('C 0 0.02 -0.5296; O 0.01 0 0.6763; H 0 0.9339 -1.1088; '
@@ -180,11 +181,11 @@ def test_the_chain_on_an_isdf_k_mean_field():
     force, torque = rigid_part(mol, g0)
     assert force < RIGID_TOL and torque < RIGID_TOL, (force, torque)
     fd, d = five_point(energy, mol, np.random.default_rng(0).normal(size=g0.shape))
-    assert abs(fd - float((g0 * d).sum())) < ISDF_GRADIENT_FLOOR
+    assert abs(fd - float((g0 * d).sum())) < isdf_gradient_bar()
     m2 = moved(mol)
     assert abs(energy(m2) - e0) < ENERGY_TOL
     assert np.abs(chain.total_gradient(m2)[0] - g0 @ rotation().T).max() \
-        < ISDF_GRADIENT_FLOOR
+        < isdf_gradient_bar()
 
 
 if __name__ == '__main__':

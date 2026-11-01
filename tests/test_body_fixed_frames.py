@@ -36,8 +36,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.Base.geometry import body_frame
 from src.Base.geometry.body_frame import BodyFrame, aligned_displacement, kabsch_rotation
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR,
-                                         SCF_DIFFERENTIABLE_GRAD_TOL,
+from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
 from src.gradients.isdf_mean_field import isdf_jk_with_force
@@ -49,7 +48,7 @@ from src.properties.excitations import SurfaceSpec, surface_of
 from src.properties.optimize import translation_rotation_basis
 from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
-from tests.pins import assert_same
+from tests.pins import assert_same, isdf_gradient_bar
 
 BASIS = 'cc-pvdz'
 #: Water with no symmetry, so no component of a force vanishes by symmetry.
@@ -228,13 +227,13 @@ def test_the_cd_chain_is_invariant_and_its_force_exact(spin):
     m2 = moved(mol)
     assert abs(energy(m2) - e0) < ENERGY_TOL
     g2 = gradient(m2)
-    assert np.abs(g2 - g0 @ rotation().T).max() < ISDF_GRADIENT_FLOOR
+    assert np.abs(g2 - g0 @ rotation().T).max() < isdf_gradient_bar()
     rng = np.random.default_rng(0)
     for direction in (rng.normal(size=g2.shape),
                       translation_rotation_basis(m2.atom_coords())[4]
                       .reshape(-1, 3)):
         fd, d = five_point(energy, m2, direction)
-        assert abs(fd - float((g2 * d).sum())) < ISDF_GRADIENT_FLOOR
+        assert abs(fd - float((g2 * d).sum())) < isdf_gradient_bar()
 
 
 @pytest.mark.parametrize('factory', [rhf, isdf_rhf], ids=['df', 'isdf-k'])
@@ -252,13 +251,13 @@ def test_the_production_surface_is_invariant(factory):
         force, torque = rigid_part(mol, g0)
         assert force < RIGID_TOL and torque < RIGID_TOL, (name, force, torque)
         assert abs(e2 - e0) < ENERGY_TOL, (name, e2 - e0)
-        assert np.abs(g2 - g0 @ rot.T).max() < ISDF_GRADIENT_FLOOR, name
+        assert np.abs(g2 - g0 @ rot.T).max() < isdf_gradient_bar(), name
     # the force at the rotated geometry is the derivative of its energy
     g2 = there['S1'][1]
     fd, d = five_point(
         lambda m: evaluated(surface, m, gradients=())['S1'][0], m2,
         translation_rotation_basis(m2.atom_coords())[5].reshape(-1, 3))
-    assert abs(fd - float((g2 * d).sum())) < ISDF_GRADIENT_FLOOR
+    assert abs(fd - float((g2 * d).sum())) < isdf_gradient_bar()
 
 
 def test_the_drpa_ground_state_is_invariant():
@@ -271,7 +270,7 @@ def test_the_drpa_ground_state_is_invariant():
     m2 = moved(mol)
     assert abs(chain.total_energy(m2) - e0) < ENERGY_TOL
     assert np.abs(chain.total_gradient(m2)[0] - g0 @ rotation().T).max() \
-        < ISDF_GRADIENT_FLOOR
+        < isdf_gradient_bar()
 
 
 def test_the_dense_df_route_is_invariant():

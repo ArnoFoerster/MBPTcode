@@ -32,12 +32,12 @@ def test_one_subspace_is_held_at_a_time(monkeypatch):
     for module in (qp_set_module, adaptive_selection_module):
         monkeypatch.setattr(module, 'QP_HAMILTONIAN_WINDOW',
                             PBE0_SUBSPACE_WINDOW)
-    held, contract = [], qp_space_time.pairs_chi0_backward
+    held, contract = [], qp_space_time.subspace_terms_backward
 
-    def recorded(WtB, pairs):
+    def recorded(B, WtB, *rest):
         held.append(frozenset(WtB))
-        return contract(WtB, pairs)
-    monkeypatch.setattr(qp_space_time, 'pairs_chi0_backward', recorded)
+        return contract(B, WtB, *rest)
+    monkeypatch.setattr(qp_space_time, 'subspace_terms_backward', recorded)
     ch = chain(pbe0, qp_hamiltonian=True, qp_window=PBE0_WINDOW)
     grad = ch.excitation_gradient()[0]
     assert ch.resolved.qp_subspaces[1] == PBE0_SUBSPACES

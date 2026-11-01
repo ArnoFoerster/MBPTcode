@@ -3,7 +3,9 @@ it (gradients.adc.ee_spectrum, properties.transition_moments
 .spectrum_properties).
 
 Formaldehyde, cc-pVDZ, DF-RHF on cc-pvdz-jkfit, ADC(2) on cc-pvdz-ri, the
-two 1s cores frozen. Checks:
+two 1s cores frozen, the roots solved to 1e-12 Ha and the residual 1e-11
+(the models' Numerics, so the symmetry zeros below hold to round-off).
+Checks:
 
   1. E_0 + omega of the two lowest roots of each spin equal ADC2State's
      energies of those roots (follow='index', the gas phase) to 1e-9 Ha.
@@ -16,9 +18,15 @@ two 1s cores frozen. Checks:
      (El-Sayed, < 1e-10 Ha) while its coupling to T2 (pi -> pi*) does not
      (> 1e-5 Ha).
   4. refusals: a root the solve did not return, a negative root index, a
-     triplet bra, a ground ket.
-  5. an SCS or SOS MP2 state model is refused: its E_0 is spin-component
-     scaled, while these roots and ISR transition densities are ADC(2)'s.
+     triplet bra with a singlet ket, a ground ket.
+  5. a triplet-triplet pair has charge density only; the SCS-ADC(2) spectrum
+     of the same molecule (MP2State spin_scaling 'scs') is labelled
+     'scs-adc2' and its roots are the scaled fold's (its E_0 + omega of S1
+     equals the SCS ADC2State's to 1e-9 Ha); the rate layer takes
+     its energies (`from_adc2`, method 'scs-adc2') but refuses its
+     spin-orbit couplings (`from_adc2_spectrum`, or a table handed to
+     `from_adc2`), naming the sublevel splitting; the ADC(2) spectrum's
+     `StateMinimum` carries its own table, dipoles and energies.
 
 Run: python tests/test_adc2_spectrum.py
 """
@@ -36,6 +44,7 @@ from src.gradients.adc.ee_spectrum import adc2_spectrum
 from src.gradients.adc.ee_state_model import ADC2State
 from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
+from src.photophysics.minimum import from_adc2, from_adc2_spectrum
 from src.properties import spin_orbit, transition_moments
 from tests.adc_common import H2CO, check
 
@@ -49,9 +58,13 @@ def make_scf(m):
     return mf
 
 
+# tight roots: a symmetry-forbidden f grows as the roots' residual squared
+TIGHT = Numerics(adc={'conv_tol': 1e-12, 'residual_tol': 1e-11})
+
+
 def mp2_model(mol):
     return MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri',
-                    numerics=Numerics())
+                    numerics=TIGHT)
 
 
 def check_energies(mol, spec):
@@ -120,7 +133,7 @@ def check_refusals(spec):
     ok = True
     for bra, ket, what in ((('ground', 0), ('singlet', 99), 'a root not returned'),
                            (('ground', 0), ('triplet', -1), 'a negative root index'),
-                           (('triplet', 0), ('singlet', 0), 'a triplet bra'),
+                           (('triplet', 0), ('singlet', 0), 'a triplet bra with a singlet ket'),
                            (('singlet', 0), ('ground', 0), 'a ground ket')):
         try:
             spec.transition_density(bra, ket)
@@ -130,18 +143,47 @@ def check_refusals(spec):
     return ok
 
 
-def check_scaled(mol):
+def check_scs(mol, spec):
     """Check 5."""
-    ok = True
-    for scaling in ('scs', 'sos'):
-        mp2 = MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri',
-                       numerics=Numerics(), spin_scaling=scaling)
+    charge, spin = spec.transition_density(('triplet', 0), ('triplet', 1))
+    ok = check(np.abs(spin).max() == 0.0 and np.abs(charge).max() > 1e-6,
+               'a triplet-triplet pair carries charge density only')
+    def scs_model():
+        return MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri',
+                        spin_scaling='scs', numerics=TIGHT)
+
+    scs = adc2_spectrum(scs_model(), N_STATES)
+    r = ADC2State(scs_model(), 'singlet', 0, N_STATES, follow='index')(
+        np.zeros((mol.nao, mol.nao)), 0.0)
+    ok &= check(abs(r.energy - scs.energy('singlet', 0)) < 1e-9,
+                'on an SCS model the spectrum\'s S1 is the SCS state model\'s root',
+                f"{abs(r.energy - scs.energy('singlet', 0)):.1e} Ha")
+    ok &= check(spec.method == 'adc2' and scs.method == 'scs-adc2',
+                'the spectra are labelled by method')
+    ok &= check(abs(scs.omega['triplet'][0] - spec.omega['triplet'][0]) > 1e-3,
+                'SCS moves T1', f"{(scs.omega['triplet'][0] - spec.omega['triplet'][0]) * 27.211386:+.3f} eV")
+    m = from_adc2('R0', mol.atom_coords(), scs.e0, scs.omega['singlet'][:N_STATES],
+                  scs.omega['triplet'][:N_STATES], method='scs-adc2')
+    ok &= check(m.method == 'scs-adc2' and m.socme is None
+                and m.energy['T1'] == scs.energy('triplet', 0),
+                'an SCS-ADC(2) minimum carries its energies and no spin-orbit table')
+    for what, call in (('an SCS-ADC(2) spectrum to from_adc2_spectrum',
+                        lambda: from_adc2_spectrum(scs, 'R0', N_STATES)),
+                       ('an SCS-ADC(2) minimum with a spin-orbit table',
+                        lambda: from_adc2('R0', mol.atom_coords(), scs.e0, [0.1], [0.1],
+                                          socme=np.zeros((2, 1)), method='scs-adc2'))):
         try:
-            adc2_spectrum(mp2, N_STATES)
-            ok &= check(False, f'a {scaling} state model is refused')
+            call()
+            ok &= check(False, f'{what} is refused')
         except ValueError as exc:
-            ok &= check('spin_scaling' in str(exc), f'a {scaling} state model is refused',
-                        str(exc)[:60])
+            ok &= check('not well-defined for spin-orbit' in str(exc) and 'splits the sublevels' in str(exc), f'{what} is refused', str(exc)[:60])
+    props = transition_moments.spectrum_properties(spec, N_STATES)
+    m = from_adc2_spectrum(spec, 'R0', N_STATES)
+    ok &= check(m.method == 'adc2' and np.array_equal(m.socme, props['socme'])
+                and np.array_equal(m.dipole, props['dipole'])
+                and m.energy['T1'] == spec.energy('triplet', 0),
+                'from_adc2_spectrum carries the method\'s own table and energies',
+                m.provenance['soc_sublevels'])
     return ok
 
 
@@ -159,7 +201,7 @@ def run():
         ok &= check_active(mol, spec, props)
         ok &= check_symmetry(props)
         ok &= check_refusals(spec)
-        ok &= check_scaled(mol)
+        ok &= check_scs(mol, spec)
     return ok
 
 

@@ -81,6 +81,7 @@ import pickle
 import sys
 import threading
 import traceback
+import weakref
 
 import numpy as np
 
@@ -629,29 +630,94 @@ class NodeShared:
     rank. `fills` is True on the rank that writes it (the node's first);
     `ready()` is the node barrier after which the others may read. Serially, on
     a world of one and on a SimulatedComm the array is private and `fills` is
-    True. Keep the object alive as long as the array is used: the window is
-    freed with it."""
+    True.
+
+    The node's communicator is split from `comm` once and reused, and a window
+    is freed once no rank of the node holds the array or a view of it any
+    more, at a later NodeShared on the same `comm` (`_Node`). Communicators
+    and windows each take an MPI context, of which a process has a few
+    thousand, so a long run that builds one per call would run out."""
 
     def __init__(self, shape, comm):
         shape = tuple(int(x) for x in shape)
-        self.node, self.win = None, None
+        self.node = None
         # a window only on a genuine mpi4py communicator; nothing here starts MPI
         mod = sys.modules.get('mpi4py.MPI')
         if (comm is None or comm.Get_size() == 1 or mod is None
                 or not isinstance(comm, mod.Comm)):
             self.array, self.fills = np.empty(shape), True
             return
-        self.node = comm.Split_type(_mpi().COMM_TYPE_SHARED)
+        node = _node_of(comm)
+        self.node = node.comm
         self.fills = self.node.Get_rank() == 0
         nbytes = 8 * int(np.prod(shape, dtype=np.int64)) if self.fills else 0
-        self.win = _mpi().Win.Allocate_shared(nbytes, 8, comm=self.node)
-        buf, _ = self.win.Shared_query(0)
-        self.array = np.ndarray(buffer=buf, dtype=np.float64, shape=shape)
+        self.array = node.allocate(nbytes, shape)
 
     def ready(self):
         """Barrier on the node: the filling rank has written the array."""
         if self.node is not None:
             self.node.Barrier()
+
+
+_NODE_KEY = []
+
+
+def _node_of(comm):
+    """The `_Node` of the genuine mpi4py communicator `comm`: split once (a
+    collective on `comm`, the first time on every rank) and kept on `comm` as
+    an MPI attribute."""
+    mod = _mpi()
+    if not _NODE_KEY:
+        _NODE_KEY.append(mod.Comm.Create_keyval())
+    node = comm.Get_attr(_NODE_KEY[0])
+    if node is None:
+        node = _Node(comm.Split_type(mod.COMM_TYPE_SHARED))
+        comm.Set_attr(_NODE_KEY[0], node)
+    return node
+
+
+class _Segment:
+    """A window's memory as numpy sees it: the array and every view of it hold
+    this object, so it lives exactly as long as some view of the memory does
+    on this rank."""
+
+    def __init__(self, buf, shape):
+        self.buf = buf
+        self.__array_interface__ = np.ndarray(buffer=buf, dtype=np.float64,
+                                              shape=shape).__array_interface__
+
+
+class _Node:
+    """The shared-memory communicator of one parent communicator and the
+    windows allocated on it, each with a weak reference to its `_Segment`."""
+
+    def __init__(self, comm):
+        self.comm, self.windows = comm, []
+
+    def allocate(self, nbytes, shape):
+        """A new window of `nbytes` on this rank (the node's memory is the
+        first rank's), as an array of `shape` over the first rank's memory.
+        Windows no rank views any more are freed first."""
+        self.sweep()
+        win = _mpi().Win.Allocate_shared(nbytes, 8, comm=self.comm)
+        buf, _ = win.Shared_query(0)
+        seg = _Segment(buf, shape)
+        self.windows.append((weakref.ref(seg), win))
+        return np.asarray(seg)
+
+    def sweep(self):
+        """Free the windows whose memory no rank of the node views. A
+        collective on the node: every rank holds the same windows in the same
+        order (each came from a collective allocation), and a window that one
+        rank still views waits for a later sweep."""
+        if not self.windows:
+            return
+        dead = [ref() is None for ref, _ in self.windows]
+        gone = [all(d) for d in zip(*self.comm.allgather(dead))]
+        for (_, win), free in zip(self.windows, gone):
+            if free:
+                win.Free()
+        self.windows = [w for w, free in zip(self.windows, gone) if not free]
 
 
 def _gather_ranges_once(buf, ranges, comm):

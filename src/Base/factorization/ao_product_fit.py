@@ -57,7 +57,8 @@ RANKS. The pivot works on the parent in fixed tiles of FIT_CHOLESKY_BLOCK
 points, owned block-cyclically (`point_tiles`): each rank keeps its tiles'
 collocation and factor columns, count x n_parent / ranks float64 (about 16 GB
 over the ranks at 20000 of 100000 parent points), never the parent's
-n_parent^2 Gram matrix; a tile's arithmetic does not depend on who owns it,
+n_parent^2 Gram matrix, and the gathered rows of the candidates of one
+block (`column_pivots`); a tile's arithmetic does not depend on who owns it,
 so the pivots are the same at every rank count. The projection E and its
 adjoint divide the shell runs of the three-centre integrals over the ranks
 (`own_runs`), integrals and contraction alike, 2 nao^2 naux nk over the
@@ -75,10 +76,12 @@ nk-indexed array, whole:
            once), d_k = 1/s_k from the tile's own rows;
   pass     every node evaluates every shell run, largest first, in rounds
            of one run per rank of the node: the run's owner evaluates its
-           (m n|P) and broadcasts it inside the node, and every rank adds
-           sum_mn (P|mn) X_gm X_gn of the run into its own tiles of E^T, in
-           the fixed run order; then E^T_i V^-1 per tile. The integral
-           blocks, nao^2 naux doubles in all, never cross a node;
+           (m n|P) for n up to the run's end and broadcasts it inside the
+           node, and every rank adds the run's pairs, each pair of two runs
+           once for both orders, into its own tiles of E^T, one matrix
+           product a tile, in the fixed run order; then E^T_i V^-1 per tile.
+           The integral blocks, about nao^2 naux / 2 doubles in all, never
+           cross a node;
   Cholesky `separable_ri.cholesky_tiles` and `backward_tiles`, the row
            fit's right-looking sweep, M^T_i = d_i (G^-1 d F^T)_i.
 
@@ -98,6 +101,7 @@ from pyscf import df as pyscf_df
 from src.Base.numerical_flags import flag
 from src.Base.geometry.geometry import grid_key
 from src.Base.numerics.constants import (BYTES_PER_GB, FIT_CHOLESKY_BLOCK,
+                                         ISDF_PIVOT_CANDIDATES,
                                          ISDF_PIVOT_FRACTION,
                                          ISDF_PIVOT_MAX_GB,
                                          ISDF_PIVOT_PARENT_FACTOR,
@@ -109,7 +113,8 @@ from src.Base.factorization.separable_ri import (RowFit, ao_values,
                                                  fit_settings,
                                                  tile_collocation,
                                                  total_bytes)
-from src.Base.utils.parallel.mpi_grid import (allgather_blocks, broadcast_rows,
+from src.Base.utils.parallel.mpi_grid import (allgather_blocks,
+                                              allgather_ranges, broadcast_rows,
                                               contiguous_block,
                                               current_comm, lockstep,
                                               node_comm, ordered_chain_sum,
@@ -430,6 +435,27 @@ def product_gram_tiles(mol, coords, tiles, owners, rank, numerics, ext,
     return S, d, X_own, X_ext
 
 
+def lower_block(mol, auxmol, run):
+    """(mu nu|P) for the AOs mu of one shell run (`shell_runs`) and every nu
+    up to the run's end, (a1 - a0) a1 rows of naux: the pairs the
+    symmetric projection reads (`projection_rows`)."""
+    sh0, sh1, a0, a1 = run
+    block = pyscf_df.incore.aux_e2(
+        mol, auxmol, intor='int3c2e', aosym='s1', comp=1,
+        shls_slice=(sh0, sh1, 0, sh1, 0, auxmol.nbas))
+    return block.reshape((a1 - a0) * a1, auxmol.nao_nr())
+
+
+def pair_products(X, a0, a1):
+    """K[g, (m, n)] = w_n X_gm X_gn for m in a0:a1 and n < a1, w_n = 2 below
+    a0 and 1 inside the run: with `lower_block`, sum over the runs of
+    K B = sum_mn (P|mn) X_gm X_gn, each pair m != n of two runs taken once
+    for both orders (exactly: the weight is a power of two)."""
+    W = X[:, :a1].copy()
+    W[:, :a0] *= 2.0
+    return (X[:, a0:a1, None] * W[:, None, :]).reshape(len(X), -1)
+
+
 def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
                     also=None, node=None):
     """{t: E^T_t}, E[P, g] = sum_mn (P|mn) X_gm X_gn on this rank's tiles
@@ -437,15 +463,20 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
     (`shell_runs`), largest first.
 
     Every node makes the whole pass itself: the runs go in rounds of one per
-    rank of the node, each rank evaluates its run's (m n|P) and every run is
-    broadcast by its owner in turn inside the node, so no integral block
+    rank of the node, each rank evaluates its run's integrals and every run
+    is broadcast by its owner in turn inside the node, so no integral block
     crosses a node and each tile adds the runs in the one fixed order
     whoever evaluated them, the same calls on the same shapes: the same bits
     at every rank and node count. node: the ranks that share the block
-    (`node_comm` of `comm` when None; a test hands smaller groups). also(t,
-    T, a0, a1), where given, is called with each tile's half-transformed run
-    T[m, P, g] = sum_n (m n|P) X[g, n] (`half_transformed`) and its AO span
-    (the adjoint reads the pass through it).
+    (`node_comm` of `comm` when None; a test hands smaller groups).
+
+    Without `also` the pass reads the pairs once, by the symmetry (P|mn) =
+    (P|nm): a run of AOs m takes nu up to its end (`lower_block`) and adds
+    E^T += K B, one matrix product over the pairs (`pair_products`), half
+    the integrals and half the products of the full pass. also(t, T, a0,
+    a1), where given, is called with each tile's half-transformed run
+    T[m, P, g] = sum_n (m n|P) X[g, n] (`half_transformed`, every nu) and its
+    AO span (the adjoint reads the pass through it).
     """
     comm = current_comm() if comm is None else comm
     split = node is None
@@ -455,8 +486,9 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
                                                 node.Get_size())
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     runs = shell_runs(mol, auxmol, numerics)
-    width = [a1 - a0 for _, _, a0, a1 in runs]
-    order = sorted(range(len(runs)), key=lambda ib: (-width[ib], ib))
+    lower = also is None
+    cost = [(a1 - a0) * (a1 if lower else nao) for _, _, a0, a1 in runs]
+    order = sorted(range(len(runs)), key=lambda ib: (-cost[ib], ib))
     Et = {t: np.zeros((len(x), naux)) for t, x in X_own.items()}
     if hold is not None:
         hold('E_rows', total_bytes(Et.values()))
@@ -465,21 +497,30 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
             batch = order[c0:c0 + nranks]
             own = None
             if rank < len(batch):
-                own = half_transform_operand(three_centre_block(
-                    mol, auxmol, runs[batch[rank]]))
+                run = runs[batch[rank]]
+                own = (np.ascontiguousarray(lower_block(mol, auxmol, run))
+                       if lower else half_transform_operand(
+                           three_centre_block(mol, auxmol, run)))
             for pos, ib in enumerate(batch):
                 a0, a1 = runs[ib][2], runs[ib][3]
                 nb = a1 - a0
-                operand = own if pos == rank else np.empty((nb * naux, nao))
+                shape = (nb * a1, naux) if lower else (nb * naux, nao)
+                operand = own if pos == rank else np.empty(shape)
                 broadcast_rows(operand, pos, node)
                 if hold is not None:
                     hold('run_block', operand.nbytes
                          + (0 if own is None or pos == rank else own.nbytes))
                 for t, X_t in X_own.items():
+                    if lower:
+                        K = pair_products(X_t, a0, a1)
+                        if hold is not None:
+                            hold('pair_products', K.nbytes)
+                        Et[t] += K @ operand
+                        del K
+                        continue
                     T = half_transformed(operand, X_t, 0, len(X_t), nb)
                     Et[t] += np.einsum('mPg,gm->gP', T, X_t[:, a0:a1])
-                    if also is not None:
-                        also(t, T, a0, a1)
+                    also(t, T, a0, a1)
                     del T
                 del operand
             own = None
@@ -535,8 +576,8 @@ def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
     # every array the fit may hold, zero until it does: the same keys on
     # every rank
     held = dict.fromkeys(('metric_lu', 'X_rows', 'X_ext', 'stream_tile',
-                          'S_rows', 'E_rows', 'run_block', 'panel',
-                          'MT_rows'), 0)
+                          'S_rows', 'E_rows', 'run_block',
+                          'pair_products', 'panel', 'MT_rows'), 0)
 
     def hold(name, nbytes):
         held[name] = max(held[name], int(nbytes))
@@ -578,14 +619,17 @@ def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
 def pivot_gb(n_parent, count, comm=None):
     """GB one rank holds for the pivot: its tiles' collocation is counted by
     the caller's basis, its factor columns (count, rows) here, at the most
-    tiles any rank owns."""
+    tiles any rank owns, and the factor columns of a block's candidates
+    (count, ISDF_PIVOT_CANDIDATES)."""
     ntiles = len(point_tiles(n_parent))
     size = 1 if comm is None else comm.Get_size()
     rows = -(-ntiles // size) * FIT_CHOLESKY_BLOCK
-    return 8.0 * count * min(rows, n_parent) / BYTES_PER_GB
+    rows = min(rows, n_parent) + min(ISDF_PIVOT_CANDIDATES, n_parent)
+    return 8.0 * count * rows / BYTES_PER_GB
 
 
-def column_pivots(mol, coords, count, numerics=None, comm=None):
+def column_pivots(mol, coords, count, numerics=None, comm=None,
+                  candidates=None, timings=None):
     """The first `count` pivots of the pivoted Cholesky factorization of the
     balanced AO-product Gram matrix G over `coords` (the largest remaining
     diagonal first, ties to the lowest index), stopping early where the
@@ -593,21 +637,40 @@ def column_pivots(mol, coords, count, numerics=None, comm=None):
     rule; warned, `ISDFPivotShort`).
 
     G is never formed: column p, G[:, p] = (X x_p)^2 d d_p + reg e_p, is
-    made when p is chosen, from the pivot's collocation row, and only the
-    factor's columns are kept, (count, rows) per rank. Every rank holds its
-    own point tiles (their collocation, residual diagonal and factor
-    columns); a step finds the largest residual over the ranks, the owner
-    hands the pivot's row (x_p, d_p and its factor entries) to every rank,
-    and each rank updates its tiles. The steps are the same calls on the
-    same tile shapes whoever owns a tile, so the pivots are the same at
-    every rank count. The Tikhonov floor is the fit's regularization
-    (`fit_settings`).
+    made from the pivot's collocation row, and only the factor's columns are
+    kept, (count, rows) per rank. The pivots are taken in blocks, so that the
+    factor is read once a block by a matrix product rather than once a pivot:
+
+      candidates  the `candidates` points of largest residual diagonal
+                  (ISDF_PIVOT_CANDIDATES when None), C, and the largest
+                  residual outside them, tau, over every rank;
+      block       the residual Gram matrix on C, G_CC - L_C^T L_C, pivoted
+                  greedily for as long as its largest residual beats tau
+                  (larger, or equal at a lower index): no point outside C can
+                  then be the largest, as a residual only falls, so these are
+                  the pivots the one-at-a-time selection takes;
+      update      the block's factor columns on every point, (G[:, P] -
+                  L^T L_P) R^-1 with R the block's triangular factor on its
+                  pivots, and the residual diagonal.
+
+    Every rank holds its own point tiles (their collocation, residual
+    diagonal and factor columns) and the candidates' rows, gathered; the
+    calls have shapes fixed by the tiles and the candidate count, so the
+    pivots are the same at every rank count. The Tikhonov floor is the
+    fit's regularization (`fit_settings`). timings: filled with the seconds
+    of each part ('pivot_candidates', 'pivot_gather', 'pivot_block_gram',
+    'pivot_block', 'pivot_update') and the block count ('pivot_blocks').
     """
     regularization, = fit_settings(numerics, 'regularization')
     comm = current_comm() if comm is None else comm
-    rank = 0 if comm is None else comm.Get_rank()
+    rank, size = (0, 1) if comm is None else (comm.Get_rank(), comm.Get_size())
+    ncand = ISDF_PIVOT_CANDIDATES if candidates is None else int(candidates)
+    if ncand < 1:
+        raise ValueError(f'candidates={ncand}: a block needs at least one')
+    clock = dict.fromkeys(('pivot_candidates', 'pivot_gather',
+                           'pivot_block_gram', 'pivot_block',
+                           'pivot_update'), 0.0)
     n = len(coords)
-    tiles = point_tiles(n)
     mine = own_tiles(n, comm)
     X, d, r, L = {}, {}, {}, {}
     for t, t0, t1 in mine:
@@ -619,53 +682,126 @@ def column_pivots(mol, coords, count, numerics=None, comm=None):
         r[t] = np.full(t1 - t0, 1.0 + regularization)
         L[t] = np.zeros((count, t1 - t0))
     nao = mol.nao_nr()
+    index = (np.concatenate([np.arange(t0, t1) for _, t0, t1 in mine])
+             if mine else np.empty(0, dtype=int))
     local = max((float(v.max()) for v in r.values()), default=-np.inf)
     largest = local if comm is None else max(comm.allgather(local))
     tol = n * np.finfo(float).eps * largest
-    order = []
-    for j in range(count):
-        best = (-np.inf, -1)
-        for t, t0, _ in mine:
-            k = int(np.argmax(r[t]))
-            if r[t][k] > best[0]:
-                best = (float(r[t][k]), t0 + k)
-        # one row (value, point) per rank, gathered as floats: a point index
-        # is exact in a double, and a buffer moves without pickling
-        cands = np.empty((1 if comm is None else comm.Get_size(), 2))
-        cands[rank] = best
+    order, short, blocks = [], False, 0
+    while len(order) < count and not short:
+        j0 = len(order)
+        _t = time.time()
+        # this rank's best ncand + 1 (value, point), as floats (a point
+        # index is exact in a double), padded; every rank's gathered
+        want = ncand + 1
+        cands = np.full((size * want, 2), [-np.inf, -1.0])
+        resid = (np.concatenate([r[t] for t, _, _ in mine]) if mine
+                 else np.empty(0))
+        if resid.size:
+            top = np.lexsort((index, -resid))[:want]
+            cands[rank * want:rank * want + len(top), 0] = resid[top]
+            cands[rank * want:rank * want + len(top), 1] = index[top]
         if comm is not None:
             allgather_blocks(cands, comm)
-        k = int(np.lexsort((cands[:, 1], -cands[:, 0]))[0])
-        value, p = float(cands[k, 0]), int(cands[k, 1])
-        if value <= tol:
-            flag('isdf_pivot_rank_short',
-                 f'the parent grid spans the AO products to numerical rank '
-                 f'{j}, below the {count} points asked for: {j} points are '
-                 'kept', ISDFPivotShort)
+        cands = cands[cands[:, 1] >= 0]
+        cands = cands[np.lexsort((cands[:, 1], -cands[:, 0]))]
+        # tau: the best point outside the candidates (none: below all)
+        tau = (cands[ncand, 0], cands[ncand, 1]) if len(cands) > ncand \
+            else (-np.inf, np.inf)
+        cands = cands[:ncand]
+        cands = cands[cands[:, 0] > -np.inf]
+        pts = cands[:, 1].astype(int)
+        owner = np.array([tile_owner(p // FIT_CHOLESKY_BLOCK, comm)
+                          for p in pts], dtype=int)
+        # the candidates' rows grouped by owner, by point within an owner
+        place = np.lexsort((pts, owner))
+        pts, owner, value = pts[place], owner[place], cands[place, 0]
+        clock['pivot_candidates'] += time.time() - _t
+        _t = time.time()
+        nc = len(pts)
+        rows = np.empty((nc, nao + 1 + j0))
+        for i in np.flatnonzero(owner == rank):
+            tp = pts[i] // FIT_CHOLESKY_BLOCK
+            kp = pts[i] - tp * FIT_CHOLESKY_BLOCK
+            rows[i, :nao] = X[tp][kp]
+            rows[i, nao] = d[tp][kp]
+            rows[i, nao + 1:] = L[tp][:j0, kp]
+        if comm is not None and size > 1:
+            bounds = np.searchsorted(owner, np.arange(size + 1))
+            allgather_ranges(rows, [[(int(bounds[q]), int(bounds[q + 1]))]
+                                    if bounds[q + 1] > bounds[q] else []
+                                    for q in range(size)], comm)
+        x_c, d_c, l_c = rows[:, :nao], rows[:, nao], rows[:, nao + 1:]
+        clock['pivot_gather'] += time.time() - _t
+        _t = time.time()
+        # the residual Gram matrix on the candidates, its diagonal the
+        # residuals the selection reads
+        R = x_c @ x_c.T
+        R *= R
+        R *= d_c[:, None]
+        R *= d_c[None, :]
+        if j0:
+            R -= l_c @ l_c.T
+        R[np.diag_indices(nc)] = value
+        clock['pivot_block_gram'] += time.time() - _t
+        _t = time.time()
+        res = value.copy()
+        room = min(nc, count - j0)
+        Lb = np.zeros((room, nc))
+        chosen, roots = [], []
+        for s in range(room):
+            top = float(res.max())
+            k = int(pts[res == top].min())
+            k = int(np.flatnonzero(pts == k)[0])
+            if s and not (top > tau[0] or (top == tau[0] and pts[k] < tau[1])):
+                break
+            if top <= tol:
+                flag('isdf_pivot_rank_short',
+                     f'the parent grid spans the AO products to numerical '
+                     f'rank {j0 + s}, below the {count} points asked for: '
+                     f'{j0 + s} points are kept', ISDFPivotShort)
+                short = True
+                break
+            col = R[:, k] - Lb[:s].T @ Lb[:s, k] if s else R[:, k].copy()
+            roots.append(np.sqrt(top))
+            Lb[s] = col / roots[-1]
+            res -= Lb[s] * Lb[s]
+            res[k] = -np.inf
+            chosen.append(k)
+        chosen = np.array(chosen, dtype=int)
+        b = len(chosen)
+        clock['pivot_block'] += time.time() - _t
+        if not b:
             break
-        tp = p // FIT_CHOLESKY_BLOCK
-        kp = p - tiles[tp][0]
-        row = np.empty((1, nao + 1 + j))
-        if tile_owner(tp, comm) == rank:
-            row[0, :nao] = X[tp][kp]
-            row[0, nao] = d[tp][kp]
-            row[0, nao + 1:] = L[tp][:j, kp]
-        if comm is not None and comm.Get_size() > 1:
-            broadcast_rows(row, tile_owner(tp, comm), comm)
-        x_p, d_p, l_p = row[0, :nao], row[0, nao], row[0, nao + 1:]
-        root = np.sqrt(value)
-        for t, _, _ in mine:
-            c = X[t] @ x_p
-            g = c * c * d[t] * d_p
-            if t == tp:
-                g[kp] += regularization
-            if j:
-                g -= L[t][:j].T @ l_p
-            L[t][j] = g / root
-            r[t] -= L[t][j] * L[t][j]
-            if t == tp:
-                r[t][kp] = -np.inf
-        order.append(p)
+        _t = time.time()
+        # Y U = G[:, P] - L^T L_P, U upper triangular: the block's factor
+        # entries on its own pivots, the residual roots on the diagonal
+        U = np.triu(Lb[:b][:, chosen], 1)
+        U[np.diag_indices(b)] = roots
+        x_p = np.ascontiguousarray(x_c[chosen])
+        d_p = d_c[chosen]
+        l_p = np.ascontiguousarray(l_c[chosen]) if j0 else None
+        p_pts = pts[chosen]
+        for t, t0, t1 in mine:
+            g = X[t] @ x_p.T
+            g *= g
+            g *= d[t][:, None]
+            g *= d_p[None, :]
+            inside = np.flatnonzero((p_pts >= t0) & (p_pts < t1))
+            g[p_pts[inside] - t0, inside] += regularization
+            if j0:
+                g -= L[t][:j0].T @ l_p.T
+            L[t][j0:j0 + b] = scipy.linalg.solve_triangular(
+                U, g.T, trans='T', lower=False, check_finite=False)
+            for s in range(b):
+                r[t] -= L[t][j0 + s] * L[t][j0 + s]
+            r[t][p_pts[inside] - t0] = -np.inf
+        order.extend(int(p) for p in p_pts)
+        blocks += 1
+        clock['pivot_update'] += time.time() - _t
+    if timings is not None:
+        timings.update(clock)
+        timings['pivot_blocks'] = blocks
     return np.array(order, dtype=int)
 
 
