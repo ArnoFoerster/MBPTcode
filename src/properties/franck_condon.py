@@ -134,7 +134,7 @@ def _saddle(delta_e, s_k, omega_k, n_k, lam_cl, gauss, kt):
     return tau, f_min, d2F(tau)
 
 
-def _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
+def log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
     """ln G(z) of `fc_weighted_dos` without the Lorentzian, at complex times z."""
     z = np.asarray(z, complex)
     phi = np.zeros_like(z)
@@ -153,15 +153,41 @@ class FCIntegrandNotDecayed(RuntimeWarning):
     its `numerical_flags`)."""
 
 
-def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
-                       dt_per_period, t_decay, max_points):
+def envelope_time(gauss, gamma):
+    """The time after which the broadening alone keeps |G| below 1e-10 of
+    G(0): |G| / G(0) <= 1 (a characteristic function), so e^{-gauss t^2}
+    or e^{-gamma t} bounds it, whichever is given (inf with neither)."""
+    decay = np.log(1e10)
+    return min(np.sqrt(decay / gauss) if gauss > 0.0 else np.inf,
+               decay / gamma if gamma > 0.0 else np.inf)
+
+
+def real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
+                       dt_per_period, t_decay, max_points, t_envelope):
     """rho(dE) for every dE off ONE real-axis grid, with e^{-gamma |t|}.
 
     |G(t)| does not depend on dE, so neither does the window; G is Hermitian,
     G(-t) = G(t)*, so rho = (1/pi) Re int_0^inf e^{-i dE t} G(t) dt.
+
+    THE GRID REACHES THE BROADENING'S ENVELOPE, `t_envelope`
+    (`envelope_time`), where it is finite. A strongly displaced fast mode
+    makes |G| dip below 1e-10 and revive one period later, so a decayed
+    last point alone proves nothing.
     """
-    fastest = max(omega_max, float(np.abs(de).max()), 1e-12)
+    # THE STEP RESOLVES THE BAND, not only the fastest mode. The trapezoid
+    # reads rho(dE) plus its aliases rho(dE +- 2 pi m / h), so 2 pi / h must
+    # reach past the band's far edge, |lambda| + 12 standard deviations
+    # beyond dE; a strongly displaced fast mode spreads it over many quanta
+    # of that mode. Rounded up to a power of two, so that two routes to one
+    # band (closed-form and numerical cumulants) take one grid.
+    reach = (float(np.abs(de).max()) + abs(float(lam_total))
+             + 12.0 * np.sqrt(variance))
+    reach = 2.0 ** np.ceil(np.log2(max(reach, 1e-12)))
+    fastest = max(omega_max, float(np.abs(de).max()), reach / dt_per_period,
+                  1e-12)
     t_max = t_decay / np.sqrt(variance + gamma ** 2)
+    if np.isfinite(t_envelope):
+        t_max = max(t_max, float(t_envelope))
     for _ in range(13):
         n_t = max(int(np.ceil(t_max * fastest * dt_per_period
                               / (2.0 * np.pi))) + 1, 17)
@@ -259,7 +285,7 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
             'bath, say which.')
 
     def log_g(z):
-        return _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
+        return log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
                                         gauss)
 
     de = np.atleast_1d(np.asarray(delta_e, float))
@@ -268,9 +294,9 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
         variance = (float((s_k * omega_k ** 2 * (2.0 * n_k + 1.0)).sum())
                     + 2.0 * gauss)
         lam_total = float((s_k * omega_k).sum()) + lam_cl
-        rho = _real_axis_density(de, log_g, variance, lam_total, gamma,
+        rho = real_axis_density(de, log_g, variance, lam_total, gamma,
                                  float(omega_k.max()), dt_per_period, t_decay,
-                                 max_points)
+                                 max_points, envelope_time(gauss, gamma))
         rho = np.maximum(rho, 0.0)
         return rho if np.ndim(delta_e) else float(rho[0])
 

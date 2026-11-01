@@ -214,7 +214,8 @@ def check_energy_formula():
     # a generic traceless density: one root of the fold at adc2
     e, _, res = solve_ee_adc(mf, level='adc2', spin='singlet', nroots=1,
                              fold=True, environment=env, conv_tol=1e-9,
-                             return_fold=True, state_specific='vertical')
+                             return_fold=True, state_specific='vertical',
+                             ss_density='unrelaxed')
     dP = C @ res.delta_density[0] @ C.T
     for mode, eps in (('vertical', env.eps), ('equilibrium', env.eps_static)):
         ref = _second_difference(_pcm_like(env, mol, eps), dm0, dP)
@@ -240,7 +241,7 @@ def check_energy_formula():
     e1, _, r1 = solve_ee_adc(mf, level='adc1', spin='singlet', nroots=2,
                              fold=True, environment=env, conv_tol=1e-10,
                              return_fold=True, state_specific='vertical',
-                             dense_limit=0)
+                             ss_density='unrelaxed', dense_limit=0)
     no = mol.nelectron // 2
     p = _pcm_like(env, mol, env.eps)
     for k in range(2):

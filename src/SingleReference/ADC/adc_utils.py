@@ -1,9 +1,12 @@
 """Shared spin-agnostic helpers: DF integral gathers and chunked
 B-factor einsum plumbing. Used by both the restricted (adc_r_*) and
 spin-orbital (adc_u_*) route modules."""
+import os
+
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.SingleReference.common.eri_blocks import b_block
 
 
 class NoccCache:
@@ -23,8 +26,8 @@ def g_diag_df(B, diag_idx, r_idx, s_idx):
     g[p,q,...]'s leading axes pinned to the SAME index i, e.g. g_ii/g_aa's
     'i,i,:,:' diagonal gather)
     """
-    Bd_r = B[:, diag_idx][:, :, r_idx]   # (naux, |diag|, |r|)
-    Bd_s = B[:, diag_idx][:, :, s_idx]   # (naux, |diag|, |s|)
+    Bd_r = b_block(B, diag_idx, r_idx)   # (naux, |diag|, |r|)
+    Bd_s = b_block(B, diag_idx, s_idx)   # (naux, |diag|, |s|)
     return np.einsum('Qir,Qis->irs', Bd_r, Bd_s, optimize=True)
 
 
@@ -36,8 +39,8 @@ def g_diag_mid_df(B, p_idx, diag_idx, s_idx):
     (O(naux*|p|*|diag|*|s|)) -- never materializes the full (|p|,|diag|,
     |diag|,|s|) array.
     """
-    Bp_d = B[:, p_idx][:, :, diag_idx]   # (naux, |p|, |diag|)
-    Bd_s = B[:, diag_idx][:, :, s_idx]   # (naux, |diag|, |s|)
+    Bp_d = b_block(B, p_idx, diag_idx)   # (naux, |p|, |diag|)
+    Bd_s = b_block(B, diag_idx, s_idx)   # (naux, |diag|, |s|)
     return np.einsum('Qpi,Qis->pis', Bp_d, Bd_s, optimize=True)
 
 
@@ -48,8 +51,8 @@ def g_diag_outer_df(B, p_idx, diag_idx, r_idx):
     (C_I_I's g_ciai) or g_ovov's c=a diagonal (C_Ip_Ip's g_kaia)). Small,
     same rationale as g_diag_mid_df.
     """
-    Bpr = B[:, p_idx][:, :, r_idx]                              # (naux, |p|, |r|)
-    Bdd = np.einsum('Qii->Qi', B[:, diag_idx][:, :, diag_idx])   # (naux, |diag|)
+    Bpr = b_block(B, p_idx, r_idx)                              # (naux, |p|, |r|)
+    Bdd = np.einsum('Qii->Qi', b_block(B, diag_idx, diag_idx))   # (naux, |diag|)
     return np.einsum('Qpr,Qi->pir', Bpr, Bdd, optimize=True)
 
 
@@ -58,32 +61,29 @@ def g_block_df(B, p_idx, q_idx, r_idx, s_idx):
     blockstacked spin-orbital DF factor B (naux, nso, nso). Rank-4 output --
     only used for the one-off bare-T2^(1) amplitude built once per nocc;
     every per-matvec term instead uses rank<=3 B-factor slices."""
-    Bpr = B[:, p_idx][:, :, r_idx]
-    Bqs = B[:, q_idx][:, :, s_idx]
-    Bps = B[:, p_idx][:, :, s_idx]
-    Bqr = B[:, q_idx][:, :, r_idx]
+    Bpr = b_block(B, p_idx, r_idx)
+    Bqs = b_block(B, q_idx, s_idx)
+    Bps = b_block(B, p_idx, s_idx)
+    Bqr = b_block(B, q_idx, r_idx)
     direct = _cached_einsum('Qpr,Qqs->pqrs', Bpr, Bqs, optimize=True)
     exchange = _cached_einsum('Qps,Qqr->pqrs', Bps, Bqr, optimize=True)
     return direct - exchange
 
 
-#: Target size of one Q-slab when a DF-factor VIEW has to be chunked. Below
-#: this the whole view is used directly (chunking a small factor is pure
-#: loop overhead); above it, an unchunked call would materialize the full
-#: contiguous copy the view exists to avoid.
-_B_SLAB_BYTES = 1 << 30
+#: Target size of one Q-slab of a DF-factor view: a contraction over the
+#: auxiliary index runs slab by slab, each slab's contiguous copy at most this
+#: size. 512 MB slabs make the Dyson and non-Dyson matvecs 7-25% faster than
+#: 1 GB slabs or whole contiguous copies of the factor blocks on a many-core
+#: node. MBPT_ADC_B_SLAB_MB sets it in MB (timing studies).
+_B_SLAB_BYTES = int(float(os.environ.get('MBPT_ADC_B_SLAB_MB', 512)) * (1 << 20))
 
 
 def b_factor(B, row_idx, col_idx, view):
-    """A DF-factor slice B[:, row_idx, col_idx]: a copy via fancy indexing
-    when small, the bare strided view when large (a copy at that size would
-    duplicate a large fraction of the whole factor). The small branch
-    reproduces fancy indexing's own memory layout rather than a generic
-    contiguous copy -- the two are not equivalent for BLAS throughput on the
-    dozens of contractions these factors feed."""
-    if view.nbytes > _B_SLAB_BYTES:
-        return view
-    return B[:, row_idx][:, :, col_idx]
+    """The DF-factor slice B[:, row_idx, col_idx] as the strided view `view`
+    (row_idx, col_idx: the same slice as index arrays). Never a copy: the
+    contractions take it slab by slab (b_chunk_einsum), which is faster than a
+    whole contiguous copy at every size and holds no second copy of the factor."""
+    return view
 
 
 def b_q_chunk(Bx):

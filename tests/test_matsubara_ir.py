@@ -1,6 +1,6 @@
 """Frequency grids that survive a metal.
 
-Every imaginary-axis grid in Base/utils/grids.py is a T = 0 construction scaled
+Every imaginary-axis grid in Base/utils/grids/grids.py is a T = 0 construction scaled
 by the smallest transition energy -- the gap. For a metal there isn't one, and
 the failures are silent. src/Base/utils/grids/matsubara.py supplies the two things
 that fixes: the thermal e_min that makes the existing quadratures well defined

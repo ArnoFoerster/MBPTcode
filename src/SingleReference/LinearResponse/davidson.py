@@ -67,7 +67,7 @@ from src.Base.numerics.constants import (
     BYTES_PER_GB, BSE_DENSE_MAX_NOV, DAVIDSON_FLOOR_EPS_MULTIPLE,
     DAVIDSON_GUESS_FACTOR, DAVIDSON_LINDEP, DAVIDSON_MIN_NEW_FRACTION,
     DAVIDSON_PRECONDITIONER, DAVIDSON_SIZED_RESIDUAL, DAVIDSON_SPACE_FRACTION,
-    DAVIDSON_SPACE_GB, DAVIDSON_WARM_START_MAX_SHIFT)
+    DAVIDSON_SPACE_GB, DAVIDSON_WARM_START_MAX_SHIFT, EVALUATION_CACHE_SIZE)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.step_failed import DavidsonNotConverged, DavidsonRefusal, StepFailed
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
@@ -131,8 +131,12 @@ class DavidsonWarmStart:
         # spin -> (mol, mo_coeff, nocc, X, Y): a chain and its spin views
         # share one holder, and each spin starts from its own roots
         self.held = {}
-        # (geometry, spin) -> what `keep` would hold, offered since the last
-        # accepted geometry and waiting for `accept`
+        # (geometry, spin) -> (mo_coeff, nocc, X, Y), what `keep` would hold
+        # minus the Mole, offered since the last accepted geometry and waiting
+        # for `accept`, which is handed the Mole: holding it here kept every
+        # displaced geometry's mol, and with it the chain's weak-keyed fit
+        # cache entry, alive until a walk accepted; only the newest
+        # EVALUATION_CACHE_SIZE geometries stay (`offer`)
         self.offered = {}
         self.used = self.declined = 0
 
@@ -161,16 +165,24 @@ class DavidsonWarmStart:
     def offer(self, mol, mo_coeff, nocc, spin, X, Y):
         """The roots (X, Y) of a solve of `spin` at `mol`, held as `keep`
         holds them once a walk accepts `mol` (`accept`)."""
-        self.offered[(_nuclei(mol), spin)] = (
-            mol, np.array(mo_coeff, dtype=float), int(nocc),
+        key = (_nuclei(mol), spin)
+        self.offered.pop(key, None)
+        self.offered[key] = (
+            np.array(mo_coeff, dtype=float), int(nocc),
             np.array(X, dtype=float), np.array(Y, dtype=float))
+        # a chain evaluates the last EVALUATION_CACHE_SIZE geometries and
+        # commits one of those: an older offer can never be accepted
+        newest = list(dict.fromkeys(at for at, _ in reversed(self.offered)))
+        newest = set(newest[:EVALUATION_CACHE_SIZE])
+        self.offered = {k: v for k, v in self.offered.items()
+                        if k[0] in newest}
 
     def accept(self, mol):
         """A walk accepted `mol`: the roots offered there, of every spin,
         are the held ones; every other offer is dropped. True when one was
         offered there."""
         here = _nuclei(mol)
-        taken = {spin: v for (at, spin), v in self.offered.items()
+        taken = {spin: (mol,) + v for (at, spin), v in self.offered.items()
                  if at == here}
         self.held.update(taken)
         self.offered = {}
@@ -334,7 +346,7 @@ def solve_casida_davidson(lr_solver, nocc, numerics=None,
     apply_AB, diag_d = casida_action(lr_solver, nocc, polarizability, W_aux,
                                       isdf_factors, conv_tol, spin=spin,
                                       comm=comm, timings=timings, tda=tda)
-    apply_AB = with_one_body(apply_AB, one_body)
+    apply_AB = with_one_body(apply_AB, one_body, comm)
     occ, virt = get_occ_virt_indices(lr_solver.eps, nocc)
     omega, X, Y = run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle,
                                 _pair_symmetry(orbsym, occ, virt),
@@ -399,7 +411,7 @@ def casida_action(lr_solver, nocc, polarizability, W_aux, isdf_factors,
     return apply_AB, diag_d
 
 
-def with_one_body(apply_AB, one_body):
+def with_one_body(apply_AB, one_body, comm=None):
     """`apply_AB` with an off-diagonal one-body term added to A.
 
     one_body: ((o, H_oo), (v, H_vv)), occupied and virtual positions (into
@@ -407,6 +419,12 @@ def with_one_body(apply_AB, one_body):
     diagonal is zero: A_ia,jb gains delta_ij H_ab - delta_ab H_ij, the
     quasiparticle Hamiltonian's coupling the diagonal eps leaves out. B is
     untouched. None returns `apply_AB` itself.
+
+    The term is formed whole on every rank, from blocks and trial vectors
+    whose threaded products differ in the last bits from rank to rank, so it
+    is lockstepped (checked: ranks that agree move nothing) before it is
+    added to the action's lockstepped output: every rank's Davidson reads one
+    set of numbers and takes the same decisions.
     """
     if one_body is None:
         return apply_AB
@@ -415,10 +433,12 @@ def with_one_body(apply_AB, one_body):
     def coupled(z):
         Az, Bz = apply_AB(z)
         z3 = np.asarray(z, float).reshape(Az.shape)
+        term = np.zeros_like(Az)
         if len(v):
-            Az[:, :, v] += z3[:, :, v] @ h_vv
+            term[:, :, v] += z3[:, :, v] @ h_vv
         if len(o):
-            Az[:, o, :] -= np.einsum('ij,kja->kia', h_oo, z3[:, o, :])
+            term[:, o, :] -= np.einsum('ij,kja->kia', h_oo, z3[:, o, :])
+        Az += lockstep(term, comm, check=True)
         return Az, Bz
 
     coupled.__dict__.update(apply_AB.__dict__)

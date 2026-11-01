@@ -128,6 +128,12 @@ for _ki, _kj, _orders in _ND_PAIRS:
         RUNTIME_MODULES[f'adc{_n}_nd{_o}_k{_ki}k{_kj}_apply_restricted_blocks'] = (
             _n, _p('sigma_codegen.generate_nondyson_pair_apply_restricted', order=_o, k_i=_ki,
                    k_j=_kj, df=False))
+        # DF twins through ADC(3) only: the g-free amplitude provider serves rank <= 2
+        # through order 2, which is all non-Dyson ADC(3) reads on canonical orbitals
+        if _n <= 3:
+            RUNTIME_MODULES[f'adc{_n}_nd{_o}_k{_ki}k{_kj}_apply_restricted_df_blocks'] = (
+                _n, _p('sigma_codegen.generate_nondyson_pair_apply_restricted', order=_o,
+                       k_i=_ki, k_j=_kj, df=True))
 del _ki, _kj, _orders, _o, _n
 
 

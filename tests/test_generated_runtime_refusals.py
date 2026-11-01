@@ -94,11 +94,11 @@ def test_decoupling_grid_is_diagrammatic_adc5_only(level, construction):
         restricted_dyson_operator(None, level, construction=construction, decoupling_ntau=8)
 
 
-def test_nondyson_restricted_refuses_df_and_order6():
+def test_nondyson_restricted_refuses_df_above_adc3_and_order6():
     class _DF:
         df = True
-    with pytest.raises(ValueError, match='no DF twins'):
-        NonDysonRestricted(_DF(), 'IP')
+    with pytest.raises(ValueError, match='ADC\\(4\\) and higher'):
+        NonDysonRestricted(_DF(), 'IP').raw_series(4)
 
     class _Dense:
         df = False

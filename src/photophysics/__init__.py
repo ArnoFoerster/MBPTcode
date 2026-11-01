@@ -13,9 +13,17 @@
     minimum        `StateMinimum`: what the rate layer reads of a geometry,
                    filled by GW-BSE or ADC(2) alike
     rate_models    the TADF rate table off three minima and the S0 modes
+    rate_chain     ISC and RISC of one method from its own minima on a
+                   declared full model, and every ablation of it
+    transfer_rates golden-rule triplet (Dexter) transfer and
+                   triplet-triplet annihilation rates between molecules
     rates          the rate formulas: golden-rule transfer (Marcus,
                    Marcus-Levich-Jortner, spin-vibronic, internal
                    conversion), radiative, and the photoluminescence kinetics
+    forster        Förster (dipole-dipole) transfer and annihilation: the
+                   overlap of a donor's emission with an acceptor's
+                   absorption, excited-state absorption included, C6 and the
+                   Förster radius
     records        what every stage shares: state labels, the log line and
                    a walk's record
     uisc           the UISC protocol of Samanta et al.: the promoting-mode
@@ -28,6 +36,9 @@
     solvated       gas and continuum absorption, emission and adiabatic
                    S1/T1 energies of one molecule, ADC(2) or GW-BSE, as one
                    JSON record (`python -m src.photophysics solvated`)
+    state_specific the GW-BSE states of the self-consistent state-specific
+                   solvation loop (scheme B) and the vertical energies of
+                   one state, which the drivers build
 
 A run, in Python:
 

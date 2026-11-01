@@ -22,7 +22,8 @@ from tests.photophysics_cases import FORMALDEHYDE, run_in
 
 def declaration(out):
     argv = ['--atom', FORMALDEHYDE, '--system', 'formaldehyde', '--basis', 'cc-pvdz',
-            '--environment', 'gas', '--temperature', '300',
+            '--environment', 'gas', '--grid-accuracy', 'G1', '--scf-grid', 'GH',
+            '--temperature', '300',
             '--lambda-env', '0.05', '--nudge', '0', '--no-far-start',
             '--refreeze', '0', '--saddle-check', '0', '--df-check', '1',
             '--hessian', 'analytic-df', '--relaxed-solvation', 'equilibrium',

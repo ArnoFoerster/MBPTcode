@@ -112,7 +112,7 @@ def stub_run(tmp_path, records):
     return SimpleNamespace(
         declaration=SimpleNamespace(
             rate_model=SimpleNamespace(name='tadf'), system=SimpleNamespace(
-                name='stub'), environment='gas'),
+                name='stub'), environment='gas', solvent_scheme='gas'),
         reusable=lambda n: n in records, read=lambda n: records[n],
         write=written.__setitem__, store=SimpleNamespace(dir=str(tmp_path)),
         written=written)

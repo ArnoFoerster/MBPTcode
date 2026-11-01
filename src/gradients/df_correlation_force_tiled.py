@@ -49,8 +49,12 @@ the SCF's auxiliary basis cut into fixed tiles over the ranks).
 Distribution. Every collective runs on the fold's communicator. A sum over
 occupied tiles, auxiliary chunks or AO shell blocks is taken in tile, chunk or
 block order (ordered_sum, ordered_chain_sum); arrays whose rows one owner
-computes travel verbatim (allgather_ranges); the replicated small pieces (the
-Z-vector, the metric factors, the SCF force) are rank 0's (lockstep). At one
+computes travel verbatim (allgather_ranges); the Z-vector is iterated by rank
+0 with every Fock build shared over the ranks in auxiliary blocks
+(Base.pyscf.cphf.ResponseKernel); the SCF force of a density-fitted
+restricted reference is assembled in fixed tiles over the same ranks
+(`isdf_mean_field.mean_field_skeleton_force`), any other is pyscf's on rank 0;
+the replicated small pieces (the metric factors) are rank 0's (lockstep). At one
 tile size and one chunk width the force has the same bits on every rank and at
 every rank count.
 """
@@ -62,7 +66,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FO
                                          DF_FORCE_BLOCK_GB, DF_FORCE_MP2_TILE_ARRAYS,
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import Numerics, numerics_or_default
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
@@ -71,6 +75,8 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, curre
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
 from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.isdf_mean_field import (fitted_force_supported,
+                                           mean_field_skeleton_force)
 from src.gradients.skeleton_tiles import fitted_fock_skeleton, shell_runs
 
 
@@ -127,8 +133,9 @@ def estimate(mol, nfrozen, auxbasis, jk_auxbasis, ranks=1, tile_gb=EE_RI_TILE_GB
     # rho_o L, B_oo-shaped Goo; MP2 alone: GL
     pieces = (7.0 * A + no * no * naux * gb if excited else A) + tile
     # GL, X and their raw-basis copies; the fitted Fock skeleton's exchange
-    # tiles (L, g L, Kt, then g Kt over this rank's auxiliary tiles) and its
-    # metric inverse, T and one tile's V^-1 T V^-1 rows
+    # tiles (L solved in place to Kt, then g Kt over this rank's auxiliary
+    # tiles, and the streamed tile) and its metric, the metric's Cholesky
+    # factor and this rank's V^-1 T V^-1 rows
     exchange = 3.0 * nao * nocc * naux_jk * gb / ranks + 3.0 * naux_jk * naux_jk * gb
     engine = (4.0 if excited else 2.0) * A + exchange + block_gb
     held = factors + amplitudes + core + cderi_jk
@@ -160,10 +167,10 @@ def refuse_over(est, max_memory_mb):
 # MP2
 # ----------------------------------------------------------------------
 
-def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB):
+def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB, scaling=None):
     """(e_mp2, FactoredDerivatives) of closed-shell DF-MP2 on the provider's
-    factors (df_correlation_force.mp2_pieces one occupied tile at a time);
-    a collective over its ranks."""
+    factors (df_correlation_force.mp2_pieces one occupied tile at a time;
+    scaling (c_os, c_ss) of SCS-MP2 or None); a collective over its ranks."""
     f, no, nv, naux = factors.f, factors.no, factors.nv, factors.f.naux
     comm = factors.comm
     ranks = 1 if comm is None else comm.Get_size()
@@ -182,7 +189,7 @@ def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB):
             continue
         I = factors.ints(k0, k1)
         D = dfa.doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
-        tau = (2.0 * I - I.transpose(dfa.PAIR)) / D
+        tau = dfa.singlet_pairs(I, I.transpose(dfa.PAIR), scaling) / D
         oo, vv = dfa.tile_amplitude_fock(-I / D, tau)
         e = -float(np.sum(I * tau))
         del I, D
@@ -444,6 +451,40 @@ def metric_force(auxmol, G2):
 # the force
 # ----------------------------------------------------------------------
 
+def relaxed_gamma(mf, mol, factors, d, nf, Bc=None, Y_extra=None, numerics=None,
+                  flags=None):
+    """(gamma (MO, relaxed, multipliers included), Y) of the factored
+    derivatives d (df_correlation_force.relax on the provider's factors), a
+    collective over its ranks: the Z-vector iterated by rank 0, every rank
+    building its share of each Fock matrix; Bc the core factors when nf."""
+    comm = factors.comm
+    nmo, nocc = nf + factors.no + factors.nv, mol.nelectron // 2
+    YG = orbital_gradient(factors, d, nf, Bc)
+    if Y_extra is not None:
+        YG = YG + Y_extra
+    gamma0 = np.zeros((nmo, nmo))
+    o, v = slice(nf, nocc), slice(nocc, nmo)
+    gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
+    with distributed(comm):
+        gamma, Y = dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
+    return lockstep((gamma, Y), comm)
+
+
+def mp2_density_tiled(mf, mol, factors, frozen=0, auxbasis=None, numerics=None,
+                      flags=None, scaling=None):
+    """(e_mp2, gamma (MO, relaxed)) of DF-MP2 (SCS-MP2 with scaling (c_os,
+    c_ss)) on the provider's tiles and ranks: the tiled force's energy and
+    relaxed density without its derivative integrals, d E_MP2 / d h_pq, a
+    collective; the pieces in occupied tiles under the Numerics layout's
+    tile_gb (None: EE_RI_TILE_GB), as the state model's force takes them."""
+    tile_gb = numerics_or_default(numerics).layout.tile_gb
+    e2, d = mp2_pieces(factors, EE_RI_TILE_GB if tile_gb is None else tile_gb,
+                       scaling)
+    Bc = factors.core_factors(mol, mf, frozen, auxbasis) if frozen else None
+    gamma, _ = relaxed_gamma(mf, mol, factors, d, frozen, Bc, None, numerics, flags)
+    return e2, gamma
+
+
 def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
                       block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK,
                       numerics=None, flags=None):
@@ -459,18 +500,7 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
                          f'{auxmol.nao}: a linearly dependent metric was pruned')
     if nmo != nf + factors.no + factors.nv:
         raise ValueError('the operator does not span the mean field\'s orbitals')
-    YG = orbital_gradient(factors, d, nf, Bc)
-    if Y_extra is not None:
-        YG = YG + Y_extra
-    gamma0 = np.zeros((nmo, nmo))
-    o, v = slice(nf, nocc), slice(nocc, nmo)
-    gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
-
-    def relaxed():
-        # rank 0 alone: its Z-vector solve is serial
-        with distributed(None):
-            return dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
-    gamma, Y = on_root(relaxed, [(nmo, nmo)] * 2, comm)
+    gamma, Y = relaxed_gamma(mf, mol, factors, d, nf, Bc, Y_extra, numerics, flags)
     asym = float(np.max(np.abs(Y - Y.T)))
     W = 0.25 * (Y + Y.T)
     gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
@@ -511,14 +541,14 @@ def prepare(mf, mol, frozen, auxbasis, excited, tile_gb=EE_RI_TILE_GB,
 
 def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_GB,
           block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK, numerics=None,
-          flags=None):
+          flags=None, scaling=None):
     """df_correlation_force.mp2_force on the provider's tiles and ranks, a
     collective over its communicator with the same bits on every rank;
     excited(d, C, nocc, nmo) -> (d plus the excitation's factored derivatives,
-    Y_extra, extra)."""
+    Y_extra, extra); scaling (c_os, c_ss) of SCS-MP2 or None."""
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
-    e2, d = mp2_pieces(factors, tile_gb)
+    e2, d = mp2_pieces(factors, tile_gb, scaling)
     Y_extra = extra = None
     if excited is not None:
         d, Y_extra, extra = excited(d, C, nocc, nmo)
@@ -526,22 +556,30 @@ def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_G
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis)
     fc, gam, asym = correlation_force(mol, mf, factors, auxmol, d, frozen, Bc,
                                       Y_extra, block_gb, width, numerics, flags)
-    F = on_root(lambda: (dcf.hf_force(mf),), [(mol.natm, 3)], factors.comm)[0] + fc
+    if fitted_force_supported(mf):
+        # over the factors' ranks, the communicator the Z-vector and the
+        # correlation force above run over
+        with distributed(factors.comm):
+            F = mean_field_skeleton_force(mf) + fc
+    else:
+        F = on_root(lambda: (mean_field_skeleton_force(mf),), [(mol.natm, 3)],
+                    factors.comm)[0] + fc
     return F, (e2, gam, asym, extra)
 
 
 def mp2_force_tiled(mf, mol, factors, frozen=0, auxbasis=None, tile_gb=EE_RI_TILE_GB,
                     max_memory=None, block_gb=DF_FORCE_BLOCK_GB,
                     width=DF_FORCE_AUX_CHUNK, comm=None, aux_chunk=None,
-                    numerics=None, flags=None):
+                    numerics=None, flags=None, scaling=None):
     """(dE/dR, (e_mp2, gamma, max |Y - Y^T|, estimate)) of E_HF + E_MP2 on the
     tiled route over comm's ranks (prepare); factors(mol, mf, frozen,
     auxbasis, tile_gb, comm, aux_chunk) -> the factor provider (module
     docstring), built once the memory estimate has passed
-    (`gradients.df_factors.mp2_factors`)."""
+    (`gradients.df_factors.mp2_factors`); scaling (c_os, c_ss) of SCS-MP2 or
+    None."""
     comm, est = prepare(mf, mol, frozen, auxbasis, False, tile_gb, block_gb,
                         max_memory, comm)
     provider = factors(mol, mf, frozen, auxbasis, tile_gb, comm, aux_chunk)
     F, (e2, gam, asym, _) = force(mf, mol, provider, frozen, auxbasis, None, tile_gb,
-                                  block_gb, width, numerics, flags)
+                                  block_gb, width, numerics, flags, scaling)
     return F, (e2, gam, asym, est)

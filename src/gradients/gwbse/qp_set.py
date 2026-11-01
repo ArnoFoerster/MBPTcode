@@ -13,16 +13,19 @@ import numpy as np
 
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.step_failed import StepFailed
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL, QP_HAMILTONIAN_WINDOW,
-                                         CD_NFREQ, CD_NFREQ_SOP)
+                                         CD_NFREQ, CD_NFREQ_SOP,
+                                         CONTINUATION_ROUTE)
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range,
                                                         static_term)
-from src.SingleReference.GW.qp_selection import (ac_quasiparticle_shifts,
-                                                 degenerate_blocks,
+from src.SingleReference.GW.qp_selection import (ac_quasiparticle_roots,
+                                                 ac_quasiparticle_shifts,
                                                  merged_blocks,
                                                  true_degenerate_blocks,
+                                                 window_blocks,
                                                  window_edge_holes)
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               calibrate_scissor_tiers,
@@ -31,6 +34,7 @@ from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               is_quasiparticle_root,
                                               nearest_probe)
 from src.gradients.gwbse.static_correction import qp_xc_correction_matrix
+from src.SingleReference.GW.qp_solve import add_reaction_field
 from src.SingleReference.GW.reaction_field import (offdiagonal_reaction_field,
                                                    pair_densities)
 from src.SingleReference.GW.sum_over_poles import (pole_denominators,
@@ -97,6 +101,51 @@ class QPHamiltonian:
         v = members[members >= nocc]
         return ((o, self.h[np.ix_(o, o)]),
                 (v - nocc, self.h[np.ix_(v, v)]))
+
+
+class QPContinuationFailed(RuntimeWarning):
+    """The analytic continuation of a quasiparticle-set member failed
+    numerically; it carries its nearest solved member's correction."""
+
+
+@dataclass(eq=False)
+class ContinuedRoots:
+    """The continuation's roots of one forward (`continued_set_solve`): the
+    mean field, factors and Eq. (18) array they were solved on, the orbitals
+    `states`, their roots without Eq. (18), Z, and the failures
+    ({orbital: 'Class: message'})."""
+
+    mf: object
+    x_mo: object
+    d_sigma: object
+    env: object
+    states: np.ndarray
+    roots: np.ndarray
+    z: np.ndarray
+    failed: dict
+
+    def serves(self, mf, x_mo, d_sigma, env, states):
+        """Whether `continuation_shifts` of `states` on these inputs is this
+        solve: the same objects, every state among the solved."""
+        return (mf is self.mf and x_mo is self.x_mo
+                and d_sigma is self.d_sigma and env is self.env
+                and set(np.asarray(states, int).tolist())
+                <= set(self.states.tolist()))
+
+    def shifts(self, states, mf):
+        """`continuation_shifts`' ({p: a_p}, {p: Z_p}, failures) of `states`,
+        a_p the root with Eq. (18) added, less eps_p (as
+        `ac_quasiparticle_shifts`)."""
+        states = np.asarray(states, int)
+        at = {int(p): i for i, p in enumerate(self.states)}
+        pos = [at[int(p)] for p in states]
+        roots = add_reaction_field(self.roots[pos].copy(), self.env, states)
+        eps = np.asarray(mf.mo_energy, float)
+        return ({int(p): float(w) - float(eps[p])
+                 for p, w in zip(states, roots)},
+                {int(p): float(v) for p, v in zip(states, self.z[pos])},
+                {int(p): why for p, why in self.failed.items()
+                 if int(p) in set(states.tolist())})
 
 
 class QuasiparticleRootLost(StepFailed):
@@ -379,7 +428,8 @@ class QuasiparticleSet:
     def _frozen_qp_subspaces(self, eps, routes):
         """The set's subspaces of two or more orbitals the quasiparticle
         Hamiltonian couples, as orbital tuples: neighbours on one side of the
-        gap closer than QP_HAMILTONIAN_WINDOW, joined with the subspaces
+        gap, all within QP_HAMILTONIAN_WINDOW of the lowest of their group
+        (`window_blocks`: a band is never chained into one group), joined with the subspaces
         carried from the surface this one was refrozen from.
 
         Decided at the first forward of a set, the reference geometry's, and
@@ -401,7 +451,7 @@ class QuasiparticleSet:
             groups = []
             for side in ([p for p in key if p < self.chain.nocc],
                          [p for p in key if p >= self.chain.nocc]):
-                groups += degenerate_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
+                groups += window_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
             before = self.chain.resolved.carried_subspaces
             carried = {int(p) for b in before for p in b}
             # a carried member the explicit set no longer holds leaves its
@@ -432,6 +482,12 @@ class QuasiparticleSet:
                     f'{[d["route"] for d in dropped]})',
                     RuntimeWarning, stacklevel=3)
             self.chain.conventions.freeze_subspaces(self.chain.resolved, key, tuple(kept), {
+                'rule': 'complete linkage: every orbital of a group within '
+                        'the window of the group\'s lowest',
+                'window_Ha': float(QP_HAMILTONIAN_WINDOW),
+                'sizes': [len(b) for b in kept],
+                'spans_Ha': [float(max(eps[p] for p in b) - min(eps[p] for p in b))
+                             for b in kept],
                 'subspaces': [list(b) for b in kept],
                 'carried': [list(b) for b in self.chain.resolved.carried_subspaces],
                 'dropped': dropped})
@@ -833,6 +889,83 @@ class QuasiparticleSet:
             {int(p): float(z) for p, z in zip(states, z_of)}}
         return out, route_out
 
+    def continued_set_solve(self, mol, mf, x_mo, d_sigma, eps, xc_correction,
+                            env):
+        """((eps^QP values, None), route_out) of the set by the analytic
+        continuation (residue_route CONTINUATION_ROUTE): each member's root
+        of w = eps_p + <p|Sigma_x - v_xc|p> + Re Sigma_c(w), Sigma_c the Pade
+        continuation of the space-time Sigma_c(i.omega) screened bare on this
+        chain's factors (as `continuation_shifts`), the root of largest Z of
+        the one root finder; without Eq. (18), which the caller adds to every
+        root as on the contour. No tape and no adjoint: energies only.
+
+        Where the outside curve is still to be placed, every orbital is
+        continued in the same solve and held (`continued`), so the curve reads
+        it instead of sweeping the self-energy again.
+
+        A member whose continuation fails numerically takes the correction of
+        the nearest member that did not (`calibrate_scissor`), warned about
+        and flagged 'qp_continuation_failed'; a failed HOMO or LUMO is
+        refused, since every excitation energy stands on the gap.
+        """
+        states = np.asarray(self.chain.resolved.qp_set, int)
+        self.fix_cd_grid(states, eps)
+        norb = len(eps)
+        solved = (np.arange(norb) if self.chain.outside_scissor == 'curve'
+                  and self.chain.resolved.outside_shift is None
+                  and len(states) < norb else states)
+        with self.chain.phase('qp_continuation'):
+            xc_all = (np.asarray(xc_correction, float) if solved is states
+                      else self.chain.xc_correction(mf, solved, env))
+            factors = (d_sigma if isinstance(d_sigma, SlicedFactors)
+                       else (x_mo, d_sigma))
+            failed = {}
+            roots, z = ac_quasiparticle_roots(
+                mf, mol, self.chain.nocc, solved, factors=factors,
+                xc_diagonal=xc_all, numerics=self.chain.settings,
+                failures=failed)
+            roots, z, failed = lockstep((roots, z, failed))
+        self.chain.continued = ContinuedRoots(mf, x_mo, d_sigma, env, solved,
+                                              roots, z, failed)
+        at = {int(p): i for i, p in enumerate(solved)}
+        pos = [at[int(p)] for p in states]
+        roots, z = roots[pos].copy(), z[pos].copy()
+        xc = xc_all[pos] if solved is not states else xc_all
+        lost = [int(p) for p in states if int(p) in failed]
+        if lost:
+            frontier = {self.chain.nocc - 1, self.chain.nocc} & set(lost)
+            if frontier:
+                raise RuntimeError(
+                    f'the analytic continuation failed on the frontier '
+                    f'orbital(s) {sorted(frontier)}: '
+                    + '; '.join(failed[p] for p in sorted(frontier)))
+            good = {int(p): float(w) - float(eps[p])
+                    for p, w in zip(states, roots) if int(p) not in failed}
+            shift = calibrate_scissor(eps, self.chain.nocc, good, lost)
+            for i, p in enumerate(states):
+                if int(p) in failed:
+                    roots[i] = float(eps[p]) + shift[int(p)]
+            flag('qp_continuation_failed',
+                 f'the analytic continuation failed on quasiparticle '
+                 f'orbital(s) {lost} ({"; ".join(failed[p] for p in lost)}); '
+                 f'each takes the correction of its nearest solved member',
+                 QPContinuationFailed)
+        route_out = {'routes': {int(p): CONTINUATION_ROUTE for p in states},
+                     'roots': {int(p): float(w) for p, w in zip(states, roots)},
+                     'weights': {int(p): float(v) for p, v in zip(states, z)},
+                     'z': z, 'xc_correction': xc,
+                     'continuation_failed': lost}
+        self.freeze_qp_branch(route_out, eps, xc, states)
+        kept = [i for i, p in enumerate(states) if int(p) not in failed]
+        self._flag_z_outside({'z': z[kept], 'roots': route_out['roots'],
+                              'routes': route_out['routes']}, states[kept])
+        self.chain.conventions.qp_set_settled = True
+        self.chain.qp_diagnostics = {
+            'routes': dict(route_out['routes']),
+            'z': {int(p): float(v) for p, v in zip(states, z)},
+            'continuation_failed': lost}
+        return (roots, None), route_out
+
     def tile_kw(self):
         return {} if self.chain.tile_gb is None else {'tile_gb': self.chain.tile_gb}
 
@@ -950,6 +1083,9 @@ class QuasiparticleSet:
         rows) with this chain's static term. The one continuation the
         adaptive selection, its end-of-walk check and the outside curve read.
         """
+        held = self.chain.__dict__.get('continued')
+        if held is not None and held.serves(mf, x_mo, d_sigma, env, states):
+            return held.shifts(states, mf)
         with self.chain.phase(phase):
             xc = self.chain.xc_correction(mf, np.asarray(states, int), env)
             # W_solv would count the continuum again beside Eq. (18)

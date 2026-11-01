@@ -206,6 +206,13 @@ class SB:
         # them (_with_flip). None promises nothing.
         self.parity = parity
 
+    @classmethod
+    def from_half(cls, half, parity):
+        """The flip eigenvector of `parity` from its alpha-first blocks
+        `half`: each beta-first block is parity times its alpha <-> beta
+        partner, the same array for +1."""
+        return cls(_with_flip(half, parity), parity=parity)
+
     def get(self, key):
         return self.blocks.get(key)
 

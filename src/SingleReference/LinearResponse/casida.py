@@ -287,3 +287,22 @@ def solver_choice(n_ov):
     terabytes.
     """
     return 'dense' if 2 * int(n_ov)**2 * 8 / BYTES_PER_GB <= BSE_DENSE_MAX_GB else 'davidson'
+
+
+def casida_solve(A, B=None):
+    """(Omega, Xn, Yn) from the Casida problem with blocks (A, B), every
+    root; Xn, Yn are (n_ov, n_ov).
+    The Tamm-Dancoff A alone (B None) by `eigh`; the full problem by THE dense
+    Casida eigensolve (`casida_eigensolve`, A - B factored), replicated on
+    every rank, which raises `CasidaInstability` where the reference is
+    singlet/triplet unstable (triplets are the usual culprit -- use the
+    Tamm-Dancoff form)."""
+    if B is None:
+        w, Z = np.linalg.eigh(0.5 * (A + A.T))
+        return w, Z, np.zeros_like(Z)
+    plus, minus = A + B, A - B
+    halves = [0.5 * (plus + plus.T), 0.5 * (minus + minus.T)]
+    del plus, minus
+    omega, x, y, _, _ = casida_eigensolve(halves, factor='amb',
+                                          threshold=np.inf)
+    return omega, x, y

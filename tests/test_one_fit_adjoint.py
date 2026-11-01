@@ -78,7 +78,8 @@ from src.gradients.isdf_derivatives import (PendingFitAdjoint,
                                             one_fit_adjoint)
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.SingleReference.GW.space_time import separable_factors
-from tests.isdf_test_grid import g1, g1_kw, g1_numerics
+from tests.isdf_test_grid import g1, g1_kw, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
+from tests.blas_bar import assert_same_within
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -94,10 +95,10 @@ GEOMS = {
     'formaldehyde': ('C 0 0 -0.5296; O 0 0.02 0.6763; H 0 0.9357 -1.1172; '
                      'H 0.02 -0.9557 -1.1172'),
 }
-#: Row tile edge of the kernel gates: water's 444 points in 7 tiles.
+#: Row tile edge of the kernel gates: water's 888 points on G1 in 14 tiles.
 TILE = 64
-#: The handed-in rows' tile edges: 7 tiles, and 2 (a third rank owns none).
-HANDED_TILES = (64, 256)
+#: The handed-in rows' tile edges: 14 tiles, and 2 (a third rank owns none).
+HANDED_TILES = (64, 512)
 XCS = ('hf', 'pbe0', 'lrc-wpbeh')
 FORCE_SIZES = (1, 2, 3)
 KERNEL_SIZES = (1, 2, 3, 5, 8)
@@ -129,7 +130,8 @@ def isdf_factory(xc, grid_accuracy=None):
                                for i in range(mol.natm)})
             kw['counts'], kw['n_start'] = resolve_isdf_grid(
                 grid_accuracy, BASIS, elements, auxbasis=AUX)
-        mf = isdf_jk_with_force(base, auxbasis=AUX, **g1_kw(base, kw))
+        mf = isdf_jk_with_force(base, auxbasis=AUX, numerics=duchemin_blase(),
+                                **g1_kw(base, kw))
         mf.conv_tol = SCF_DIFFERENTIABLE_CONV_TOL
         mf.conv_tol_grad = SCF_DIFFERENTIABLE_GRAD_TOL
         mf.max_cycle = 200
@@ -148,6 +150,7 @@ def ladder_chain(xc):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
                        numerics=numerics_of({'grid_accuracy': 'G1', 'sliced': True,
+                                 'test_set': DUCHEMIN_BLASE_FIT,
                                  'fit': 'rows', 'bse_adjoint': 'grid'}))
     return surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                       isdf_factory(xc, 'G1'))
@@ -324,16 +327,13 @@ def calls(log):
 # --------------------------------------------------------- (i) one fit
 @pytest.mark.parametrize('tile', HANDED_TILES)
 @pytest.mark.parametrize('size', (1, 2, 3))
-def test_the_handed_tiles_are_the_fit(size, tile, request):
+def test_the_handed_tiles_are_the_fit(size, tile):
     """The handle's tiles read through `fit_rows(tiles=)` are to a few ulp the fit
     made again; another tile edge, regularization or point set refits."""
-    if (size, tile) == (3, 256):
-        request.node.add_marker(pytest.mark.xfail(
-            strict=True, reason='premise tuned to the retired 148-point grid: at tile 256 every one of three ranks holds a tile on G1; re-tune'))
     def rank(comm):
         warnings.simplefilter('ignore')
         mol = molecule('water')
-        mf = isdf_jk_with_force(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')))
+        mf = isdf_jk_with_force(dft.RKS(mol, xc='lrc-wpbeh'), auxbasis=AUX, counts=g1(dft.RKS(mol, xc='lrc-wpbeh')), numerics=duchemin_blase())
         handle = DistributedISDFJK(mf.with_df, comm=comm, tile=tile)
         handle.build()
         tiles = handle.fit_tiles()
@@ -374,7 +374,7 @@ def test_the_handed_tiles_are_the_fit(size, tile, request):
         assert reused and not refit
         assert others == [False, False, False], others
         assert readonly and (held > 0) == (owned > 0)
-    if size == 3 and tile == 256:
+    if size == 3 and tile == 512:
         assert min(o[4] for o in out) == 0, 'no rank without a tile'
 
 
@@ -426,11 +426,12 @@ def test_the_energy_route_reads_the_scf_fit(size):
                                                 serial.mo_energy)
         t_handed, t_fit = {}, {}
         handed = separable_factors(mf, mol, auxbasis=AUX, fit='rows',
-                                   grid_accuracy='G1',
+                                   grid_accuracy='G1', numerics=duchemin_blase(),
                                    fit_tiles=handle.fit_tiles(),
                                    timings=t_handed)
         fitted = separable_factors(mf, mol, auxbasis=AUX, fit='rows',
-                                   grid_accuracy='G1', timings=t_fit)
+                                   grid_accuracy='G1', numerics=duchemin_blase(),
+                                   timings=t_fit)
         same = all(matches(getattr(handed, k), getattr(fitted, k),
                            RECORDING_BLAS, unit='1', quantity='root')
                    for k in ('X_mo', 'D', 'X_ao', 'coords'))
@@ -556,9 +557,14 @@ def test_the_force_makes_one_fit_adjoint_call(xc, switches, monkeypatch):
     for size in (1, 2):
         out = run_simulated(unpooled, size)
         whole, separate = out[0]
-        d = np.abs(whole - separate).max() / np.abs(separate).max()
-        lines.append(f'{size} ranks unpooled: {d:.1e} rel')
-        assert d <= 1e-12, lines
+        scale = np.abs(separate).max()
+        lines.append(f'{size} ranks unpooled: '
+                     f'{np.abs(whole - separate).max() / scale:.1e} rel')
+        # a few ulp where the BLAS is the recording one; elsewhere the two
+        # arms' orbital-response solves (ORBITAL_MULTIPLIER_TOL = 1e-11) may
+        # stop at different iterations, so the force differs by that scale
+        assert_same_within(whole / scale, separate / scale, 1e-10,
+                           label=f'unpooled, {size} ranks: {lines}')
         for o in out:
             assert_same(o[0], whole, quantity='gradient', label='unpooled')
     print(f'\n{xc}: ' + '; '.join(lines))
@@ -606,9 +612,9 @@ def test_the_total_force_follows_its_energy(name, xc):
         mol = molecule(name)
         chain = ExcitedStateChain(
             mol, isdf_factory(xc), spin='singlet',
-            numerics=g1_numerics(mol, Numerics(isdf={'fit': 'rows'},
+            numerics=duchemin_blase(g1_numerics(mol, Numerics(isdf={'fit': 'rows'},
                                                bse={'solver': 'davidson', 'conv_tol': BSE_CONV_TOL},
-                                               layout={'sliced': True, 'fit_block': TILE})))
+                                               layout={'sliced': True, 'fit_block': TILE}))))
         grad = np.asarray(chain.total_gradient()[0])
         misses = []
         for atom, axis in components:

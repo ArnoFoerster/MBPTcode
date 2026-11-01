@@ -55,6 +55,10 @@ def _gdf_krpa_ecorr(kmf, nw=NW):
 
     gw = krgw_ac.KRGWAC(kmf); gw.fc = False
     mf = gw._scf
+    # newer pyscf leaves these None until kernel(); nmo and the response read them
+    for name in ('mo_occ', 'mo_coeff', 'mo_energy'):
+        if getattr(gw, name, None) is None:
+            setattr(gw, name, np.array(getattr(mf, name), copy=True))
     mo_energy = np.array(mf.mo_energy); mo_coeff = np.array(mf.mo_coeff)
     nkpts = gw.nkpts; kpts = gw.kpts; nmo = gw.nmo; mydf = gw.with_df
     kscaled = gw.mol.get_scaled_kpts(kpts); kscaled -= kscaled[0]

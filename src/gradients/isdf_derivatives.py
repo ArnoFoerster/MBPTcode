@@ -46,8 +46,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
+from src.Base.geometry.geometry import grid_key
 from src.Base.numerics.constants import (AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
-                                         FIT_REALIZATIONS,
+                                         FIT_REALIZATIONS, ISDF_TEST_SETS,
                                          THREE_CENTER_BLOCK_BYTES,
                                          WHOLE_FIT_ADJOINT_MAX_GB)
 import scipy.linalg
@@ -65,7 +66,7 @@ from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, a
                                                  fit_test_set_layout)
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds, fit_rows_adjoints
 from src.gradients.skeleton_tiles import isdf_exchange_seeds, shell_runs
-from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels
 
@@ -75,14 +76,25 @@ _PENDING = threading.local()
 
 
 class FitKey:
-    """What a row fit's adjoint is a function of, by content: the molecule,
-    the auxiliary basis, the points, the pair layout, the tile edge and the
-    estimator's settings. Seeds of one key share one
-    `isdf_fit_adjoint.fit_rows_adjoints` call (`contract`)."""
+    """What a row fit's adjoint is a function of, by content: the test set,
+    the molecule, the auxiliary basis, the points, the pair layout (None on
+    the AO-product test set, which screens nothing), the tile edge and the
+    estimator's settings. Seeds of one key share one call (`contract`):
+    `isdf_fit_adjoint.fit_rows_adjoints`, or on the AO-product test set
+    `ao_product_fit_adjoint.ao_product_fit_rows_adjoints`."""
 
-    def __init__(self, mol, auxmol, coords, layout, block, numerics=None):
+    def __init__(self, mol, auxmol, coords, layout, block, numerics=None,
+                 test_set=ISDF_TEST_SETS[0]):
         l_max_second, regularization, block_memory_gb = fit_settings(
             numerics, 'l_max_second', 'regularization', 'block_memory_gb')
+        if test_set not in ISDF_TEST_SETS:
+            raise ValueError(f'test_set={test_set!r} not in {ISDF_TEST_SETS}')
+        if (layout is None) != (test_set == 'ao_products'):
+            raise ValueError(
+                f'the {test_set!r} row fit takes '
+                + ('no pair layout' if test_set == 'ao_products'
+                   else 'the pair layout its fit kept'))
+        self.test_set = test_set
         self.mol, self.auxmol = mol, auxmol
         self.coords, self.layout = np.asarray(coords), layout
         self.block = int(block)
@@ -90,8 +102,9 @@ class FitKey:
         self.settings = dict(l_max_second=int(l_max_second),
                              regularization=float(regularization),
                              block_memory_gb=float(block_memory_gb))
-        self.key = (content_key(mol), content_key(auxmol),
+        self.key = (test_set, content_key(mol), content_key(auxmol),
                     self.coords.tobytes(),
+                    () if layout is None else
                     tuple(np.asarray(a, dtype=kind).tobytes() for a, kind
                           in zip(layout, (np.int64, np.int64, np.float64))),
                     self.block, tuple(sorted(self.settings.items())))
@@ -104,6 +117,13 @@ class FitKey:
 
     def contract(self, targets):
         """[RowFitAdjoint] of `targets` (`AdjointSeeds`) on this fit."""
+        if self.test_set == 'ao_products':
+            # cycle: that module builds on the pieces of this one
+            from src.gradients.ao_product_fit_adjoint import (
+                ao_product_fit_rows_adjoints)
+            return ao_product_fit_rows_adjoints(
+                self.mol, self.auxmol, self.coords, targets,
+                numerics=self.numerics, block=self.block)
         return fit_rows_adjoints(self.mol, self.auxmol, self.coords,
                                  self.layout, targets, block=self.block,
                                  numerics=self.numerics)
@@ -160,6 +180,14 @@ class PendingFitAdjoint:
     The deposits' share of the force is `settle`'s; the mean field's
     skeleton, contracted ahead where its force follows (`mean_field`), waits
     in `stash` for that force (`take`).
+
+    The window holds a second kind of term: a skeleton channel linear in its
+    density at the SCF density (a four-centre exchange channel, the
+    exchange-correlation grid skeleton) whose caller hands the window
+    `hold_skeleton` instead of evaluating. The densities of one channel are
+    summed, so the orbital response's skeleton and the static correction's
+    take one pass between them; `take_skeletons` hands the sums to the
+    assembly (`mean_field_response.held_skeletons`).
     """
 
     def __init__(self, mf, mean_field=False):
@@ -169,6 +197,28 @@ class PendingFitAdjoint:
         self.deposits = []
         self.share = None
         self.stash = None
+        self.skeletons = {}
+
+    def hold_skeleton(self, channel, g_ao, D):
+        """Add g_ao (weight included) to the density held for `channel`,
+        ('exchange', omega) or ('xc', None), whose other density is D. Every
+        deposit of a channel must carry the same D, the SCF density: the sum
+        is one pass only because the channel is linear in g_ao at fixed D."""
+        held = self.skeletons.get(channel)
+        if held is None:
+            self.skeletons[channel] = (np.array(g_ao, dtype=float),
+                                       np.asarray(D, dtype=float))
+            return
+        if not np.array_equal(held[1], np.asarray(D, dtype=float)):
+            raise ValueError(
+                f'skeleton channel {channel} was held with another density '
+                'D: summing the densities is exact only at one D')
+        held[0][...] += g_ao
+
+    def take_skeletons(self):
+        """{channel: (summed g_ao, D)} in deposit order, emptied."""
+        held, self.skeletons = self.skeletons, {}
+        return held
 
     def deposit(self, key, chain, seeds):
         """Hold one skeleton's seeds for the assembly's call."""
@@ -242,6 +292,7 @@ class PendingFitAdjoint:
         wanted the orbital branch's inputs only (a relaxed density), so no
         force is assembled and nothing of the fit reaches the nuclei."""
         self.deposits = []
+        self.skeletons = {}
         self.open = False
 
     def settle(self):
@@ -265,7 +316,7 @@ def point_layout(mol, radii_by_element, origin_by_element=None):
     """
     pts_local, owner = [], []
     for ia in range(mol.natm):
-        sym = mol.atom_pure_symbol(ia)
+        sym = grid_key(mol, ia)
         use_origin = (origin_by_element or {}).get(sym, False)
         p = atomic_points(radii_by_element[sym], centre=(0.0, 0.0, 0.0),
                           origin=use_origin)
@@ -797,17 +848,22 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
 def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                     pts_local, atom_of_point, frames=None, decay=FRAME_DECAY,
                     with_frames=True, block=None, pending=None, body=None,
-                    gauges=()):
+                    gauges=(), test_set=ISDF_TEST_SETS[0]):
     """(g_collocation, g_fit, held): the collocation branch of X_bar and the
     fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
-    the frozen `layout` (its Gram matrix over every product pair).
+    the frozen `layout` (its Gram matrix over every product pair), or with
+    test_set 'ao_products' the AO-product row fit's (layout None,
+    `ao_product_fit_adjoint.ao_product_fit_rows_adjoints`).
 
     d_bar is the BARE gauge's adjoint (None where no target reads it);
     gauges: `GaugeAdjoint`s of dressed factors on the same fit, each with
     the environment that dresses its metric root, which ride the same call
     as `isdf_fit_adjoint.GaugeSeeds` -- `dfactor_adjoint_gauges`' gauges, in
-    the fit's tiles. A gauge whose environment dresses nothing belongs in
-    d_bar and is refused here.
+    the fit's tiles. A gauge whose environment dresses nothing is the bare
+    factor itself (the static half of a split continuum on the bare
+    interaction): its D adjoint joins d_bar and its root adjoint the bare
+    root's (`AdjointSeeds.root_bar`), as `dfactor_adjoint_gauges` lands it;
+    a vtilde adjoint on it is refused (it has no vtilde).
 
     `isdf_fit_adjoint.fit_rows_adjoints` runs both in the fit's tiles and
     returns their centre terms and point adjoints, the same bits on every
@@ -822,25 +878,49 @@ def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
     this target arrives inside these two branches.
     """
     key = FitKey(mol, auxmol, coords, layout,
-                 FIT_CHOLESKY_BLOCK if block is None else block)
+                 FIT_CHOLESKY_BLOCK if block is None else block,
+                 test_set=test_set)
     chain = PointChain(pts_local, atom_of_point, frames, with_frames, decay,
                        body=body)
-    dressed = []
+    dressed, bare, bare_root = [], [d_bar], []
     for g in gauges:
         if not dresses_interaction(g.environment, auxmol):
-            raise ValueError(
-                f'{g.environment!r} dresses nothing: its adjoint is on the '
-                'bare gauge and belongs in d_bar')
+            if g.kernel_bar is not None:
+                raise ValueError(
+                    f'{g.environment!r} dresses nothing, so this gauge has no '
+                    'vtilde for a kernel adjoint to land on')
+            bare.append(g.d_bar)
+            bare_root.append(g.root_bar)
+            continue
         dressed.append(GaugeSeeds(g.d_bar, g.environment,
                                   root_bar=g.root_bar,
                                   kernel_bar=g.kernel_bar))
-    seeds = AdjointSeeds(d_bar=d_bar, x_bar=x_bar, mo_coeff=mo_coeff,
-                         gauges=dressed)
+    seeds = AdjointSeeds(d_bar=_bare_sum(bare), x_bar=x_bar, mo_coeff=mo_coeff,
+                         gauges=dressed, root_bar=_bare_sum(bare_root))
     adjoint = (key.contract([seeds])[0] if pending is None
                else pending.contract(key, seeds, chain))
     g_coll = adjoint.coll_centre + chain(mol, adjoint.coll_points)
     g_fit = adjoint.fit_centre + chain(mol, adjoint.fit_points)
     return g_coll, g_fit, adjoint.held
+
+
+def _bare_sum(values):
+    """The sum of the adjoints `values` on one array (None where none),
+    whole or `GridTileRows`, added in their order onto a copy of the first
+    tiled one (a tiled sum stays in tiles; `GridTileRows` adds whole arrays
+    by its own tiles), else of the first."""
+    values = [v for v in values if v is not None]
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    tiled = [i for i, v in enumerate(values) if isinstance(v, GridTileRows)]
+    first = values.pop(tiled[0] if tiled else 0)
+    out = (GridTileRows(first.rows.copy(), first.npts, first.block, first.comm)
+           if isinstance(first, GridTileRows) else np.array(first, float))
+    for v in values:
+        out += v
+    return out
 
 
 def orbital_rotation_rows(x_mo, x_bar, block=None):
@@ -952,10 +1032,18 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     Gram matrix (M, M) on every rank, and is refused above
     `WHOLE_FIT_ADJOINT_MAX_GB`; 'rows' is `_exchange_skeleton_rows`, in the
     row fit's grid-row tiles over the ranks; None is `exchange_fit`'s choice.
+    On the AO-product test set 'rows' is the same skeleton on the AO-product
+    row fit, and 'replicated' its whole reverse pass
+    (`ao_product_fit_adjoint.exchange_skeleton`).
     """
     fit = exchange_fit(fit)
     dm = mf.make_rdm1() if dm is None else np.asarray(dm)
     channels = exchange_channels(mf) if channels is None else list(channels)
+    if (fit == 'replicated'
+            and getattr(mf.with_df, 'test_set', None) == 'ao_products'):
+        # cycle: that module builds on the pieces of this one
+        from src.gradients.ao_product_fit_adjoint import exchange_skeleton
+        return exchange_skeleton(mf, dm, dm_other, prefactor, channels)
     if fit == 'rows':
         return _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels)
     with_df = mf.with_df
@@ -1083,7 +1171,7 @@ def _exchange_skeleton_rows(mf, dm, dm_other, prefactor, channels):
     seeds, two, _ = isdf_exchange_seeds(
         key.mol, key.auxmol, key.coords, key.layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=key.block,
-        numerics=key.numerics)
+        numerics=key.numerics, test_set=key.test_set)
     if pending is not None and pending.open:
         pending.deposit(key, chain, seeds)
         return lockstep(two)
@@ -1101,6 +1189,8 @@ def _exchange_rows_fit(mf):
     ones the fit was placed on (`mean_field_point_chain`)."""
     with_df = mf.with_df
     require_placed_grid(with_df, 'the ISDF exchange skeleton')
+    if getattr(with_df, 'test_set', None) == 'ao_products':
+        return _ao_exchange_rows_fit(mf)
     mol = with_df.mol
     handle = isdf_scf_handle(mf)
     if with_df.coords is not None:
@@ -1125,6 +1215,42 @@ def _exchange_rows_fit(mf):
     key = FitKey(mol, auxmol, coords, layout, block,
                  numerics=with_df.numerics)
     pts_local, owner = point_layout(mol, radii, origins)
+    chain = mean_field_point_chain(with_df, mol, pts_local, owner)
+    if handle is None:
+        return key, chain, None, None
+    return key, chain, handle.MT, handle.X
+
+
+def _ao_exchange_rows_fit(mf):
+    """`_exchange_rows_fit` on the AO-product test set: the mean field's
+    points (its own, the distributed SCF's, or placed as its build places
+    them), the clouds of its pivoted selection or of its grid, and no pair
+    layout (the test set screens nothing)."""
+    with_df = mf.with_df
+    mol = with_df.mol
+    handle = isdf_scf_handle(mf)
+    radii, origins = with_df.grid_radii, with_df.grid_origins
+    if with_df.coords is not None:
+        coords = with_df.coords
+    elif handle is not None and handle.coords is not None:
+        coords = handle.coords
+    else:
+        coords, radii, origins = lockstep(with_df.place_grid())
+    if with_df.selection is not None:
+        pts_local, owner = with_df.selection
+    else:
+        if radii is None:
+            # the tabulated grid's clouds: the build's own placement
+            _, radii, origins = lockstep(with_df.place_grid())
+        pts_local, owner = point_layout(mol, radii, origins)
+    if handle is not None and not np.array_equal(handle.coords, coords):
+        raise RuntimeError(
+            "the distributed SCF's interpolation points are not this mean "
+            "field's grid, so its fit is not the one the energy used")
+    auxmol = handle.auxmol if handle is not None else auxmol_of(mf)
+    block = handle.tile if handle is not None else FIT_CHOLESKY_BLOCK
+    key = FitKey(mol, auxmol, coords, None, block, numerics=with_df.numerics,
+                 test_set='ao_products')
     chain = mean_field_point_chain(with_df, mol, pts_local, owner)
     if handle is None:
         return key, chain, None, None
@@ -1194,7 +1320,7 @@ def _mean_field_exchange_target(mf, keys):
     seeds, two, _ = isdf_exchange_seeds(
         key.mol, key.auxmol, key.coords, key.layout, dm, prefactor=1.0,
         channels=channels, mt=mt, X=X, block=key.block,
-        numerics=key.numerics)
+        numerics=key.numerics, test_set=key.test_set)
     return {'key': key, 'chain': chain, 'seeds': [seeds], 'role': 'mean_field',
             'two': two, 'request': (dm, None, 1.0, channels)}
 
@@ -1250,6 +1376,11 @@ def one_fit_adjoint(mf, mean_field=False):
             f'{len(pending.deposits)} exchange skeleton(s) left row-fit '
             'adjoint seeds that no nuclear assembly contracted: the force '
             'would miss their fit and collocation terms')
+    if pending.skeletons:
+        raise RuntimeError(
+            f'skeleton channel(s) {sorted(pending.skeletons, key=str)} were '
+            'held and no nuclear assembly evaluated them: the force would '
+            'miss them')
     if pending.stash is not None:
         warnings.warn('the mean-field exchange skeleton was contracted ahead '
                       'of a force that never asked for it', RuntimeWarning)

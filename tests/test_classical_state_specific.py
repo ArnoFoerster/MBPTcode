@@ -288,3 +288,31 @@ def test_the_surface_entry_records_the_scheme(mol, equilibrium):
 
 if __name__ == '__main__':
     sys.exit(pytest.main([__file__, '-q', '-p', 'no:cacheprovider']))
+
+
+def test_one_vocabulary_for_every_solvation_entry_point():
+    """The SS-density tuple, the run's scheme tuple and the gas name are single
+    objects read by every user, and the environment's scheme is named, never
+    defaulted."""
+    import inspect
+    from src.environments import environment, medium, solvent_vocabulary as V
+    from src.environments import split_equilibrium
+    from src.photophysics import cli, declaration
+    from src.SingleReference.ADC.eeADC import solve, vertical
+    assert split_equilibrium.SS_DENSITIES is V.SS_DENSITIES
+    assert solve.SS_DENSITIES is V.SS_DENSITIES
+    assert vertical.SS_DENSITIES is V.SS_DENSITIES
+    assert declaration.SOLVENT_SCHEMES is V.SOLVENT_SCHEMES
+    assert cli.SOLVENT_SCHEMES is V.SOLVENT_SCHEMES
+    assert declaration.GAS is V.GAS is medium.GAS is cli.GAS
+    assert set(V.SCHEME_CONSTRUCTION.values()) == set(V.CONSTRUCTION_SCHEMES)
+    assert set(V.SCHEME_CONSTRUCTION) == set(V.SOLVENT_SCHEMES) - {V.GAS}
+    assert (inspect.signature(environment.solvent_scheme)
+            .parameters['scheme'].default is inspect.Parameter.empty)
+    with pytest.raises(TypeError):
+        environment.solvent_scheme(None)
+    with pytest.raises(ValueError, match='relaxed\\+pcm'):
+        split_equilibrium.ClassicalStateSpecific(
+            SolventScreening(gto.M(atom='H 0 0 0; H 0 0 0.74', verbose=0),
+                             eps=1.7, eps_static=2.4),
+            ss_density='relaxed+pcm')

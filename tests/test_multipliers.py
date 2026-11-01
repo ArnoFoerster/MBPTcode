@@ -36,6 +36,8 @@ blind to one pair converges, reports info=0, and leaves a finite residual --
 which is exactly what the residual check is for, since the multiplier enters
 the force linearly and a stagnated solve gives a plausible wrong gradient.
 """
+import zlib
+
 import numpy as np
 import pytest
 import scipy.sparse.linalg
@@ -356,3 +358,44 @@ def test_the_same_right_hand_side_solves_with_the_whole_operator():
     assert np.abs(np.diag(Lam)).max() == 0.0      # zero diagonal by construction
     Y_tot = Y_E + _hartree_fock_matvec(eps)(Lam)
     assert np.abs(Y_tot - Y_tot.T).max() < 1e-10
+
+
+def _floored_matvec(eps, floor):
+    """A coupled response whose every application carries a deterministic,
+    non-linear error of size `floor`, as a matvec on grids and fitted
+    integrals carries its round-off: lgmres cannot lower the true residual
+    below about `floor`."""
+    n = len(eps)
+    rng = np.random.default_rng(3)
+    K = 0.05 * rng.standard_normal((n, n))
+    K = K + K.T
+
+    def matvec(Lam):
+        matvec.calls += 1
+        noise = np.random.default_rng(zlib.crc32(Lam.tobytes()))
+        return (2.0 * (np.diag(eps) @ Lam) + K @ Lam @ K
+                + floor * noise.standard_normal((n, n)))
+    matvec.calls = 0
+    return matvec
+
+
+def test_a_solve_on_its_round_off_floor_ends_below_the_residual_bar():
+    """A matvec whose round-off floor (1e-10) lies above the lgmres tolerance
+    (1e-11) but far below the residual bar (1e-7) ends within a few outer
+    cycles, unflagged, where it ran to the iteration ceiling (3000 outer
+    cycles) and was flagged before; its multiplier is the floor-free one to
+    the floor."""
+    eps = np.array([-1.1, -0.7, -0.4, 0.2, 0.5, 0.9, 1.4, 2.0])
+    rng = np.random.default_rng(5)
+    Y_E = 0.3 * rng.standard_normal((8, 8))
+    floored = _floored_matvec(eps, 1e-10)
+    flags = []
+    with collecting(flags):
+        Lam, res = solve_orbital_multipliers(floored, Y_E, eps, flags=flags)
+    assert flags == []
+    assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
+    assert floored.calls < 200, floored.calls
+    exact = _floored_matvec(eps, 0.0)
+    Lam_ref, res_ref = solve_orbital_multipliers(exact, Y_E, eps)
+    assert res_ref < ORBITAL_MULTIPLIER_TOL * max(1.0, np.linalg.norm(Y_E))
+    assert np.abs(Lam - Lam_ref).max() < 1e-8

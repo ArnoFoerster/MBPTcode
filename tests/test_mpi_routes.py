@@ -273,7 +273,7 @@ from src.Base.utils.grids.time_frequency import sigma_transforms
 from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
-from tests.isdf_test_grid import g1, g1_numerics
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, matches
 
@@ -587,9 +587,10 @@ def grid_tag(chain, m):
     radii = repr([(el, [(s, np.asarray(chain.radii[el][s]).tolist())
                         for s in sorted(chain.radii[el])])
                   for el in sorted(chain.radii)])
+    # the AO-product fit screens no pair: its layout is None
     return (digest(chain.coords(m)),
             hashlib.sha1(radii.encode()).hexdigest()[:12],
-            digest(*chain.layout))
+            'no pair layout' if chain.layout is None else digest(*chain.layout))
 
 
 def scf_mean_field(mol, xc):
@@ -1758,7 +1759,8 @@ def row_fit_chain_routes(gate, mol):
     def force(scan=None, **layout):
         surface = RPABSESurface(
             mol, chain_scf, spin='singlet', mf=mf_ref,
-            numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
+            # the row fit's ledgers and pair layout are the Duchemin-Blase fit's
+            numerics=g1_numerics(mol, numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
         if scan is not None:
             scan(surface)
         g, e, _ = surface.total_gradient(here, mf_here)               # context

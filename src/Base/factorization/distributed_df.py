@@ -169,7 +169,8 @@ from pyscf.dft import gen_grid, numint
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 from pyscf.lib import logger
 
-from src.Base.numerics.constants import BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION
+from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION, DF_JK_BLOCK_GB,
+                                         DF_JK_BLOCK_ROWS_MAX, XC_BLOCK_MAX_MB)
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
@@ -345,7 +346,7 @@ def _restore_methods(mf, saved):
             setattr(mf, name, original)
 
 
-def _metric_factor(mol, auxmol):
+def metric_factor(mol, auxmol):
     """(L, mode) with (P|Q) = L L^T, or the eigen-replacement where it is not
     positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes.
 
@@ -370,7 +371,7 @@ def _replicated_metric_factor(mol, auxmol, comm):
     broadcast, once.
     """
     if comm.Get_rank() == 0:
-        low, mode = _metric_factor(mol, auxmol)
+        low, mode = metric_factor(mol, auxmol)
         header = (mode, low.shape, low.dtype.str)
     else:
         low, header = None, None
@@ -545,7 +546,8 @@ def lockstep_density(dms, comm, timings=None):
             'its halves reduced separately')
     t0 = time.time()
     lockstep((dms, getattr(dms, 'mo_coeff', None),
-              getattr(dms, 'mo_occ', None)), comm, check=True)
+              getattr(dms, 'mo_occ', None),
+              getattr(dms, 'read_columns', None)), comm, check=True)
     add_seconds(timings, 'scf_lockstep', t0)
     return dms
 
@@ -633,6 +635,15 @@ class InstalledWithDF:
         return self
 
 
+def exchange_block_rows(nao):
+    """Auxiliary rows per block of a rank's J/K build at `nao` AOs: pyscf's
+    K loop holds (2, rows, nao, nao), kept under DF_JK_BLOCK_GB, between 4
+    and DF_JK_BLOCK_ROWS_MAX. Depends on nao alone, so the K sum's blocking,
+    and its bits, never depend on the free memory."""
+    rows = int(DF_JK_BLOCK_GB * BYTES_PER_GB / (16.0 * int(nao) ** 2))
+    return max(4, min(DF_JK_BLOCK_ROWS_MAX, rows))
+
+
 class DistributedDF(InstalledWithDF, df.df.DF):
     """A `with_df` holding one contiguous block of the auxiliary index.
 
@@ -713,6 +724,9 @@ class DistributedDF(InstalledWithDF, df.df.DF):
                 'or more would hold it in core. This route keeps its slice in '
                 'core by construction and will not spill it to disk, which is '
                 'the cost it exists to remove.')
+        # pyscf's J/K loops block by min(blockdim, free memory): a block of
+        # this many rows keeps their buffers under DF_JK_BLOCK_GB
+        self.blockdim = exchange_block_rows(nao)
         blocks = self._blocks = _column_blocks(mol, nao_pair, naux, size)
         self.column_blocks = tuple(int(i) for i
                                    in partition(len(blocks), rank, size))
@@ -778,15 +792,46 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         if self._cderi is None:
             self.build()
         t0 = time.time()
+        columns = getattr(dm, 'read_columns', None)
         if self._cderi.shape[0] == 0:
             zero = np.zeros(np.shape(dm))
             vj, vk = zero, zero.copy()
+        elif with_k and columns is not None and np.ndim(dm) == 2:
+            vj = (df_jk.get_jk(self, dm, hermi, True, False, direct_scf_tol)[0]
+                  if with_j else None)
+            vk = self._exchange_on_columns(np.asarray(dm), columns)
         else:
             vj, vk = df_jk.get_jk(self, dm, hermi, with_j, with_k,
                                   direct_scf_tol)
         add_seconds(self.timings, 'scf_fock_jk', t0)
         add_count(self.timings, 'scf_requests_jk')
         return (vj if with_j else None), (vk if with_k else None)
+
+    def _exchange_on_columns(self, dm, columns):
+        """This rank's rows' K[dm] where the caller reads it only as K C.
+
+        A density tagged `read_columns` = C (nao, k) belongs to a caller that
+        uses the potential only through v C (`multipliers.rotation_gradient`
+        reads the occupied columns of C^T G C). K C = sum_Q L_Q dm (L_Q C)
+        costs 3 naux nao^2 k against the 2 naux nao^3 of a general K, and
+        (K C) C^+ stands for K: it is linear in the rows, so the ranks'
+        partials add up to the total's, and (K C) C^+ C = K C because C has
+        full column rank. Any other reader of a tagged density's potential
+        would get a different matrix, which is why only the caller that
+        reads columns sets the tag.
+        """
+        C = np.ascontiguousarray(columns, dtype=float)
+        nao, k = C.shape
+        KC = np.zeros((nao, k))
+        for eri1 in self.loop(exchange_block_rows(nao)):
+            L = lib.unpack_tril(eri1).reshape(-1, nao)       # (nb nao, nao)
+            nb = L.shape[0] // nao
+            X = (L @ C).reshape(nb, nao, k)                  # L_Q C
+            T = dm @ X.transpose(1, 0, 2).reshape(nao, nb * k)
+            T = np.ascontiguousarray(
+                T.reshape(nao, nb, k).transpose(1, 0, 2)).reshape(nb * nao, k)
+            KC += L.T @ T                                    # L_Q symmetric
+        return KC @ np.linalg.pinv(C)
 
     def _reduce_jk(self, vj, vk, with_j, with_k):
         """The ranks' partials added, in one reduction of both matrices.
@@ -905,7 +950,8 @@ class DistributedNumInt(numint.NumInt):
 
     def _follow_grid(self, mol, grids, max_memory):
         """Rank 0's grid decision on every rank, this rank's points of it
-        taken where it is new; rank 0's `max_memory`. Collective."""
+        taken where it is new; rank 0's `max_memory`, at most XC_BLOCK_MAX_MB.
+        Collective."""
         t0 = time.time()
         header = None
         if self.comm.Get_rank() == 0 and grids.coords is not None:
@@ -923,7 +969,7 @@ class DistributedNumInt(numint.NumInt):
         if fresh:
             self._take_grid(mol, grids, npoints, cutoff)
         add_seconds(self.timings, 'scf_grid' if fresh else 'scf_lockstep', t0)
-        return max_memory
+        return min(max_memory, XC_BLOCK_MAX_MB)
 
     # -- the response quadrature an orbital-response solve calls -------------
 
@@ -1221,12 +1267,18 @@ def _lock_solvent(mf, comm, timings):
     density, (e_solvent, v_solvent): `get_veff` only TAGS the J/K matrix with
     it and `get_fock` and `energy_elec` add it, once per cycle. `_B_dot_x(dm1)`
     is its linear response, which an equilibrium response function adds (a
-    Newton step on the solvated orbital Hessian). Both are replicated and
-    cheap -- a cavity of a few hundred points -- so every rank computes them
+    Newton step on the solvated orbital Hessian). Every rank computes them
     from the density the J/K entry lockstepped, and the result is
     lockstepped to rank 0's (checked: only a rank apart moves anything). The
     loop's energy, Fock matrix and DIIS then read the same reaction field on
     every rank, which is what keeps the replicated drivers in step.
+
+    Their cost is the surface potential, (nao, nao, n_surf) three-centre
+    integrals, which is not small on a large molecule. Every rank enters both
+    calls here at the same point, so the block attaches `comm` to the
+    continuum as `_cavity_comm`: a continuum that splits its surface points
+    over ranks (`environments.pcm_factorization.tile_cavity`) reads it, and
+    any other ignores it.
 
     None where `mf` carries no continuum, or an enclosing block already
     locked it.
@@ -1241,6 +1293,7 @@ def _lock_solvent(mf, comm, timings):
         saved.append((name, solvent.__dict__.get(name)))
         setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
                                             timings))
+    solvent._cavity_comm = comm
     _RANK_LOCKED.add(solvent)
     return solvent, saved
 
@@ -1251,6 +1304,7 @@ def _unlock_solvent(locked):
         return
     solvent, saved = locked
     _restore_methods(solvent, saved)
+    solvent.__dict__.pop('_cavity_comm', None)
     _RANK_LOCKED.discard(solvent)
 
 

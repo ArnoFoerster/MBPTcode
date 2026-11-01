@@ -30,7 +30,7 @@ PACKAGE = pathlib.Path(vertical_arms.__file__).resolve().parent
 SHARED = ['--grid-accuracy', 'G1', '--nroots', '5', '--n-states', '2',
           '--outside-scissor', 'tiers', '--track', 'overlap',
           '--qp-hamiltonian', '--bse-conv-tol', '1e-6',
-          '--reference', 'pbe0', '--scf', 'isdf']
+          '--reference', 'pbe0', '--scf', 'isdf', '--scf-grid', 'GH']
 
 
 def declaration(out, *extra):

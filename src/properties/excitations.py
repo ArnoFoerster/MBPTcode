@@ -324,7 +324,7 @@ def grid_record(spec, mol):
     level = isdf.level
     if level is None and isdf.counts is None and isdf.radii is None:
         level = SURFACE_GRID_ACCURACY
-    basis = isdf.basis or str(mol.basis)
+    basis = isdf.basis or mol.basis
     identity = grid_identity(
         level, basis, elements_of(mol),
         auxbasis=isdf.auxbasis or paired_auxbasis(basis), counts=counts,

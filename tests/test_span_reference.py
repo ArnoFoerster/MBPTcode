@@ -32,7 +32,7 @@ from src.Base.factorization.separable_ri import UnrepresentedOrbitals, shipped_r
 from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from tests.isdf_test_grid import g1_numerics
+from tests.isdf_test_grid import g1_numerics, duchemin_blase
 
 H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BENZENE = ('C 0 1.3915 0; C 1.2051 0.6958 0; C 1.2051 -0.6958 0; '
@@ -95,7 +95,7 @@ def test_the_span_of_an_augmented_basis():
             < span['smallest_kept_eigenvalue'])
     # the factors represent every orbital of the span (worst 0.026 measured)
     separable_factors(mf, mol, auxbasis='aug-cc-pvdz-ri',
-                      radii=_radii(('C', 'H')))
+                      radii=_radii(('C', 'H')), numerics=duchemin_blase())
 
 
 def test_the_refusal_fires_on_what_the_cut_leaves():
@@ -112,7 +112,7 @@ def test_the_refusal_fires_on_what_the_cut_leaves():
     with pytest.raises(UnrepresentedOrbitals,
                        match='density-fitted route in the full basis') as refused:
         separable_factors(mf, mol, auxbasis='aug-cc-pvdz-ri',
-                          radii=_radii(('O', 'H')))
+                          radii=_radii(('O', 'H')), numerics=duchemin_blase())
     assert len(refused.value.orbitals) == 3
 
 
@@ -159,7 +159,7 @@ def test_the_chain_freezes_its_span():
         return mf
 
     chain = ExcitedStateChain(mol, factory, mf=factory(mol),
-                              numerics=g1_numerics(mol, Numerics(bse={'solver': 'dense'})))
+                              numerics=duchemin_blase(g1_numerics(mol, Numerics(bse={'solver': 'dense'}))))
     assert chain.span_basis is chain.mf0.span_basis
     assert not chain.mf0.span['frozen']
     _, mf = chain.mean_field(_displaced(mol, 0, 2, 0.02))
@@ -185,7 +185,7 @@ def test_a_chain_refuses_another_span_dimension():
         mf.kernel()
         return mf
 
-    chain = ExcitedStateChain(mol, factory, mf=factory(mol), numerics=g1_numerics(mol))
+    chain = ExcitedStateChain(mol, factory, mf=factory(mol), numerics=duchemin_blase(g1_numerics(mol)))
     moved = mol.copy()
     moved.set_geom_(mol.atom_coords() + 1e-3, unit='Bohr')
     moved.build(False, False)

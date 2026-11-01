@@ -78,7 +78,8 @@ def main():
     print('\n=== 4. __init__ passes all five arguments ===')
     # the original defect: 4 args against a 5-parameter signature, which
     # byte-compiles and raises TypeError only when the solver is constructed.
-    src = pathlib.Path('src/Base/utils/linear_algebra/elpa.py').read_text()
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / 'src' / 'Base' / 'utils' / 'linear_algebra' / 'elpa.py').read_text()
     calls = [n for n in ast.walk(ast.parse(src))
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
              and n.func.attr == '_numroc']

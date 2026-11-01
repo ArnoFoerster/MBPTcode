@@ -24,6 +24,12 @@ exactly (K2 diagonal):
     Sigma(w) = U3^T g U3 + B^T (w - A11 - E^T g E)^{-1} B,
     g = (w - K2)^{-1},  B = C + E^T g U3.
 
+Two settings run the same checks. This file (slow tier) is the cheap one: LiH
+in STO-3G (two occupied orbitals, four virtual), lambda = 0.04 and 0.02, the
+HOMO root of the riccati and ccd routes, DF on LiH/STO-3G. The settings of the
+list above (H2O and LiH in STO-3G, LiH in 6-31+G, H2O/6-31G DF, three
+lambdas, both roots) run in test_faddeev_adc4_restricted_full.py (heavy tier).
+
 Run: python tests/test_faddeev_adc4_restricted.py, or under pytest.
 """
 import os
@@ -53,7 +59,8 @@ pytestmark = requires_runtime(4)
 
 MOLS = {'h2o': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
         'lih': 'Li 0 0 0; H 0 0 1.595'}
-LAMBDAS = (0.08, 0.04, 0.02)
+LAMBDAS = (0.04, 0.02)
+LAMBDAS_FULL = (0.08, 0.04, 0.02)
 OMEGAS = np.array([-0.6 + 0.4j, -0.2 + 0.4j, 0.4 + 0.4j, 1.0 + 0.4j])
 RATIO_5 = 28.0
 RATIO_4 = (13.0, 20.0)
@@ -220,9 +227,9 @@ def _ratios(rows, col):
     return [rows[n - 1][col] / rows[n][col] for n in range(1, len(rows))]
 
 
-def check_gate(label, sysd, route):
+def check_gate(label, sysd, route, lambdas=LAMBDAS):
     rows = []
-    for lam in LAMBDAS:
+    for lam in lambdas:
         sR = sigma_folded(adc4_blocks(sysd, lam))
         P = sigma_folded(faddeev(sysd, lam, route).dense_blocks())
         P0 = sigma_folded(faddeev(sysd, lam, route, line_dressing=False).dense_blocks())
@@ -237,7 +244,9 @@ def check_gate(label, sysd, route):
     return ok
 
 
-def check_against_spin_orbital(label, sysd):
+def check_against_spin_orbital(label, sysd, root_routes=('riccati', 'ccd'), n_roots=1):
+    """Sigma of all three routes; the downfold roots of `root_routes` from the
+    `n_roots` highest occupied orbitals."""
     norb, nocc = sysd.norb, sysd.nocc
     alpha = 2 * np.arange(norb)
     so = sysd.spin_orbital()
@@ -261,7 +270,7 @@ def check_against_spin_orbital(label, sysd):
         w, V = np.linalg.eigh(Mso)
         st = np.sum(V[:2 * norb] ** 2, axis=0)
         ref = w[(w < 0) & (st > 0.5)]
-        for k in (nocc - 1, nocc - 2):
+        for k in (nocc - 1, nocc - 2)[:n_roots] if route in root_routes else ():
             e = op.solve(k, tol=1e-11, davidson_tol=1e-9)['e']
             dk = np.abs(ref - e).min()
             ok &= check(dk < TOL_IP, f'{label} {route}: downfold root from orbital {k} '
@@ -271,8 +280,9 @@ def check_against_spin_orbital(label, sysd):
     return ok
 
 
-def check_df():
-    sysd = System('h2o', '6-31g', df=True)
+def check_df(name='lih', basis='sto-3g', root_routes=('riccati',)):
+    label = f'{name}/{basis}'
+    sysd = System(name, basis, df=True)
     ok = True
     for route in ('riccati', 'ccd'):
         if route == 'ccd':
@@ -289,22 +299,27 @@ def check_df():
                 return faddeev(sysd, 1.0, route, df=df)
         a, b = mk(True), mk(False)
         d = np.abs(sigma_folded(a.dense_blocks()) - sigma_folded(b.dense_blocks())).max()
-        ok &= check(d < TOL_SIGMA, f'h2o/6-31g {route}: DF operator == dense operator',
+        ok &= check(d < TOL_SIGMA, f'{label} {route}: DF operator == dense operator',
                     f'{d:.1e}')
-        ea = a.solve(sysd.nocc - 1, tol=1e-11, davidson_tol=1e-9)['e']
-        eb = b.solve(sysd.nocc - 1, tol=1e-11, davidson_tol=1e-9)['e']
-        ok &= check(abs(ea - eb) < TOL_IP, f'h2o/6-31g {route}: DF HOMO == dense HOMO',
-                    f'{ea:.10f} Eh, {abs(ea - eb):.1e}')
+        if route in root_routes:
+            ea = a.solve(sysd.nocc - 1, tol=1e-11, davidson_tol=1e-9)['e']
+            eb = b.solve(sysd.nocc - 1, tol=1e-11, davidson_tol=1e-9)['e']
+            ok &= check(abs(ea - eb) < TOL_IP, f'{label} {route}: DF HOMO == dense HOMO',
+                        f'{ea:.10f} Eh, {abs(ea - eb):.1e}')
     return ok
 
 
-SYSTEMS = (('h2o', 'sto-3g'), ('lih', 'sto-3g'), ('lih', '6-31+g'))
+SYSTEMS = (('lih', 'sto-3g'),)
+SYSTEMS_FULL = (('h2o', 'sto-3g'), ('lih', 'sto-3g'), ('lih', '6-31+g'))
 
 
-def run(which=None):
+def run(which=None, full=False):
+    """The cheap setting, or with `full` the complete one (test_faddeev_adc4_restricted_full.py)."""
     warnings.simplefilter('ignore')
     ok = True
-    for name, basis in SYSTEMS:
+    lambdas = LAMBDAS_FULL if full else LAMBDAS
+    root_routes = ('riccati', 'phonon', 'ccd') if full else ('riccati', 'ccd')
+    for name, basis in SYSTEMS_FULL if full else SYSTEMS:
         label = f'{name}/{basis}'
         if which and label not in which:
             continue
@@ -312,17 +327,17 @@ def run(which=None):
         print(f"\n== {label}: norb {sysd.norb}, nocc {sysd.nocc}")
         ok &= check_isometry(sysd)
         for route in ('riccati', 'ccd'):
-            ok &= check_gate(label, sysd, route)
+            ok &= check_gate(label, sysd, route, lambdas)
         if basis == 'sto-3g':
-            ok &= check_against_spin_orbital(label, sysd)
+            ok &= check_against_spin_orbital(label, sysd, root_routes, 2 if full else 1)
     if not which or 'df' in which:
-        print('\n== DF (h2o/6-31g)')
-        ok &= check_df()
+        print('\n== DF')
+        ok &= check_df(*(('h2o', '6-31g', ('riccati', 'ccd')) if full else ()))
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return ok
 
 
-@pytest.mark.parametrize('which', ['h2o/sto-3g', 'lih/sto-3g', 'lih/6-31+g', 'df'])
+@pytest.mark.parametrize('which', ['lih/sto-3g', 'df'])
 def test_faddeev_adc4_restricted(which):
     assert run((which,))
 

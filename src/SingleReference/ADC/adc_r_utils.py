@@ -7,7 +7,7 @@ from collections import namedtuple
 import numpy as np
 
 from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
-from src.SingleReference.common.eri_blocks import g_slice_df
+from src.SingleReference.common.eri_blocks import b_block, g_slice_df
 from src.SingleReference.ADC.adc_utils import (
     g_diag_df, b_chunk_einsum)
 
@@ -79,13 +79,13 @@ def u_2p1h_zparts_df(B, O, norb, vidx_abs, oidx, z_p):
     III' blocks. Note g_abip_T[a,b,p,i] = g_abpi[b,a,p,i] (both are (ai|bp) in
     chemist form), so gz's own transpose covers that term too -- no second
     build. Peak transient here is O(V^2 O) plus O(naux*V), never O(V^2*norb*O)."""
-    Bvp = B[:, vidx_abs, :]                     # (naux, V, norb)
-    Bop = B[:, oidx, :]                         # (naux, O, norb)
+    Bvp = b_block(B, vidx_abs, slice(None))      # (naux, V, norb)
+    Bop = b_block(B, oidx, slice(None))          # (naux, O, norb)
     bz = _cached_einsum('Qap,p->Qa', Bvp, z_p, optimize=True)
     boz = _cached_einsum('Qkp,p->Qk', Bop, z_p, optimize=True)
-    Bvo = B[:, vidx_abs][:, :, oidx]
-    Bvv = B[:, vidx_abs][:, :, vidx_abs]
-    Bov = B[:, oidx][:, :, vidx_abs]
+    Bvo = b_block(B, vidx_abs, oidx)
+    Bvv = b_block(B, vidx_abs, vidx_abs)
+    Bov = b_block(B, oidx, vidx_abs)
     gz = _cached_einsum('Qa,Qbi->abi', bz, Bvo, optimize=True)
     gzr = _cached_einsum('Qk,Qbc->kbc', boz, Bvv, optimize=True)
     gzm = _cached_einsum('Qkc,Qb->kbc', Bov, bz, optimize=True)
@@ -335,8 +335,8 @@ def build_g_blocks_df(B, O, V, norb, need_vvvv=True, need_vv_pv_vp=True, need_vv
     # g_voov/g_vovo (2h1p) and g_ovov/g_ovvo (2p1h) are (V,O,O,V)/(O,V,V,O),
     # the last O^2V^2 arrays standing on the streamed C-block path: nothing
     # reads the full arrays there -- the C-block appliers rebuild
-    # occupied-chunk slices directly from B via _c2h1p_df_chunks/
-    # _c2p1h_df_chunks, and the small diagonal pieces (C_I_I/C_Ip_Ip) go
+    # occupied-chunk slices directly from B via c2h1p_df_chunks/
+    # c2p1h_df_chunks, and the small diagonal pieces (C_I_I/C_Ip_Ip) go
     # through g_diag_mid_df/g_diag_outer_df instead.
     if need_voov_vovo:
         blocks['g_voov'] = g_slice_df(B, vir, occ, occ, vir)

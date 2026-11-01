@@ -16,7 +16,7 @@ from src.Base.step_failed import StepFailed
 from src.Base.numerics.constants import (ROOT_FOLLOW_MARGIN_MIN,
                                          ROOT_FOLLOW_RESOLVE_FACTOR,
                                          ROOT_FOLLOW_WEIGHT_MIN, BSE_FORCE_RESIDUAL_TOL,
-                                         CASIDA_PHASE_TIE_TOL)
+                                         CASIDA_PHASE_TIE_TOL, CONTINUATION_ROUTE)
 from src.Base.numerical_flags import collecting, gathered
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.GW.qp_solve import add_reaction_field
@@ -240,7 +240,9 @@ class StateFollower:
 
         Only the newest geometry keeps its forward: an older one keeps its
         roots and forces, and asked for its forward again it is evaluated
-        again on the same mean field.
+        again on the same mean field. The held forwards are dropped before
+        the new pass runs, so a solvation loop's cycle never holds the last
+        cycle's factors and quasiparticle tape beside its own.
         """
         # the roots a matrix-free solve checks for a force: all of them for
         # a followed state, else the state and those below it (`_casida`)
@@ -250,12 +252,15 @@ class StateFollower:
                 and (held.read is None or (read is not None
                                            and read <= held.read))):
             return held.shared, held.solution
+        # the held forwards go before the new pass, and with them the
+        # relaxed densities' reverse passes, finished on their own forward only
+        for other in self.chain.evaluations.values():
+            other.shared = None
+            other.reverse.clear()
         raised = []
         with collecting(raised):
             shared, solution = self._forward_pass(mol, mf)
         self._log_flags(gathered(raised))
-        for other in self.chain.evaluations.values():
-            other.shared = None
         if held is None or held.mf is not mf:
             held = self.chain.evaluations.put(mol, Evaluation(mf))
         held.shared, held.solution, held.read = shared, solution, read
@@ -316,7 +321,7 @@ class StateFollower:
         reverse solve reads proj(tau) and the slices from it instead of
         sweeping them again, bitwise. A quantity that needs the kernel but
         not the supermolecular roots -- the fragment-diabatic elements
-        (`fragment_bse`) -- starts here, and so does its gradient
+        (`fragments.partition`) -- starts here, and so does its gradient
         (`fold_to_nuclei` reads nothing from the roots). With no roots there
         is no eigenvector check of an adaptive set (`verify_selection`)."""
         self.anchored_first(mol, lambda: self.chain.forward(self.chain.mol0, self.chain.mf0))
@@ -356,9 +361,13 @@ class StateFollower:
                                     w_aux, shift)
             while True:
                 xc = self.chain.xc_correction(mf, self.chain.resolved.qp_set, shift)
-                out, route_out = self.chain.quasiparticles.qp_set_solve(
-                    x_mo, d_sigma, eps, mu, xc,
-                    np.zeros(len(self.chain.resolved.qp_set)))
+                if self.chain.residue_route == CONTINUATION_ROUTE:
+                    out, route_out = self.chain.quasiparticles.continued_set_solve(
+                        mol, mf, x_mo, d_sigma, eps, xc, shift)
+                else:
+                    out, route_out = self.chain.quasiparticles.qp_set_solve(
+                        x_mo, d_sigma, eps, mu, xc,
+                        np.zeros(len(self.chain.resolved.qp_set)))
                 # the set the roots belong to: settling may have shrunk it
                 xc = route_out['xc_correction']
                 # G0W0: Eq. (18) whole on each root, never Z x shift inside

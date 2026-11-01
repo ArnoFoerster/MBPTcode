@@ -82,6 +82,9 @@ def test_the_classes_are_the_ruled_bars():
     moved = grad + [[2.2e-9, 0.0, 0.0]]
     assert matches(moved, grad, other, quantity='gradient')
     assert not matches(moved, grad, other, quantity='energy')
+    # and the 1.04e-8 Ha/Bohr an OpenBLAS run missed a water ISDF pin by
+    assert matches(grad + [[1.04e-8, 0.0, 0.0]], grad, other, quantity='gradient')
+    assert not matches(grad + [[2.5e-8, 0.0, 0.0]], grad, other, quantity='gradient')
 
 
 def test_a_pin_without_a_class_is_an_energy():

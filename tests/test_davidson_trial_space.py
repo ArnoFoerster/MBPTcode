@@ -55,7 +55,7 @@ from src.SingleReference.LinearResponse.block_actions import (bse_pair_diagonal,
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.trial_space import PairRows, pair_tiles
 from tests.test_distributed_fit_mpi import relative, roots_resolution
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, duchemin_blase
 
 NOCC, NVIR, NAUX, NROOTS, CONV_TOL = 8, 150, 40, 12, 1e-6
 FORCED_SPACE = 60
@@ -203,7 +203,7 @@ def _system(geometry):
     # benzene's virtual 86 is missed by 0.12 on the default grid and the
     # factors would be refused; this gate is the solver's, not the fit's
     factors = unrefused_separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
-                                          counts=g1(mol))
+                                          counts=g1(mol), numerics=duchemin_blase())
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(mol=mol, mf=mf, nocc=nocc, factors=factors, W_aux=W_aux,
                 eps=np.asarray(mf.mo_energy, float))

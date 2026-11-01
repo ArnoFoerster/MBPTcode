@@ -6,46 +6,68 @@ them cannot declare different surfaces for the same declaration.
 
 THE CHAIN: an ISDF-K mean field on the declared mean-field grid (or J and K
 density-fitted on <basis>-jkfit), E_0 = E_KS, space-time GW with the
-sum-over-poles residues on the declared quasiparticle set and the frozen
-scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
+sum-over-poles residues (or, for the vertical energies alone, the analytic
+continuation, `--residues pade`) on the declared quasiparticle set and the
+frozen scissor outside it, the ISDF Davidson and the grid adjoint of each root, on
 the sliced factors and the row-distributed fit in the gas phase and in a
-continuum alike. The factors sit on `numerics.isdf.level`.
+continuum alike. The factors sit on `numerics.isdf.level`: the AO-product
+fit (what an unnamed test set means), on the points `numerics.isdf.pivot_points`
+(else `ao_product_fit.pivot_count`) pivots from that level's parent grid where
+a surface is built, or the Duchemin-Blase set where it is named.
 
 The chain stands on the declaration's one `Numerics`, which `chain_spec`
 hands to `SurfaceSpec.numerics` whole; `potential_energy_surface` refuses a
 declared choice the chain does not read.
+
+SCHEME B (`solvent_scheme` one of `solvent_vocabulary.SCHEME_B`): the same chain in the
+self-consistent state-specific loop (`src.environments.solvation_loop`). The
+loop's medium is the continuum's `ContinuumField` (`reaction_field`), its
+state models are `GWBSEState`s on a mean field configured here and converged
+by the model in each set of charges (`mean_field_factory(converge=False)`),
+and each model's chain is this chain (`DeclaredChain`), built on the mean
+field of its first call, its linear response the medium's optical answer.
 """
 import warnings
+from dataclasses import asdict, replace
 
 from pyscf import dft
 from pyscf import df as pyscf_df
 
-from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import SCF_NEWTON_FINISH_FROM, SOLVENT_RI_RESIDUAL_MAX
-from src.Base.declaration import GroundState
+from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
+from src.Base.numerics.constants import (ISDF_TEST_SETS, SCF_NEWTON_FINISH_FROM,
+                                         SOLVENT_RI_RESIDUAL_MAX)
+from src.Base.declaration import Excitation, GroundState
+from src.Base.numerics.numerics import SolventNumerics
 from src.Base.geometry.geometry import elements_of
 from src.Base.factorization.isdf_jk import canonical_span_size, span_confined
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.pyscf.pyscf_interface import occupied_count
 from src.Base.pyscf.scf_convergence import SCFHistory, newton_finished, warm_started
 from src.Base.factorization.separable_ri import grid_identity, resolve_isdf_grid
-from src.environments.solvent_screening import SolventScreening
+from src.environments.medium import parse as parse_medium
 from src.Base.utils.parallel.mpi_grid import n_ranks
 from src.Base.utils.parallel.threads import blas_single_threaded
-from src.properties.excitations import SurfaceSpec
+from src.Base.utils.record_io import record_hash
+from src.environments.reaction_field import ContinuumField
+from src.gradients.surface import driven_chain
+from src.properties.excitations import SurfaceSpec, surface_of
+from src.photophysics.declaration import scf_fit
 
 # -------------------------------------------------------------- molecules
 def factor_auxbasis(mol):
-    """The RI set of the GW and BSE factors (`paired_auxbasis`)."""
+    """The RI set of the GW and BSE factors (`paired_auxbasis`); a
+    per-element basis gets each element's own -ri set."""
     return paired_auxbasis(mol.basis)
 
 
 def scf_auxbasis(mol, route):
     """The auxiliary set of the mean field's J and K: <basis>-jkfit when it
-    is density-fitted (route 'df'), since -ri fits only the
-    occupied-virtual products of MP2; the factors' -ri set for ISDF-K and for
-    the DF twin of an ISDF-K surface."""
-    return f'{mol.basis}-jkfit' if route == 'df' else factor_auxbasis(mol)
+    is density-fitted (route 'df', `paired_jk_auxbasis`), since -ri fits only
+    the occupied-virtual products of MP2; the factors' -ri set for ISDF-K and
+    for the DF twin of an ISDF-K surface. Element by element for a
+    per-element basis."""
+    return paired_jk_auxbasis(mol.basis) if route == 'df' \
+        else factor_auxbasis(mol)
 
 
 def grid_content(level, mol):
@@ -54,7 +76,7 @@ def grid_content(level, mol):
     without the level, which a stamp carries beside it). A level is a name,
     and the table it names has been re-cut under it, so the content is
     stamped too."""
-    identity = grid_identity(level, str(mol.basis), elements_of(mol),
+    identity = grid_identity(level, mol.basis, elements_of(mol),
                              auxbasis=factor_auxbasis(mol))
     return {'level': level, 'counts': identity['counts'],
             'radii_sha256': identity['radii_sha256']}
@@ -62,20 +84,29 @@ def grid_content(level, mol):
 
 # ------------------------------------------------------------- continuum
 def continuum(declaration, mol):
-    """The continuum of `declaration` around `mol` (a solvent of pyscf's SMD
-    table, or 'EPS:EPS_STATIC'), or None in the gas phase.
+    """The continuum of `declaration` around `mol` (`declaration.environment`
+    read by `src.environments.medium.parse`: a solvent of pyscf's SMD table,
+    eps=EPS_S,n2=N2 for any other medium, or the older N2:EPS_STATIC, each on
+    the cavity convention it names), or None in the gas phase.
 
     The optical constant screens the response, the static one relaxes the
     ground state: the non-equilibrium recipe of Duchemin, Guido, Jacquemin and
     Blase, Chem. Sci. 9, 4430 (2018).
     """
-    named = declaration.environment
     if declaration.gas:
         return None
-    if ':' in named:
-        eps, eps_static = (float(x) for x in named.split(':', 1))
-        return SolventScreening(mol, eps=eps, eps_static=eps_static)
-    return SolventScreening(mol, solvent=named)
+    return parse_medium(declaration.environment).screening(mol)
+
+
+def reaction_field(declaration):
+    """make_field(mol) of the scheme-B loop: the continuum of `declaration`
+    around `mol` as the loop's medium (`ContinuumField`: the static and
+    optical constants, the cavity); refused in the gas phase, which has no
+    loop."""
+    if declaration.gas:
+        raise ValueError('the gas phase has no reaction field to equilibrate')
+    return lambda mol: ContinuumField.from_environment(
+        continuum(declaration, mol))
 
 
 def solvated(env, factory):
@@ -116,6 +147,54 @@ def chain_spec(declaration, environment):
                        numerics=numerics)
 
 
+def _in_the_loop(mol):
+    """The scf_factory of a scheme-B chain: its mean fields are the loop's."""
+    raise RuntimeError('a scheme-B chain is evaluated in the mean fields its '
+                       'loop hands it, at one geometry')
+
+
+class DeclaredChain:
+    """The chain a scheme-B state model builds (`GWBSEState(build_chain=)`):
+    the production chain of `declaration` (`chain_spec`: its ground state,
+    residues, quasiparticle set, eigensolver and Numerics) in the model's
+    linear-response environment, the model's root on the declared kernel,
+    on the mean field the loop converged in its charges. An adaptive set is
+    selected where the chain is built (each surface its own). The chain
+    stands on the declaration's Numerics with the loop's tolerances at their
+    defaults (`numerics`): the loop holds them, and the chain refuses a
+    section it does not read."""
+
+    def __init__(self, declaration):
+        self.declaration = declaration
+        n = declaration.numerics
+        loop = {k: getattr(SolventNumerics(), k)
+                for k in ('loop_tol_q', 'loop_tol_energy', 'loop_max_cycle',
+                          'loop_force_fraction')}
+        #: The chain's Numerics (class docstring).
+        self.numerics = (n if all(getattr(n.solvent, k) == v
+                                  for k, v in loop.items()) else
+                         n.derive('the chain of a scheme-B state: the loop '
+                                  'holds the loop tolerances', solvent=loop))
+
+    def __call__(self, mol, mf, spin, state, bse_tda, environment):
+        d = self.declaration
+        if bool(bse_tda) != (d.kernel == 'bse-tda'):
+            raise ValueError(f'the state model asks bse_tda={bse_tda}, the '
+                             f'declaration the kernel {d.kernel}')
+        excitation = Excitation(spin, root=int(state) + 1, kernel=d.kernel)
+        spec = replace(chain_spec(d, environment), numerics=self.numerics)
+        return driven_chain(surface_of(spec, excitation, mol, _in_the_loop,
+                                       mf=mf))
+
+    def identity(self):
+        """What the chain is a function of beyond the model's own keys."""
+        d = self.declaration
+        return record_hash({'ground': d.ground, 'reference': d.reference,
+                            'kernel': d.kernel,
+                            'qp_states': asdict(d.qp_states),
+                            'numerics': d.numerics.identity()})
+
+
 # ------------------------------------------------------------ mean field
 def distributed_here():
     """Whether this call runs inside the launch's distribution (and not in an
@@ -128,8 +207,48 @@ class SCFNotConverged(RuntimeWarning):
     stage that built it carries 'scf_not_converged' in its record."""
 
 
+def scf_fit_keyword(numerics):
+    """The `numerics=` keyword of the ISDF-K mean field: where the run
+    declares the mean field's own fit (`declaration.scf_fit`), the run's
+    Numerics with that test set and pivot count in the isdf section the
+    handle reads; nothing where it declares none, so the mean field keeps its
+    level's tabulated fit whatever the factors are fitted on."""
+    fit = scf_fit(numerics)
+    if fit is None:
+        return {}
+    isdf = {'test_set': fit[0], 'pivot_points': fit[1]}
+    if all(getattr(numerics.isdf, k) == v for k, v in isdf.items()):
+        return {'numerics': numerics}
+    return {'numerics': numerics.derive(
+        "the ISDF-K mean field on its own declared fit", isdf=isdf)}
+
+
+class UndeclaredFit(RuntimeError):
+    """An ISDF-K mean field built on another fit than the declared one."""
+
+
+def require_declared_fit(handle, numerics):
+    """Refuse an ISDF-K handle whose test set or pivot count is not the one
+    `numerics` declares (`declaration.scf_fit`; the tabulated fit, test set
+    ISDF_TEST_SETS[0] and no pivots, where it declares none): a declared fit
+    never falls back silently to the tabulated grid."""
+    fit = scf_fit(numerics)
+    want = (ISDF_TEST_SETS[0], None) if fit is None else fit
+    if want[0] != 'ao_products':
+        want = (want[0], None)
+    got = (getattr(handle, 'test_set', None),
+           getattr(handle, 'pivot_points', None))
+    if got[0] != 'ao_products':
+        got = (got[0], None)
+    if got != want:
+        raise UndeclaredFit(
+            f'the ISDF-K mean field is built on test set {got[0]!r} with '
+            f'pivot count {got[1]!r}, the declaration asks for {want[0]!r} '
+            f'with {want[1]!r}')
+
+
 def mean_field_factory(reference, numerics, max_memory, histories, finish,
-                       warm_start, span, surface_route):
+                       warm_start, span, surface_route, converge=True):
     """An SCF factory mol -> mf: `reference` Kohn-Sham on the XC grid
     `numerics.scf.xc_grid`, its exchange ISDF-K
     on `numerics.scf.grid_level` (route 'isdf') or J and K density-fitted
@@ -151,9 +270,12 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
     `WarmStart` whose density starts each SCF. span: (n_kept, cut), solve
     every SCF in the span of the n_kept largest overlap eigenvectors counted
     at that cut (`span_confined`); n_kept None is the full basis.
+    converge False returns the mean field configured and not run: a scheme-B
+    state model converges it in each set of charges itself.
     """
     scf = numerics.scf
     route = scf.route
+    fit_keyword = scf_fit_keyword(numerics)
 
     def build(mol):
         mf = dft.RKS(mol, xc=reference)
@@ -163,11 +285,12 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
             mf = mf.density_fit(
                 auxbasis=scf_auxbasis(mol, surface_route or route))
         else:
-            counts, n_start = resolve_isdf_grid(scf.grid_level, str(mol.basis),
+            counts, n_start = resolve_isdf_grid(scf.grid_level, mol.basis,
                                                 elements_of(mol),
                                                 auxbasis=factor_auxbasis(mol))
             mf = isdf_jk_with_force(mf, auxbasis=factor_auxbasis(mol), counts=counts,
-                         n_start=n_start)
+                         n_start=n_start, **fit_keyword)
+            require_declared_fit(mf.with_df, numerics)
         mf.conv_tol, mf.conv_tol_grad = scf.conv_tol, scf.conv_tol_grad
         mf.max_cycle = scf.max_cycle
         mf = span_confined(mf, *span)
@@ -179,7 +302,7 @@ def mean_field_factory(reference, numerics, max_memory, histories, finish,
             mf = newton_finished(mf, finish_from=SCF_NEWTON_FINISH_FROM)
         if warm_start is not None:
             mf = warm_started(mf, warm_start)
-        if distributed_here():
+        if distributed_here() or not converge:
             return mf
         with blas_single_threaded():
             mf.kernel()

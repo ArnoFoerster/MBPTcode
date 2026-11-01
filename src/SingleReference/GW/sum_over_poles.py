@@ -45,15 +45,23 @@ import warnings
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse.linalg
 
 from src.Base.numerical_flags import flag
-from src.Base.numerics.constants import (QP_ROOT_TOL,
+from src.Base.numerics.constants import (QP_ROOT_TOL, QP_SUBSPACE_DENSE_MAX,
+                                         QP_SUBSPACE_GMRES_MAXITER,
+                                         QP_SUBSPACE_GMRES_RESTART,
+                                         QP_SUBSPACE_GMRES_RTOL,
+                                         QP_SUBSPACE_POLE_CHUNK,
                                          QP_SUBSPACE_MAX_ITER, QP_SUBSPACE_TOL,
                                          SOP_CLEARANCE_MIN, SOP_FIT_RCOND,
                                          SOP_FIT_STRIDE, SOP_N_POLES,
                                          SOP_POLE_MERGE_TOL)
 from src.SingleReference.GW.real_screening import residue_set
 from src.Base.orbital_spaces import ov_energies
+from src.Base.utils.linear_algebra.krylov import root_driven_solve
+from src.Base.utils.parallel.mpi_grid import (contiguous_block, current_comm,
+                                              lockstep, reduce_sum)
 from src.Solvers.qp_equation import (solve_qp_equation_poles,
                                      solve_qp_hamiltonian)
 
@@ -103,6 +111,11 @@ def pole_amplitudes(wc, poles, nu_points, rcond=SOP_FIT_RCOND):
 
 class VectorFitFallback(RuntimeWarning):
     """The vector-fitting least squares fell back to another LAPACK driver."""
+
+
+class SubspaceGMRESShort(RuntimeWarning):
+    """A large group's GMRES on (1 - J) x = rhs stopped above its tolerance;
+    its last iterate is kept."""
 
 
 def _vector_fit_lstsq(block, rhs):
@@ -418,6 +431,105 @@ def subspace_self_energy_jacobian(r, at):
     return jac.reshape(n * n, n * n)
 
 
+class PoleSlice:
+    """The rank's share of a group's poles x in H's eigenbasis: r[x, k] =
+    1/(e_k - d_x) and the residues A_x there, kept as one array of
+    (X / ranks, n, n) so a large group holds no n^4 Jacobian and no
+    all-pole temporary. `reduce` sums a partial over the ranks.
+
+    The eigenpairs are rank 0's on every rank (`lockstep`): each rank's share
+    is taken in that one eigenbasis, so the reduced partials are partials of
+    one H. A group is near-degenerate by construction, and a degenerate pair's
+    eigenvectors are any rotation of the pair, so two ranks' own eigh of the
+    same H need not agree."""
+
+    def __init__(self, h, amp, d, comm):
+        self.comm = comm
+        size = 1 if comm is None else comm.Get_size()
+        rank = 0 if comm is None else comm.Get_rank()
+        lo, hi = contiguous_block(len(amp), rank, size)
+        e, u = np.linalg.eigh(h)
+        self.e, self.u = lockstep((e, u), comm)
+        u = self.u
+        d = np.asarray(d, float).ravel()[lo:hi]
+        self.r = 1.0 / (self.e[None, :] - d[:, None])
+        self.at = np.empty((hi - lo,) + amp.shape[1:])
+        for a in range(0, hi - lo, QP_SUBSPACE_POLE_CHUNK):
+            part = slice(a, min(a + QP_SUBSPACE_POLE_CHUNK, hi - lo))
+            self.at[part] = u.T @ amp[lo:hi][part] @ u
+
+    def reduce(self, a):
+        return reduce_sum(a, self.comm)
+
+    def sigma(self):
+        """Sigma^c[H] in H's eigenbasis."""
+        g = 0.5 * (np.einsum('xkl,xk->kl', self.at, self.r)
+                   + np.einsum('xkl,xl->kl', self.at, self.r))
+        return self.reduce(g)
+
+    def apply(self, v, transpose=False):
+        """J v (or J^T v) for an n x n matrix v, J the derivative of Sigma^c[H]
+        on H (`subspace_self_energy_jacobian`), as batched products."""
+        out = np.zeros_like(v)
+        for a in range(0, len(self.r), QP_SUBSPACE_POLE_CHUNK):
+            part = slice(a, a + QP_SUBSPACE_POLE_CHUNK)
+            r, at = self.r[part], self.at[part]
+            if transpose:
+                t1, t2 = v @ at, at @ v
+                out -= 0.5 * np.einsum('xk,xkb,xb->kb', r, t1, r)
+                out -= 0.5 * np.einsum('xa,xal,xl->al', r, t2, r)
+            else:
+                t1 = (v[None] * r[:, None, :]) @ at
+                t2 = (at * r[:, None, :]) @ v
+                out -= 0.5 * np.einsum('xk,xkl->kl', r, t1)
+                out -= 0.5 * np.einsum('xkl,xl->kl', t2, r)
+        return self.reduce(out)
+
+    def solve(self, rhs, transpose=False):
+        """(1 - J) x = rhs (or (1 - J^T) x = rhs) by GMRES on the operator,
+        root-driven (`krylov.root_driven_solve`): rank 0 iterates on its rhs
+        and every rank applies its vectors, so the ranks' iteration counts
+        pair and every rank holds rank 0's x. A GMRES that stops above its
+        tolerance keeps its last iterate and is flagged
+        ('qp_subspace_gmres_not_converged'), on every rank alike."""
+        n = len(rhs)
+        rhs = np.asarray(rhs, float).ravel()
+
+        def apply(x):
+            v = x.reshape(n, n)
+            return (v - self.apply(v, transpose)).reshape(-1, 1)
+
+        def gmres(act):
+            op = scipy.sparse.linalg.LinearOperator(
+                (n * n, n * n), matvec=lambda x: act(x).ravel(), dtype=float)
+            return scipy.sparse.linalg.gmres(
+                op, rhs, rtol=QP_SUBSPACE_GMRES_RTOL, atol=0.0,
+                restart=QP_SUBSPACE_GMRES_RESTART,
+                maxiter=QP_SUBSPACE_GMRES_MAXITER)
+
+        x, info = root_driven_solve(gmres, apply, rows=n * n, comm=self.comm)
+        if info != 0:
+            flag('qp_subspace_gmres_not_converged',
+                 f'the subspace Newton equation (1 - J) x = rhs of a group of '
+                 f'{n} orbitals stopped above its GMRES tolerance (info '
+                 f'{info}); the last iterate is kept', SubspaceGMRESShort)
+        return np.asarray(x, float).reshape(n, n)
+
+
+def large_group(n):
+    return n > QP_SUBSPACE_DENSE_MAX
+
+
+def lockstep_group(comm, *arrays):
+    """Rank 0's copies of a large group's replicated inputs (`lockstep`,
+    checked): the residues, written in place where they are a C-ordered float
+    array, the rest as float copies. A one-ulp difference in H between ranks
+    can rotate a degenerate pair differently on each."""
+    out = [np.ascontiguousarray(a, float) if np.ndim(a) == 3
+           else np.array(a, float) for a in arrays]
+    return lockstep(tuple(out), comm, check=True)
+
+
 def subspace_hamiltonian(e0, amp, d, seed, tol=QP_SUBSPACE_TOL,
                          max_iter=QP_SUBSPACE_MAX_ITER):
     """(H, iterations, converged): the quasiparticle Hamiltonian of one
@@ -444,6 +556,25 @@ def subspace_hamiltonian(e0, amp, d, seed, tol=QP_SUBSPACE_TOL,
     e0 = np.asarray(e0, float)
     n = len(e0)
 
+    if large_group(n):
+        # rank 0's inputs, H and residual at every step: each rank's share
+        # of the poles is a share of one H, and the stop is one decision
+        comm = current_comm()
+        e0, amp, d, seed = lockstep_group(comm, e0, amp, d, seed)
+
+        def newton_step(h):
+            poles = PoleSlice(h, amp, d, comm)
+            res = poles.u.T @ e0 @ poles.u + poles.sigma() - np.diag(poles.e)
+            res = 0.5 * (res + res.T)
+            step = poles.solve(res)
+            h = h + poles.u @ (0.5 * (step + step.T)) @ poles.u.T
+            h, size = lockstep((0.5 * (h + h.T), np.array([np.abs(res).max()])),
+                               comm, check=True)
+            return h, float(size[0])
+
+        return solve_qp_hamiltonian(newton_step, seed, tol=tol,
+                                    max_iter=max_iter)
+
     def newton_step(h):
         e, u, r, at = _resolvent_terms(h, amp, d)
         g = 0.5 * (np.einsum('xkl,xk->kl', at, r)
@@ -461,6 +592,12 @@ def subspace_hamiltonian(e0, amp, d, seed, tol=QP_SUBSPACE_TOL,
 def subspace_pole_strengths(h, amp, d):
     """Z_k = [1 - <k| dSigma^c/domega (e_k) |k>]^-1 for each eigenvector k of
     the subspace's H: a quasiparticle when it lies in (0, 1]."""
+    if large_group(len(h)):
+        comm = current_comm()
+        h, amp, d = lockstep_group(comm, h, amp, d)
+        poles = PoleSlice(h, amp, d, comm)
+        slope = poles.reduce(-np.einsum('xkk,xk->k', poles.at, poles.r ** 2))
+        return lockstep(1.0 / (1.0 - slope), comm, check=True)
     _, _, r, at = _resolvent_terms(h, amp, d)
     slope = -np.einsum('xkk,xk->k', at, r ** 2)
     return 1.0 / (1.0 - slope)

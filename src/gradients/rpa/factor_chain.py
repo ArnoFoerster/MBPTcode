@@ -77,13 +77,13 @@ from pyscf import df as pyscf_df
 
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.body_frame import BodyFrame
-from src.Base.factorization.isdf_jk import ISDFJK
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.surface_identity import chain_identity
 from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
                                          EVALUATION_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS,
-                                         ISDF_FIT_ERROR_FAILED)
+                                         ISDF_DEFAULT_TEST_SET,
+                                         ISDF_FIT_ERROR_FAILED, ISDF_TEST_SETS)
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
                                         require_same_numerics)
 from src.environments.environment import dresses_interaction
@@ -95,6 +95,9 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  resolve_isdf_grid, runtime_atomic_radii,
                                                  subshells, fit_test_set_layout)
 from src.Base.factorization.separable_ri import require_grid
+from src.Base.factorization.ao_product_fit import (ao_product_fit,
+                                                   ao_product_fit_rows,
+                                                   pivoted_points)
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.utils.timing import stage
@@ -108,7 +111,8 @@ from src.gradients.isdf_derivatives import (collocation_adjoint,
                                             product_pairs,
                                             require_whole_fit_adjoint,
                                             row_fit_adjoint)
-from src.gradients.mean_field_response import eps_chain_gradient
+from src.gradients.mean_field_response import eps_chain_gradient, held_skeletons
+from src.gradients.ao_product_fit_adjoint import ao_product_fit_adjoint_gauges
 from src.gradients.rpa.exchange_double_counting import (exx_double_counting_Y,
                                                         exx_double_counting_skeleton)
 from src.gradients.reference_mean_field import ReferenceMeanField
@@ -117,7 +121,10 @@ from src.gradients.reference_mean_field import ReferenceMeanField
 FACTORIZATION_RECORD = ('basis', 'auxbasis', 'counts', 'n_start', 'radii_tag',
                         'radii', 'fit_errors', 'seconds', 'pts_local', 'owner',
                         'frames', 'M', 'naux', 'layout', 'sliced', 'fit',
-                        'fit_block')
+                        'fit_block', 'test_set', 'pivot_points')
+#: What a record written before a field existed reads it as.
+FACTORIZATION_RECORD_DEFAULTS = {'test_set': ISDF_TEST_SETS[0],
+                                 'pivot_points': None}
 
 
 def radii_tag(radii):
@@ -231,12 +238,27 @@ class FrozenFactorization:
     replicated fit's bits, but within a few of its reassociation responses
     (`FIT_REASSOCIATION_K`). `FactorChain.nuclear_gradient` differentiates
     that estimator on either.
+
+    `test_set` 'ao_products' (`IsdfNumerics.test_set`, what an unnamed one
+    means) trains the fit on every AO product in the Coulomb metric
+    (`ao_product_fit`), on
+    either realization ('rows': `ao_product_fit.ao_product_fit_rows`, its
+    adjoint `ao_product_fit_adjoint.ao_product_fit_rows_adjoints`); it has
+    no pair layout (`layout` None). Its points are `pivot_points` (else
+    `ao_product_fit.pivot_count`) pivots of the AO-product Gram
+    matrix over the parent grid (`ao_product_fit.pivoted_points`), chosen
+    here, at the reference geometry, and kept with their atoms in the frozen
+    frames like any tabulated grid; a refreeze pivots again.
     """
 
     def __init__(self, mol, numerics=None):
         numerics = numerics_or_default(numerics)
         # Refused before the radii are optimized or anything is placed.
         self._refuse_fit_layout(numerics)
+        # a factorization always names a grid: unnamed, its test set is the
+        # AO-product one
+        self.test_set = numerics.isdf.test_set or ISDF_DEFAULT_TEST_SET
+        self.pivot_points = numerics.isdf.pivot_points
         elements = elements_of(mol)
         self._resolve_grid(mol, numerics.isdf, elements)
         self._place_points(mol, numerics.isdf, elements)
@@ -276,7 +298,7 @@ class FrozenFactorization:
                                           isdf.counts, isdf.radii)
         n_start = 1 if isdf.n_start is None else isdf.n_start
         grid_accuracy = isdf.level
-        self.basis = basis or str(mol.basis)
+        self.basis = basis or mol.basis
         self.auxbasis = auxbasis or paired_auxbasis(self.basis)
         # Resolved here and stored as plain counts, so `rebuilt_at`,
         # `settings` and `require_match` compare one kind of object and a
@@ -312,10 +334,11 @@ class FrozenFactorization:
         # wall seconds of each convention's construction, for the record
         self.seconds = {}
         t0 = time.perf_counter()
+        origins = {}
         if radii is None:
             radii = {}
             for el in elements:
-                radii[el], fit_errors[el], _ = runtime_atomic_radii(
+                radii[el], fit_errors[el], origins[el] = runtime_atomic_radii(
                     el, self.basis, self.auxbasis, self.counts,
                     n_start=self.n_start, runtime_radii=isdf.runtime_radii)
         self.seconds['radii'] = time.perf_counter() - t0
@@ -329,6 +352,15 @@ class FrozenFactorization:
                                   *point_layout(mol, radii),
                                   atomic_frames(mol)[0]))
         self.seconds['points'] = time.perf_counter() - t0
+        if self.test_set == 'ao_products':
+            # the pivot over the densified parent on rank 0's frames, and
+            # rank 0's selection on every rank (a pivot can tie on the last
+            # bits another rank holds)
+            t0 = time.perf_counter()
+            pts_local, owner, self.parent_size = pivoted_points(
+                mol, self.radii, origins, self.frames, self.pivot_points)
+            self.pts_local, self.owner = lockstep((pts_local, owner))
+            self.seconds['pivot'] = time.perf_counter() - t0
         # Frozen frames are frozen in the molecule: they turn with the Kabsch
         # rotation of each geometry onto this one, so a rigid motion moves
         # the points with the atoms and the energy cannot see it.
@@ -356,6 +388,10 @@ class FrozenFactorization:
         # The layout is a screening threshold on collocated products of rank
         # 0's placed points, locked too: a rank whose threshold kept another
         # column set raises on every rank (the shapes disagree).
+        if self.test_set == 'ao_products':
+            # every AO product is in the test set: nothing is screened
+            self.layout = None
+            return
         t0 = time.perf_counter()
         self.layout = lockstep(fit_test_set_layout(mol, self.coords(mol)))
         self.seconds['layout'] = time.perf_counter() - t0
@@ -439,7 +475,8 @@ class FrozenFactorization:
                   'counts': self.counts, 'n_start': self.n_start,
                   'radii': (self.radii if self.radii_tag is not None
                             else None),
-                  'fit': self.fit},
+                  'fit': self.fit, 'test_set': self.test_set,
+                  'pivot_points': self.pivot_points},
             layout={'sliced': self.sliced, 'fit_block': self.fit_block}))
 
     def to_record(self):
@@ -455,7 +492,8 @@ class FrozenFactorization:
         optimized again, and empty caches."""
         out = cls.__new__(cls)
         for name in FACTORIZATION_RECORD:
-            setattr(out, name, record[name])
+            setattr(out, name, record[name] if name in record
+                    else FACTORIZATION_RECORD_DEFAULTS[name])
         out.body = BodyFrame(record['body_reference'])
         out._fit_cache = weakref.WeakKeyDictionary()
         out._rows_cache = weakref.WeakKeyDictionary()
@@ -509,8 +547,11 @@ class FrozenFactorization:
         return lockstep(hit)
 
     def _fit(self, mol, auxmol, crd):
-        """(X_ao, M, V) at `mol`: `fit_M_streaming` on the frozen layout."""
+        """(X_ao, M, V) at `mol`: `fit_M_streaming` on the frozen layout, or
+        the AO-product fit (`ao_product_fit`)."""
         # every rank runs the serial fit, which `shareable_factors` locksteps
+        if self.test_set == 'ao_products':
+            return ao_product_fit(mol, auxmol, crd)
         M = fit_M_whole(mol, auxmol, crd, self.layout)
         return (mol.eval_gto('GTOval_sph', crd), M,
                 auxmol.intor('int2c2e', aosym='s1'))
@@ -519,7 +560,7 @@ class FrozenFactorization:
         """What two chains must agree on to be allowed to share one of these."""
         return (self.basis, self.auxbasis, tuple(sorted(self.counts.items()))
                 if isinstance(self.counts, dict) else tuple(np.ravel(self.counts)),
-                self.n_start, self.radii_tag)
+                self.n_start, self.radii_tag, self.test_set, self.pivot_points)
 
     def require_match(self, numerics):
         """Refuse a chain whose own settings (`numerics`) contradict this
@@ -568,6 +609,14 @@ class FrozenFactorization:
         other.n_start = self.n_start if n_start is None else n_start
         # a chain with no opinion on radii accepts the factorization's
         other.radii_tag = radii_tag(radii) if radii is not None else self.radii_tag
+        # a chain with no opinion on the test set (none named, no grid
+        # named) accepts the factorization's, and its pivot with it; a named
+        # grid is the AO-product fit (`IsdfNumerics.test_set_named`)
+        named = isdf.test_set_named()
+        if named is None:
+            other.test_set, other.pivot_points = self.test_set, self.pivot_points
+        else:
+            other.test_set, other.pivot_points = named, isdf.pivot_points
         if other.settings() != self.settings():
             raise ValueError(
                 f'this chain asks for {other.settings()} but the shared '
@@ -795,25 +844,17 @@ class FactorChain(ReferenceMeanField):
                 exx_double_counting_skeleton(mf, mol))
 
     def mean_field_gradient(self, mf):
-        """pyscf's force for this mean field, with the grid response paired.
+        """The force of this mean field's reported energy, the quadrature's
+        motion included (`mean_field_skeleton_force`).
 
         The half of `kohn_sham_gradient_correction` outside the Lagrangian:
-        `grid_response=True` on a KS gradient is the partner of the
-        double-counting skeleton, not an accuracy knob.
-
-        Rank 0's force on every rank: pyscf blocks a DF gradient's auxiliary
-        index by the process's free memory, so ranks re-associate the same
-        sums differently.
+        the grid's motion on a KS reference is the partner of the
+        double-counting skeleton, not an accuracy knob. On a fitted or
+        interpolated reference every term is divided over the ranks; rank 0's
+        force on every rank.
         """
         self.require_scf_quality(mf, 'mean_field_gradient')
-        if isinstance(getattr(mf, 'with_df', None), ISDFJK):
-            # `isdf_mean_field_gradient` sets grid_response on the reference it
-            # differentiates, so the quadrature's own motion is carried there.
-            return lockstep(np.asarray(mean_field_skeleton_force(mf)))
-        g0 = mf.Gradients()
-        if self.is_kohn_sham(mf):
-            g0.grid_response = True
-        return lockstep(np.asarray(g0.kernel()))
+        return lockstep(np.asarray(mean_field_skeleton_force(mf)))
 
     def environment_at(self, mol):
         """The environment around this geometry, built once per geometry.
@@ -1092,14 +1133,23 @@ class FactorChain(ReferenceMeanField):
         whose own screen kept the frozen layout's pairs (the reference
         geometry), the rows are read from its handle's M^T tiles
         (`separable_ri.FitTiles`) instead of fitted again.
+
+        On the AO-product test set the rows are
+        `ao_product_fit.ao_product_fit_rows`' on the frozen points, read
+        likewise from an SCF's AO-product tiles.
         """
         comm = self.factorization.slice_comm()
         handle = isdf_scf_handle(mf)
-        fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
-                              block=self.factorization.fit_block,
-                              layout=self.factorization.layout,
-                              tiles=None if handle is None
-                              else handle.fit_tiles())
+        tiles = None if handle is None else handle.fit_tiles()
+        if self.factorization.test_set == 'ao_products':
+            fit = ao_product_fit_rows(mol, auxmol, crd,
+                                      block=self.factorization.fit_block,
+                                      tiles=tiles)
+        else:
+            fit = fit_M_streaming(mol, auxmol, crd, fit='rows',
+                                  block=self.factorization.fit_block,
+                                  layout=self.factorization.layout,
+                                  tiles=tiles)
         x_mo = fit.mo_rows(mf.mo_coeff)
         d = fit.metric_root_rows(auxmol, self.environment_at(mol))
         x_ao = fit.ao_rows()
@@ -1181,10 +1231,14 @@ class FactorChain(ReferenceMeanField):
                 with self.phase('t_orbital'):
                     y = orbital_rotation_rows(x_mo, x_bar, self.fit_block)
             else:
-                # refused before the orbital response rather than after it
-                require_whole_fit_adjoint(mol.nao_nr(), auxmol.nao_nr(),
-                                          len(crd), len(product_pairs(mol)[0]),
-                                          'FactorChain.nuclear_gradient')
+                # a factorization that names no test set fits the
+                # Duchemin-Blase one
+                if getattr(self.factorization, 'test_set', None) != 'ao_products':
+                    # refused before the orbital response rather than after it
+                    require_whole_fit_adjoint(mol.nao_nr(), auxmol.nao_nr(),
+                                              len(crd),
+                                              len(product_pairs(mol)[0]),
+                                              'FactorChain.nuclear_gradient')
                 y = (x_mo.require(current_comm()).gather('X_mo')
                      if isinstance(x_mo, SlicedFactors) else x_mo).T @ x_bar
             if y_extra is not None:
@@ -1199,8 +1253,14 @@ class FactorChain(ReferenceMeanField):
                     pending.discard()
                     return None, {}
             with self.phase('t_orbital'):
-                g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc,
-                                                  Y_extra=y, numerics=self.settings)
+                # a relaxed density of this target may have solved Lambda
+                g_orb, diags = eps_chain_gradient(
+                    mf, eps_bar, self.nocc, Y_extra=y, numerics=self.settings,
+                    pending=pending,
+                    multiplier=getattr(self, '_held_multiplier', None))
+                # the skeleton channels this force's terms held (g_extra's
+                # among them), one pass each
+                g_orb = g_orb + held_skeletons(mf, pending)
             if g_extra is not None:
                 g_orb = g_orb + g_extra
             held = None
@@ -1230,7 +1290,8 @@ class FactorChain(ReferenceMeanField):
                            gauges=()):
         """(g_collocation, g_fit) on the replicated fit, both formed whole:
         `collocation_adjoint` of X_bar C^T and `dfactor_adjoint_gauges` over
-        every product pair."""
+        every product pair, or on the AO-product test set
+        `ao_product_fit_adjoint_gauges`."""
         with self.phase('t_collocation'):
             g_coll = collocation_adjoint(mol, crd, x_bar @ mf.mo_coeff.T,
                                          self.pts_local, self.owner,
@@ -1251,12 +1312,17 @@ class FactorChain(ReferenceMeanField):
                 every.append(GaugeAdjoint(whole, g.environment,
                                           root_bar=g.root_bar,
                                           kernel_bar=g.kernel_bar))
-            g_fit = dfactor_adjoint_gauges(mol, auxmol, crd, every,
-                                           self.layout, self.pts_local,
-                                           self.owner, frames=self.frames,
-                                           with_frames=False,
-                                           gram_layout=product_pairs(mol),
-                                           body=self.body)
+            if getattr(self.factorization, 'test_set', None) == 'ao_products':
+                g_fit = ao_product_fit_adjoint_gauges(
+                    mol, auxmol, crd, every, self.pts_local, self.owner,
+                    frames=self.frames, with_frames=False, body=self.body)
+            else:
+                g_fit = dfactor_adjoint_gauges(mol, auxmol, crd, every,
+                                               self.layout, self.pts_local,
+                                               self.owner, frames=self.frames,
+                                               with_frames=False,
+                                               gram_layout=product_pairs(mol),
+                                               body=self.body)
         return g_coll, g_fit
 
     def row_fit_branches(self, mol, mf, auxmol, crd, x_bar, d_bar,
@@ -1274,21 +1340,15 @@ class FactorChain(ReferenceMeanField):
         `whole_fit_branches`: where the environment dresses the interaction
         d_bar is the dressed gauge's (with root_bar and kernel_bar on its
         root and vtilde), d_bar_bare the bare one's, and `gauges` further
-        dressed factors (a split continuum's static one); in the gas phase
-        d_bar is the bare gauge's and the call is the one-gauge call.
+        factors (a split continuum's static one, dressed, or on the bare
+        interaction with an adjoint on the bare root: scheme B's, which
+        joins the bare gauge, `row_fit_adjoint`); in the gas phase d_bar is
+        the bare gauge's and the call is the one-gauge call.
 
         Inside the force's `one_fit_adjoint` window the call carries the
         skeletons' seeds too (`PendingFitAdjoint.contract`), and `held` is
         that one call's ledger.
         """
-        if any(g.environment is None for g in gauges):
-            # scheme B's static half is the bare root; its root adjoint is
-            # carried on the replicated fit (`dfactor_adjoint_gauges`) only
-            raise NotImplementedError(
-                'a bare gauge with a root adjoint (the static half of '
-                'split_equilibrium.ClassicalStateSpecific) is differentiated '
-                "on the replicated fit; build the factorization with "
-                "fit='replicated' for a scheme B force or relaxed density")
         env = self.environment_at(mol)
         if dresses_interaction(env, auxmol):
             bare = d_bar_bare
@@ -1310,7 +1370,8 @@ class FactorChain(ReferenceMeanField):
                                       body=self.body,
                                       block=self.fit_block,
                                       pending=pending_fit_adjoint(mf),
-                                      gauges=dressed)
+                                      gauges=dressed,
+                                      test_set=self.factorization.test_set)
         return adjoint
 
     def _assembled(self, g_orb, g_coll, g_fit, diags, x_mo,

@@ -2,8 +2,8 @@
 
 The replicated fit's adjoint (`isdf_derivatives.fit_adjoint`) and the test set
 it differentiates (`separable_ri.fit_test_set_D`) are the widest arrays of a
-state-pair force: D is (M, npair + naux). On ethylene/cc-pVDZ at 148 points
-per atom each is compared with a whole-array form written out below, which
+state-pair force: D is (M, npair + naux). On ethylene/cc-pVDZ on the G1
+grid each is compared with a whole-array form written out below, which
 gives the same numbers to a few ulp. The blocked adjoint holds two arrays of D's shape beside
 D where the whole form holds four and a transient, and its last update holds
 D_bar, F_bar and one block of `FIT_CHOLESKY_BLOCK` grid rows; the test set
@@ -44,6 +44,7 @@ from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_FIT_REGULARIZA
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.numerics.numerics import Numerics, numerics_of
 # aliased on import: pytest collects a module-level `test_*` callable
+from src.Base.factorization import separable_ri
 from src.Base.factorization.separable_ri import fit_test_set_D as build_test_set
 from src.gradients import isdf_derivatives
 from src.gradients.gwbse.excited_state import ExcitedStateChain
@@ -54,7 +55,7 @@ from src.gradients.isdf_derivatives import (dfactor_adjoint_gauges,
                                             product_pairs,
                                             require_whole_fit_adjoint,
                                             whole_fit_adjoint_gb)
-from tests.isdf_test_grid import g1, g1_numerics
+from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
@@ -82,6 +83,8 @@ SLACK = 5e5
 #: Bytes four consecutive gradients may peak apart and still be flat: half
 #: of what one abandoned geometry's mean field and fit hold here.
 FLAT = 2e6
+# gradients before the chain's evaluation caches are full (EVALUATION_CACHE_SIZE + 2)
+WARM = 4
 
 
 class Traced:
@@ -196,7 +199,7 @@ def same_layout(a, b):
 def fit_inputs():
     """Ethylene's frozen layout, points and auxiliary molecule."""
     mol = gto.M(atom=ETHYLENE, basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     return mol, fz.auxmol(mol), fz.coords(mol), fz.layout
 
 
@@ -223,8 +226,6 @@ def test_the_test_set_is_filled_in_column_blocks(fit_inputs):
     assert peak_whole > D.nbytes + M * npair * 8 > bound, (peak_whole, bound)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the memory bound was sized for the 148-point D; re-tune'))
 def test_fit_adjoint_holds_two_arrays_of_d_beside_it(fit_inputs):
     """The adjoint beside its input holds two arrays of D's shape, and its
     last update one D_bar and a block of rows; the same numbers (to a few
@@ -258,7 +259,12 @@ def test_fit_adjoint_holds_two_arrays_of_d_beside_it(fit_inputs):
           f'{n_D / 1e6:.2f} MB')
     assert peak <= bound, (peak, bound)
     assert tail <= tail_bound, (tail, tail_bound)
-    assert peak_whole > 4 * n_D > bound, (peak_whole, bound)
+    # On G1 D is 33.8 MB (ethylene/cc-pVDZ), so the bound is set by the (M, M)
+    # and (naux, M) terms, not by D: 149.5 MB against the whole form's 223.9 MB
+    # and the blocked form's 98.5 MB. The whole form exceeds four times D and
+    # the bound itself.
+    assert peak_whole > 4 * n_D, (peak_whole, n_D)
+    assert peak_whole > bound, (peak_whole, bound)
 
 
 def four_gradient_peaks(chain, displaced):
@@ -269,6 +275,9 @@ def four_gradient_peaks(chain, displaced):
     gc.disable()
     try:
         for atom in displaced:
+            # the content-keyed metric eigensystems are a byte-bounded cache
+            # of the process, not state the chain holds
+            separable_ri._METRIC_ROOTS.clear()
             here = gto.M(atom=atom, basis=BASIS, verbose=0)
             tracemalloc.reset_peak()
             start = tracemalloc.get_traced_memory()[0]
@@ -280,24 +289,24 @@ def four_gradient_peaks(chain, displaced):
     return rows
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: the memory bound was sized for the 148-point D; re-tune'))
 def test_consecutive_gradients_peak_flat():
-    """Four displaced geometries in a row, on the whole fit and on the row
-    fit: each gradient peaks where the last one did, since the mean field
-    and fit it abandoned are collected before its SCF."""
+    """Displaced geometries in a row, on the whole fit and on the row fit:
+    once the chain's caches hold their EVALUATION_CACHE_SIZE + 1 geometries
+    each gradient starts and peaks where the last one did, since the mean
+    field and fit it abandoned are collected before its SCF and the warm
+    start keeps no geometry of its own (`DavidsonWarmStart.offered`)."""
     mol = gto.M(atom=ETHYLENE, basis=BASIS, verbose=0)
     mf = chain_scf(mol)
     displaced = [ETHYLENE.replace('C 0 0 0.6695',
                                   f'C 0 0 {0.6795 + 0.005 * k:.4f}')
-                 for k in range(4)]
+                 for k in range(WARM + 3)]
     peaks = {}
     with Traced():
         for tag, kw in (('whole', {}),
                         ('rows', dict(sliced=True, fit='rows'))):
             chain = ExcitedStateChain(
                 mol, chain_scf, mf=mf,
-                numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **kw})))
+                numerics=duchemin_blase(g1_numerics(mol, numerics_of({'solver': 'davidson', **kw}))))
             rows = four_gradient_peaks(chain, displaced)
             del chain
             starts = [r[0] for r in rows]
@@ -305,12 +314,14 @@ def test_consecutive_gradients_peak_flat():
             print(f'\n{tag} fit: starts '
                   + ' '.join(f'{s / 1e6:.1f}' for s in starts) + ' MB, peaks '
                   + ' '.join(f'{p / 1e6:.1f}' for p in peaks[tag]) + ' MB')
-            # the first start holds no abandoned geometry yet, every later
-            # one exactly one, not yet collected
-            assert max(starts[1:]) - min(starts[1:]) < FLAT, (tag, starts)
-            assert max(peaks[tag]) - min(peaks[tag]) < FLAT, (tag, peaks[tag])
+            # the caches fill over the first WARM gradients; after that each
+            # start holds the same geometries, one abandoned and not yet
+            # collected
+            assert max(starts[WARM:]) - min(starts[WARM:]) < FLAT, (tag, starts)
+            assert (max(peaks[tag][WARM:]) - min(peaks[tag][WARM:]) < FLAT), (
+                tag, peaks[tag])
     # the row fit forms no array of the test set's width
-    assert max(peaks['rows']) < min(peaks['whole']), peaks
+    assert max(peaks['rows'][WARM:]) < min(peaks['whole'][WARM:]), peaks
 
 
 def test_the_whole_fit_adjoint_refuses_the_dimer():
@@ -331,13 +342,13 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
     """With the cap below water's estimate, every whole form refuses before
     it builds the three-centre tensor or the test set."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     auxmol, crd = fz.auxmol(mol), fz.coords(mol)
 
     def built(*args, **kwargs):
         raise AssertionError('an array of the whole form was built')
 
-    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)))
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)), numerics=duchemin_blase())
     mf.with_df.build()
     monkeypatch.setattr(isdf_derivatives, 'WHOLE_FIT_ADJOINT_MAX_GB', 1e-4)
     monkeypatch.setattr(isdf_derivatives, 'fit_test_set_D', built)
@@ -363,7 +374,7 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
 def test_the_test_molecules_pass_the_cap(name):
     """The molecules the whole form's gates run on sit orders under it."""
     mol = gto.M(atom=CAP_MOLECULES[name], basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     gb = require_whole_fit_adjoint(mol.nao_nr(), fz.auxmol(mol).nao_nr(),
                                    len(fz.coords(mol)),
                                    len(product_pairs(mol)[0]), name)

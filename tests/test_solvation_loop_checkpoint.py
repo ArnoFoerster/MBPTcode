@@ -51,7 +51,7 @@ def build(kind, solvent='toluene', basis='6-31g'):
     hf = HFState(mol, make_scf)
     if kind == 'hf':
         return field, hf
-    mp2 = MP2State(hf, 1, AUX)
+    mp2 = MP2State(hf, 1, AUX, numerics=SOLVATION_TIGHT['numerics'])
     if kind == 'mp2':
         return field, mp2
     if kind == 'adc2-triplet':

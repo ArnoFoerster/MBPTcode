@@ -47,7 +47,9 @@ its exchange dressing (its cavity moves with the atoms), so info['lr'] is
 empty.
 
 One surface. The chain is built once, on the first call's mean field, and
-freezes its conventions there (`FrozenConventions`); each later call hands it
+freezes its conventions there (`FrozenConventions`); that call is in S0's
+equilibrium charges at the geometry (`freezes_on_first_call`, which the loop
+reads: `solvation_loop`, "Frozen surfaces"); each later call hands it
 the mean field converged in the new charges at the same nuclei, and the root
 is the chain's (by index, or followed with `bse.track`). `at(mol, make_scf)`
 is the same surface at other nuclei (the reference's chain), handed the
@@ -65,13 +67,22 @@ Refreeze. `refrozen(mol, lr_environment)` is this state on the surface a
 chain built afresh at `mol` freezes, as a vertical energy's model does: a
 model with no chain, whose first call builds one on the mean field it is
 handed at `mol` (`gradients.solvated_surface.SolvatedSurface.refreeze`
-hands it the zero-charge one, as the loop of a vertical does). The physics,
+starts its loop from S0's equilibrium charges there, as the loop of a
+vertical does). The physics,
 the kernel, the root and the Numerics are this model's; a chain following its
 state (`bse.track`) hands the followed state over, its index at `mol`
 (`followed_root`) and its committed eigenvector, which the new chain's first
 evaluation matches by overlap (as `ExcitedStateChain.refreeze` does), so the
 rebuilt surface cannot start on the other state of a near-degenerate pair.
 The reference (spin None) freezes nothing and is its own refreeze.
+
+Which chain. By default the model builds `ExcitedStateChain` on its
+Numerics. `build_chain(mol, mf, spin, state, bse_tda, environment)` builds it
+instead, on the mean field of the first call: a driver whose chain is a
+declared surface (its quasiparticle set, residues and eigensolver, e.g.
+`src.photophysics.chain.DeclaredChain`) hands the loop that surface. The
+builder travels with `at` and `refrozen`, and its `identity()` (when it has
+one) is part of the model's.
 
 Checkpoint (`solvation_loop.equilibrate(checkpoint=...)`): `checkpoint()`
 holds the reference's warm start and, for a model that built its chain, the
@@ -93,7 +104,8 @@ import numpy as np
 from src.Base.numerics.numerics import numerics_of
 from src.environments.split_equilibrium import LinearResponseOnly
 from src.Base.utils.parallel.mpi_grid import lockstep
-from src.gradients.df_correlation_force import hf_force
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.gradients.scf_loop_response import loop_density_response
 from src.gradients.state_models import HFState, StateResult
 from src.gradients.gwbse.excited_state import ExcitedStateChain, dipole_change
 from src.gradients.surface import followed_root
@@ -110,11 +122,13 @@ class GWBSEState:
     state: zero-based root; numerics: the one `Numerics` of the calculation
     (or a mapping for `numerics_of`), required: the chain's settings and the
     loop's (its solvent section, `solvation_loop.loop_numerics`); bse_tda the
-    kernel.
+    kernel; build_chain: the chain's builder, None for `ExcitedStateChain`
+    on the Numerics (module docstring).
     """
 
     def __init__(self, mol, make_scf, spin=None, state=0, bse_tda=False,
-                 lr_environment=None, numerics=None, chain=None):
+                 lr_environment=None, numerics=None, chain=None,
+                 build_chain=None):
         if numerics is None:
             raise ValueError('GWBSEState needs its Numerics (the ISDF grid, the BSE '
                              'solver, the loop tolerances): there are no defaults '
@@ -130,6 +144,7 @@ class GWBSEState:
         self.numerics = (numerics_of(numerics) if hasattr(numerics, 'items')
                          else numerics)
         self.chain = chain
+        self.build_chain = build_chain
         self._owns_chain = chain is None
         # a followed state handed over by `refrozen`, for the chain built first
         self._handover = None
@@ -152,6 +167,12 @@ class GWBSEState:
                            'fields its loop hands it, at one geometry')
 
     @property
+    def freezes_on_first_call(self):
+        """True for an excited state whose chain is not built yet: its next
+        call freezes the surface (`solvation_loop`, "Frozen surfaces")."""
+        return self.spin is not None and self.chain is None
+
+    @property
     def surface_key(self):
         """The object that fixes this model's surface: its chain (None for
         the reference, which has none, and before the first call)."""
@@ -168,7 +189,7 @@ class GWBSEState:
                              'call this model once before moving it')
         moved = GWBSEState(mol, make_scf, self.spin, self.state, self.bse_tda,
                            lr_environment=lr_environment, numerics=self.numerics,
-                           chain=self.chain)
+                           chain=self.chain, build_chain=self.build_chain)
         self._require_same_continuum(moved)
         return moved
 
@@ -196,7 +217,7 @@ class GWBSEState:
                            followed_root(chain, mol) if following is not None
                            else self.state,
                            self.bse_tda, lr_environment=lr_environment,
-                           numerics=self.numerics)
+                           numerics=self.numerics, build_chain=self.build_chain)
         self._require_same_continuum(fresh)
         if following is not None:
             fresh._handover = following
@@ -209,7 +230,10 @@ class GWBSEState:
             self.chain.commit(mol)
 
     def _chain(self, mf):
-        if self.chain is None:
+        if self.chain is None and self.build_chain is not None:
+            self.chain = self.build_chain(self.mol, mf, self.spin, self.state,
+                                          self.bse_tda, self.environment)
+        elif self.chain is None:
             self.chain = ExcitedStateChain(
                 self.mol, self._no_factory, spin=self.spin, state=self.state,
                 bse_tda=self.bse_tda, environment=self.environment, mf=mf,
@@ -250,20 +274,34 @@ class GWBSEState:
 
     def force(self, h, e):
         """(F, info) in the fixed charges (module docstring): the reference's
-        own gradient class on the mean field this call handed the chain
+        force (`mean_field_skeleton_force`) on the mean field this call handed the chain
         (`HFState.force` would converge it once more), plus dOmega/dR."""
         r = self(h, e)
-        F = np.asarray(hf_force(self.mf), float)
+        F = np.asarray(mean_field_skeleton_force(self.mf), float)
         if self.spin is not None:
             F = F + self.chain.excitation_gradient(self.mol, self.mf)[0]
         return lockstep(F), dict(dm_eff=r.dm_eff, lr=[], flags=r.info['flags'])
 
+    def loop_response(self, h, field, numerics=None):
+        """The reference's `HFState.loop_response` on the mean field of its
+        last call; an excited state has none."""
+        if self.spin is not None:
+            raise ValueError('the loop response is the reference\'s (spin None): '
+                             'the slow charges follow the ground state')
+        return lockstep(loop_density_response(self.mf, self.reference._h0,
+                                              field.scf_continuum(), h,
+                                              numerics))
+
     def identity(self):
         """What this model computes (module docstring)."""
-        return dict(self.reference.identity(), model='GW-BSE', spin=self.spin,
-                    root=self.state, bse_tda=bool(self.bse_tda),
-                    lr=self.environment is not None,
-                    numerics=self.numerics.identity())
+        out = dict(self.reference.identity(), model='GW-BSE', spin=self.spin,
+                   root=self.state, bse_tda=bool(self.bse_tda),
+                   lr=self.environment is not None,
+                   numerics=self.numerics.identity())
+        builder = getattr(self.build_chain, 'identity', None)
+        if builder is not None:
+            out['chain'] = builder()
+        return out
 
     def checkpoint(self):
         """The arrays `restore` needs (module docstring)."""

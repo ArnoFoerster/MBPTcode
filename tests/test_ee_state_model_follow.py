@@ -25,7 +25,7 @@ import numpy as np
 
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from tests.adc_common import ATOMS, AUX, NF, ROOT_CONV_TOL, check, make_scf_loop, molecule
+from tests.adc_common import (ADC_NUMERICS, ATOMS, AUX, NF, check, make_scf_loop, molecule)
 from tests.pins import RECORDING_BLAS, matches
 
 MOL = molecule(ATOMS)
@@ -33,8 +33,9 @@ H0 = np.zeros((MOL.nao, MOL.nao))
 
 
 def model(spin, root=0, follow='overlap'):
-    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense')
-    return ADC2State(mp2, spin, root, 3, None, conv_tol=ROOT_CONV_TOL, follow=follow)
+    mp2 = MP2State(HFState(MOL, make_scf_loop), NF, AUX, force_route='dense',
+                   numerics=ADC_NUMERICS)
+    return ADC2State(mp2, spin, root, 3, None, follow=follow)
 
 
 def check_follow(spin):

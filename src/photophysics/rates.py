@@ -32,6 +32,7 @@ import numpy as np
 
 from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS,
                                          BOLTZMANN_HARTREE_PER_KELVIN,
+                                         GAUSSIAN_FWHM_PER_SIGMA,
                                          HARTREE_TO_CM, HARTREE_TO_EV,
                                          HARTREE_TO_MEV,
                                          RATE_FC_LAMBDA_RATIO_MAX,
@@ -39,8 +40,9 @@ from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS,
                                          RATE_MLJ_N_MAX,
                                          RATE_THERMAL_WINDOW_KT,
                                          SPEED_OF_LIGHT_AU, TRIPLET_SUBLEVELS)
-from src.properties.franck_condon import (FCIntegrandNotDecayed, bose,
-                                          fc_weighted_dos,
+from src.properties.band_shape import vibronic_band_grid
+from src.properties.franck_condon import (TRAPEZOID, FCIntegrandNotDecayed,
+                                          bose, fc_weighted_dos,
                                           require_vibrational_modes,
                                           thermal_energy)
 
@@ -109,7 +111,7 @@ class ManifoldGaps:
                              'each state\'s own minimum')
 
 
-def _golden_rule(coupling, rho_fc):
+def golden_rule(coupling, rho_fc):
     """(2 pi / hbar) |V|^2 rho_FC in s^-1, from Hartree and Hartree^-1.
 
     hbar = 1 in atomic units, so the product is already a rate in inverse
@@ -148,6 +150,14 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         first moment.
     n_max: quanta retained in the Poisson sum.
     """
+    return golden_rule(coupling, mlj_density(delta_e, lambda_m, s_eff,
+                                             omega_eff, temperature, n_max))
+
+
+def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max=50):
+    """rho_FC of `marcus_levich_jortner_rate`, Hartree^-1: the Poisson sum
+    over quanta of the effective mode, each a classical Marcus line of
+    width lambda_m (same arguments and sign convention)."""
     kt = thermal_energy(lambda_m, temperature)
     if s_eff < 0.0 or omega_eff < 0.0:
         raise ValueError(f'the effective mode needs S >= 0 and omega >= 0, got '
@@ -166,9 +176,8 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         raise ValueError(f'n_max = {n_max} keeps only {poisson.sum():.6f} of '
                          f'the Poisson weight at S = {s_eff}; raise n_max')
     activation = (float(delta_e) + lambda_m + n * omega_eff) ** 2
-    rho_fc = ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
-              / np.sqrt(4.0 * np.pi * lambda_m * kt))
-    return _golden_rule(coupling, rho_fc)
+    return ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
+            / np.sqrt(4.0 * np.pi * lambda_m * kt))
 
 
 def marcus_rate(coupling, delta_e, lambda_total, temperature):
@@ -185,7 +194,7 @@ def marcus_rate(coupling, delta_e, lambda_total, temperature):
     rho_fc = (np.exp(-(float(delta_e) + lambda_total) ** 2
                      / (4.0 * lambda_total * kt))
               / np.sqrt(4.0 * np.pi * lambda_total * kt))
-    return _golden_rule(coupling, rho_fc)
+    return golden_rule(coupling, rho_fc)
 
 
 def spin_vibronic_rate(delta_e, v0, dv_dq, omega_promoting, rho_fc,
@@ -223,13 +232,13 @@ def spin_vibronic_rate(delta_e, v0, dv_dq, omega_promoting, rho_fc,
         raise ValueError(f'{dv.shape} derivatives against {w.shape} '
                          f'frequencies; one per promoting mode')
     n = bose(w, kt)
-    k_c = _golden_rule(v0, rho_fc(float(delta_e)))
+    k_c = golden_rule(v0, rho_fc(float(delta_e)))
     k_ht = 0.0
     for dvk, wk, nk in zip(dv, w, n):
-        k_ht += _golden_rule(dvk * np.sqrt(0.5 * (nk + 1.0)),
-                             rho_fc(float(delta_e) + float(wk)))
-        k_ht += _golden_rule(dvk * np.sqrt(0.5 * nk),
-                             rho_fc(float(delta_e) - float(wk)))
+        k_ht += golden_rule(dvk * np.sqrt(0.5 * (nk + 1.0)),
+                            rho_fc(float(delta_e) + float(wk)))
+        k_ht += golden_rule(dvk * np.sqrt(0.5 * nk),
+                            rho_fc(float(delta_e) - float(wk)))
     return k_c + k_ht, k_c, k_ht
 
 
@@ -297,11 +306,10 @@ def radiative_rate(delta_e, dipole):
     delta_e: the emission energy in Hartree.
     dipole: <0|r|n> in atomic units, either the (3,) vector or its magnitude.
 
-    Condon only. A weakly allowed transition -- which a charge-transfer TADF
-    state usually is -- also emits through dmu/dQ, and that term is NOT here;
-    it is the same Herzberg-Teller structure `spin_vibronic_rate` carries for
-    intersystem crossing, and it needs the transition dipole's nuclear
-    derivative.
+    Condon, at one energy. A weakly allowed transition -- which a
+    charge-transfer TADF state usually is -- also emits through dmu/dQ:
+    `vibronic_radiative_rate` integrates E^3 over the vibronic band with the
+    Herzberg-Teller dipole (`properties.herzberg_teller`).
     """
     mu2 = float(np.sum(np.asarray(dipole, float) ** 2))
     w = float(delta_e)
@@ -310,6 +318,50 @@ def radiative_rate(delta_e, dipole):
                          'radiative rate needs the state above the one it '
                          'falls to')
     return (4.0 * w ** 3 * mu2 / (3.0 * SPEED_OF_LIGHT_AU ** 3)
+            / ATOMIC_TIME_SECONDS)
+
+
+def vibronic_radiative_rate(model, e_adiabatic, temperature, *,
+                            gaussian_fwhm, lorentzian_fwhm=0.0, dipole=None,
+                            energies=None):
+    """Spontaneous-emission rate in s^-1 over the whole vibronic band.
+
+        k_r = 4 / (3 c^3) int E^3 rho_em(E) dE
+
+    with rho_em the emission density of `model` (a
+    `band_shape.VibronicModel`) at photon energy E, whose area is the squared
+    transition dipole: `duschinsky.DuschinskyOscillators(model, dipole)` with
+    a `herzberg_teller.TransitionDipole` carries <|mu(q)|^2> itself, the
+    Herzberg-Teller emission of a weakly allowed emitter; a Condon model
+    (no dipole of its own) takes the constant `dipole` here. Every line
+    emits at its own E^3, so no single emission energy has to be chosen.
+
+    e_adiabatic: the electronic adiabatic gap, Hartree. energies: the photon
+    grid, default `band_shape.vibronic_band_grid`; the broadenings are
+    required in the same sense as for the band (a Lorentzian's algebraic
+    tail is cut where the grid ends; 12 band widths each side).
+    """
+    own = getattr(model, 'dipole', None)
+    if (own is None) == (dipole is None):
+        raise ValueError('the transition dipole is given twice or not at '
+                         'all: a Condon model takes `dipole`, a '
+                         'Herzberg-Teller model carries its own')
+    if energies is None:
+        # 12 widths: E^3 weights the blue tail, which 8 widths leave short
+        # by a few 1e-7 of the rate
+        energies = vibronic_band_grid(model, e_adiabatic, temperature,
+                                      gaussian_fwhm=gaussian_fwhm,
+                                      lorentzian_fwhm=lorentzian_fwhm,
+                                      n_widths=12.0)
+    e = np.asarray(energies, float)
+    rho = model.density(e - float(e_adiabatic), temperature, 'emission',
+                        broadening=float(gaussian_fwhm)
+                        / GAUSSIAN_FWHM_PER_SIGMA,
+                        lorentzian=0.5 * float(lorentzian_fwhm))
+    mu2 = 1.0 if dipole is None else float(np.sum(np.asarray(dipole,
+                                                              float) ** 2))
+    moment = float(TRAPEZOID(e ** 3 * rho, e))
+    return (4.0 * mu2 * moment / (3.0 * SPEED_OF_LIGHT_AU ** 3)
             / ATOMIC_TIME_SECONDS)
 
 

@@ -32,6 +32,8 @@ it ends. Gated:
 import threading
 import warnings
 
+import gc
+
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
@@ -234,6 +236,27 @@ def test_holder_holds_only_the_accepted_geometry():
     held = holder.held['singlet'][3]
     assert not holder.accept(trial)
     assert holder.held['singlet'][3] is held
+
+
+def test_offers_hold_no_mole():
+    """An offer waiting for `accept` keeps no Mole (a displaced geometry's
+    mol would keep the chain's fit cache entry for it alive across a
+    gradient sequence or a stencil no walk accepts); `accept` is handed the
+    Mole it holds."""
+    import weakref
+    mol = gto.M(atom=FORMALDEHYDE, basis='sto-3g', verbose=0)
+    mo = np.eye(mol.nao_nr())
+    nocc = mol.nelectron // 2
+    n_pair = nocc * (mol.nao_nr() - nocc)
+    holder = DavidsonWarmStart()
+    here = mol.set_geom_(mol.atom_coords(), unit='Bohr', inplace=False)
+    ref = weakref.ref(here)
+    holder.offer(here, mo, nocc, 'singlet', np.ones((n_pair, 1)),
+                 np.ones((n_pair, 1)))
+    del here
+    gc.collect()
+    assert ref() is None
+    assert holder.accept(mol) and holder.held['singlet'][0] is mol
 
 
 def test_holder_record_reads_back_to_the_bit(tmp_path):

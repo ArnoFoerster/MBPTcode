@@ -7,10 +7,15 @@ from it, never from each other's private names):
   sum with one energy array per axis (spin-resolved blocks);
 - to_l: the t{rank} -> l{rank} axis convention of the generated equations;
 - u2_2h1p/2p1h_amplitude_chunks: the restricted DF U^(2) amplitudes,
-  streamed over one occupied axis.
+  streamed over one occupied axis;
+- occ_chunk, chunk_ranges: the chunk size of that axis and the chunks one MPI
+  rank works on.
 """
+import os
+
 import numpy as np
 
+from src.Base.utils.parallel.mpi_grid import contiguous_block, current_comm
 from src.SingleReference.common.eri_blocks import g_slice_df
 
 
@@ -62,6 +67,40 @@ def to_l(t_arr, rank, block=None):
     return sign * t_arr.transpose(*axes)
 
 
+# Occupied indices per chunk of the streamed amplitude and integral generators here and in
+# adc_r_sigma_df and adc_r_nondyson_df. Larger chunks make fewer, larger contractions (the
+# matvec of a mid-sized molecule runs about 1.5x faster with chunks of 16 than of 4) at
+# the price of chunk_size O V^2 memory per live array. A fixed cap keeps that memory
+# O(N^3); half the occupied axis keeps every streamed array smaller than O^2 V^2 on small
+# molecules too. MBPT_ADC_OCC_CHUNK sets the chunk size exactly (timing studies).
+OCC_CHUNK = 16
+_OCC_CHUNK_ENV = os.environ.get('MBPT_ADC_OCC_CHUNK')
+
+
+def occ_chunk(n_occ):
+    """Chunk size of the occupied axis of length n_occ: MBPT_ADC_OCC_CHUNK if set,
+    else min(OCC_CHUNK, ceil(n_occ / 2))."""
+    if _OCC_CHUNK_ENV:
+        return int(_OCC_CHUNK_ENV)
+    return max(1, min(OCC_CHUNK, -(-n_occ // 2)))
+
+
+def chunk_ranges(n, chunk_size):
+    """[(lo, hi)] of the chunks of range(n) this rank works on.
+
+    Without a distribution, or on one rank: range(n) cut into the fewest chunks of at
+    most `chunk_size`, of equal length up to one index. Inside `distributed(comm)` with
+    several ranks: the rank owns one contiguous block of range(n), the blocks differing
+    by at most one index, and cuts it the same way. Every consumer then holds a partial
+    of what it accumulates and sums the partials across the ranks after its chunk loop."""
+    comm = current_comm()
+    size = 1 if comm is None else comm.Get_size()
+    start, stop = (0, n) if size == 1 else contiguous_block(n, comm.Get_rank(), size)
+    n_chunks = -(-(stop - start) // chunk_size)
+    edges = [start + (k * (stop - start)) // n_chunks for k in range(n_chunks + 1)] if n_chunks else []
+    return list(zip(edges[:-1], edges[1:]))
+
+
 # ===================== S4: occupied-index streaming (bare + hh/pp-dressed EN) =====================
 # The amplitudes below (each O^2V^2, held live for the whole aop lifetime)
 # are built chunk by chunk, streaming over one occupied axis, never as full
@@ -86,8 +125,7 @@ def u2_2h1p_amplitude_chunks(B, O, V, norb, eps_o, eps_v, chunk_size, dh=None, d
     below, whose transpose swaps the SAME two axes being chunked."""
     occ = np.arange(O)
     vir = np.arange(O, norb)
-    for lo in range(0, O, chunk_size):
-        hi = min(lo + chunk_size, O)
+    for lo, hi in chunk_ranges(O, chunk_size):
         occ_chunk = occ[lo:hi]
         g_chunk = g_slice_df(B, occ_chunk, occ, vir, vir)       # (ci,O,V,V)
         g_chunk_T = g_chunk.transpose(0, 1, 3, 2)
@@ -130,8 +168,7 @@ def u2_2p1h_amplitude_chunks(B, O, V, norb, eps_o, eps_v, chunk_size, dh=None, d
     transposed back), never the full (V,V,O,O)."""
     occ = np.arange(O)
     vir = np.arange(O, norb)
-    for lo in range(0, O, chunk_size):
-        hi = min(lo + chunk_size, O)
+    for lo, hi in chunk_ranges(O, chunk_size):
         occ_chunk = occ[lo:hi]
         g_direct = g_slice_df(B, vir, vir, occ, occ_chunk)                      # g[a,c,k,l_chunk]
         g_exch = g_slice_df(B, vir, vir, occ_chunk, occ).transpose(0, 1, 3, 2)  # g[a,c,l_chunk,k]->[a,c,k,l_chunk]

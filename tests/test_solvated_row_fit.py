@@ -77,7 +77,7 @@ from tests.test_chain_row_fit import (TILE, adjoint_ledger_faults,
                                       relative, traced, whole_fit_arrays)
 from tests.test_chain_sliced_factors import H2O
 from tests.test_solvated_scf_ranks import built, water
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
 from tests.pins import assert_same
 
 SIZES = [1, 2, 3]
@@ -118,7 +118,7 @@ def production(mol, equilibrium, layout, mf=None):
         environment=environment(mol, equilibrium), chi0='space-time',
         residues='sop', solver='davidson', factorization='isdf',
         qp_states=QPStates('frontier'), mf=mf,
-        numerics=numerics_of(dict(grid_accuracy='G1', bse_adjoint='grid',
+        numerics=numerics_of(dict(grid_accuracy='G1', bse_adjoint='grid', test_set=DUCHEMIN_BLASE_FIT,
                                   nroots=5,
                                   **(ROWS if layout == 'rows' else {}))))
 
@@ -178,7 +178,7 @@ def test_dressed_gauges_on_fixed_adjoints():
     FIT_REALIZATION_REL_TOL."""
     mol = molecule(H2O)
     with distributed(None):
-        fac = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux = len(crd), aux.nao_nr()
     rng = np.random.default_rng(5)
@@ -318,7 +318,7 @@ def test_row_fit_force_is_the_energy_derivative():
                        residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics=numerics_of({'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
+                       numerics=numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'grid_accuracy': 'G3', 'bse_adjoint': 'grid',
                                  'nroots': 4, **ROWS}))
     with distributed(None):
         chain = surface_of(spec, Excitation('singlet', root=1), mol0,

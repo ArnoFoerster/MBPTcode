@@ -30,6 +30,7 @@ import pytest
 from pyscf import gto, scf
 
 from tests.blas_bar import assert_same
+from tests.pins import RECORDING_BLAS, blas_identity
 from src.Base.numerics.constants import GEOM_OPT_CONV
 from src.Base.utils.record_io import read_record, write_record
 from src.Base.geometry.body_frame import aligned_displacement
@@ -91,13 +92,18 @@ def same_walk(mol, info, mol_ref, info_ref):
           f'minimum {moved:.1e} Bohr, energy {de:.1e} Ha from the '
           f'uninterrupted walk')
     assert moved <= SAME and de <= SAME
-    # the drift is a difference of two energies of two independent SCF solves
-    # (one per walk): bitwise on the recording BLAS, energy class bar on another
+    # the drift is a difference of two energies of two surfaces, each solved
+    # in each walk, at the end of a first walk whose geometry carries the
+    # gradient's round-off: a few ulp on the recording BLAS, SAME on another
+    # (an energy bar is too tight for it: 1.6e-11 Ha on OpenBLAS)
     if info['refreeze_drift'] is None or info_ref['refreeze_drift'] is None:
         assert info['refreeze_drift'] == info_ref['refreeze_drift']
-    else:
+    elif blas_identity() == RECORDING_BLAS:
         assert_same(info['refreeze_drift'], info_ref['refreeze_drift'],
                     label='refreeze drift')
+    else:
+        gap = abs(info['refreeze_drift'] - info_ref['refreeze_drift'])
+        assert gap <= SAME, ('refreeze drift', gap, SAME)
     assert info['cycles'] == info_ref['cycles']
 
 

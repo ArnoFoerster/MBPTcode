@@ -97,6 +97,24 @@ def _complex_roots(theta, imag, imag_tol, scale, X, flags, what):
     return theta, X
 
 
+def _dropped_roots(w_real, flags, what):
+    """Warn and flag 'upfolded_bse_dropped_roots' when `what` holds a value
+    with Re <= 0: the solvers keep positive excitation energies only, so such
+    a root (a physical instability of the upfolded problem, or a Ritz value
+    the subspace has not resolved) is left out of the returned set."""
+    w_real = np.asarray(w_real)
+    low = w_real[w_real <= 0]
+    if low.size:
+        message = (f'{low.size} upfolded-BSE {what} with Re <= 0 (lowest '
+                   f'{low.min():.4e} Ha) are left out of the returned '
+                   'excitation energies; the upfolded problem has a '
+                   'non-positive root.')
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+        if flags is not None:
+            flags.append({'flag': 'upfolded_bse_dropped_roots',
+                          'message': message})
+
+
 def dimensions(no, nv):
     n_s = no * nv
     n_d = no * nv * no * nv
@@ -420,6 +438,7 @@ def solve_dense(eps, e_qp, gb, no, nv, spin='singlet', nroots=5,
     H = build_hamiltonian(eps, e_qp, gb, no, nv, spin)
     w, vr = linalg.eig(H)
     keep = np.argsort(w.real)
+    _dropped_roots(w.real, flags, 'eigenvalues')
     keep = [k for k in keep if w.real[k] > 0][:nroots]
     # Complex eigenvalues DO occur, in conjugate pairs, high in the doubles
     # manifold -- H is real but not symmetric, and the dynamical BSE it
@@ -494,6 +513,7 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
         V = np.hstack([V, new])
         W = np.hstack([W, np.column_stack([aop(new[:, k])
                                            for k in range(new.shape[1])])])
+    _dropped_roots(w.real, flags, 'Ritz values')
     scale = max(1.0, float(np.abs(theta).max()))
     theta, X = _complex_roots(theta, theta_c.imag, imag_tol, scale, X, flags,
                               'Ritz values')

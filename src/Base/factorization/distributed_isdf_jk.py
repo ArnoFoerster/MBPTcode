@@ -88,6 +88,7 @@ from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
                                                    lockstep_density,
                                                    reduce_parts, add_seconds,
                                                    distributed_handles)
+from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  fit_M_streaming, screened_layout)
@@ -286,17 +287,24 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
             self.mine = [int(t) for t in partition(len(self.tiles), rank,
                                                    size)]
             t_fit = time.time()
-            fit = fit_M_streaming(mol, self.auxmol, coords,
-                                  numerics=source.numerics,
-                                  progress=source.progress, comm=comm,
-                                  fit='rows', block=self.tile,
-                                  layout=source.fit_layout())
+            if source.test_set == 'ao_products':
+                # the AO-product row fit, in the same tiles
+                fit = ao_product_fit_rows(mol, self.auxmol, coords,
+                                          numerics=source.numerics, comm=comm,
+                                          block=self.tile)
+            else:
+                fit = fit_M_streaming(mol, self.auxmol, coords,
+                                      numerics=source.numerics,
+                                      progress=source.progress, comm=comm,
+                                      fit='rows', block=self.tile,
+                                      layout=source.fit_layout())
             add_seconds(self.timings, 'scf_isdf_fit', t_fit)
         _ran_on(self.timings, 'scf_isdf_blas_fit', pool)
-        self.MT = fit.mt
-        self.fit_held = dict(fit.held)
-        self.fit_kept = fit.kept
-        del fit
+        if fit is not None:
+            self.MT = fit.mt
+            self.fit_held = dict(fit.held)
+            self.fit_kept = fit.kept
+            del fit
         self.X = {t: self._collocation(t) for t in self.mine}
         self._hold('X_tiles', self.X.values())
         self._hold('MT_tiles', self.MT.values())
@@ -582,7 +590,8 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
         """This rank's M^T tiles and the fit they are, read-only views
         (`separable_ri.FitTiles`), or None before the build: the settings
         are the ones `build` hands the row fit, so a later stage asking for
-        the same fit reads these instead of making it again."""
+        the same fit reads these instead of making it again; the AO-product
+        row fit's are marked as such."""
         if self.MT is None:
             return None
         source = self.source
@@ -591,7 +600,7 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
                         fit_settings(source.numerics, 'l_max_second',
                                      'pair_tol', 'regularization',
                                      'block_memory_gb'),
-                        kept=self.fit_kept)
+                        kept=self.fit_kept, test_set=source.test_set)
 
     def held_bytes(self):
         """{array: bytes} this rank holds now, read off the arrays: the X and
@@ -733,7 +742,8 @@ def scf_pair_layout(mf):
     """The AO-pair columns (mu, nu, weight) the ISDF-K fit of `mf` kept: the
     layout it was frozen to, else the screen at its own points, the bits
     either fit realization screens; None where `mf` built no ISDF-K fit (a
-    fitted mean field, or a pure functional's, which never asks for K).
+    fitted mean field, or a pure functional's, which never asks for K) and
+    on the AO-product test set, which screens no pair.
 
     A walk freezes this at its reference geometry (`frozen_pair_layout`).
     """
@@ -744,7 +754,8 @@ def scf_pair_layout(mf):
         if handles is not None and isinstance(handles[0], DistributedISDFJK):
             handle = handles[0]
     source = with_df if handle is None else handle.source
-    if not isinstance(source, ISDFJK):
+    if not isinstance(source, ISDFJK) or source.test_set == 'ao_products':
+        # the AO-product test set screens no pair
         return None
     if source.pair_layout is not None:
         return source.pair_layout

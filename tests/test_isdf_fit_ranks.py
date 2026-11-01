@@ -89,7 +89,7 @@ from src.Base.factorization.separable_ri import (ao_l_labels, ao_blocks, atomic_
                                                  molecular_points_covariant)
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1, g1_kw
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, TEST_GRID_LEVEL, counts_at, g1, g1_kw
 from tests.archived_tree import require_commit, unpack_commit
 from tests.pins import THREAD_CAPS_WITHOUT_OMP, assert_archive_same, assert_same
 
@@ -321,6 +321,7 @@ def test_separable_factors_passes_the_comm_through(case):
     mf.conv_tol = 1e-12
     mf.kernel()
     kwargs = dict(auxbasis=auxbasis, numerics=Numerics(
+        isdf={'test_set': DUCHEMIN_BLASE_FIT},
         layout={'fit_gb': case['block_memory_gb']}))
     ser = separable_factors(mf, mol, **g1_kw(mol, kwargs))
     per_rank = run_simulated(lambda comm: separable_factors(mf, mol, comm=comm,

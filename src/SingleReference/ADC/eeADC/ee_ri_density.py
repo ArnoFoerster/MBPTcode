@@ -134,6 +134,15 @@ def _doubles(op, BtT, k0, k1, omega, scale, s):
     return Z, W
 
 
+def root_doubles(op, y, omega, t1):
+    """(Z, W) of every occupied row of one root (module docstring), shape
+    (no, nv, no, nv) each: its doubles held whole, for molecules whose
+    o^2 v^2 fits in memory."""
+    s = 1.0 if op.spin == 'singlet' else -1.0
+    return _doubles(op, op.dressed(np.asarray(y, float).ravel()), 0, op.no,
+                    omega, np.sqrt(t1) / (2.0 * np.sqrt(2.0)), s)
+
+
 def oo_contract(A, B):
     """sum_{k in tile} sum_ab A[k,b,i,a] B[k,b,j,a] -> (i, j)."""
     no = A.shape[2]

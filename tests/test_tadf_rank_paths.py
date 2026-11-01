@@ -57,7 +57,7 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed, mpi_map
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.Base.numerics.constants import NUCLEAR_FD_STEP, PIN_CROSS_BLAS_GRADIENT_BAR
+from src.Base.numerics.constants import NUCLEAR_FD_STEP, ISDF_GRADIENT_FLOOR
 from src.gradients.gwbse import qp_space_time
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
@@ -271,6 +271,6 @@ def test_hessian_displacements_over_two_ranks(pyscf_one_thread):
     # to a few ulp on the recording BLAS. On another BLAS every displaced
     # gradient moves by the gradient class bar and the central difference
     # divides that by 2 * step.
-    bar = PIN_CROSS_BLAS_GRADIENT_BAR / (2 * NUCLEAR_FD_STEP)
+    bar = ISDF_GRADIENT_FLOOR / (2 * NUCLEAR_FD_STEP)
     for r, got in enumerate(run_simulated(rank, 2)):
         assert_same_within(got, serial, bar, label=r)

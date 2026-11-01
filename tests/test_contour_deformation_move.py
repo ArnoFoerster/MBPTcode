@@ -3,7 +3,7 @@ ulp (two computations of each number: `assert_same` of tests/pins.py).
 
 `SingleReference/GW/contour_deformation.py` holds the forward physics,
 `SingleReference/GW/real_screening.py` the explicit real-frequency screening,
-and `gradients/contour_deformation_adjoint.py` the adjoints. Production must
+and `gradients/gwbse/contour_deformation_adjoint.py` the adjoints. Production must
 reproduce the reference numbers, so every gate here is a few ulp, not a
 physics tolerance -- except the root itself: the reference's pole-guarded Newton is
 replaced by the one root finder of `Solvers.qp_equation` (one quasiparticle

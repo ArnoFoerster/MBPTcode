@@ -30,7 +30,8 @@ from typing import Optional, Tuple
 import numpy as np
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BSE_SOLVERS, RESIDUE_ROUTES_ALL,
+from src.Base.numerics.constants import (BSE_SOLVERS, CONTINUATION_ROUTE,
+                                         RESIDUE_ROUTES_ALL,
                                          OUTSIDE_TREATMENTS,
                                          SURFACE_GRID_ACCURACY)
 from src.Base.numerics.numerics import (SECTIONS, Numerics, numerics_or_default,
@@ -296,7 +297,7 @@ def resolve_grid(mol, numerics):
     than resolved to either side (`separable_factors`' rule).
     """
     isdf = numerics.isdf
-    basis = isdf.basis or str(mol.basis)
+    basis = isdf.basis or mol.basis
     auxbasis = isdf.auxbasis or paired_auxbasis(basis)
     elements = elements_of(mol)
     counts, n_start = isdf.counts, isdf.n_start
@@ -805,6 +806,12 @@ def resolve_residues(residues, row):
     """The residue backend the row will run, or None where it has none."""
     if residues not in RESIDUE_ROUTES:
         raise ValueError(f'residues {residues!r} not in {RESIDUE_ROUTES}')
+    if residues == CONTINUATION_ROUTE and row.excitation != 'Excitation':
+        raise TypeError(
+            f'{row.cls.__name__} does not read residues={residues!r}: the '
+            'analytic continuation solves the quasiparticle set of a neutral '
+            "excitation's chain; a charged state's root is the contour's "
+            "(residues 'sop', 'explicit' or 'laplace').")
     if row.reads_residues:
         return residues
     if residues != 'explicit':

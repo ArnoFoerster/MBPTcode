@@ -133,8 +133,32 @@ def numerics(mol):
 
 
 def loop(state, field, **kw):
-    """equilibrate at the test's tolerances (the state's own Numerics)."""
+    """equilibrate at the test's tolerances (the state's own Numerics); a
+    model whose first call freezes its chain starts from S0's equilibrium
+    charges (`s0_charges`) unless q0 is given."""
+    if ('q0' not in kw and field.nsites
+            and getattr(state, 'freezes_on_first_call', False)):
+        kw['q0'] = s0_charges(state, field)
     return sl.equilibrate(state, field, numerics=state.numerics, **kw)
+
+
+def ground_of(state):
+    """The reference (S0) model of `state`'s mean field, nuclei and
+    Numerics."""
+    return GWBSEState(state.mol, state.make_scf, numerics=state.numerics)
+
+
+def s0_charges(state, field):
+    """S0's equilibrium charges in `field` (the start of an excited loop)."""
+    return loop(ground_of(state), field).q
+
+
+def hcore_shift(model):
+    """What the mean field the chain of `model` froze its conventions on
+    added to the gas-phase core Hamiltonian: the operator of the charges its
+    first call was in."""
+    mf0, mol = model.chain.mf0, model.mol
+    return mf0.get_hcore() - (mol.intor('int1e_kin') + mol.intor('int1e_nuc'))
 
 
 def make_scf(mol, xc='hf'):
@@ -460,6 +484,71 @@ def test_the_state_cannot_move_before_its_surface_is_fixed(mol):
         state.at(molecule(), make_scf)
 
 
+# --- every chain is built in S0's equilibrium charges ----------------------
+
+def test_a_loop_refuses_to_freeze_a_chain_at_no_charges(mol):
+    """A loop of a model whose first call freezes its chain, started from no
+    charges in a medium with sites: refused (the chain would freeze its
+    conventions on the zero-charge mean field)."""
+    field, state = setup(mol, 'singlet')
+    assert state.freezes_on_first_call
+    with pytest.raises(ValueError, match='freezes its surface'):
+        sl.equilibrate(state, field, numerics=state.numerics)
+
+
+def test_a_verticals_chain_is_built_in_s0_charges(mol):
+    """The chain of a vertical's state (absorption, emission) froze its
+    conventions on the mean field converged in S0's equilibrium charges: its
+    core Hamiltonian is the gas one plus the operator of those charges (it
+    was the gas one, the loop's first call at no charges)."""
+    field = ContinuumField.from_environment(screening(mol))
+    models = []
+
+    def state():
+        models.append(setup(mol, 'singlet', field=field)[1])
+        if len(models) > 1:
+            # the second loop of the state stands on the first's chain
+            models[-1] = models[0].at(mol, make_scf, field.transition_environment())
+        return models[-1]
+    r = sl.vertical_energies(lambda: setup(mol, 'ground', field=field)[1],
+                             state, field, numerics=numerics(mol))
+    h = field.operator(r['loops']['eq_ground'].q)[0]
+    assert np.abs(h).max() > 1e-4
+    assert np.abs(hcore_shift(models[0]) - h).max() < 1e-12
+
+
+def test_a_surfaces_chain_is_built_in_s0_charges(mol):
+    """The solvated surface's first geometry and a refrozen surface's: the
+    chain stands on the mean field in S0's equilibrium charges there."""
+    surf, ref = _toluene_surface(mol, 'singlet')
+    surf.total_energy(mol)
+    field = ContinuumField.from_environment(screening(mol))
+    h = field.operator(s0_charges(ref[0], field))[0]
+    assert np.abs(hcore_shift(ref[0]) - h).max() < 1e-10
+    r1 = molecule(_offset(31))
+    rebuilt = surf.refreeze(r1)
+    rebuilt.total_energy(r1)
+    f1 = ContinuumField.from_environment(screening(r1))
+    model = rebuilt.last['state']
+    h1 = f1.operator(s0_charges(model, f1))[0]
+    assert np.abs(hcore_shift(model) - h1).max() < 1e-10
+
+
+def test_a_surface_without_its_ground_is_refused(mol):
+    """A solvated surface of a GW-BSE excited state with no S0 model to
+    start its first loop from: the loop refuses it."""
+    ref = []
+
+    def make_state(m, field):
+        ref.append(setup(m, 'singlet', field=field)[1])
+        return ref[0]
+    surf = SolvatedSurface(
+        mol, lambda m: ContinuumField.from_environment(screening(m)), make_state,
+        label='S1 toluene', numerics=numerics(mol))
+    with pytest.raises(ValueError, match='freezes its surface'):
+        surf.total_energy(mol)
+
+
 def _on_rank(comm):
     """S1 in toluene on one rank, with its own molecule, medium and state, as
     an MPI process has: simulated ranks share one process, and a `Mole`
@@ -490,7 +579,11 @@ def test_ranks_reproduce_one_rank(loops):
     assert_same(two[0], three[0])
     assert_same(two[4], three[4], quantity='gradient')
     assert abs(two[0] - serial.energy) < 1e-10
-    assert np.abs(two[4] - f_serial).max() < 1e-10
+    # both loops start from the same charges (S0's, bitwise equal) and stop
+    # within loop_tol_q = 1e-10 of the fixed point, at charges that differ
+    # by 3e-11 (cluster) between chunked and serial sums; the force follows
+    # the charges: 1e-11 on a workstation, 1.7e-10 on the cluster
+    assert np.abs(two[4] - f_serial).max() < 5e-10
     # the chunked sums' round-off can tip the last cycle at tol_energy 1e-12
     assert abs(two[3] - len(serial.history)) <= 1
 
@@ -598,7 +691,8 @@ def test_the_solvated_surface_force_is_its_energy_derivative(mol):
         return ref[0].at(m, make_scf, field.transition_environment())
     surf = SolvatedSurface(
         mol, lambda m: ContinuumField.from_environment(screening(m)), make_state,
-        label='S1 toluene', numerics=numerics(mol))
+        label='S1 toluene', numerics=numerics(mol),
+        make_ground=lambda m, f: setup(m, 'ground', field=f)[1])
     F = surf.total_gradient(mol)[0]
     d = np.random.default_rng(23).standard_normal((mol.natm, 3))
     d /= np.linalg.norm(d)
@@ -623,13 +717,15 @@ def test_a_resumed_loop_is_the_uninterrupted_one(mol, tmp_path, kind):
     solves its SCFs again: not bitwise); the GW-BSE model
     rebuilds its chain from the first call the checkpoint holds."""
     field, state = setup(mol, kind)
-    whole = loop(state, field)
+    # one start for every run: the checkpoint's key holds it
+    start = {} if kind == 'ground' else {'q0': s0_charges(state, field)}
+    whole = loop(state, field, **start)
     path = str(tmp_path / f'{kind}.json')
     f1, s1 = setup(mol, kind)
     with pytest.raises(Stop):
-        loop(s1, f1, checkpoint=path, log=stop_after(3))
+        loop(s1, f1, checkpoint=path, log=stop_after(3), **start)
     f2, s2 = setup(mol, kind)
-    part = loop(s2, f2, checkpoint=path)
+    part = loop(s2, f2, checkpoint=path, **start)
     assert len(part.history) == len(whole.history) > 4
     same_history(part.history, whole.history)
     assert_same(part.energy, whole.energy)
@@ -652,9 +748,10 @@ def test_a_checkpoint_of_another_loop_is_refused(mol, tmp_path):
 
 def test_a_checkpoint_of_another_state_is_refused(mol, tmp_path):
     """The singlet's checkpoint resumed by the triplet: refused (the state's
-    identity is in the checkpoint's key)."""
+    identity is in the checkpoint's key). In toluene: a gas-phase loop ends in
+    its first cycle and writes no checkpoint."""
     path = str(tmp_path / 'singlet.json')
-    field, state = setup(mol, 'singlet', field=NoMedium(mol))
+    field, state = setup(mol, 'singlet')
     with pytest.raises(Stop):
         loop(state, field, checkpoint=path, log=stop_after(1))
     _, other = setup(mol, 'triplet', field=field)
@@ -664,19 +761,23 @@ def test_a_checkpoint_of_another_state_is_refused(mol, tmp_path):
 
 def test_a_moved_model_restores_only_on_its_chain(mol, tmp_path):
     """A model moved with `at` holds no chain of its own: its checkpoint
-    cannot rebuild one, and a fresh model is refused."""
-    _, ref = setup(mol, 'singlet', field=NoMedium(mol))
-    loop(ref, NoMedium(mol))
+    cannot rebuild one, and a fresh model is refused. In toluene: a gas-phase
+    loop ends in its first cycle and writes no checkpoint."""
+    field, ref = setup(mol, 'singlet')
+    loop(ref, field)
     m = molecule(np.full((3, 3), 1e-3))
-    moved = ref.at(m, make_scf)
+    f2 = ContinuumField.from_environment(screening(m))
+    lr = f2.transition_environment()
+    moved = ref.at(m, make_scf, lr)
     path = str(tmp_path / 'moved.json')
+    _, fresh = setup(m, 'singlet', field=f2)
+    q0 = s0_charges(fresh, f2)   # the checkpoint key holds q0: one start for all
     with pytest.raises(Stop):
-        loop(moved, NoMedium(m), checkpoint=path, log=stop_after(1))
-    _, fresh = setup(m, 'singlet', field=NoMedium(m))
+        loop(moved, f2, q0=q0, checkpoint=path, log=stop_after(1))
     with pytest.raises(ValueError, match='no chain of its own'):
-        loop(fresh, NoMedium(m), checkpoint=path)
-    again = loop(ref.at(m, make_scf), NoMedium(m), checkpoint=path)
-    same_history(again.history, loop(ref.at(m, make_scf), NoMedium(m)).history)
+        loop(fresh, f2, q0=q0, checkpoint=path)
+    again = loop(ref.at(m, make_scf, lr), f2, q0=q0, checkpoint=path)
+    same_history(again.history, loop(ref.at(m, make_scf, lr), f2, q0=q0).history)
 
 
 # --- refreeze on SolvatedSurface -----------------------------------
@@ -729,7 +830,8 @@ def _toluene_surface(m0, kind):
         return ref[0].at(m, make_scf, lr)
     return SolvatedSurface(
         m0, lambda m: ContinuumField.from_environment(screening(m)), make_state,
-        label=f'{kind} toluene', numerics=numerics(m0)), ref
+        label=f'{kind} toluene', numerics=numerics(m0),
+        make_ground=lambda m, f: setup(m, 'ground', field=f)[1]), ref
 
 
 def _vertical_g(m, kind):
@@ -760,6 +862,114 @@ def test_the_reference_is_its_own_refreeze(mol):
     assert surf.refreeze(molecule(_offset(31))) is surf
 
 
+def ao_numerics(mol):
+    """`numerics` with the AO-product fit on 200 points pivoted from the G1
+    parent (the solvated driver's --isdf-test-set / --pivot-points)."""
+    return Numerics(bse={'solver': 'dense'},
+                    isdf={'counts': g1(mol), 'test_set': 'ao_products',
+                          'pivot_points': 200},
+                    solvent={'loop_tol_q': 1e-10, 'loop_tol_energy': 1e-12})
+
+
+def _ao_surface(m0):
+    """S1 in toluene on the AO-product fit, one model moved as a walk's."""
+    ref = []
+
+    def make_state(m, field):
+        if not ref:
+            ref.append(setup(m, 'singlet', field=field, num=ao_numerics(m0))[1])
+            return ref[0]
+        return ref[0].at(m, make_scf, field.transition_environment())
+    return SolvatedSurface(
+        m0, lambda m: ContinuumField.from_environment(screening(m)), make_state,
+        label='S1 toluene', numerics=ao_numerics(m0),
+        make_ground=lambda m, f: setup(m, 'ground', field=f,
+                                       num=ao_numerics(m0))[1]), ref
+
+
+def test_the_ao_fit_solvated_force_is_its_energy_derivative(mol):
+    """The SolvatedSurface force on the AO-product fit (points pivoted once,
+    carried by their atoms) against the central difference of its energy along
+    a random unit direction, 1e-6 Ha/Bohr, as on the tabulated grid."""
+    surf, _ = _ao_surface(mol)
+    F = surf.total_gradient(mol)[0]
+    d = np.random.default_rng(29).standard_normal((mol.natm, 3))
+    d /= np.linalg.norm(d)
+    fd = central(lambda t: surf.total_energy(molecule(t * d)), FD_STEP_SOLVATION)
+    assert abs(fd - float(np.sum(F * d))) < 1e-6
+
+
+def test_an_ao_fit_refreeze_pivots_again(mol):
+    """A refreeze on the AO-product fit is the vertical surface at the new
+    geometry: its points are pivoted there, not the moved reference's."""
+    surf, ref = _ao_surface(mol)
+    surf.total_energy(mol)
+    r1 = molecule(_offset(31))
+    old = surf.total_energy(r1)
+    rebuilt = surf.refreeze(r1)
+    new = rebuilt.total_energy(r1)
+    field, state = setup(r1, 'singlet', num=ao_numerics(mol))
+    assert same_solve(new, loop(state, field).energy)
+    assert abs(new - old) > 1e-8
+    chain = rebuilt.last['state'].chain
+    assert chain is not ref[0].chain
+    assert chain.factorization.test_set == 'ao_products'
+
+
+#: The row fit's tile edge of the rows-vs-whole gate: 200 points in four
+#: tiles.
+ROW_TILE = 64
+#: Rows vs whole, relative to the largest force component: the two
+#: realizations of this fit differ by 1.0e-10 already in the gas phase (the
+#: S1 force here, its tiled against its whole Cholesky); scheme B measured
+#: 0.8-1.0e-10, and 0.78 without the bare root's adjoint.
+ROWS_VS_WHOLE_RTOL = 2e-10
+
+
+def fit_numerics(mol, fit):
+    """`ao_numerics` with the fit realized `fit` ('rows' or 'replicated'),
+    sliced, the rows in tiles of ROW_TILE points."""
+    layout = {'sliced': True}
+    if fit == 'rows':
+        layout['fit_block'] = ROW_TILE
+    return Numerics(bse={'solver': 'dense'},
+                    isdf={'counts': g1(mol), 'test_set': 'ao_products',
+                          'pivot_points': 200, 'fit': fit},
+                    layout=layout,
+                    solvent={'loop_tol_q': 1e-10, 'loop_tol_energy': 1e-12})
+
+
+def _scheme_b_singlet(fit):
+    """(energy, relaxed density, force) of the scheme-B singlet (its
+    linear-response gauge beside the bare one) in toluene, in S0's
+    equilibrium charges, on the AO-product fit realized `fit`; one molecule,
+    medium and model per call (per simulated rank)."""
+    m = molecule()
+    field, state = setup(m, 'singlet', num=fit_numerics(m, fit))
+    h, e = field.operator(s0_charges(state, field))
+    r = state(h, e)
+    F = state.force(h, e)[0]
+    return r.energy, np.array(r.dm_eff), np.array(F)
+
+
+def test_scheme_b_runs_on_the_row_fit():
+    """The scheme-B singlet's relaxed density and force on the row fit (the
+    bare gauge's root adjoint in the row tiles) are the whole fit's to
+    ROWS_VS_WHOLE_RTOL of their scale, at one and three simulated ranks,
+    every rank rank 0's bits (refused on the rows before)."""
+    whole = _scheme_b_singlet('replicated')
+    rows = _scheme_b_singlet('rows')
+    three = run_simulated(lambda comm: _scheme_b_singlet('rows'), 3)
+    for rank in three[1:]:
+        for a, b in zip(rank, three[0]):
+            assert np.array_equal(a, b)
+    for got in (rows, three[0]):
+        assert abs(got[0] - whole[0]) < 1e-10 * abs(whole[0])
+        for a, b in zip(got[1:], whole[1:]):
+            assert np.abs(a - b).max() < ROWS_VS_WHOLE_RTOL * np.abs(b).max(), \
+                np.abs(a - b).max() / np.abs(b).max()
+
+
 #: Formaldehyde (Angstrom, planar): its T1 is bound, water's S1 and T1 are
 #: dissociative (a walk ends in a collapsed radius at the BSE instability).
 H2CO = [('C', (0.0, 0.0, -0.528)), ('O', (0.0, 0.0, 0.677)),
@@ -783,7 +993,8 @@ def test_a_solvated_walk_refreezes():
                                numerics=num), field).energy
     surf = SolvatedSurface(
         start, lambda m: ContinuumField.from_environment(screening(m)), make_state,
-        label='T1 toluene', numerics=num)
+        label='T1 toluene', numerics=num,
+        make_ground=lambda m, f: GWBSEState(m, walk_scf, numerics=num))
     states = []
     m, info = relax(surf, start, engine='cartesian', refreeze=1, verbose=False,
                     checkpoint=states.append)

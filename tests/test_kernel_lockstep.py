@@ -85,7 +85,7 @@ from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.SingleReference.GW.imaginary_time import screened_interaction_tau
 from tests.test_isdf_fit_ranks import FIT_TOL
 from tests.test_simulated_ranks import NFREQ, NTAU, REL, SIGMA_REL, close
-from tests.isdf_test_grid import g1, g1_kw
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_kw
 from tests.pins import assert_same
 
 SIZES = [2, 3, 8]
@@ -251,7 +251,8 @@ def test_fit_finds_the_context(water, size):
     call's numbers to a few ulp, and D is the serial fit to `FIT_TOL`."""
     w = water
     kw = dict(auxbasis='cc-pvdz-ri',
-              numerics=Numerics(layout={'fit_gb': 2e-4}))
+              numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT},
+                                layout={'fit_gb': 2e-4}))
     ser = separable_factors(w['mf'], w['mol'], **g1_kw(w['mol'], kw))
 
     def one_rank(comm):

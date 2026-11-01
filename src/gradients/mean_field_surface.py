@@ -1,7 +1,9 @@
 """The mean field's own energy as a potential-energy surface.
 
 `MeanFieldSurface` is the ground-state surface every walk and Hessian of the
-property layer can take: no excited-state machinery, no frozen conventions.
+property layer can take: no excited-state machinery, and of the frozen
+conventions only those of the ISDF-K fit (its pair layout, and on pivoted
+AO-product points the reference's frames and selection).
 `mean_field_force` is its force, the one definition the property layer's
 convergence checks read too.
 """
@@ -11,13 +13,24 @@ from src.Base.declaration import SurfacePhysics
 from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
 from src.environments.environment import environment_label
 from src.Base.environment_seam import resolve_environment
-from src.Base.factorization.isdf_jk import frozen_pair_layout
+from src.Base.factorization.isdf_jk import (ISDFJK, frozen_frames,
+                                            frozen_pair_layout,
+                                            reference_frames)
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.Base.utils.parallel.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
 from src.gradients.evaluation import GeometryCache
 from src.gradients.reference_mean_field import converged_factory
 from src.gradients.surface import PotentialEnergySurface
+
+
+def pivoted_frames(mf):
+    """`reference_frames` of `mf` where its ISDF-K fit is on pivoted
+    AO-product points, the selection riding on them; None otherwise."""
+    with_df = getattr(mf, 'with_df', None)
+    if not isinstance(with_df, ISDFJK) or with_df.test_set != 'ao_products':
+        return None
+    return reference_frames(mf)
 
 
 def mean_field_force(mf):
@@ -82,6 +95,11 @@ class MeanFieldSurface(PotentialEnergySurface):
         # the mean field at every geometry of this surface fits on: [] until
         # read, then [layout], None for a mean field without an ISDF-K fit.
         self._layout = []
+        # The frames and pivoted points of mol0's ISDF-K fit where it is on
+        # the AO-product test set (`pivoted_frames`), which every geometry of
+        # this surface places its points on: [] until read, then [frames],
+        # None for any other mean field.
+        self._frames = []
         # one SCF per geometry: the mean fields of the last ones evaluated
         self._mean_fields = GeometryCache()
 
@@ -96,10 +114,14 @@ class MeanFieldSurface(PotentialEnergySurface):
                                       self.mol0.atom_coords())
         layout = (None if at_reference and not self._layout
                   else self.pair_layout())
-        with frozen_pair_layout(layout):
+        frames = (None if at_reference and not self._frames
+                  else self.frozen_frames())
+        with frozen_pair_layout(layout), frozen_frames(frames):
             mf = self._converged(mol)
         if not self._layout:
             self._layout.append(scf_pair_layout(mf))
+        if not self._frames:
+            self._frames.append(pivoted_frames(mf))
         return self._mean_fields.put(mol, mf)
 
     def _converged(self, mol):
@@ -121,6 +143,19 @@ class MeanFieldSurface(PotentialEnergySurface):
                   self._converged(self.mol0))
             self._layout.append(scf_pair_layout(mf))
         return self._layout[0]
+
+    def frozen_frames(self):
+        """The frames and pivoted points of mol0's ISDF-K fit on the
+        AO-product test set (`pivoted_frames`), which every geometry of this
+        surface places its points on, so the walk stands on one selection as
+        an excited chain does; None for any other mean field (a tabulated
+        fit's points follow each geometry's own frames, as before)."""
+        if not self._frames:
+            mf = (self._mf0 if self._own else
+                  self._mean_field(self.mol0))
+            if not self._frames:
+                self._frames.append(pivoted_frames(mf))
+        return self._frames[0]
 
     def mean_field(self, mol=None, mf=None):
         """(mol, mf): the mean field this surface evaluates on: the factory's

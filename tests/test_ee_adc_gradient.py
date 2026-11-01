@@ -8,8 +8,8 @@ cc-pvdz-jkfit, gas phase.
      pyscf DF-MP2's to 1e-12.
   2. the Lagrangian is stationary: Y = Y^T to 1e-8 (MP2, ADC(2) singlet and
      triplet).
-  3. the relaxed MP2 density of the engine is pyscf DF-MP2's (refined CPHF,
-     state_models.mp2_relaxed) to 1e-8, and the ADC(2) part is
+  3. the relaxed MP2 density of the engine is pyscf DF-MP2's (its CPHF refined,
+     `pyscf_mp2_relaxed` below) to 1e-8, and the ADC(2) part is
      ee_relaxed_density's to 1e-8.
   4. the JK-fit skeleton every force takes, sum g G'[D_HF]
      (skeleton_tiles.fitted_fock_skeleton, tiled over the auxiliary basis),
@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 import numpy as np
 from pyscf import df as pyscf_df
-from pyscf import scf
+from pyscf import lib, scf
 from pyscf.mp import dfmp2_native
 
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
@@ -44,12 +44,44 @@ from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
 from src.gradients.df_assembly import two_electron_skeleton_df
 from src.gradients.skeleton_tiles import fitted_fock_skeleton
-from src.gradients.state_models import mp2_relaxed
+from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
 from tests.adc_common import (ATOMS, AUX, FD_STEP_FORCE, NF, check,
                               make_scf_tight, molecule)
 
 
 FIELD = 1e-4
+
+
+def pyscf_mp2_relaxed(mf, frozen, auxbasis):
+    """(e_mp2, D) of pyscf's DF-MP2 on mf, the oracle of the engine's MP2
+    density: D the orbital-relaxed correlation density (AO, spin-summed, the
+    SCF part removed), its CPHF refined to the multiplier solve's tolerance
+    (pyscf's own krylov stops near a residual of 3e-6), the orbitals
+    responding through mf's own kernel (exact integrals without a JK fit)."""
+    mp = dfmp2_native.DFRMP2(mf, frozen=frozen or None, auxbasis=auxbasis)
+    mp.verbose = 0
+    e_mp2 = mp.kernel()
+
+    def cphf(mf, Lvo, _cycles, _tol, _logger):
+        # (e_a - e_i) z + R[z] = -Lvo is antisym(Y_E + Y[Lambda]) = 0 on the
+        # virtual-occupied pairs with Y_E[a, i] = Lvo and z = 2 Lambda
+        C, eps = np.asarray(mf.mo_coeff), np.asarray(mf.mo_energy, float)
+        nmo, nocc = C.shape[1], int(np.count_nonzero(mf.mo_occ > 0))
+        kernel, fock = dcf.scf_kernel(mf), np.diag(eps)
+        Y_E = np.zeros((nmo, nmo))
+        Y_E[nocc:, :nocc] = Lvo
+        free = np.zeros((nmo, nmo), bool)
+        free[:nocc, nocc:] = True
+        Lam, _ = solve_orbital_multipliers(
+            lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_E, eps, free=free)
+        return 2.0 * Lam[nocc:, :nocc]
+    with lib.temporary_env(dfmp2_native, solve_cphf_rhf=cphf):
+        rdm1 = mp.make_rdm1(relaxed=True)
+    nocc = mp.nocc
+    rdm1[:nocc, :nocc] -= 2.0 * np.eye(nocc)
+    C = mf.mo_coeff
+    mp.delete()
+    return float(e_mp2), C @ rdm1 @ C.T
 
 
 def scf_tight(mol):
@@ -137,7 +169,7 @@ def check_densities_and_symmetry():
     g0, info0 = eg.adc2_force(mf, mol, None, frozen=NF, auxbasis=AUX, ground=True)
     ok &= check(info0['asymmetry'] < 1e-8, 'MP2: the Lagrangian is stationary',
                 f"max |Y - Y^T| {info0['asymmetry']:.1e}")
-    _, D2 = mp2_relaxed(mf, NF, AUX)
+    _, D2 = pyscf_mp2_relaxed(mf, NF, AUX)
     d = float(np.max(np.abs(info0['dm_corr'] - D2)))
     ok &= check(d < 1e-8, 'MP2: relaxed density = pyscf DF-MP2 (refined CPHF)',
                 f'{d:.1e}')
@@ -193,7 +225,7 @@ def check_plain_rhf():
         return mf, dfmp2_native.DFRMP2(mf, frozen=NF, auxbasis=AUX).run(verbose=0).e_corr
 
     mf, _ = e_mp2(0.0)
-    _, D2 = mp2_relaxed(mf, NF, AUX)
+    _, D2 = pyscf_mp2_relaxed(mf, NF, AUX)
     analytic = float(np.einsum('pq,qp->', D2, dip))
     fd = (e_mp2(FIELD)[1] - e_mp2(-FIELD)[1]) / (2 * FIELD)
     ok = check(abs(analytic - fd) < 1e-7,

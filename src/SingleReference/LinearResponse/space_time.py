@@ -79,7 +79,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB
+from src.Base.numerics.constants import (BYTES_PER_GB, DEFAULT_TAU_TARGET,
+                                         ISDF_SQUARE_TILE_ROWS, ISDF_TILE_GB)
 from src.Base.numerical_flags import flag
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
@@ -416,17 +417,24 @@ def tile_rows(M, tile_memory_gb, per_row_bytes):
     return max(1, min(M, int(tile_memory_gb * BYTES_PER_GB / max(per_row_bytes, 1))))
 
 
+def square_tile_rows(rows):
+    """`rows` of a (rows, M) tile of an (M, M) intermediate, at most
+    ISDF_SQUARE_TILE_ROWS, so that no rank forms the (M, M) array whole
+    where M exceeds it, whatever the memory budget allows."""
+    return max(1, min(int(rows), ISDF_SQUARE_TILE_ROWS))
+
+
 def polarizability_work(M, tile_memory_gb=ISDF_TILE_GB):
     """The two (rows, M) Green's-function tiles `polarizability_projected_tau`
     works in, sized for this M and budget, to be reused across tau points."""
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     return np.empty((rows, M)), np.empty((rows, M))
 
 
 def polarizability_tiles(M, tile_memory_gb=ISDF_TILE_GB):
     """[(p0, p1)] grid-row tiles of `polarizability_projected_tau`, set by M
     and the budget alone: the addends of proj(tau), whoever sums them."""
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     return [(p0, min(p0 + rows, M)) for p0 in range(0, M, rows)]
 
 
@@ -483,7 +491,8 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
         proj_ab(tau) = -2 sum_PQ D[P,a] (Go_PQ Gv_PQ) D[Q,b]
 
     Tiled over grid rows, which is exact because the expression is a sum over
-    them, so the M x M object never exists. Contract the Pi block with D first:
+    them, so the M x M object never exists: rows set by the budget and at most
+    ISDF_SQUARE_TILE_ROWS (`square_tile_rows`). Contract the Pi block with D first:
     the other order builds an (naux, M) intermediate instead.
 
     The one kernel of the N^3 sweep, for the energy routes and the gradient
@@ -502,7 +511,7 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
     """
     M = X_o.shape[0]
     naux = D.shape[1]
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     if tiles is None:
         tiles = polarizability_tiles(M, tile_memory_gb)
     if work is None:

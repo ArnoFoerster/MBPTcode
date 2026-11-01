@@ -106,6 +106,27 @@ def test_the_static_self_energy_skeleton_fits_libcint(libcint_calls):
     assert np.abs(blocked - whole).max() < 1e-12
 
 
+def test_a_force_holds_one_small_block_at_a_time(monkeypatch):
+    """The continuum terms of a force hold one cavity block at a time, and a
+    block is at most PCM_CAVITY_BLOCK_GB: at CBP's nao (1090) and a few
+    thousand cavity points, not the 4 GB tile budget of the ISDF routes."""
+    from src.Base.numerics.constants import BYTES_PER_GB, PCM_CAVITY_BLOCK_GB
+    nao, ngrids = 1090, 5000
+    assert max((k1 - k0) * nao * nao * 3 * 8 for k0, k1 in
+               cavity_blocks(nao, ngrids)) <= PCM_CAVITY_BLOCK_GB * BYTES_PER_GB
+    budgets, plan = [], pcm_derivatives.cavity_blocks
+
+    def recorded(nao, ngrids, comp=3, **kw):
+        budgets.append(kw.get('budget_gb', PCM_CAVITY_BLOCK_GB))
+        return plan(nao, ngrids, comp, **kw)
+    monkeypatch.setattr(pcm_derivatives, 'cavity_blocks', recorded)
+    mf = scf.RHF(water()).PCM()
+    mf.with_solvent.eps = 2.3741
+    mf.with_solvent.build()
+    solvation_gradient(mf.with_solvent, mf.get_init_guess())
+    assert budgets and set(budgets) == {PCM_CAVITY_BLOCK_GB}, budgets
+
+
 def test_pyscf_own_pcm_routines_are_bounded_too():
     """pyscf's PCM force and Hessian, run by pyscf itself on the mean field a
     continuum hands out, block by `max_memory`: capped, no block of theirs can

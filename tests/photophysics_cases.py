@@ -40,7 +40,7 @@ def argv(*extra, out='unused', atom=FORMALDEHYDE):
     """The command line of the tests' formaldehyde run, `extra` appended
     (argparse takes the last of a repeated option)."""
     return (['--system', 'formaldehyde', '--atom', atom, '--basis', 'cc-pvdz',
-             '--environment', 'gas', '--grid-accuracy', 'G3',
+             '--environment', 'gas', '--grid-accuracy', 'G3', '--scf-grid', 'GH',
              '--scf-grad-tol', '1e-11', '--no-scf-warm-start', '--engine',
              'cartesian', '--out', str(out)] + REQUIRED + list(extra))
 
@@ -69,9 +69,10 @@ def run_of(store_root, *extra, max_memory=4000, **changes):
 
 def production(store_root, environment, solvation, *extra):
     """(the photophysics Run, the S1 surface at R0 it would walk): the walk
-    gate's configuration, the run's own factory and declaration; `extra`
-    command-line options appended."""
-    run = run_of(store_root, '--environment', environment,
+    gate's configuration (in a continuum scheme A), the run's own
+    factory and declaration; `extra` command-line options appended."""
+    scheme = () if environment == 'gas' else ('--solvent-scheme', 'scheme-a')
+    run = run_of(store_root, '--environment', environment, *scheme,
                  '--relaxed-solvation', solvation, *extra,
                  qp_states='admitted')
     mol0 = run.mol_in

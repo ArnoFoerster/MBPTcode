@@ -34,6 +34,9 @@ SCF_TOL_NEWTON = 1e-16                         # second-order polish after the f
 ROOT_CONV_TOL = 1e-12                          # ADC(2) state-model roots
 SOLVATION_TIGHT_LOOP = dict(loop_tol_q=1e-10, loop_tol_energy=1e-12)  # solvation loop: charges, energy
 SOLVATION_TIGHT = dict(numerics=Numerics(solvent=SOLVATION_TIGHT_LOOP))  # equilibrate's keywords
+# an ADC(2) model's one Numerics, which its loop is handed too
+ADC_NUMERICS = Numerics(solvent=SOLVATION_TIGHT_LOOP, adc={'conv_tol': ROOT_CONV_TOL})
+ADC_TIGHT = dict(numerics=ADC_NUMERICS)                                   # its loop's keywords
 
 # Finite-difference steps: nuclear displacements (Bohr), field strength (a.u.).
 FD_STEP_FORCE = 1e-4          # gas-phase forces

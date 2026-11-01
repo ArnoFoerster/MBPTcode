@@ -34,6 +34,7 @@ from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_en as _en
 from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4
+from src.SingleReference.common import df_ladder
 
 LEVELS = _r.LEVELS
 
@@ -76,13 +77,22 @@ class DFVvvvKernels(_eq.VvvvKernels):
     call overhead dominating whenever no^2 nv^3 is small). The chunk carries a
     bounded auxiliary batch axis on top of the four orbital indices; its size
     is chosen from `mem_gb`, so it is a memory knob, not a scaling axis.
+
+    The particle ladder is common.df_ladder's: `ladder_kernel` 'auto' (default)
+    takes the cheaper of its 'aux' evaluation (the chunks above) and 'slab'
+    ((ac|bd) in slabs of a, built once for every spin block of one call),
+    about six times faster on a naphthalene-sized block (no 24, nv 146, naux
+    672) and the same numbers to a few ulps.
     """
 
-    def __init__(self, B, no, norb, mem_gb=2.0):
+    def __init__(self, B, no, norb, mem_gb=2.0, ladder_kernel='auto'):
+        if ladder_kernel not in df_ladder.KERNELS:
+            raise ValueError(f'ladder_kernel={ladder_kernel!r}: one of {df_ladder.KERNELS}')
         self.B = B
         self.Bvv = np.ascontiguousarray(B[:, no:norb, no:norb])
         self.no, self.nv = no, norb - no
         self.mem_gb = mem_gb
+        self.ladder_kernel = ladder_kernel
 
     def _chunks(self, per_aux_elems):
         """Aux-function slices sized so one batch stays inside mem_gb."""
@@ -93,13 +103,11 @@ class DFVvvvKernels(_eq.VvvvKernels):
     # ---- particle ladder -------------------------------------------------
     def ladder_direct(self, Y):
         """sum_cd (sum_Q B[Q,a,c] B[Q,b,d]) Y[i,j,c,d]."""
-        no2 = Y.shape[0] * Y.shape[1]
-        out = np.zeros(Y.shape[:2] + (self.nv,) * 2)
-        for sl in self._chunks(no2 * self.nv ** 2):
-            Bc = self.Bvv[sl]
-            U = np.einsum('Qac,ijcd->Qijad', Bc, Y, optimize=True)
-            out += np.einsum('Qijad,Qbd->ijab', U, Bc, optimize=True)
-        return out
+        return self._ldir([Y])[0]
+
+    def _ldir(self, Ys):
+        """ladder_direct of several blocks in one call (one set of slabs)."""
+        return df_ladder.ladders(self.Bvv, self.Bvv, Ys, self.mem_gb, self.ladder_kernel)
 
     def ladder(self, X):
         """R[key] = Ldir(X[key]) - Ldir(X[key with a,b swapped] transposed).
@@ -114,11 +122,12 @@ class DFVvvvKernels(_eq.VvvvKernels):
         swapped key instead of running the kernel again -- one Ldir per spin
         block rather than two. The ladder is ~70% of a DF sigma, so this is
         the single biggest lever in the operator."""
-        # memoize on exact array identity (buffer, shape, strides): several
-        # spin blocks are literally the SAME object or a view of one -- anti4
-        # stores three distinct arrays under six keys -- so this collapses
-        # six kernel runs to three or four with no assumption about how the
-        # SB was built
+        if X.parity is not None and not X.derived:
+            # a flip eigenvector (a closed-shell reference's amplitudes): the
+            # kernel commutes with alpha <-> beta, so it runs on the
+            # alpha-first blocks, whose swapped keys are alpha-first too
+            half = SB({k: v for k, v in X.items() if k[0] == 'a'})
+            return SB.from_half(self.ladder(half).blocks, X.parity)
         # Ldir maps (c,d) -> (a,b) with the occupied indices as spectators,
         # so it commutes with any permutation within {i,j} and within {a,b}:
         #     Ldir(sign * Y^P) == sign * Ldir(Y)^P.
@@ -126,11 +135,9 @@ class DFVvvvKernels(_eq.VvvvKernels):
         # which (ee_r_sigma.to_blocks does), the kernel runs on the base
         # blocks only -- three instead of six for a doubles vector.
         derived = X.derived or {}
-        L = {}
-        for key, blk in X.items():
-            if key in derived and derived[key][0] in X.keys():
-                continue
-            L[key] = self.ladder_direct(blk)
+        base = [key for key in X.keys()
+                if not (key in derived and derived[key][0] in X.keys())]
+        L = dict(zip(base, self._ldir([X.get(key) for key in base])))
         for key, (base, perm, sign) in derived.items():
             if base in L:
                 L[key] = sign * L[base].transpose(perm)

@@ -29,7 +29,13 @@ property takes any surface that provides the ingredients it reads
 random displacement of the input geometry, so a symmetric start can still reach
 a minimum of lower symmetry. `vibronic` gives normal modes and Huang-Rhys
 factors by two independent routes; `conformers` the Boltzmann-weighted average
-over torsional minima a soft emitter has; `spin_orbit` and `nonadiabatic` the
+over torsional minima a soft emitter has (chiral minima counted twice), with
+the ring puckers and nitrogen inversions of `ring_conformers` as extra starts,
+free-energy populations from per-conformer Hessians in `conformer_weights`,
+relaxed torsion scans, barriers and the following of one state through a large
+twist in `torsion_scan` (an increment whose point is lost or does not converge is
+halved, then the scan stops with the reason), and `excited_conformers` for a twisted-ICT emitter
+whose emitting conformer is not its absorbing one; `spin_orbit` and `nonadiabatic` the
 two couplings a Marcus-Levich-Jortner or golden-rule rate needs; `characters`
 labels a BSE root by its charge-transfer weight; `hessian` the nuclear Hessian
 by central differences of the analytic gradient, for a route pyscf's own
@@ -114,6 +120,52 @@ energy grid that covers and resolves both bands, and `gaussian_limit_fwhm` the
 width of the second cumulant alone. See `examples/20_vibronic_band_shape.py`
 for formaldehyde S1 end to end, both Huang-Rhys routes.
 
+`vibronic_band(model, e00, temperature, energies, *, gaussian_fwhm,
+lorentzian_fwhm)` is the same band for any model on the `VibronicModel`
+protocol (a density per direction and its first two cumulants);
+`band_shape` is it on `DisplacedOscillators`. `properties.duschinsky` gives
+each state its own modes and frequencies: `duschinsky_model(ground, excited)`
+takes two Hessians at their own minima (anything with `.mol` and `.hessian`;
+`read_orca_hessian` reads an ORCA `.hess` file as data) and returns J, K and
+both frequency sets, and `DuschinskyOscillators(model)` feeds
+`vibronic_band`. The density is the Fourier transform of the thermal
+correlation function of the two harmonic surfaces, with the zero-point shift
+of the 0-0 line included:
+
+```python
+from src.properties.band_shape import vibronic_band, vibronic_band_grid
+from src.properties.duschinsky import (CartesianHessian, DuschinskyOscillators,
+                                       duschinsky_model)
+
+model = duschinsky_model(CartesianHessian(mol_s0, hess_s0, 'S0 analytic'),
+                         CartesianHessian(mol_s1, hess_s1, 'S1'))
+fc = DuschinskyOscillators(model)
+e = vibronic_band_grid(fc, e_adiabatic, 300.0, gaussian_fwhm=0.002,
+                       lorentzian_fwhm=0.0)
+band = vibronic_band(fc, e_adiabatic, 300.0, e, gaussian_fwhm=0.002,
+                     lorentzian_fwhm=0.0)
+print(band['fwhm_emission'], band['peak_emission'])
+```
+
+**Herzberg-Teller intensity** — `properties.herzberg_teller.TransitionDipole`
+holds mu0 and dmu/dq at one state's minimum on that state's normal
+coordinates; `DuschinskyOscillators(model, dipole)` then carries the Condon,
+Herzberg-Teller and cross terms in the same correlation function, and its
+density has <|mu|^2> as its area. dmu/dq comes from an analytic Cartesian
+derivative (`dipole_from_cartesian`) or from central differences of any
+routine that returns the transition dipole at a geometry
+(`dipole_derivative`, which warns when the two displaced dipoles look like a
+phase flip). For an excited state of a Casida-type solve (BSE@GW) the routine
+is `PhaseTrackedDipole(solve_at, mol, root)`: each displaced solve is aligned
+to the one at `mol` by the transported overlap of the eigenvectors, a group of
+near-degenerate roots as a subspace, and a displaced solve that no longer holds
+the roots is refused. On formaldehyde BSE@G0W0@PBE0/cc-pVDZ the forbidden S1
+borrows along the out-of-plane wag and the b2 modes, and its dmu/dq does not
+move under random sign flips of the displaced eigenvectors. A displaced-oscillator model with Herzberg-Teller terms is
+`DuschinskyModel.from_displacement(omega, dq)` with the signed displacements.
+`photophysics.rates.vibronic_radiative_rate` integrates E^3 over the emission
+band, so a weakly allowed emitter's rate includes what it borrows.
+
 **Rates** — `src/photophysics/rates.py` holds the golden-rule,
 Marcus-Levich-Jortner and spin-vibronic rates, `photoluminescence`, and
 `rate_table`, which assembles every rate between S0, S1, T1 (and T2) from the
@@ -121,6 +173,73 @@ minima a run relaxed. The Huang-Rhys factors of the rate tables are taken in
 valence internal coordinates (`properties.curvilinear`), so a rotated methyl
 or amino group does not show up as a fake displacement along the C-H
 stretches.
+
+**ISC and RISC of any method** — `src/photophysics/rate_chain.py` computes
+intersystem crossing S1 -> T1 and its reverse from one method's S1 and T1
+minima (`minimum.StateMinimum`, filled alike by GW-BSE, ADC(2) or any other
+method) and two Hessians at their own minima, which may come from another
+method (an ORCA TD-DFT `.hess` read with `read_orca_hessian`). The model is
+declared field by field in `RateModel`: Duschinsky rotation, frequency change
+and zero-point difference; the displacement from the method's own minima
+(curvilinear or Cartesian) or from its gradient at the other minimum; the
+solvent reorganization (non-equilibrium minus equilibrium energy of the
+accepting state) as the classical broadening; the Condon coupling plus its
+nuclear derivative; the Boltzmann-populated singlets and triplets with every
+reachable pair, so RISC through T2 is included. A second-order path through a
+nearly degenerate state (T2 a few meV above T1) is outside first-order
+mixing: its coupling-to-gap ratio r, read off the path's own derivative
+(`spin_vibronic.path_ratio`), switches that direction to the diabatic
+two-state model above 0.1, where the path state's exact thermal weight
+(`spin_vibronic.mixed_weight`, at most 1/2) replaces r^2; the record says
+which model each rate used, and `mixing` is a switch of its own. The
+Duschinsky model is checked before it is used (`duschinsky.duschinsky_guard`,
+recorded as `duschinsky_guard`): a soft mode of one state that puts more than
+1% of its weight on the other state's stretches, a sum-rule reorganization
+more than a factor 2 from the accepting state's energy difference between the
+minima, or a band whose mean vibrational energy is more than twice that
+reorganization, refuses the Duschinsky rungs. Between two minima a large
+torsion apart (4-(dimethylamino)benzonitrile S1 and T1) the Cartesian mode
+sets mix the torsions into the stretches and the band's first moment comes out
+at tens of eV. The production model therefore measures J through the valence
+internals (`RateModel.duschinsky_coordinates = 'curvilinear'`,
+`curvilinear.curvilinear_duschinsky`, after Reimers, J. Chem. Phys. 115, 9103
+(2001)): a torsion of one state maps onto the torsions of the other, and J is
+used as it is, not orthogonalized (each state keeps its own kinetic metric;
+the correlation function carries the Jacobian). On the same molecule the soft
+modes then put less than 0.5% of their weight on the stretches and the ISC
+band sits 0.76 eV above its 0-0 line at 300 K against a reorganization of
+0.54 eV; with every mode quantum, RISC is refused at 300 K, because a T1 mode at
+10 cm^-1 becomes an S1 mode at 80 cm^-1 and its harmonic thermal energy alone
+is about 1 eV. Such a mode is neither quantum nor harmonic at room
+temperature, so the production model takes the T1 modes below 100 cm^-1
+(`DUSCHINSKY_CLASSICAL_BELOW_CM`, about kT/2 at 300 K) and their image in S1
+out of the correlation function as one classical, frequency-unchanged block
+(`duschinsky.split_soft_modes`, `RateModel.classical_below_cm`): its
+reorganization joins the classical broadening, as the low-frequency modes of
+Ulstrup and Jortner (J. Chem. Phys. 63, 4358 (1975)). DMABN RISC then sits
+0.53 eV above its 0-0 line against a reorganization of 0.45 eV and is
+accepted; a cutoff of 200 cm^-1 moves its rate by 5%, one of 50 cm^-1 by a
+factor 3. With no mode below the cutoff nothing changes, bit for bit; every
+mode quantum is a rung of its own (`quantum_soft_modes`). The Cartesian J is a rung of its own (`rectilinear_duschinsky`), and so is the
+displaced-oscillator model. `ablation_ladder` removes
+one ingredient at a time down to a single Marcus-Levich-Jortner mode with an
+assumed reorganization energy, and every rung records its model:
+
+```python
+from src.photophysics.rate_chain import (RateInputs, RateModel,
+                                         ablation_ladder, rate_chain)
+from src.properties.duschinsky import read_orca_hessian
+
+inputs = RateInputs(s1=s1_minimum, t1=t1_minimum,
+                    hessians={'S1': read_orca_hessian('s1.hess', mol),
+                              'T1': read_orca_hessian('t1.hess', mol)},
+                    gradients={}, solvent=solvent_energies)
+full = RateModel.full('curvilinear', 0.0)
+table = rate_chain(inputs, full, 300.0)
+print(table['ISC']['k_eff'], table['RISC']['k_eff'])
+for rung in ablation_ladder(inputs, full, 300.0, shared=inputs):
+    print(rung['step'], rung.get('refused') or rung['table']['RISC']['k_eff'])
+```
 
 **Photophysics from the command line** — `src/photophysics` runs the TADF
 rates of an emitter in stages: the S0 minimum, its modes, the vertical
@@ -132,7 +251,8 @@ formaldehyde in the gas phase on a single machine, from the repository root:
 ```bash
 python -m src.photophysics --system formaldehyde \
     --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
-    --basis cc-pvdz --environment gas --temperature 300 --lambda-env 0.05 \
+    --basis cc-pvdz --environment gas --grid-accuracy G1 --scf-grid GH \
+    --temperature 300 --lambda-env 0.05 \
     --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \
     --hessian analytic-df --relaxed-solvation equilibrium --span full \
     --manifold-gaps stacked --out tadf
@@ -141,6 +261,61 @@ python -m src.photophysics --system formaldehyde \
 The records land in `tadf/formaldehyde/gas/`. `--rate-model uisc` runs the
 UISC protocol of Samanta et al. instead, and `--distribute` under `srun`
 spreads the stages over MPI ranks.
+
+In a solvent the run names how its states are solvated, one way for every
+stage: `--solvent-scheme scheme-a` (the solvated BSE of Duchemin et al.),
+`scheme-b-eq` or `scheme-b-noneq`. Under both scheme-B names every state,
+the ground state included, is made self-consistent with its own relaxed
+density in the continuum (the same states as `solvated` below), the walks
+relax the solvated free energy of each state, absorption and emission are
+non-equilibrium energies, and the couplings and oscillator strengths at each
+geometry are taken in one reaction field, held fixed. `scheme-b-eq` gives each
+excited minimum its energy with the solvent relaxed around it (adiabatic
+gaps in equilibrium); `scheme-b-noneq` with the solvent left as the ground
+state had it. The S0 Hessian can come from another program (`--hessian
+external --hessian-file s0.hess`, an ORCA .hess file computed at the geometry
+in `s0.xyz`):
+
+```bash
+python -m src.photophysics --system formaldehyde \
+    --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
+    --basis cc-pvdz --environment toluene --solvent-scheme scheme-b-eq \
+    --temperature 300 --lambda-env 0.05 --nudge 0.02 --no-far-start \
+    --refreeze 1 --saddle-check 0 --df-check 0 --hessian analytic-df \
+    --relaxed-solvation equilibrium --span full --manifold-gaps stacked \
+    --tda --qp-states frontier --scf df --grid-accuracy G1 --scf-grad-tol 1e-9 \
+    --out tadf
+```
+
+A basis can differ by element or by atom: `--basis` names the set of every
+atom, `--basis-for EL=NAME` another set for one element (aug-cc-pVDZ on the
+heavy atoms and cc-pVDZ on hydrogen), and `--basis-for atoms=I-J,K:NAME`
+another set for atoms counted from 1 as in the xyz file (aug-cc-pVDZ on an
+emitter's atoms and cc-pVDZ on the host molecules around it). Both repeat,
+and an atom range wins over its element. Where one element ends up on two
+sets, the atoms on the second are labelled `C@1`, `H@1`, ... (pyscf reads a
+labelled atom's basis under its label). Each atom's auxiliary sets follow
+its own basis (its -jkfit set for a density-fitted mean field, its -ri set
+for the GW and BSE factors), and so does its interpolation grid. An accuracy
+level such as G3 is used where every named basis gives it the same grid
+counts, which aug-cc-pVDZ and cc-pVDZ do at G1, G2 and G3. Every record
+carries the whole map, so a run is never continued under another one.
+Formaldehyde in the gas phase:
+
+```bash
+python -m src.photophysics --system formaldehyde \
+    --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \
+    --basis aug-cc-pvdz --basis-for H=cc-pvdz --environment gas \
+    --scf df --grid-accuracy G1 --temperature 300 --lambda-env 0.05 \
+    --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \
+    --hessian analytic-df --relaxed-solvation equilibrium --span full \
+    --manifold-gaps stacked --out tadf
+```
+
+`--basis-for atoms=1-2:aug-cc-pvdz` in place of `H=cc-pvdz` puts
+aug-cc-pVDZ on C and O only. `solvated` below takes `--basis-for` the same
+way; there `--auxbasis` and `--jk-auxbasis` are left out under a map, which
+pairs them atom by atom.
 
 `python -m src.photophysics solvated` gives the absorption, emission and
 adiabatic S1 and T1 energies of one molecule in the gas phase and in a

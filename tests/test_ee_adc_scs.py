@@ -22,7 +22,8 @@ the second-order singles block and in the folded coupling. Checks:
   4. over 2 and 3 simulated MPI ranks a scaled operator's set-up, products and
      roots are the serial ones to a few ulp.
   5. solve_ee_adc(fold=True, spin_scaling='scs') gives the operator's roots;
-     refusals: an unknown name, without fold, at ADC(1), with state_specific.
+     refusals: an unknown name, without fold, at ADC(1), with state_specific
+     on the unrelaxed density (a scaled root has none).
   6. with CuPy importable, the GPU doubles kernel equals the CPU path to 1e-10
      (scaled, singlets and triplets).
 
@@ -200,7 +201,7 @@ def check_driver(mf, F):
                       (dict(fold=False, spin_scaling='scs'), 'without fold'),
                       (dict(fold=True, level='adc1', spin_scaling='scs'), 'at ADC(1)'),
                       (dict(fold=True, spin_scaling='scs', state_specific='vertical'),
-                       'with state_specific')):
+                       'with state_specific on the unrelaxed density')):
         args = dict(level='adc2', spin='singlet', nroots=1)
         args.update(kw)
         try:

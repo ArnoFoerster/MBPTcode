@@ -40,6 +40,7 @@ from src.gradients.adc.fold_factors import ground_factors
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.gradients.adc import ee_gradient as eg
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from tests.adc_common import (ATOMS, AUX, FD_STEP_FORCE, JKFIT, SCF_GRAD_TILED,
                               SCF_TOL_TIGHT, check, df_rhf, molecule)
@@ -102,9 +103,10 @@ def check_against_dense():
         out = {}
         for route in ('dense', 'tiled'):
             hf = HFState(mol, make_scf)
-            mp2 = MP2State(hf, nf, AUX, force_route=route, tile_gb=1e-9)
-            state = ADC2State(mp2, 'singlet', 0, 3, field.transition_environment(),
-                              conv_tol=1e-12)
+            mp2 = MP2State(hf, nf, AUX, force_route=route,
+                           numerics=Numerics(layout={'tile_gb': 1e-9},
+                                             adc={'conv_tol': 1e-12}))
+            state = ADC2State(mp2, 'singlet', 0, 3, field.transition_environment())
             h, c = field.operator(field.charges(field.potential(hf(0.0, 0.0).dm_eff)))
             F, info = state.force(h, c)
             F = F + field.force(info['dm_eff'])

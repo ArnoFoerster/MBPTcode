@@ -170,7 +170,8 @@ def _one_root(res):
     res.omega, res.t1 = res.omega[:1], res.t1[:1]
     res.y = np.asarray(res.y)[..., :1]
     res.converged = np.atleast_1d(res.converged)[:1]
-    res.delta_density_relaxed = list(res.delta_density_relaxed)[:1]
+    if hasattr(res, 'delta_density_relaxed'):
+        res.delta_density_relaxed = list(res.delta_density_relaxed)[:1]
     return res
 
 
@@ -296,6 +297,7 @@ def test_a_force_on_reordered_roots_is_flagged(monkeypatch):
     h = np.zeros((mol.nao, mol.nao))
     state = adc(mol, follow='index')
     state(h, 0.0)
+    state.solved = None          # the force solves its roots afresh
 
     def swap(out):
         order = [1, 0] + list(range(2, out['omega'].size))
@@ -314,6 +316,7 @@ def test_a_force_of_another_omega_is_flagged(monkeypatch):
     h = np.zeros((mol.nao, mol.nao))
     state = adc(mol, follow='index')
     state(h, 0.0)
+    state.solved = None          # the force solves its roots afresh
     _patched_root(monkeypatch, lambda out: dict(out, omega=out['omega'] + 1e-6))
     with pytest.warns(FollowingWarning, match='same field'):
         F, info = state.force(h, 0.0)

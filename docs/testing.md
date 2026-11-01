@@ -6,8 +6,9 @@ The tests run under pytest, which the package itself does not need:
 pip install pytest
 ```
 
-Every test file runs as a script, which prints a verdict per check and exits
-non-zero if any check failed, and under pytest:
+A test file runs either under pytest or as a script, which prints a verdict
+per check and exits non-zero if any check failed. The lists in `tools/ci/`
+say which, file by file (`pytest <file>` or `script <file>`):
 
 ```bash
 python tests/test_adc3.py

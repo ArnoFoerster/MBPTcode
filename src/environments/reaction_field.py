@@ -37,9 +37,20 @@ The contract:
                                    density (sites, nuclei and basis moving)
     transition_force(dm)           d/dR [(1/2) V_e(dm)^T Q_f V_e(dm)] of the
                                    electrons of dm alone (a transition density)
+    charge_force(dm, q)            d/dR [q . V_tot(dm)] at fixed charges q and
+                                   AO density dm (the sites moving with their
+                                   atoms): the electrostatic force of given
+                                   charges, e.g. a loop's residual
+    response_force(a, b, response) d/dR [a^T Q b] at fixed site vectors a, b:
+                                   the medium's own geometry dependence
+    scf_continuum()                the medium at eps_static as a solvated
+                                   SCF's continuum (pyscf's), for the
+                                   response of a ground state equilibrated
+                                   in it (src.gradients.scf_loop_response)
 
-force and transition_force take a symmetric AO density (a non-symmetric one is
-refused, src.environments.pcm_derivatives.potential_integral_gradient) and are refused
+force, transition_force and charge_force take a symmetric AO density (a
+non-symmetric one is refused,
+src.environments.pcm_derivatives.potential_integral_gradient) and are refused
 on a medium whose sites do not move with the atoms (a continuum around an
 enclosing shell: `differentiable` False).
 
@@ -56,13 +67,16 @@ from pyscf.solvent import pcm as pyscf_pcm
 from pyscf.solvent.grad import pcm as pcm_grad
 
 from src.environments.pcm_derivatives import (bound_pyscf_pcm_blocks,
-                                     potential_integral_gradient, solvation_gradient)
+                                              potential_integral_gradient,
+                                              solvation_gradient,
+                                              solver_bilinear_gradient)
 from src.environments.pcm_factorization import factorize_once
 from src.Base.utils.record_io import record_hash
-from src.environments.solvent_screening import SolventScreening, symmetrized_response
+from src.environments.solvent_screening import (SolventScreening, pcm_radii_table,
+                                                symmetrized_response)
 
 RESPONSES = ('static', 'fast')
-CAVITY_KEYS = ('lebedev_order', 'vdw_scale', 'r_probe', 'radii_table')
+CAVITY_KEYS = ('lebedev_order', 'vdw_scale', 'r_probe', 'radii_table', 'radius_set')
 
 
 def _cavity_of(env):
@@ -95,6 +109,12 @@ class ReactionField(Protocol):
     def force(self, dm, response='static'): ...
 
     def transition_force(self, dm, response='fast'): ...
+
+    def charge_force(self, dm, q): ...
+
+    def response_force(self, a, b, response='static'): ...
+
+    def scf_continuum(self): ...
 
 
 class ContinuumField:
@@ -137,7 +157,9 @@ class ContinuumField:
         p = self._new_pcm(self.mol)
         p.eps, p.method, p.verbose = eps, self.method, 0
         for k, v in self._cavity.items():
-            setattr(p, k, v)
+            if k not in ('radius_set', 'radii_table'):
+                setattr(p, k, v)
+        p.radii_table = pcm_radii_table(self._cavity)
         bound_pyscf_pcm_blocks(p)
         p.build()
         factorize_once(p)
@@ -183,13 +205,19 @@ class ContinuumField:
 
     def identity(self):
         """What this medium is, for a checkpoint's key: the model, both
-        dielectric constants, the cavity settings and a digest of its sites
-        and their areas."""
+        dielectric constants, the cavity settings (a radius table of one's
+        own by its digest; the radius set by name unless it is the modified
+        Bondi set, which a key without a name has always meant) and a digest
+        of its sites and their areas."""
         surf = self._pcm['static'].surface
+        cavity = {k: v for k, v in self._cavity.items()
+                  if not (k == 'radius_set' and v == 'bondi')}
         return dict(medium='continuum', method=self.method,
                     eps_static=self.eps['static'], eps_inf=self.eps['fast'],
-                    cavity={k: (None if v is None else str(v))
-                            for k, v in sorted(self._cavity.items())},
+                    cavity={k: (None if v is None else
+                                record_hash(np.asarray(v, float))
+                                if isinstance(v, np.ndarray) else str(v))
+                            for k, v in sorted(cavity.items())},
                     sites=record_hash((np.asarray(surf['grid_coords'], float),
                                        np.asarray(surf['area'], float))))
 
@@ -221,6 +249,35 @@ class ContinuumField:
         finally:
             p.v_grids_n = v_n
             p._intermediates.pop('dm', None)
+
+    def charge_force(self, dm, q):
+        """d/dR [q . V_tot(dm)] at fixed q and dm: the nuclei's and the
+        electrons' interaction with the charges, the basis and the sites
+        moving (pyscf's `grad_nuc` and `grad_qv` with the charges given)."""
+        self._require_differentiable()
+        p = self._pcm['static']
+        q = np.asarray(q, float)
+        dm = np.asarray(dm)
+        p._intermediates.pop('dm', None)
+        out = (np.asarray(pcm_grad.grad_nuc(p, dm, q_sym=q))
+               + potential_integral_gradient(p, dm, q_sym=q))
+        p._intermediates.pop('dm', None)
+        return out
+
+    def response_force(self, a, b, response='static'):
+        """d/dR [a^T Q b] at fixed site vectors a and b: the cavity's own
+        derivative of the symmetrized response (both orders of pyscf's
+        K^-1 R, `pcm_derivatives.solver_bilinear_gradient`)."""
+        self._require_differentiable()
+        p = self._pcm[response]
+        a, b = np.asarray(a, float), np.asarray(b, float)
+        return 0.5 * (solver_bilinear_gradient(p, a, b)
+                      + solver_bilinear_gradient(p, b, a))
+
+    def scf_continuum(self):
+        """A fresh pyscf continuum at eps_static on this cavity, built as the
+        medium's own (module docstring)."""
+        return self._build(self.eps['static'])
 
 
 class NoMedium:
@@ -263,6 +320,15 @@ class NoMedium:
 
     def transition_force(self, dm, response='fast'):
         return np.zeros((self.mol.natm, 3))
+
+    def charge_force(self, dm, q):
+        return np.zeros((self.mol.natm, 3))
+
+    def response_force(self, a, b, response='static'):
+        return np.zeros((self.mol.natm, 3))
+
+    def scf_continuum(self):
+        return None
 
 
 def _optical_only(env, mol):

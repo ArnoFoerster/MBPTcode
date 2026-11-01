@@ -114,12 +114,14 @@ from src.Base.numerics.constants import (BYTES_PER_GB, AUX_METRIC_INDEFINITE_TOL
                                          ISDF_GRID_N_START, ISDF_ORBITAL_RESIDUAL_TOL,
                                          ISDF_REFUSED_ORBITALS_NAMED,
                                          ISDF_RADII_MATCH_TOL,
-                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TILE_GB,
+                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TEST_SETS,
+                                         ISDF_TILE_GB,
                                          THREE_CENTER_BLOCK_BYTES)
-from src.Base.geometry.geometry import elements_of
+from src.Base.geometry.geometry import elements_of, grid_key
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
-                                        missing_row_hint, paired_auxbasis)
+                                        missing_row_hint, paired_auxbasis,
+                                        pure_element)
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block, current_comm,
@@ -250,10 +252,14 @@ class FitTiles:
     The distributed ISDF-K SCF hands its own out
     (`DistributedISDFJK.fit_tiles`), and the gradient chain and the energy
     route's factor stage read the SCF's fit instead of repeating it.
+    `test_set` names the fit the tiles are (`IsdfNumerics.test_set`): the
+    AO-product row fit (`ao_product_fit.ao_product_fit_rows`) hands tiles
+    out the same way, and neither fit reads the other's.
     """
 
     def __init__(self, mol, auxmol, coords, block, mt, comm, held, settings,
-                 kept=None):
+                 kept=None, test_set=ISDF_TEST_SETS[0]):
+        self.test_set = str(test_set)
         self.keys = (content_key(mol), content_key(auxmol))
         self.kept = None if kept is None else _read_only(kept)
         self.coords = _read_only(coords)
@@ -269,11 +275,11 @@ class FitTiles:
                          float(regularization), float(block_memory_gb))
 
     def row_fit(self, mol, auxmol, coords, block, comm, settings,
-                layout=None):
+                layout=None, test_set=ISDF_TEST_SETS[0]):
         """The `RowFit` `fit_rows` would return for this call, read from
         these tiles, or None where the call asks for another fit: another
-        molecule, basis, point, tile edge, setting or rank layout, or a
-        frozen pair `layout` other than the columns these tiles kept.
+        test set, molecule, basis, point, tile edge, setting or rank layout,
+        or a frozen pair `layout` other than the columns these tiles kept.
 
         The collocation over this rank's contiguous rows is evaluated tile
         by tile, the calls the fit's own Gram pass makes for it, and the
@@ -281,7 +287,8 @@ class FitTiles:
         """
         ranks = (1, 0) if comm is None else (comm.Get_size(), comm.Get_rank())
         l_max, tol, reg, gb = settings
-        if (ranks != self.ranks or int(block) != self.block
+        if (str(test_set) != self.test_set or ranks != self.ranks
+                or int(block) != self.block
                 or (int(l_max), float(tol), float(reg), float(gb))
                 != self.settings
                 or (content_key(mol), content_key(auxmol)) != self.keys
@@ -1356,6 +1363,121 @@ def gram_tiles(mol, auxmol, coords, tiles, owners, rank, second, w,
     return S, d, X_own, B_own, P_own, X_ext, screen_ref
 
 
+def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
+                    hold):
+    """(diagonal, panels): `fit_rows`' right-looking Cholesky of the Gram
+    tiles S (consumed), the forward substitution of each right-hand side of
+    `rhs_sets` riding in the sweep as it does there, and the factor kept for
+    later solves: the diagonal block and the gathered panel below it of
+    every tile this rank owns, the same arrays and the same calls as that
+    sweep's."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncols = [broadcast(next(iter(rhs.values())).shape[1] if rhs else 0, comm)
+             for rhs in rhs_sets]
+    diagonal, panels = {}, {}
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        LT = np.empty((j1 - j0, j1 - j0))
+        info = 0
+        if rank == owner:
+            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
+            LT = L.T
+        info = broadcast(info, comm, root=owner)
+        if info != 0:
+            raise np.linalg.LinAlgError(
+                f'Cholesky of the balanced Gram matrix failed at leading '
+                f'minor {j0 + info}: it is not positive definite, which for a '
+                f'Gram matrix plus a {regularization:g} shift means the grid '
+                'is degenerate.')
+        broadcast_rows(LT, owner, comm)
+        L = LT.T
+        ys = []
+        for rhs, ncol in zip(rhs_sets, ncols):
+            y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+            if rank == owner:
+                trsm(L, y.T, side=1, trans_a=1)
+            broadcast_rows(y, owner, comm)
+            ys.append(y)
+        if rank == owner:
+            diagonal[j] = L
+        below = [i for i in mine if i > j]
+        Lcol = {}
+        for i in below:
+            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
+            trsm(L, Lcol[i].T, side=0, trans_a=0)
+        for rhs, y in zip(rhs_sets, ys):
+            for i in below:
+                rhs[i] -= Lcol[i] @ y
+        del ys
+        panel = np.empty((nk - j1, j1 - j0))
+        for i in below:
+            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
+        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
+                                  for i in own if i > j] for own in owners],
+                         comm)
+        for i in below:
+            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
+            S[i] = S[i][:, j1 - j0:] - U
+            del U
+        if rank == owner:
+            panels[j] = panel
+        hold('panel', panel.nbytes)
+        hold('S_rows', total_bytes(S.values()) + total_bytes(panels.values())
+             + total_bytes(diagonal.values()))
+        del panel
+    return diagonal, panels
+
+
+def forward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm, hold):
+    """rhs <- L^-1 rhs on the kept factor: the owner of tile j solves its
+    block and broadcasts it with its panel, and every rank updates its tiles
+    below with the call `cholesky_tiles` makes there."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j], y.T, side=1, trans_a=1)
+        broadcast_rows(y, owner, comm)
+        panel = panels[j] if rank == owner else np.empty((nk - j1, j1 - j0))
+        broadcast_rows(panel, owner, comm)
+        hold('panel', panel.nbytes)
+        for i in mine:
+            if i > j:
+                rhs[i] -= panel[tiles[i][0] - j1:tiles[i][1] - j1] @ y
+        del y, panel
+
+
+def backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
+                    keep=True):
+    """rhs <- L^-T rhs on the kept factor, `fit_rows`' backward sweep: each
+    solved block broadcast by its owner and pushed into the rows that own a
+    panel. keep=False drops the factor as it goes, as that sweep does."""
+    nranks = len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j in reversed(range(len(tiles))):
+        j0, j1 = tiles[j]
+        owner = j % nranks
+        z = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j] if keep else diagonal.pop(j), z.T, side=1,
+                  trans_a=0)
+            if not keep:
+                panels.pop(j, None)
+        broadcast_rows(z, owner, comm)
+        for i in mine:
+            if i < j:
+                i1 = tiles[i][1]
+                rhs[i] -= panels[i][j0 - i1:j1 - i1].T @ z
+        del z
+
+
 def block_coefficients(integrals, lu, shells, a0, keep, second, w, hold):
     """F_b^T = (V^-1 (Q|rho) w)^T, (kept, naux) C order, of one shell block's
     kept pairs rho = (mu, nu): the arithmetic of the replicated pass on the
@@ -1630,27 +1752,22 @@ def _balanced_gram(D, numerics):
 def fit_M(D, F, numerics=None):
     """Their eqs 8-9: balanced, Tikhonov-regularized least-squares estimator.
 
-    Cost is one (nk x nk) Gram matrix, one inversion and two products -- O(N^3)
-    with the test set linear in system size.
-    """
-    Dt, d, G = _balanced_gram(D, numerics)
-    return ((F @ Dt.T) @ np.linalg.inv(G)) * d[None, :]
-
-
-def fit_M_stable(D, F, numerics=None):
-    """`fit_M` with the explicit inverse replaced by a Cholesky solve.
-
-    The same estimator, a better numerical realization of it. `fit_M` forms
-    np.linalg.inv(G) at cond(G) ~ 2e8, which costs digits in the forward pass;
-    production's default `fit_M_streaming` already solves rather than inverts,
-    and `build_separable_ri` calls it "the better conditioned of the two". D is
-    explicit, so the estimator is whatever columns D and F carry: the fit
-    adjoints formed whole rebuild `fit_M_streaming`'s estimator with it from D
-    over every product pair and F zero on the screened ones.
+    The Gram matrix is solved with a Cholesky factorization, not inverted:
+    an explicit inverse at cond(G) ~ 2e8 costs digits, and production's
+    default `fit_M_streaming` solves too. Cost is one (nk x nk) Gram matrix,
+    one factorization and two products -- O(N^3) with the test set linear in
+    system size. D is explicit, so the estimator is whatever columns D and F
+    carry: the fit adjoints formed whole rebuild `fit_M_streaming`'s estimator
+    with it from D over every product pair and F zero on the screened ones.
     """
     Dt, d, G = _balanced_gram(D, numerics)
     cho = scipy.linalg.cho_factor(G, lower=True)
     return scipy.linalg.cho_solve(cho, (F @ Dt.T).T).T * d[None, :]
+
+
+def fit_M_stable(D, F, numerics=None):
+    """`fit_M`, kept as the name the gradient refits call."""
+    return fit_M(D, F, numerics)
 
 
 def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
@@ -2271,9 +2388,23 @@ def single_basis_name(basis):
     return names.pop()
 
 
+def validated_levels(basis):
+    """{level: counts} validated at `basis`. Levels are defined per basis
+    name; a per-element basis has a level where every set it names has that
+    level at the same four counts (aug-cc-pVDZ and cc-pVDZ agree at G1-G3),
+    so each element takes its own table row at one count tuple. A level whose
+    counts differ between the sets is absent: no one grid is that level."""
+    if not isinstance(basis, dict):
+        return ISDF_GRID_ACCURACY.get(single_basis_name(basis), {})
+    tables = [ISDF_GRID_ACCURACY.get(element_basis_name(basis, el), {})
+              for el in basis]
+    return {level: counts for level, counts in tables[0].items()
+            if all(t.get(level) == counts for t in tables[1:])}
+
+
 def _shipped_key(element, basis, auxbasis, counts):
     """Table key: the physics, and nothing about how the grid was found."""
-    return (f'{element}|{element_basis_name(basis, element)}|'
+    return (f'{pure_element(element)}|{element_basis_name(basis, element)}|'
             f'{element_basis_name(auxbasis, element)}|') + \
            ','.join(str(int((counts or {}).get(name, 0))) for name in SHELL_ORDER)
 
@@ -2288,7 +2419,7 @@ def _tabulated_counts(element, basis, auxbasis):
     auxbasis = element_auxbasis(element, basis, auxbasis)
     for key, row in shipped_radii().items():
         el, bas, aux, counts = key.split('|')
-        if (el, bas, aux) != (str(element), element_basis_name(basis, element),
+        if (el, bas, aux) != (pure_element(element), element_basis_name(basis, element),
                               element_basis_name(auxbasis, element)):
             continue
         out.append((row['points'], f'({counts}) {row["points"]} pts'
@@ -2323,7 +2454,7 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
     whether the nuclear cusp is sampled, which together are the grid.
     """
     auxbasis = auxbasis or paired_auxbasis(basis)
-    hit = shipped_radii_lookup(element, str(basis), str(auxbasis), counts)
+    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
     if hit is None:
         raise KeyError(
             f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
@@ -2368,6 +2499,12 @@ def runtime_atomic_radii(element, basis, auxbasis, counts, n_start=1,
             f'or counts, add the row to the table, or declare the run-time '
             f'grid (IsdfNumerics(runtime_radii=True), or runtime_radii=True).'
             + missing_row_hint(element, basis, auxbasis, counts))
+    if element != pure_element(element):
+        # a per-atom key: the optimizer reads the element and its own sets
+        auxbasis = element_basis_name(element_auxbasis(element, basis, auxbasis),
+                                      element)
+        basis = element_basis_name(basis, element)
+        element = pure_element(element)
     r_max = search_r_max(element, n_start=max(int(n_start), 2))
     radii, fit_error = optimize_atomic_radii(element, basis, auxbasis,
                                              counts=counts, n_start=n_start,
@@ -2655,7 +2792,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
             'or four shell counts.')
     if isinstance(grid, str) and ',' not in grid:
         level = grid.strip().upper()
-        validated = ISDF_GRID_ACCURACY.get(single_basis_name(basis), {})
+        validated = validated_levels(basis)
         if level not in validated:
             raise ValueError(
                 f'grid does not exist: no interpolation grid is validated at '
@@ -2724,7 +2861,7 @@ def grid_identity(level, basis, elements, auxbasis=None, counts=None,
     else:
         rows = {}
         for el in elements:
-            hit = shipped_radii_lookup(el, str(basis), str(auxbasis), counts)
+            hit = shipped_radii_lookup(el, basis, auxbasis, counts)
             rows[el] = (None if hit is None else
                         [{k: np.asarray(v).tolist()
                           for k, v in sorted(hit[0].items())}, hit[2]])
@@ -3089,7 +3226,7 @@ def points_on_frames(mol, radii, origins, frames):
     3) rows the axes: the same expression, so equal frames give the same bits."""
     out = []
     for ia in range(mol.natm):
-        sym = mol.atom_pure_symbol(ia)
+        sym = grid_key(mol, ia)
         pts = atomic_points(radii[sym], centre=(0.0, 0.0, 0.0),
                             origin=(origins or {}).get(sym, False))
         out.append(pts @ frames[ia] + mol.atom_coord(ia))

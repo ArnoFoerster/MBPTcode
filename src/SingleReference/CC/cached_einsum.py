@@ -56,6 +56,8 @@ import os
 import numpy as np
 import opt_einsum
 
+from src.Base.utils.threaded_copies import threaded_copies_active
+
 _PATH_CACHE = {}
 _OPTIMAL_MAX_OPERANDS = 4
 # path strategy for the products a factorized operand expands into: exact
@@ -180,6 +182,9 @@ def einsum(subscripts, *operands, optimize=True):
     if optimize is True and len(operands) > 1:
         strategy = 'optimal' if len(operands) <= _OPTIMAL_MAX_OPERANDS else 'greedy'
         optimize = _cached_path(subscripts, operands, strategy)
+        if threaded_copies_active():
+            return opt_einsum.contract(subscripts, *operands, optimize=optimize[1:],
+                                       backend='threaded')
     return np.einsum(subscripts, *operands, optimize=optimize)
 
 

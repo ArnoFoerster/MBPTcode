@@ -51,7 +51,8 @@ from dataclasses import replace
 import numpy as np
 from pyscf import gto
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_ENERGY_CONV_TOL,
+from src.Base.numerics.constants import (CONTINUATION_ROUTE, HARTREE_TO_EV,
+                                         SCF_ENERGY_CONV_TOL,
                                          SCF_ENERGY_GRAD_TOL, VERTICAL_FRONTIER_LISTED,
                                          VERTICAL_WORST_LISTED)
 from src.Base.declaration import Excitation, QPStates
@@ -76,6 +77,11 @@ def arm_declaration(declaration, arm):
     ac-all arm's chain included)."""
     if arm not in ARMS:
         raise ValueError(f'arm {arm!r} not in {ARMS}')
+    if declaration.numerics.qp.residue_route == CONTINUATION_ROUTE:
+        raise ValueError(
+            f'the arms run the pole model and the continuation on one '
+            f'forward of the declared chain; a declaration on residues '
+            f'{CONTINUATION_ROUTE!r} is the vertical stage\'s (--stages vert)')
     kind = declaration.qp_states.kind
     if arm == 'sop-adaptive':
         if kind == 'adaptive':
@@ -271,7 +277,7 @@ def vertical_arm(declaration, arm, max_memory):
         f'{d.reference}/{mol.basis}, {d.mean_field_name} mean field, factors '
         f'{d.numerics.isdf.level}, environment {d.environment}, arm {arm}')
     rec = dict(kind='vertical_arm', system=d.system.name, natm=mol.natm,
-               nao=mol.nao_nr(), basis=str(mol.basis), reference=d.reference,
+               nao=mol.nao_nr(), basis=mol.basis, reference=d.reference,
                environment=d.environment, arm=arm,
                scf=d.numerics.scf.route, scf_grid=d.numerics.scf.grid_level,
                kernel=d.kernel, nroots=d.numerics.bse.nroots,

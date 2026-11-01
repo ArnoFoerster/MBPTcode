@@ -143,8 +143,8 @@ def test_frozen_poles_are_not_fitted_again(water, monkeypatch):
 @pytest.mark.parametrize('size', SIZES)
 def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     """The three-index slices B_p, the O(M naux norb) per-state cost of the
-    sweep, are striped too: n slices in all over `size` ranks, and every
-    rank's are the serial ones to a few ulp."""
+    sweep, are striped too: n slices in all over `size` ranks, each held by
+    the rank that built it alone, and the serial ones to a few ulp."""
     n = len(water['states'])
     built, lock = [], threading.Lock()
     real = qp_space_time.three_index_slice
@@ -158,9 +158,11 @@ def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
                         size)
     assert len(built) == n, f'{len(built)} slices for {n} states'
+    held = [i for _, route_out in got for i in route_out['tape'].Bps.held]
+    assert sorted(held) == list(range(n)), held
     for _, route_out in got:
-        for b, r in zip(route_out['tape'].Bps, ref):
-            same(b, r, 'B_p', unit='1')
+        for i, b in route_out['tape'].Bps.held.items():
+            same(b, ref[i], 'B_p', unit='1')
 
 
 if __name__ == '__main__':

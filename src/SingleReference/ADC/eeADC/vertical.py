@@ -11,8 +11,9 @@ The route is solve_ee_adc(fold=True): the doubles folded into the singles
 problem and every doubles-shaped quantity built a tile at a time from the DF
 factors, so a thousand basis functions fit on one machine. The reference is
 DF-RHF on the JK fit (--jk-auxbasis); the ADC integrals use the correlation
-fit (--auxbasis). In a continuum (a solvent name from pyscf's SMD table) the
-SCF relaxes at the solvent's static dielectric constant and the excitation's
+fit (--auxbasis). In a continuum (a solvent name from pyscf's SMD table, or
+eps=EPS_S,n2=N2 for any other medium, on the cavity --cavity names) the SCF
+relaxes at the solvent's static dielectric constant and the excitation's
 reaction field answers at the optical one, in the singlet singles block; the
 second-order terms keep the bare interaction (see ee_ri_fold).
 
@@ -31,11 +32,15 @@ and both dipole changes (delta_dipole_au), and density_<spin>.npz the relaxed
 densities in the full MO basis (delta_density_relaxed).
 
 --spin-scaling scs|sos runs SCS- or SOS-ADC(2) (ee_ri_fold; the factors of
-ADC2_SPIN_SCALING), gas phase or with the LR term, not with --state-specific.
+ADC2_SPIN_SCALING), gas phase or with the LR term; with --state-specific
+only on a relaxed --ss-density (a scaled root has no unrelaxed ISR density:
+the unrelaxed shifts and dipole change are null, density_<spin>.npz holds
+the relaxed densities only).
 
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
-spin channel in channel_<spin>.json; a rerun reuses both. --estimate-only
+spin channel in channel_<spin>.json; a rerun reuses both (a channel of another
+medium is solved again). --estimate-only
 prints the problem's size, the memory the operator holds and the floating
 point work of one product, and exits.
 
@@ -62,6 +67,8 @@ from src.Base.numerics.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,
                                          EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import code_id
+from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
+from src.environments.medium import CAVITY_CONVENTIONS, describe, parse as parse_medium
 from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
                                               lockstep_mean_field)
 from src.Base.utils.parallel.threads import blas_threads, openmp_threads
@@ -165,19 +172,24 @@ def main(argv=None):
     p.add_argument('--jk-auxbasis', default='aug-cc-pvdz-jkfit',
                    help='JK fit of the reference')
     p.add_argument('--environment', default='gas',
-                   help="'gas' or a solvent name of pyscf's SMD table")
+                   help="'gas', a solvent name of pyscf's SMD table, or "
+                        'eps=EPS_S,n2=N2[,label=NAME] (src.environments.medium)')
+    p.add_argument('--cavity', default=None,
+                   choices=sorted(CAVITY_CONVENTIONS),
+                   help='the cavity convention, radius set and scale (default '
+                        'the one --environment names, else DEFAULT_CAVITY)')
     p.add_argument('--spins', nargs='+', default=['singlet', 'triplet'])
     p.add_argument('--nroots', type=int, default=6)
     p.add_argument('--state-specific', default='off',
                    choices=('off', 'vertical', 'equilibrium'),
                    help='add the state-specific reaction field of each '
                         "root's difference density (needs a continuum)")
-    p.add_argument('--ss-density', default='unrelaxed',
-                   choices=('unrelaxed', 'relaxed', 'relaxed+pcm'),
+    p.add_argument('--ss-density', default=SS_DENSITY_DEFAULT,
+                   choices=SS_DENSITIES,
                    help='difference density of the state-specific term: '
-                        'unrelaxed ISR-ADC(2), orbital-relaxed with the '
-                        'ground-state charges frozen, or relaxed with the '
-                        'continuum responding')
+                        'orbital-relaxed with the ground-state charges '
+                        'frozen (default), unrelaxed ISR-ADC(2), or relaxed '
+                        'with the continuum responding')
     p.add_argument('--spin-scaling', default='none', choices=('none', 'scs', 'sos'),
                    help='spin-component scaled ADC(2), factors (c_os, c_ss) of '
                         'ADC2_SPIN_SCALING')
@@ -222,8 +234,12 @@ def run(args, comm):
                         omp_threads=openmp_threads())), flush=True)
     if args.state_specific != 'off' and args.environment == 'gas':
         raise SystemExit('--state-specific needs --environment (a continuum)')
-    if args.ss_density != 'unrelaxed' and args.state_specific == 'off':
+    if args.ss_density != SS_DENSITY_DEFAULT and args.state_specific == 'off':
         raise SystemExit('--ss-density needs --state-specific')
+    if (args.spin_scaling != 'none' and args.state_specific != 'off'
+            and args.ss_density == 'unrelaxed'):
+        raise SystemExit('--spin-scaling with --state-specific needs --ss-density '
+                         'relaxed or relaxed+pcm (a scaled root has no unrelaxed density)')
     if args.estimate_only:
         need = est['peak_gb']
         if need * MB_PER_GB > args.max_memory:
@@ -239,13 +255,10 @@ def run(args, comm):
     record_path = os.path.join(args.out_dir, 'record.json')
     env = None
     env_info = {'name': 'gas'}
-    if args.environment != 'gas':
-        from src.environments.solvent_screening import SolventScreening
-        env = SolventScreening(mol, solvent=args.environment)
-        env_info = dict(name=args.environment, eps_optical=env.eps,
-                        eps_static=env.eps_static, method=env.method,
-                        cavity=dict(env.cavity_settings, cavity_atoms=None),
-                        ngrids=env.ngrids,
+    medium = parse_medium(args.environment, args.cavity)
+    if medium is not None:
+        env = medium.screening(mol)
+        env_info = dict(describe(env), name=medium.name, eps_optical=env.eps,
                         convention='SCF at eps_static; LR transition reaction '
                                    'field at eps_optical in the singlet singles '
                                    'block; second order with the bare '
@@ -289,7 +302,9 @@ def run(args, comm):
                 stored = json.load(fh)
             if (stored.get('state_specific', 'off') == args.state_specific
                     and stored.get('ss_density', 'unrelaxed') == args.ss_density
-                    and stored.get('spin_scaling', 'none') == args.spin_scaling):
+                    and stored.get('spin_scaling', 'none') == args.spin_scaling
+                    # a channel that records no medium is reused
+                    and stored.get('medium', describe(env)) == describe(env)):
                 channels[spin] = stored
                 say(f'{spin}: reused {path}', flush=True)
                 continue
@@ -322,18 +337,20 @@ def run(args, comm):
                   wall_s=time.time() - t, peak_rss_gb=peak_rss_gb(),
                   state_specific=args.state_specific,
                   ss_density=args.ss_density,
-                  spin_scaling=args.spin_scaling)
+                  spin_scaling=args.spin_scaling, medium=describe(env))
         if args.state_specific != 'off':
             ch['ss_shifts_eV'] = {m: (np.asarray(v) * HARTREE_TO_EV).tolist()
                                   for m, v in res.ss_shifts.items()}
             ch['ss_shift_eV'] = (np.asarray(res.ss_shift) * HARTREE_TO_EV).tolist()
             ch['omega_ss_eV'] = (np.asarray(e) * HARTREE_TO_EV).tolist()
-            densities = dict(delta_density=np.asarray(res.delta_density))
+            # a spin-scaled root has no unrelaxed density (solve_ee_adc)
+            densities = ({} if res.delta_density is None else
+                         dict(delta_density=np.asarray(res.delta_density)))
             if args.ss_density != 'unrelaxed':
-                ch['ss_shifts_unrelaxed_eV'] = {
+                ch['ss_shifts_unrelaxed_eV'] = (None if res.ss_shifts_unrelaxed is None else {
                     m: (np.asarray(v) * HARTREE_TO_EV).tolist()
-                    for m, v in res.ss_shifts_unrelaxed.items()}
-                ch['delta_dipole_au'] = {k: np.asarray(v).tolist()
+                    for m, v in res.ss_shifts_unrelaxed.items()})
+                ch['delta_dipole_au'] = {k: None if v is None else np.asarray(v).tolist()
                                          for k, v in res.delta_dipole.items()}
                 densities['delta_density_relaxed'] = np.asarray(
                     res.delta_density_relaxed)
