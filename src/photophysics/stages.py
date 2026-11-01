@@ -2,7 +2,10 @@
 of a `Run` that returns its record, and `run_tadf`, which runs them in order.
 
     ground_minimum   s0    the ground-state minimum R0 on the declared mean
-                           field (in PCM at eps_static in a solvent)
+                           field (in PCM at eps_static in a solvent); with
+                           policies.r0 'input' the input geometry as it is,
+                           recorded with no SCF, and taken by any later stage
+                           without being asked for
     ground_modes     hess  the S0 Hessian at R0 and its normal modes:
                            pyscf's analytic Hessian of a density-fitted twin,
                            or central differences of the declared mean
@@ -205,7 +208,7 @@ from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
 from src.gradients.gwbse.state_manifold import StateManifold
 from src.photophysics import chain, df_check, rate_models, state_specific, uisc
-from src.photophysics.declaration import CONTINUATION_STAGES
+from src.photophysics.declaration import CONTINUATION_STAGES, ENERGY_STAGES
 from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
@@ -240,8 +243,8 @@ CHECKED_STAGES = ('vert', 's1', 't1')
 # ----------------------------------------------------------------- stamps
 def scf_stamp(numerics):
     """The scf section a stamp holds: its record, the mean field's own fit
-    (test_set, pivot_points) left out where undeclared, so every stamp
-    written before those fields existed stays what it was."""
+    (test_set, pivot_points) left out where undeclared: a stamp without
+    them is a run that declared neither."""
     record = numerics.to_record()['scf']
     for name in ('test_set', 'pivot_points'):
         if record.get(name) is None:
@@ -267,10 +270,13 @@ class Stamps:
                   'mean_field': mean_field,
                   'scf': scf_stamp(n),
                   'span': span}
+        if d.policies.r0 != 'walk':
+            # stamped only where R0 is not walked: a stamp without r0 is a
+            # walked run
+            ground['r0'] = d.policies.r0
         if d.scheme_b:
-            # stamped under scheme B alone, so that the gas and scheme-A
-            # records keep the stamps they were written with (they differ in
-            # the environment, and a scheme-B record carries the key)
+            # stamped under scheme B only: a stamp without it is a gas or
+            # scheme-A run, which the environment already tells apart
             ground['solvent_scheme'] = {'scheme': d.solvent_scheme,
                                         'loop': n.to_record()['solvent']}
         hess = dict(ground, hessian=d.policies.hessian)
@@ -286,7 +292,10 @@ class Stamps:
                         # and place their points on R0's frames
                         fd_hessian={'pair_layout': 'reference',
                                     'frames': REFERENCE_FRAMES})
-        vert = dict(ground, numerics=n.identity(),
+        # the property set, stamped where it is not every property alone
+        partial = ({} if d.policies.properties == 'all'
+                   else {'properties': d.policies.properties})
+        vert = dict(ground, numerics=n.identity(), **partial,
                     factors=chain.grid_content(n.isdf.level, mol),
                     kernel=d.kernel, ground=d.ground,
                     qp_states=asdict(d.qp_states),
@@ -961,7 +970,8 @@ def merged_flags(*parts):
 
 
 # ------------------------------------------------------------ properties
-def geometry_properties(ev, s_key, t_key, n_states, derivatives=True):
+def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
+                        spin_orbit=True):
     """Everything a rate needs at one geometry, off ONE evaluation: the
     energies of every reported root, the oscillator strengths and transition
     dipoles, the spin-orbit table, d(S0, S), d(S, S+1), d(T, T+1) and the
@@ -970,12 +980,18 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True):
 
     derivatives=False (an evaluation with no adjoint, the continuation's):
     the energies, oscillator strengths, spin-orbit table and |V(S, T)|, and
-    None for every derivative (d_ground, nac, soc_dv_cart, soc_dv_paths)."""
+    None for every derivative (d_ground, nac, soc_dv_cart, soc_dv_paths).
+    spin_orbit=False (policies.properties 'energies'): the energies,
+    oscillator strengths and dipoles, and None for the spin-orbit table, the
+    Condon element and every derivative; derivatives must be False then."""
+    if spin_orbit is False and derivatives:
+        raise ValueError('the derivative couplings read the spin-orbit pass')
     nocc = occupied_count(ev.mf)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     f_osc, dipole = oscillator_strengths(ev.mf, ev.mol, nocc, *singlet)
-    soc = spin_orbit_couplings(ev.mf, ev.mol, nocc, singlet, triplet,
-                               nroots=n_states, two_electron='somf')
+    soc = (spin_orbit_couplings(ev.mf, ev.mol, nocc, singlet, triplet,
+                                nroots=n_states, two_electron='somf')
+           if spin_orbit else None)
     keys = list(ev.energy)
     common = {'coords_bohr': ev.mol.atom_coords(), 'e0': ev.e0,
               'energy': {label(k): float(ev.energy[k]) for k in keys},
@@ -983,7 +999,11 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True):
               'root': {label(k): int(ev.root[k]) for k in keys},
               'emitter': label(s_key), 'reservoir': label(t_key),
               'f_osc': f_osc[:n_states], 'dipole': dipole[:n_states],
-              'socme': soc['socme']}
+              'socme': None if soc is None else soc['socme']}
+    if soc is None:
+        return dict(common, d_ground=None, nac=None, soc_v0=None,
+                    soc_v0_vector=None, soc_dv_cart=None, soc_dv_paths=None,
+                    scf_flags=[])
     if not derivatives:
         v0, v0_vector = condon_element(ev, soc['h_mo'], s_key, t_key)
         return dict(common, d_ground=None, nac=None, soc_v0=v0,
@@ -1016,6 +1036,9 @@ def report_properties(where, props):
             f'{props["omega"][name] * HARTREE_TO_EV:8.4f} eV  '
             f'E {props["energy"][name]:.9f} Ha  root {props["root"][name]}')
     log('    f ' + ' '.join(f'{x:.4f}' for x in props['f_osc']))
+    if props['socme'] is None:
+        log('    no spin-orbit table and no coupling (properties energies)')
+        return
     soc = np.abs(np.asarray(props['socme'])) * HARTREE_TO_CM
     for i, row in enumerate(soc):
         log(f'    |<{"S0" if i == 0 else f"S{i}"}|H_SO|T_j>| / cm^-1 '
@@ -1057,6 +1080,8 @@ def ground_minimum(run):
         log(f's0 stored: {run.store.path("s0")}')
         return record
     t0 = time.time()
+    if d.policies.r0 == 'input':
+        return input_minimum(run, t0)
     if d.scheme_b:
         surface = run.loop_surface('S0', run.mol_in, 'R0')
         given = {'nudge': 0.0}
@@ -1086,6 +1111,22 @@ def ground_minimum(run):
                         f'{d.environment}')
     log(f's0: E {info.get("energy"):.9f} Ha, {info.get("cycles")} cycles, '
         f'residual {info.get("opt_grad_max"):.2e}', t0)
+    return run.read('s0')
+
+
+def input_minimum(run, t0):
+    """s0 under policies.r0 'input': R0 is the input geometry as it is, with
+    no SCF and no walk; the record holds it and says so."""
+    d = run.declaration
+    run.mol0 = lockstep_geometry(run.mol_in)
+    record = {'coords_bohr': run.mol0.atom_coords(), 'r0': 'input',
+              'e0_walk': None, 'seconds': time.time() - t0}
+    run.write('s0', record)
+    run.store.write_xyz('s0.xyz', run.mol0,
+                        f'R0 = the input geometry, {d.reference}/'
+                        f'{run.mol0.basis} {d.environment}, not relaxed')
+    log(f's0: R0 is the input geometry ({run.mol_in.natm} atoms), not '
+        f'relaxed', t0)
     return run.read('s0')
 
 
@@ -1147,7 +1188,9 @@ def vertical(run, walks_next=False):
     shared = run.relaxed_spec is run.spec
     # the continuation has no adjoint: energies, oscillator strengths and the
     # spin-orbit table, and no derivative coupling (`geometry_properties`)
-    derivatives = d.numerics.qp.residue_route != CONTINUATION_ROUTE
+    spin_orbit = d.policies.properties == 'all'
+    derivatives = (d.numerics.qp.residue_route != CONTINUATION_ROUTE
+                   and spin_orbit)
     walks = (shared and walks_next and derivatives
              and d.policies.far_start is None and not run.reusable('s1'))
     want_force = walks and d.handover
@@ -1166,7 +1209,8 @@ def vertical(run, walks_next=False):
             t0)
         return run.read('vert')
     props = geometry_properties(ev, run.s_key, run.t_key, d.n_states,
-                                derivatives=derivatives)
+                                derivatives=derivatives,
+                                spin_orbit=spin_orbit)
     record = {'props': props, 'seconds': time.time() - t0,
               'residues': d.numerics.qp.residue_route,
               'qp_states': man.chain.realization.qp_states,
@@ -1200,10 +1244,13 @@ def scheme_b_vertical(run):
     man = run.manifold(run.s_key, run.t_key, chain=r['singlet']['state'].chain)
     # the ground state's equilibrium loop ended in S0's converged charges
     ev = man.evaluate(run.mol0, r['singlet']['ground'].mf,
-                      couplings=run.couplings)
+                      couplings=(run.couplings
+                                 if d.policies.properties == 'all' else ()))
     e0 = r['singlet']['G']['eq_ground']
     props = free_energies(
-        geometry_properties(ev, run.s_key, run.t_key, d.n_states),
+        geometry_properties(ev, run.s_key, run.t_key, d.n_states,
+                            derivatives=d.policies.properties == 'all',
+                            spin_orbit=d.policies.properties == 'all'),
         {label(run.s_key): e0 + r['singlet']['absorption'],
          label(run.t_key): e0 + r['triplet']['absorption']}, e0)
     absorption_flags = {label(k): r[k[0]]['flags']
@@ -1818,6 +1865,21 @@ def refuse_continuation_stages(declaration, stages):
             f'{",".join(CONTINUATION_STAGES)} on the continuation)')
 
 
+def refuse_energy_stages(declaration, stages):
+    """Refuse, before any SCF, a stage outside ENERGY_STAGES under
+    policies.properties 'energies': the walks' minima and the rates read the
+    spin-orbit table and the couplings that declaration does not compute."""
+    if declaration.policies.properties == 'all':
+        return
+    refused = [s for s in stages if s not in ENERGY_STAGES]
+    if refused:
+        raise StageRefused(
+            f'stages {refused} with --properties '
+            f'{declaration.policies.properties}: they read the spin-orbit '
+            f'table and the couplings it does not compute (--stages '
+            f'{",".join(ENERGY_STAGES)}, or --properties all)')
+
+
 def run_tadf(declaration, store, *, max_memory, stages=None, dry_run=False):
     """Every asked stage of `declaration` (all of its rate model's,
     `stages_of`, when None) in order on `store`, inside the caller's
@@ -1831,6 +1893,7 @@ def run_tadf(declaration, store, *, max_memory, stages=None, dry_run=False):
     if unknown:
         raise ValueError(f'stages {sorted(unknown)} not in {STAGE_ORDER}')
     refuse_continuation_stages(declaration, stages)
+    refuse_energy_stages(declaration, stages)
     run = Run(declaration, store, max_memory)
     describe_run(run, stages, run.refuse_early())
     if dry_run:
@@ -1838,7 +1901,8 @@ def run_tadf(declaration, store, *, max_memory, stages=None, dry_run=False):
     out = {}
     walk_again(run, stages)
     later = [s for s in stages if s != 's0']
-    if 's0' in stages or (later and store.has('s0')):
+    if ('s0' in stages or (later and store.has('s0'))
+            or (later and declaration.policies.r0 == 'input')):
         out['s0'] = flag_scfs(run, 's0', ground_minimum)
     elif later:
         raise StageRefused('every later stage needs R0: run s0 first')

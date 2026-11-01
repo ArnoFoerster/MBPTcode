@@ -240,7 +240,9 @@ class StateFollower:
 
         Only the newest geometry keeps its forward: an older one keeps its
         roots and forces, and asked for its forward again it is evaluated
-        again on the same mean field.
+        again on the same mean field. The held forwards are dropped before
+        the new pass runs, so a solvation loop's cycle never holds the last
+        cycle's factors and quasiparticle tape beside its own.
         """
         # the roots a matrix-free solve checks for a force: all of them for
         # a followed state, else the state and those below it (`_casida`)
@@ -250,12 +252,15 @@ class StateFollower:
                 and (held.read is None or (read is not None
                                            and read <= held.read))):
             return held.shared, held.solution
+        # the held forwards go before the new pass, and with them the
+        # relaxed densities' reverse passes, finished on their own forward only
+        for other in self.chain.evaluations.values():
+            other.shared = None
+            other.reverse.clear()
         raised = []
         with collecting(raised):
             shared, solution = self._forward_pass(mol, mf)
         self._log_flags(gathered(raised))
-        for other in self.chain.evaluations.values():
-            other.shared = None
         if held is None or held.mf is not mf:
             held = self.chain.evaluations.put(mol, Evaluation(mf))
         held.shared, held.solution, held.read = shared, solution, read

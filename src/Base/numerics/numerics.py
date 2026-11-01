@@ -114,8 +114,8 @@ class IsdfNumerics:
         None takes `ao_product_fit.pivot_count` of the molecule and its
         parent. Refused beside test_set='duchemin_blase'. The identity
         leaves out test_set at 'duchemin_blase' (and with no grid named)
-        and pivot_points at None, so every identity written before the
-        fields stays what it was.
+        and pivot_points at None: an identity without them is one at those
+        values.
     runtime_radii: True declares a grid the shipped radii table holds no
         row for, re-optimized at run time (`runtime_atomic_radii`); False
         refuses one (`UntabulatedISDFGrid`). Not part of `identity`: where a
@@ -710,15 +710,14 @@ IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
 # declarations that permit a calculation without changing any (the reason is
 # at each field)
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
-# fields added after identities were first written: at their default they are
-# left out, so every identity written before them stays what it was
+# fields left out of the identity at their default: an identity without one
+# is the identity at that default
 IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'),
                               ('solvent', 'loop_force_fraction'),
                               ('scf', 'test_set'), ('scf', 'pivot_points'))
-# fields retired after identities were first written, with the one value every
-# object held: hashed at it, so every identity written before stays what it
-# was; a record naming one at that value is read without it, at any other
-# value refused (the orbital-response solve's tolerances are the scf section's
+# fields that are no declaration of their own, with the one value every
+# object holds and the identity is hashed at; a record naming one at that
+# value is read without it, at any other value refused (the orbital-response solve's tolerances are the scf section's
 # multiplier_* fields)
 IDENTITY_RETIRED = (('scf', 'cphf_tol', 1e-9), ('scf', 'cphf_max_cycle', 100),
                     ('scf', 'cphf_refinements', 10))
@@ -771,8 +770,7 @@ class Numerics:
     @classmethod
     def from_record(cls, record):
         """The object `to_record` wrote. A record whose scf section names no
-        xc_grid was written before the field existed, on pyscf's default
-        grid (XC_GRID_LEVEL_UNRECORDED), and is read as that."""
+        xc_grid is read on pyscf's default grid (XC_GRID_LEVEL_UNRECORDED)."""
         sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
                     else dict(record[name]) for name in SECTIONS}
         sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)

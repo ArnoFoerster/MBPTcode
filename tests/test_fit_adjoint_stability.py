@@ -30,7 +30,7 @@ from src.Base.numerics.numerics import numerics_of
 from src.gradients import isdf_derivatives
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.test_chain_sliced_factors import BASIS, H2O, chain_scf
-from tests.isdf_test_grid import g1_numerics, legacy
+from tests.isdf_test_grid import g1_numerics, duchemin_blase
 from tests.pins import assert_same
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
@@ -76,7 +76,7 @@ def ulp_responses(**fit):
     mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
     chain = ExcitedStateChain(
         mol, chain_scf, mf=chain_scf(mol),
-        numerics=legacy(g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': True, **fit}))))
+        numerics=duchemin_blase(g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': True, **fit}))))
     rec = {}
     seeds_of = chain.follower.casida_seeds
 

@@ -638,6 +638,9 @@ class DiabaticSurface(PotentialEnergySurface):
         self.state, self.dressed, self.route = state, dressed, route
         self.mol0 = method.mol0
         self._last = None
+        # None until the reference is built: the reference partition then
+        # chooses Omega_0, frozen for every later geometry
+        self.omega0 = omega0
         ref = self._gradient_object(None, None, omega0)
         self.omega0 = ref.partition.omega0
 
@@ -650,8 +653,8 @@ class DiabaticSurface(PotentialEnergySurface):
         self._last = g.orbitals
         return g
 
-    def mean_field(self, mol=None):
-        return self.method.mean_field(mol)
+    def mean_field(self, mol=None, mf=None):
+        return self.method.mean_field(mol, mf)
 
     def total_energy(self, mol=None, mf=None):
         g = self._gradient_object(mol, mf)

@@ -147,7 +147,7 @@ from tests.test_mpi_routes import (ROW_NTAU, ROW_PERMUTATIONS, ROW_TILE_GB,
                                    RecordedSimulatedComm, branch_pair_addends,
                                    grid_row_axes, proj_tile_addends,
                                    sweep_owners)
-from tests.isdf_test_grid import LEGACY_FIT, g1, g1_numerics
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 NTAU, NFREQ = 8, 24
@@ -928,7 +928,7 @@ def test_frozen_conventions_are_rank_zeros(monkeypatch):
     def one_rank(comm):
         local.rank = comm.Get_rank()
         mol = gto.M(atom=H2O, basis=BASIS, verbose=0)
-        chain = FactorChain(mol, chain_scf, mf=chain_scf(mol), numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+        chain = FactorChain(mol, chain_scf, mf=chain_scf(mol), numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
         crd = chain.coords(mol)
         x_ao, m_fit, _ = chain.factorization.shareable_factors(
             mol, chain.auxmol(mol), crd)

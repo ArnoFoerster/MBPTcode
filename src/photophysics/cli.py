@@ -64,13 +64,14 @@ self-energy, with no residues and no adjoint, on a set declared by kind and
 without the quasiparticle Hamiltonian, in the gas phase or scheme A, on the
 stages s0, hess and vert. Its record holds the energies, oscillator strengths
 and spin-orbit table and no derivative coupling; every walk, the rates and
-scheme B are refused. R0 is the s0 record's:
+scheme B are refused. With --r0 input R0 is the input geometry as it is (a film
+frame), recorded by the s0 stage with no SCF:
 
     srun --mpi=pmi2 -n 32 python -m src.photophysics --xyz film.xyz \\
         --basis cc-pvdz --basis-for atoms=1-41:aug-cc-pvdz --environment gas \\
         ... --residues pade --qp-states admitted --scf isdf --scf-grid G3 \\
         --scf-pivot-points 60000 --grid-accuracy G3 --pivot-points 60000 \\
-        --stages vert --out tadf --distribute
+        --r0 input --stages vert --out tadf --distribute
 
 The S0 Hessian may come from elsewhere (--hessian external): an ORCA .hess
 file at R0, the geometry the s0 stage writes to s0.xyz; another geometry is
@@ -103,7 +104,9 @@ from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from src.environments.solvent_vocabulary import GAS, SCHEME_B, SOLVENT_SCHEMES
 from src.photophysics.declaration import (ENGINES, GROUNDS,
                                           HESSIAN_ROUTES, RELAXED_SOLVATION,
-                                          RESIDUES, SCF_FINISH, SCF_ROUTES,
+                                          PROPERTY_SETS, R0_ROUTES, RESIDUES,
+                                          SCF_FINISH,
+                                          SCF_ROUTES,
                                           Declaration,
                                           ExternalHessian, FarStart, Policies,
                                           System, TadfModel, TdaMinimum,
@@ -205,6 +208,17 @@ def add_policies(ap):
                           "state at its spin's adiabatic energy plus its "
                           "vertical splitting; 'adiabatic', each state at its "
                           'own minimum (S1 and T1 here)')
+    ap.add_argument('--r0', default='walk', choices=R0_ROUTES,
+                    help="where R0 comes from: 'walk' relaxes the ground "
+                         "state (the s0 stage), 'input' takes the input "
+                         'geometry as it is (a film or trajectory frame); '
+                         'the s0 stage then only records it')
+    ap.add_argument('--properties', default='all', choices=PROPERTY_SETS,
+                    help="what the vertical stage computes besides the "
+                         "energies: 'all' (every property a rate reads) or "
+                         "'energies' (the energies, oscillator strengths and "
+                         'transition dipoles; no spin-orbit table, no '
+                         'coupling; only the stages s0, hess and vert)')
 
 
 def add_physics(ap):
@@ -542,7 +556,8 @@ def policies_of(args):
         external_hessian=(None if args.hessian_file is None
                           else ExternalHessian.of(args.hessian_file)),
         tda_t1_minimum=(None if args.tda_t1_minimum is None else TdaMinimum(
-            xyz_atoms(pathlib.Path(args.tda_t1_minimum).read_text()))))
+            xyz_atoms(pathlib.Path(args.tda_t1_minimum).read_text()))),
+        r0=args.r0, properties=args.properties)
 
 
 def qp_states_of(args):

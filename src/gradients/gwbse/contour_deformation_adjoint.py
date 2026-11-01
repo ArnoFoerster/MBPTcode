@@ -182,18 +182,49 @@ def integral_term_backward(Bp, WtB, weights, want_chi0=True):
     return 2.0 * WB * weights, wc, chi0_bar
 
 
-def pair_term_backward(Bi, Bj, WtBi, WtBj, weights):
+def pair_term_backward(Bi, Bj, WtBi, WtBj, weights, want_chi0=True):
     """(Bi_bar, Bj_bar, chi0_bar) of sum_q g_q Bi[:,q]^T (W - I) Bj[:,q] at
     ONE frequency, WtB = W B, weights = g, (norb,).
 
     W is symmetric, so each slice takes the other's (W - I) B; chi0 takes the
     symmetric part of W Bi diag(g) Bj^T W, the only part a symmetric chi0
     reads. With Bi = Bj it is `integral_term_backward`'s pair of terms.
+    want_chi0=False returns None for chi0_bar (`pairs_chi0_backward` takes
+    a whole set of pairs at once).
     """
     bi_bar = (WtBj - Bj) * weights
     bj_bar = (WtBi - Bi) * weights
+    if not want_chi0:
+        return bi_bar, bj_bar, None
     half = (WtBi * weights) @ WtBj.T
     return bi_bar, bj_bar, 0.5 * (half + half.T)
+
+
+def pairs_chi0_backward(WtB, pairs):
+    """chi0_bar of sum over `pairs` (i, j, g) of sum_q g_q Bi[:,q]^T (W - I)
+    Bj[:,q] at ONE frequency: the sum of `pair_term_backward`'s chi0_bar over
+    the pairs, in one product per state instead of one per pair.
+
+    WtB: {state: W B_state}, (naux, norb) each. With Y_s = sum over the pairs
+    holding s of the partner's W B diag(g) (a pair (i, i) puts W B_i diag(g)
+    into Y_i twice), the sum is 1/2 sum_s W B_s Y_s^T, symmetric in exact
+    arithmetic and made so in the bits, as the pairs' own are: g states cost g products of naux^2 norb, against g(g + 1)/2 for the pairs
+    of a group one by one. The summation order differs from the one-by-one
+    sum, so the bits move at round-off.
+    """
+    partners = {}
+    for i, j, g in pairs:
+        partners.setdefault(i, []).append((j, g))
+        partners.setdefault(j, []).append((i, g))
+    out = None
+    for s, near in partners.items():
+        Y = None
+        for t, g in near:
+            Y = WtB[t] * g if Y is None else Y + WtB[t] * g
+        term = WtB[s] @ Y.T
+        out = term if out is None else out + term
+        Y = term = None
+    return 0.25 * (out + out.T)
 
 
 def residue_terms_backward(p, omega, Bp, eps, _nocc, residues, sigma_bar,

@@ -66,7 +66,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FO
                                          DF_FORCE_BLOCK_GB, DF_FORCE_MP2_TILE_ARRAYS,
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import Numerics, numerics_or_default
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
@@ -475,8 +475,11 @@ def mp2_density_tiled(mf, mol, factors, frozen=0, auxbasis=None, numerics=None,
     """(e_mp2, gamma (MO, relaxed)) of DF-MP2 (SCS-MP2 with scaling (c_os,
     c_ss)) on the provider's tiles and ranks: the tiled force's energy and
     relaxed density without its derivative integrals, d E_MP2 / d h_pq, a
-    collective; the pieces in occupied tiles of mp2_pieces' default size."""
-    e2, d = mp2_pieces(factors, scaling=scaling)
+    collective; the pieces in occupied tiles under the Numerics layout's
+    tile_gb (None: EE_RI_TILE_GB), as the state model's force takes them."""
+    tile_gb = numerics_or_default(numerics).layout.tile_gb
+    e2, d = mp2_pieces(factors, EE_RI_TILE_GB if tile_gb is None else tile_gb,
+                       scaling)
     Bc = factors.core_factors(mol, mf, frozen, auxbasis) if frozen else None
     gamma, _ = relaxed_gamma(mf, mol, factors, d, frozen, Bc, None, numerics, flags)
     return e2, gamma
@@ -554,9 +557,10 @@ def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_G
     fc, gam, asym = correlation_force(mol, mf, factors, auxmol, d, frozen, Bc,
                                       Y_extra, block_gb, width, numerics, flags)
     if fitted_force_supported(mf):
-        # over the current region, the communicator the Z-vector's kernel
-        # takes too (dcf.scf_kernel)
-        F = mean_field_skeleton_force(mf) + fc
+        # over the factors' ranks, the communicator the Z-vector and the
+        # correlation force above run over
+        with distributed(factors.comm):
+            F = mean_field_skeleton_force(mf) + fc
     else:
         F = on_root(lambda: (mean_field_skeleton_force(mf),), [(mol.natm, 3)],
                     factors.comm)[0] + fc

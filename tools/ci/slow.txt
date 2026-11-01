@@ -116,6 +116,7 @@ pytest test_tta_coupling.py
 pytest test_unrestricted_imaginary_axis.py
 pytest test_vertical_arms.py
 pytest test_vertical_continuation.py
+pytest test_vertical_properties.py
 pytest test_xc_grid_response.py
 script test_davidson_isdf_bse.py
 pytest test_davidson_tda.py

@@ -36,7 +36,7 @@ from src.Base.factorization.separable_ri import (atomic_grid, aux_metric_sqrt, f
                                                  fit_M_streaming, molecular_points_covariant)
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import pair_positions, product_pairs
-from tests.isdf_test_grid import LEGACY_FIT, g1
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
@@ -111,7 +111,7 @@ def screened_gram(mol, auxmol, crd, layout):
 def realizations(name):
     """Every realization of M on the chain's frozen grid, and the bar."""
     mol = molecule(MOLECULES[name])
-    fac = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'auxbasis': AUX, 'counts': g1(mol)}))
+    fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(mol)}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     rows = fit_M_streaming(mol, auxmol, crd, fit='rows', layout=fac.layout)
     out = dict(mol=mol, auxmol=auxmol, coords=crd, layout=fac.layout,
@@ -145,7 +145,7 @@ def test_the_chain_and_production_place_the_same_points(name):
     """The chain's re-optimized radii are the shipped row at these counts,
     so the chain and production fit on one grid."""
     mol = molecule(MOLECULES[name])
-    chain = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'auxbasis': AUX, 'counts': g1(mol)})).coords(mol)
+    chain = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(mol)})).coords(mol)
     assert_same(chain, shipped_grid(mol), unit='1', quantity='root',
                 label='grid points')
 
@@ -168,7 +168,7 @@ def test_the_frozen_layout_is_what_the_fit_keeps():
     one pair it
     is another fit: the layout is read, not re-screened."""
     mol = molecule(DISPLACED['ethylene'])
-    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'test_set': LEGACY_FIT, 'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
+    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     own = separable_ri.fit_test_set_layout(mol, crd)
     free = fit_M_streaming(mol, auxmol, crd)

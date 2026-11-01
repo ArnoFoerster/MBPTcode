@@ -66,8 +66,7 @@ ROUTES = ('auto', 'dense', 'fold')
 DENSE_BLOCK = 64
 #: Eigenvalues of the pair matrix sum_k w_k sym(s_k t_k^T) below this
 #: fraction of its largest carry no weight (`ADC2Response.pair_force`): the
-#: pair vectors' span holds the rest exactly. A module constant, owned here
-#: (the shared constants file is not this module's).
+#: pair vectors' span holds the rest exactly.
 PAIR_RANK_CUT = 1e-14
 
 

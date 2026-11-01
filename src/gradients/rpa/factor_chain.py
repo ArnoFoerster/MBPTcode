@@ -1253,9 +1253,11 @@ class FactorChain(ReferenceMeanField):
                     pending.discard()
                     return None, {}
             with self.phase('t_orbital'):
-                g_orb, diags = eps_chain_gradient(mf, eps_bar, self.nocc,
-                                                  Y_extra=y, numerics=self.settings,
-                                                  pending=pending)
+                # a relaxed density of this target may have solved Lambda
+                g_orb, diags = eps_chain_gradient(
+                    mf, eps_bar, self.nocc, Y_extra=y, numerics=self.settings,
+                    pending=pending,
+                    multiplier=getattr(self, '_held_multiplier', None))
                 # the skeleton channels this force's terms held (g_extra's
                 # among them), one pass each
                 g_orb = g_orb + held_skeletons(mf, pending)

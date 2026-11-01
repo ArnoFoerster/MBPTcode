@@ -259,7 +259,7 @@ AMB_PROBE_SIGN_TOLS = (1e-2, 1e-3, 1e-4)
 CPHF_MAX_CYCLE = 100
 CPHF_TOL = 1e-9
 # The static correction's relaxed density on the tighter tolerance of a
-# correlated force (test_uhf_static_correction_df's bar).
+# correlated force.
 CORRELATION_CPHF_TOL = 1e-10
 
 # QP root-finding (src/Solvers/qp_equation.py).
@@ -746,6 +746,24 @@ THREE_CENTER_BLOCK_BYTES = 2 << 30
 # a large system.
 SKELETON_AUX_TILE = 32
 
+# AO functions per tile of the four-centre exchange skeleton's derivative pass
+# (`gradients.skeleton_tiles.exchange_skeleton_by_atoms`): runs of consecutive
+# shells, tile t rank t % size's, so each rank's rows interleave every part of
+# the molecule (a screened row's cost differs between atoms by far more than
+# its AO count says), and the tiles' (natm, 3) addends are added in tile order.
+# Fixed by the basis, never by the rank count: the same bits at every rank
+# count. At nao 1300 this is some 160 tiles.
+SKELETON_EXCHANGE_TILE = 8
+
+# Occupied orbitals per column block of the fitted exchange skeleton's metric
+# solve (`gradients.skeleton_tiles.FittedFockSkeleton`): Kt = V^-1 L and
+# At = Kt g are taken one block of whole occupied orbitals at a time, a rank's
+# blocks one contiguous run, and the blocks' (naux, naux) terms of
+# <g Kt^P, Kt^Q> add in block order. Fixed by nocc, never by the rank count, so
+# every block is the same call shapes and bits on whichever rank holds it. A
+# rank holds one (naux, naux) term per block it owns until the sum passes it.
+SKELETON_EXCHANGE_OCC_BLOCK = 4
+
 # Points per tile of the xc skeleton's Becke-grid sum (`gradients.skeleton_tiles`,
 # `xc_grid_skeleton`): tile t of the mean field's own sorted grid is rank
 # t % size's, a multiple of pyscf's 56-point screening block. Fixed by the
@@ -993,7 +1011,7 @@ FRAGMENT_PM_CONV_TOL = 1e-12
 FRAGMENT_PM_CONV_TOL_GRAD = 1e-9
 FRAGMENT_PM_POLISH_MAX = 2000
 
-# Fragment-partitioned BSE (`gradients.gwbse.fragment_bse`). Up to
+# The fragment partition (`src.fragments.partition`). Up to
 # FRAGMENT_DENSE_MAX rows every block is diagonalized and every resolvent
 # solved densely; above it, by Davidson and conjugate gradients to
 # FRAGMENT_SOLVE_TOL. The pole guard asks Omega_0 to sit FRAGMENT_POLE_MARGIN
@@ -1011,13 +1029,20 @@ FRAGMENT_POLE_MARGIN = 0.01
 # to the larger of 1 and the array's largest entry: at the solvers' own
 # tolerance, far below what a 5e-4 Bohr step or another orbital choice moves.
 FRAGMENT_CHECKPOINT_MATCH_TOL = 1e-10
+# The fingerprint's probe (`fragments.checkpoint`): the seed of its random
+# vectors, the rows of the operator's action it keeps and the columns of the
+# random block the operator acts on. Any seed: a probe only has to be the same
+# in the run that saves and the run that reads.
+FRAGMENT_CHECKPOINT_PROBE_SEED = 20261025
+FRAGMENT_CHECKPOINT_PROBE_ROWS = 4096
+FRAGMENT_CHECKPOINT_PROBE_COLUMNS = 2
 
 # Finite-difference diabats (`tests/fragment_diabatic_fd.py`): a displaced diabat that
 # overlaps its reference by less than this has mixed within its block, and its
 # difference would follow a different state.
 DIABAT_OVERLAP_FLOOR = 0.9
 
-# Analytic diabatic gradients (`gradients.gwbse.fragment_diabatic`): a diabat whose
+# Analytic diabatic gradients (`gradients.fragment_diabatic`): a diabat whose
 # block holds another state closer than this (Hartree) has no well-defined
 # eigenvector response, which divides by the gap.
 DIABAT_GAP_MIN = 1e-4
@@ -1042,7 +1067,7 @@ FRAGMENT_GUARD_NEWTON_TOL = 1e-6
 FRAGMENT_GUARD_TOL = 1e-5
 FRAGMENT_GUARD_MAX_CYCLE = 1000
 # Seed of the two generic AO vectors a, b that fix each diabat's sign: the
-# sign of a^T T b, T its AO transition density (`fragment_bse.diabat_phase`).
+# sign of a^T T b, T its AO transition density (`partition.diabat_phase`).
 # Any integer: it fixes a convention, and |couplings| do not depend on it.
 FRAGMENT_PHASE_SEED = 1
 
@@ -1315,6 +1340,26 @@ DAVIDSON_NULL_DIRECTION = 1e-8
 # peaks at 1.5x the slice, where a single exchange of the whole column layout
 # would peak at 3x.
 DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
+
+# The largest exchange buffer (GB) of a rank's density-fitted J/K build on its
+# auxiliary rows (`distributed_df.DistributedDF`): pyscf's K loop holds
+# (2, rows, nao, nao), so a block takes at most DF_JK_BLOCK_GB / (16 nao^2)
+# auxiliary rows, never more than pyscf's own 240 and never fewer than 4. A
+# function of nao alone, not of the free memory, so the K sum's order and bits
+# are the same in every run. At nao 1090 a block is 26 rows (0.49 GB), where
+# pyscf's 240 rows are 4.6 GB.
+DF_JK_BLOCK_GB = 0.5
+
+DF_JK_BLOCK_ROWS_MAX = 240
+
+# The most memory (MB) a rank's block of the distributed XC quadrature may plan
+# for (`distributed_df.DistributedNumInt`): pyscf's block loop sizes its AO
+# values by the max_memory it is handed, which is rank 0's free share and so
+# several GB on a large node, at every rank count. Capped, a block of AO values
+# stays near 1 GB (some 19 000 points at nao 1300, 6 000 at nao 4000, both
+# large BLAS-3 blocks), and the points' blocking, the order of the sums inside a
+# rank's partial, does not depend on the free memory.
+XC_BLOCK_MAX_MB = 1000
 
 # The digest `mpi_grid.agreement` compares across ranks: an array's C-ordered
 # bytes as 64-bit words u_i, summed mod 2^64 against W[i mod L] c[i div L],
@@ -1708,8 +1753,7 @@ QP_SUBSPACE_MAX_ITER = 200
 # QP_SUBSPACE_GMRES_RTOL, restarted every QP_SUBSPACE_GMRES_RESTART
 # iterations, at most QP_SUBSPACE_GMRES_MAXITER restart cycles. The fixed
 # point is the same one: the Newton residual the iteration stops on is exact.
-# A group of at most QP_SUBSPACE_DENSE_MAX orbitals takes the dense solve, as
-# before.
+# A group of at most QP_SUBSPACE_DENSE_MAX orbitals takes the dense solve.
 QP_SUBSPACE_DENSE_MAX = 24
 
 QP_SUBSPACE_GMRES_RTOL = 1e-11
@@ -1806,7 +1850,7 @@ DAVIDSON_ACTION_SYMMETRY_TOL = 1e-8
 # number, dimensionless.
 PIN_CROSS_BLAS_BAR = 2e-12
 
-# Forces and gradients, Ha/Bohr: 1.15e-9 to 2.2e-9 on the cluster MKL
+# Forces and gradients, Ha/Bohr: 1.15e-9 to 2.2e-9 on MKL
 # (surface_comm 1.15e-9 to 1.82e-9, outside_scissor R0 2.0e-9 to 2.2e-9), and
 # 1.04e-8 on OpenBLAS (outside_scissor water, R0 + 0.05 Bohr on atom 0): the fit
 # adjoint turns last-bit differences into this, so the bar is twice the
@@ -2355,6 +2399,13 @@ PCM_DM_CACHE_TOL = 1e-10
 # field is the same bits at every rank count, and up to this many ranks share
 # its integrals in a cycle.
 PCM_CAVITY_MIN_TILES = 32
+# The largest block (GB) of a cavity grid's three-centre integral derivatives,
+# (3, nao, nao, nk) (src.environments.pcm_derivatives.cavity_blocks): every rank
+# holds one at a time in a force's continuum terms. Fixed, never derived from
+# the free memory, so the blocks and the force's bits are a function of the
+# cavity and the basis alone. The flop count does not depend on it; at nao 1090
+# a block is 46 cavity points.
+PCM_CAVITY_BLOCK_GB = 0.5
 
 # Folded ADC(2) nuclear force (src.gradients.adc.ee_gradient)
 # eigenvalue tolerance (Hartree) of the root whose force is taken
@@ -2419,7 +2470,7 @@ QB_Z_RESIDUAL_REL = 1e-6
 QB_Z_DEGENERATE_REL = 1e-12
 QB_Z_PRECONDITIONER_FLOOR = 1e-10
 
-# The fragment-diabatic BSE (`fragment_bse`): the cycle cap of its Davidsons,
+# The fragment partition (`src.fragments.partition`): the cycle cap of its Davidsons,
 # the iteration cap of its batched conjugate gradient, the Newton steps of its
 # pole guard, and the Feshbach oracle's root tolerance (Ha) and step cap.
 FRAGMENT_DAVIDSON_MAX_CYCLE = 500

@@ -25,7 +25,7 @@ it. A spec string (`parse`) names it on a command line:
     'toluene'                   a solvent of pyscf's SMD table
     'eps=5.0,n2=2.89'           both constants, eps_s and n^2
     'eps=5.0,n2=2.89,label=film' the same, with a name for the records
-    'N2:EPS'                    the older form: n^2, then eps_s
+    'N2:EPS'                    both constants as n^2, then eps_s
     'toluene,cavity=uff-1.1'    any of these on a named cavity convention
                                 (else DEFAULT_CAVITY)
 """
@@ -47,8 +47,7 @@ CAVITY_CONVENTIONS = {
     'uff-1.1': ('uff', 1.1),
     'cosmo': ('cosmo', 1.0),
 }
-# The cavity of a medium that names none; every result before the cavity
-# conventions were named sat on it.
+# The cavity of a medium that names none.
 DEFAULT_CAVITY = 'bondi-1.2'
 
 

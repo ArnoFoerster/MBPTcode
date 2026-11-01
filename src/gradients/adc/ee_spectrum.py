@@ -107,7 +107,14 @@ def adc2_spectrum(mp2, n_states, h=None, e=0.0, lr_environment=None):
     e) (h None: the gas phase), the singlets with the LR term of
     `lr_environment` (a transition environment, or None). The roots are
     solved to EE_FORCE_ROOT_TOL, the tolerance the state model's force
-    solves them to, so the spectrum and the force see the same roots."""
+    solves them to, so the spectrum and the force see the same roots. An
+    SCS or SOS model (spin_scaling) is refused: its E_0 is SCS-MP2, while these
+    roots and the ISR transition densities are those of unscaled ADC(2)."""
+    if mp2.scaling is not None:
+        raise ValueError(f'adc2_spectrum takes an unscaled MP2State, not spin_scaling='
+                         f'{mp2.spin_scaling!r}: its ground state would be spin-component '
+                         'scaled while the roots and the ISR transition densities here are '
+                         "ADC(2)'s")
     mf0 = mp2.mf
     if h is None:
         h = np.zeros_like(np.asarray(mf0.get_hcore(), float))

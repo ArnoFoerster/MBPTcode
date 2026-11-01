@@ -51,7 +51,7 @@ from tests.archive_radii import install_current_radii
 from src.Base.factorization.separable_ri import atomic_grid
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import separable_factors
-from tests.isdf_test_grid import g1, legacy
+from tests.isdf_test_grid import g1, duchemin_blase
 
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
@@ -139,7 +139,7 @@ def case(request):
 def _factors(case, comm=None, timings=None, radii=None):
     return separable_factors(case['mf'], case['mol'], auxbasis=case['auxbasis'],
                              radii=radii,
-                             numerics=legacy(Numerics(layout={'fit_gb': case['block_memory_gb']})),
+                             numerics=duchemin_blase(Numerics(layout={'fit_gb': case['block_memory_gb']})),
                              comm=comm, timings=timings, counts=g1(case['mol']))
 
 

@@ -59,7 +59,7 @@ from src.gradients.rpa.space_time_adjoint import (chi0_backward,
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_chain_row_fit import TILE, molecule
 from tests.test_chain_sliced_factors import H2O
-from tests.isdf_test_grid import LEGACY_FIT, g1
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
 from tests.pins import RECORDING_BLAS, matches
 
 SIZES = (1, 2, 3, 5, 8)
@@ -198,7 +198,7 @@ def test_fit_adjoint_and_y_read_tiles_bitwise():
     ranks (two layouts)."""
     mol = molecule(H2O)
     with distributed(None):
-        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux, nao = len(crd), aux.nao_nr(), mol.nao
     rng = np.random.default_rng(3)
@@ -253,7 +253,7 @@ def ladder_chain(mol):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics=numerics_of({'test_set': LEGACY_FIT, 'sliced': True, 'fit': 'rows',
+                       numerics=numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'sliced': True, 'fit': 'rows',
                                  'fit_block': CHAIN_BLOCK,
                                  'tile_gb': CHAIN_TILE_GB,
                                  'bse_adjoint': 'grid'}))

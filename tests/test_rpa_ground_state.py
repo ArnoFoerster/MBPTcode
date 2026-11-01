@@ -23,7 +23,7 @@ from src.gradients.grad_engine import correlation_gradient
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.gwbse.targets import rpa_partials
-from tests.isdf_test_grid import LEGACY_FIT, g1
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
 
 BASIS = 'cc-pvdz'
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
@@ -51,7 +51,7 @@ def scf_direct(mol):
 def water_df():
     mol = gto.M(atom=H2O_C1, basis=BASIS, verbose=0)
     mf = scf_df(mol)
-    return mol, mf, RPAGroundStateChain(mol, scf_df, mf=mf, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    return mol, mf, RPAGroundStateChain(mol, scf_df, mf=mf, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
 
 
 def finite_difference(chain, mol, h=1e-4):
@@ -76,7 +76,7 @@ def finite_difference(chain, mol, h=1e-4):
 def test_total_gradient_vs_finite_difference(scf_factory):
     """dE/dR = dE_HF/dR + dE_c/dR against a finite difference of the SUM."""
     mol = gto.M(atom=H2O_C1, basis=BASIS, verbose=0)
-    chain = RPAGroundStateChain(mol, scf_factory, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    chain = RPAGroundStateChain(mol, scf_factory, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     g, e, diags = chain.total_gradient()
     assert e == pytest.approx(chain.energy()[0], abs=1e-12)
     assert diags['stationarity'] < 1e-9
@@ -134,7 +134,7 @@ def test_grid_error_against_the_dense_rpa_gradient_shrinks_with_the_grid(water_d
     mol, mf, chain = water_df
     e_dense, g_dense = _dense_df_reference(mol, mf)
     fine = RPAGroundStateChain(mol, scf_df, mf=mf,
-                               numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': {'A1': 32, 'A2': 20, 'A3': 12, 'B1': 4}}))
+                               numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': {'A1': 32, 'A2': 20, 'A3': 12, 'B1': 4}}))
     for rung in (chain, fine):
         for el in ('O', 'H'):
             assert shipped_radii_lookup(el, BASIS, BASIS + '-ri',

@@ -80,11 +80,13 @@ pytest test_environment_cache.py
 pytest test_environment_guards.py
 pytest test_eom_left_right_pairing.py
 pytest test_exchange_skeleton_split.py
+pytest test_fitted_exchange_columns.py
 pytest test_fitted_exchange_conditioning.py
 script test_exciton_descriptors.py
 pytest test_faddeev_adc3.py
 pytest test_fit_adjoint_stability.py
 pytest test_followed_root_after_rejection.py
+pytest test_force_after_density.py
 pytest test_fragment_checkpoint_ranks.py
 script test_frame_sign_convention.py
 pytest test_frequency_rows_serial_shaped.py
@@ -179,9 +181,11 @@ pytest test_qp_states.py
 pytest test_qsgw.py
 pytest test_qsgw_continuum.py
 pytest test_quasi_boson_move.py
+pytest test_r0_from_input.py
 pytest test_range_separated_refusal.py
 pytest test_reaction_field.py
 pytest test_reaction_field_adjoint.py
+pytest test_reaction_field_skeleton_ranks.py
 pytest test_record_names_map.py
 pytest test_refactor_baseline.py
 pytest test_refreeze_carries_settings.py
@@ -191,6 +195,8 @@ script test_restricted_ccsdt.py
 pytest test_ri_fallback.py
 pytest test_root_driven_solve.py
 pytest test_rotation_gradient_columns.py
+pytest test_df_jk_block_rows.py
+pytest test_xc_block_cap.py
 pytest test_row_fit_frozen_layout.py
 script test_rpa_correlation_energy.py
 pytest test_rpa_qp_surface.py
@@ -235,6 +241,7 @@ pytest test_static_sigma_distributed.py
 pytest test_sum_over_poles.py
 pytest test_sum_over_poles_move.py
 pytest test_surface_abc.py
+pytest test_fragment_surface_fixes.py
 pytest test_walk_state_release.py
 pytest test_surface_mean_field.py
 pytest test_surface_protocol.py
@@ -352,6 +359,8 @@ pytest test_qp_block_shared_correction.py
 pytest test_qp_hamiltonian_drops_non_pole_member.py
 pytest test_qp_hamiltonian_member_lost_inside_frozen_set.py
 pytest test_qp_hamiltonian_rotation_invariance.py
+pytest test_qp_pairs_reuse_solves.py
+pytest test_qp_pairs_by_subspace.py
 pytest test_qp_selection_window_edge.py
 pytest test_qp_subspace_carried_member_not_explicit.py
 pytest test_rate_manifold.py
@@ -375,6 +384,7 @@ pytest test_cphf_residual.py
 pytest test_ee_adc_gradient.py
 pytest test_ee_adc_gradient_tiled.py
 pytest test_correlated_mean_field_force.py
+pytest test_tiled_force_comm.py
 pytest test_ee_adc_relaxed_density.py
 pytest test_ss_density_default.py
 pytest test_scs_adc2_gradient.py

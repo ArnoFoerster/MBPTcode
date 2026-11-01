@@ -76,7 +76,8 @@ from src.SingleReference.GW.sum_over_poles import (compressible,
 from src.gradients.gwbse.contour_deformation_adjoint import (
     ExplicitRealScreeningAdjoint as ExplicitRealScreening,
     LaplaceRealScreeningAdjoint as LaplaceRealScreening,
-    integral_term_backward, pair_term_backward, residue_terms_backward)
+    integral_term_backward, pair_term_backward, pairs_chi0_backward,
+    residue_terms_backward)
 from src.gradients.gwbse.sum_over_poles_adjoint import sigma_sop_backward
 from src.Solvers.qp_equation import qp_start, quasiparticle_weight
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
@@ -323,6 +324,29 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     return out
 
 
+def pair_subspaces(pairs):
+    """The states joined by `pairs` [(i, j, ...)], in connected sets: each a
+    frozenset, in order of their first pair. A quasiparticle-Hamiltonian
+    pair joins two states of one subspace, so these are its subspaces."""
+    parent = {}
+
+    def root(s):
+        while parent[s] != s:
+            parent[s] = parent[parent[s]]
+            s = parent[s]
+        return s
+    for i, j, *_ in pairs:
+        for s in (int(i), int(j)):
+            parent.setdefault(s, s)
+        parent[root(int(j))] = root(int(i))
+    out = {}
+    for i, *_ in pairs:
+        out.setdefault(root(int(i)), set())
+    for s in parent:
+        out[root(s)].add(s)
+    return [frozenset(c) for c in out.values()]
+
+
 def integral_term_reverse(state, Bp, WtB, k):
     """(Bp_bar, chi0_bar, eps_bar) of ONE contour-deformation frequency for one state.
 
@@ -548,6 +572,7 @@ class QPSetPass:
         eps = np.asarray(eps, float)
         self.X_in, self.D_in = X, D
         self.paired = {s for i, j, _ in pairs for s in (int(i), int(j))}
+        self.subspaces = pair_subspaces(pairs)
         states = np.atleast_1d(states)
         weights = np.atleast_1d(weights)
         require_static_terms(xc_correction, len(states))
@@ -772,7 +797,7 @@ class QPSetPass:
         active, eps, comm = self.active, self.eps, self.comm
         proj_tau, grid, naux, eye = (self.proj_tau, self.grid, self.naux,
                                      self.eye)
-        pairs, Bps, paired = self.pairs, self.Bps, self.paired
+        Bps = self.Bps
         self.lap = _lap(self.timer, 'qp_set.routes', self.lap)
         Bp_bars = Bps.zeros([a['si'] for a in active])
         eps_bar_part = np.zeros_like(eps)
@@ -780,9 +805,12 @@ class QPSetPass:
         if active:
             eps_terms = []
             proj_bar = proj_tau.zeros_like()
-            # a held frequency: its factor and chi0_bar, and the B_p_bar
-            # terms of the state passing by and of every paired state
-            live = 2 + (len(paired) + 1) * Bps.shape[1] / naux
+            # a held frequency: its factor, chi0_bar and the pairs' chi0_bar,
+            # and the B_p_bar terms of the state passing by and of the
+            # largest subspace's states, with their solves
+            # (`_reverse_group`)
+            widest = max((len(c) for c in self.subspaces), default=0)
+            live = 3 + (2 * widest + 1) * Bps.shape[1] / naux
             k0, k1 = frequency_blocks(len(grid.cosft_wt), naux, self.tile_gb,
                                       live)[0]
             cap = k1 - k0
@@ -826,37 +854,65 @@ class QPSetPass:
             if rank == root:
                 Bp_bars.held[si] = total
 
-        kept = {}
+        def close(subspace):
+            """A subspace's off-diagonal contractions on its states' kept
+            solves: each slice's terms in pair order, the pairs' chi0_bar
+            at once into pairs_bar; then its states' terms are chained and
+            its slices and solves let go."""
+            near = [p for p in pairs if p[0] in subspace]
+            for n, (chi0, m, k, solve) in enumerate(held):
+                for i, j, wc_bar in near:
+                    (Bi, Wi), (Bj, Wj) = solved[i], solved[j]
+                    bi, bj, _ = pair_term_backward(Bi, Bj, Wi[k], Wj[k],
+                                                   wc_bar[k], want_chi0=False)
+                    kept[i][k] = kept[i][k] + bi
+                    kept[j][k] = kept[j][k] + bj
+                term = pairs_chi0_backward(
+                    {s: solved[s][1][k] for s in subspace},
+                    [(i, j, wc_bar[k]) for i, j, wc_bar in near])
+                pairs_bar[n] = term if pairs_bar[n] is None else pairs_bar[n] + term
+                term = None
+            for s in subspace:
+                del solved[s]
+            for a in active:
+                if a['si'] in subspace:
+                    chain_state(a['si'], kept.pop(a['si']))
+
+        # a paired state keeps its slice and its solve at every held
+        # frequency until the last state of its subspace has passed: pairs
+        # join states of one subspace only, so one subspace's solves are held
+        # at a time where the subspaces pass one after another
+        closing = {}
+        for subspace in self.subspaces:
+            last = max(j for j, a in enumerate(active) if a['si'] in subspace)
+            closing.setdefault(last, []).append(subspace)
+        kept, solved, pairs_bar = {}, {}, [None] * len(held)
         for j, a in enumerate(active):
             si = a['si']
             Bp = Bps.fetch(si)
-            terms = {}
+            terms, solves = {}, {}
             for chi0, m, k, solve in held:
-                bb, cb, e_k = integral_term_reverse(a, Bp, solve(Bp), k)
+                WtB = solve(Bp)
+                bb, cb, e_k = integral_term_reverse(a, Bp, WtB, k)
                 chi0[m] += cb
                 eps_terms.append(((k, j), e_k))
                 terms[k] = bb
-            Bp = None
+                if si in paired:
+                    solves[k] = WtB
+                WtB = None
             if si in paired:
-                kept[si] = terms
+                kept[si], solved[si] = terms, (Bp, solves)
             else:
                 chain_state(si, terms)
-            terms = None
-        # the off-diagonal contractions' adjoints, on the same solves, after
-        # every state's terms at each frequency as in the frequency-outside
-        # loop
-        for i, j, wc_bar in pairs:
-            Bi, Bj = Bps.fetch(i), Bps.fetch(j)
-            for chi0, m, k, solve in held:
-                bi, bj, cb = pair_term_backward(Bi, Bj, solve(Bi), solve(Bj),
-                                                wc_bar[k])
-                kept[i][k] = kept[i][k] + bi
-                kept[j][k] = kept[j][k] + bj
-                chi0[m] += cb
-            Bi = Bj = None
-        for a in active:
-            if a['si'] in kept:
-                chain_state(a['si'], kept.pop(a['si']))
+            Bp = terms = solves = None
+            for subspace in closing.get(j, ()):
+                close(subspace)
+        # the pairs' chi0_bar after every state's, as in the
+        # frequency-outside loop
+        for n, (chi0, m, k, solve) in enumerate(held):
+            if pairs_bar[n] is not None:
+                chi0[m] += pairs_bar[n]
+        pairs_bar = None
 
     def direct_terms(self):
         """PASS 3 -- per state: the direct term, the residues, the slice

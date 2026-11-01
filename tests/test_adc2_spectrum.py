@@ -17,6 +17,8 @@ two 1s cores frozen. Checks:
      (> 1e-5 Ha).
   4. refusals: a root the solve did not return, a negative root index, a
      triplet bra, a ground ket.
+  5. an SCS or SOS MP2 state model is refused: its E_0 is spin-component
+     scaled, while these roots and ISR transition densities are ADC(2)'s.
 
 Run: python tests/test_adc2_spectrum.py
 """
@@ -128,6 +130,21 @@ def check_refusals(spec):
     return ok
 
 
+def check_scaled(mol):
+    """Check 5."""
+    ok = True
+    for scaling in ('scs', 'sos'):
+        mp2 = MP2State(HFState(mol, make_scf), frozen=FROZEN, auxbasis='cc-pvdz-ri',
+                       numerics=Numerics(), spin_scaling=scaling)
+        try:
+            adc2_spectrum(mp2, N_STATES)
+            ok &= check(False, f'a {scaling} state model is refused')
+        except ValueError as exc:
+            ok &= check('spin_scaling' in str(exc), f'a {scaling} state model is refused',
+                        str(exc)[:60])
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     with warnings.catch_warnings():
@@ -142,6 +159,7 @@ def run():
         ok &= check_active(mol, spec, props)
         ok &= check_symmetry(props)
         ok &= check_refusals(spec)
+        ok &= check_scaled(mol)
     return ok
 
 

@@ -104,8 +104,8 @@ its path --, bases, solvent, frozen core, roots,
 following, saddle check, loop tolerances, code) is refused: its pieces and
 the new ones would not belong to one calculation. The code is
 `src.Base.utils.record_io.code_id`: the short commit, with '+dirty:' and a digest
-of the edit on an edited tree; a record stamped with a full commit (an
-older record) resumes on a clean checkout of that commit.
+of the edit on an edited tree; a record stamped with a full commit
+resumes on a clean checkout of that commit.
 Numerical events warn, are flagged and the run carries on (the policy: refuse
 inputs, warn numerics). A walk that does not reach its
 minimum is kept as `S0` / `minimum` with converged false and the flag
@@ -210,8 +210,8 @@ ADC2_ONLY = ('auxbasis', 'nroots', 'frozen', 'spin_scaling', 'solvent_arm')
 GWBSE_ONLY = ('xc', 'isdf_grid', 'bse_solver', 'bse_kernel', 'refreeze',
               'outside_scissor', 'residues', 'xc_grid', 'isdf_test_set',
               'pivot_points')
-#: The settings added after records were first written, and the value an
-#: older record that lacks them was made with.
+#: The settings a record may lack, and the value a record that lacks one was
+#: made with.
 LATER_SETTINGS = dict(outside_scissor=None, residues=None, xc_grid=None,
                       isdf_test_set=None, pivot_points=None, cavity=DEFAULT_CAVITY,
                       spin_scaling=None, solvent_arm=None, loop_tolerance='fixed')

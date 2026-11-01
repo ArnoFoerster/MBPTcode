@@ -273,7 +273,7 @@ from src.Base.utils.grids.time_frequency import sigma_transforms
 from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
-from tests.isdf_test_grid import LEGACY_FIT, g1, g1_numerics
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, matches
 
@@ -1760,7 +1760,7 @@ def row_fit_chain_routes(gate, mol):
         surface = RPABSESurface(
             mol, chain_scf, spin='singlet', mf=mf_ref,
             # the row fit's ledgers and pair layout are the Duchemin-Blase fit's
-            numerics=g1_numerics(mol, numerics_of({'test_set': LEGACY_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
+            numerics=g1_numerics(mol, numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
         if scan is not None:
             scan(surface)
         g, e, _ = surface.total_gradient(here, mf_here)               # context

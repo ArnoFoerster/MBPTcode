@@ -90,7 +90,7 @@ from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
 from src.gradients.surface import evaluate
 from src.gradients.gwbse.surface_factory import potential_energy_surface
-from tests.isdf_test_grid import g1, g1_numerics, LEGACY_FIT, legacy
+from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
@@ -141,7 +141,7 @@ def state_pair(sliced, scf_factory=chain_scf, **numerics):
     mol = own_water()
     return RPABSESurface(
         mol, scf_factory, spin='singlet', mf=scf_factory(mol),
-        numerics=legacy(g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': sliced, **numerics}))))
+        numerics=duchemin_blase(g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': sliced, **numerics}))))
 
 
 def reachable_arrays(root):
@@ -352,7 +352,7 @@ def test_gathers_are_one_per_sweep(size):
         # halves read; a half on other numerics is refused
         return RPABSESurface(
             mol, chain_scf, spin='singlet', mf=mf,
-            numerics=legacy(g1_numerics(mol, Numerics(
+            numerics=duchemin_blase(g1_numerics(mol, Numerics(
                 bse={'solver': 'davidson'}, quadrature={'ntau_rpa': ntau},
                 layout={'sliced': True}))))
 
@@ -382,7 +382,7 @@ def test_excited_chain_on_slices(size, solver, pyscf_one_thread):
             mol = own_water()
             chain = ExcitedStateChain(
                 mol, scf_factory, mf=scf_factory(mol),
-                numerics=legacy(g1_numerics(mol, Numerics(bse={'solver': solver},
+                numerics=duchemin_blase(g1_numerics(mol, Numerics(bse={'solver': solver},
                                                    layout={'sliced': sliced}))))
             here = own_water(H2O_DISPLACED)
             g_ex, d_ex = chain.excitation_gradient(here)
@@ -410,7 +410,7 @@ def test_charged_surface_on_slices(pyscf_one_thread):
             mol = own_water()
             surface = RPAQPSurface(
                 mol, scf_factory, state=0, mf=scf_factory(mol),
-                numerics=legacy(g1_numerics(mol, Numerics(layout={'sliced': sliced}))))
+                numerics=duchemin_blase(g1_numerics(mol, Numerics(layout={'sliced': sliced}))))
             g, e, _ = surface.total_gradient(own_water(H2O_DISPLACED))
             out.append((g, e))
         return out
@@ -457,27 +457,27 @@ def test_what_slices_cannot_serve_is_refused():
         return chain_scf(m)
 
     with pytest.raises(ValueError, match='sliced=False'):
-        FactorChain(mol, counted, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)},
+        FactorChain(mol, counted, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                     layout={'sliced': True}))
     with pytest.raises(ValueError, match='layout|sliced'):
         ExcitedStateChain(
-            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)},
+            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                                           layout={'sliced': True})),
             numerics=Numerics(layout={'sliced': False}))
     assert built == []
     # a continuum is served on slices, its bare gauge and Eq. (18) by rows
     # (tests/test_solvated_row_fit.py)
-    RPAGroundStateChain(mol, chain_scf, environment=solvated, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)},
+    RPAGroundStateChain(mol, chain_scf, environment=solvated, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                                                 layout={'sliced': True}))
     ExcitedStateChain(
         mol, chain_scf, environment=solvated,
-        numerics=legacy(g1_numerics(mol, Numerics(layout={'sliced': True}))))
+        numerics=duchemin_blase(g1_numerics(mol, Numerics(layout={'sliced': True}))))
 
     def rank(comm):
         m = own_water()
         chain = ExcitedStateChain(
             m, chain_scf, mf=chain_scf(m),
-            numerics=legacy(g1_numerics(m, Numerics(layout={'sliced': True}))))
+            numerics=duchemin_blase(g1_numerics(m, Numerics(layout={'sliced': True}))))
         rows = chain.factors_at(m, chain.mf0)[0]
         with pytest.raises(TypeError):
             tuple(rows)

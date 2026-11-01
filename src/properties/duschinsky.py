@@ -142,7 +142,7 @@ CUMULANT_STEP = 1e-4
 
 class DuschinskyNotOrthogonal(RuntimeWarning):
     """The overlap of two normal-mode sets is not orthogonal to
-    DUSCHINSKY_ORTHOGONALITY_TOL: it was replaced by the nearest orthogonal
+    DUSCHINSKY_ORTHOGONALITY_TOL: it is replaced by the nearest orthogonal
     matrix, and the deviation is in `DuschinskyModel.orthogonality`."""
 
 

@@ -248,6 +248,8 @@ def old_identity(numerics):
     for name in ('test_set', 'pivot_points', 'runtime_radii'):
         values['isdf'].pop(name)
     values['solvent'].pop('loop_force_fraction')   # left out at its default
+    for name in ('test_set', 'pivot_points'):      # left out at their default
+        values['scf'].pop(name)
     for section, name, held in IDENTITY_RETIRED:   # written then, at the value held
         values[section][name] = held
     return record_hash({k: values[k] for k in ('isdf', 'scf', 'span', 'qp',
@@ -259,8 +261,8 @@ def test_a_named_grid_is_the_ao_product_fit_in_the_identity():
     """The Duchemin-Blase fit named keeps the identity it had before the
     fields existed (it was what a named level meant); a level named alone is
     the AO-product fit and says so; nothing named keeps its identity."""
-    legacy = Numerics(isdf={'level': 'G3', 'test_set': 'duchemin_blase'})
-    assert legacy.identity() == old_identity(legacy)
+    duchemin_blase = Numerics(isdf={'level': 'G3', 'test_set': 'duchemin_blase'})
+    assert duchemin_blase.identity() == old_identity(duchemin_blase)
     plain = Numerics(isdf={'level': 'G3'})
     assert plain.isdf.test_set_named() == 'ao_products'
     assert plain.identity() != old_identity(plain)

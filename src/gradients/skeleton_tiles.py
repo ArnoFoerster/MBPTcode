@@ -29,12 +29,14 @@ tile the first AO index into slabs whose derivative block stays under
 `THREE_CENTER_BLOCK_BYTES`: each (slab, tile) block of (mn|P), its two
 derivative integrals and S is made, contracted and dropped. Pass 1 gives a
 tile's rows of a, b and L^P = J^P Cd; a and b are gathered verbatim and
-solved on every rank (locked to rank 0's); for the exchange Kt = V^-1 L is
-solved on the metric's Cholesky factor V = Lc Lc^T by block substitution over
-the tiles, forward in tile order and back in reverse, each tile solved by its
-owner and streamed to the others, who subtract it from their own tiles; the
-tiles of Kt then stream once more, each rank forming its rows of
-Vinv T Vinv = <g Kt^P, Kt^Q>. Neither V^-1 nor the product Vinv T Vinv is
+solved on every rank (locked to rank 0's); for the exchange, L moves in one
+exchange from the auxiliary tiles to fixed blocks of whole occupied orbitals
+(`SKELETON_EXCHANGE_OCC_BLOCK`, a rank's blocks one contiguous run), where
+Kt = V^-1 L is solved on the metric's Cholesky factor V = Lc Lc^T, At = Kt g
+is formed and each block's (naux, naux) term of Vinv T Vinv =
+<g Kt^P, Kt^Q> is taken; the terms add in block order (`ordered_chain_sum`)
+and At moves back to the tiles in a second exchange. Neither V^-1 nor the
+product Vinv T Vinv is
 formed: on a near-singular metric (DMABN/aug-cc-pVDZ-JKFIT, smallest
 eigenvalue 7e-8) they lose digits that the solves keep, about 1e-6 Ha/Bohr
 of a force. Pass 2 is each tile's (natm, 3) addend: its AO-slab
@@ -110,15 +112,18 @@ from pyscf.dft import gen_grid, numint, radi
 from pyscf.scf import _vhf
 
 from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_TEST_SETS,
-                                         SKELETON_AUX_TILE,
+                                         SKELETON_AUX_TILE, SKELETON_EXCHANGE_OCC_BLOCK,
+                                         SKELETON_EXCHANGE_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
 from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.separable_ri import tile_collocation, fit_rows
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
                                             fit_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
-                                              current_comm, lockstep, ordered_sum,
-                                              partition, reduce_sum)
+                                              contiguous_block, current_comm,
+                                              exchange_blocks, lockstep,
+                                              ordered_chain_sum, ordered_sum,
+                                              partition)
 
 
 class FittedFockSkeleton:
@@ -206,7 +211,8 @@ class FittedFockSkeleton:
 
     def prepare(self, owned, comm=None):
         """Pass 1 on the `owned` tiles, then the gathers, the metric solves
-        and the exchange's stream: every rank calls it, collectively."""
+        and the exchange's column blocks: every rank calls it,
+        collectively."""
         rank, size = ((0, 1) if comm is None
                       else (comm.Get_rank(), comm.Get_size()))
         owners = [[int(t) for t in partition(len(self.tiles), r, size)]
@@ -261,103 +267,96 @@ class FittedFockSkeleton:
         if not self.w:
             return self
         del V
-        nt = len(self.tiles)
-        # each owned tile's rows of L, (rows, nocc nao)
-        Lt = {t: L.pop(t).reshape(-1, nocc * nao) for t in owned}
-
-        def stream(q, held, trans=None):
-            # tile q's rows of `held` from their owner, who first solves them
-            # against the diagonal block (trans 'N' forward, 'T' backward)
-            owner = q % size
-            q0, q1 = self.functions(q)
-            if rank == owner:
-                if trans is not None:
-                    held[q] = np.ascontiguousarray(scipy.linalg.solve_triangular(
-                        Lc[q0:q1, q0:q1], held[q], lower=True, trans=trans))
-                rows = held[q]
+        # Kt = V^-1 L acts on each column of L alone, and At^P = Kt^P g mixes
+        # the columns of one occupied orbital only, so the solve runs on
+        # fixed blocks of whole occupied orbitals (`occupied_column_blocks`),
+        # a rank's blocks one contiguous run: one exchange moves L from the
+        # auxiliary tiles to the blocks, each block is solved, multiplied by
+        # g and contracted into its (naux, naux) term of <g Kt^P, Kt^Q> on
+        # its own, the terms add in block order (`ordered_chain_sum`), and
+        # one exchange moves At back to the tiles. Each byte of L and At
+        # crosses once, where a stream of every tile to every rank moved the
+        # whole tensor to each rank three times. Every block is the same
+        # arithmetic on whichever rank holds it, so the skeleton is the same
+        # bits at every rank count.
+        blocks = occupied_column_blocks(nocc)
+        block_owner = [r for r in range(size)
+                       for _ in range(*contiguous_block(len(blocks), r, size))]
+        runs = [contiguous_block(len(blocks), r, size) for r in range(size)]
+        cols = [(blocks[b0][0], blocks[b1 - 1][1]) if b1 > b0 else (0, 0)
+                for b0, b1 in runs]
+        rows = [[self.functions(t) for t in own] for own in owners]
+        nrows = [sum(p1 - p0 for p0, p1 in own) for own in rows]
+        i0, i1 = cols[rank]
+        mine = i1 - i0
+        # tiles to blocks: this rank's tiles' rows, each rank's columns
+        stacked = (np.concatenate([L.pop(t) for t in owned]) if owned
+                   else np.empty((0, nocc, nao)))
+        got = exchange_blocks(
+            [np.ascontiguousarray(stacked[:, c0:c1, :]).reshape(
+                len(stacked), (c1 - c0) * nao) for c0, c1 in cols],
+            [(nrows[r], mine * nao) for r in range(size)], comm)
+        stacked = None
+        Lb = np.empty((naux, mine, nao))
+        for r in range(size):
+            at = 0
+            for p0, p1 in rows[r]:
+                Lb[p0:p1] = got[r][at:at + p1 - p0].reshape(p1 - p0, mine, nao)
+                at += p1 - p0
+        got = None
+        self._hold('L_columns', Lb.nbytes)
+        At = np.empty_like(Lb)
+        terms = {}
+        for b in range(*runs[rank]):
+            b0, b1 = blocks[b][0] - i0, blocks[b][1] - i0
+            X = Lb[:, b0:b1, :].reshape(naux, -1)
+            if U is None:
+                # V = Lc Lc^T, by substitution, never by an explicit inverse:
+                # on a near-singular metric the inverse's product loses
+                # digits that the solves keep
+                Kb = scipy.linalg.solve_triangular(Lc, X, lower=True)
+                Kb = scipy.linalg.solve_triangular(Lc, Kb, lower=True, trans='T')
             else:
-                rows = np.empty((q1 - q0, nocc * nao))
-            broadcast_rows(rows, owner, comm)
-            self._hold('Kt_stream', rows.nbytes)
-            return q0, q1, rows
-
-        if U is None:
-            # V = Lc Lc^T; Kt = V^-1 L by substitution, never by an explicit
-            # inverse: on a near-singular metric the inverse's product loses
-            # digits that the solves keep. Solved in place.
-            Kt = Lt
-            # forward, Lc Y = L, in tile order
-            for q in range(nt):
-                q0, q1, Yq = stream(q, Kt, 'N')
-                for t in owned:
-                    if t > q:
-                        p0, p1 = self.functions(t)
-                        Kt[t] -= Lc[p0:p1, q0:q1] @ Yq
-                del Yq
-            # backward, Lc^T Kt = Y, in reverse tile order
-            for q in reversed(range(nt)):
-                q0, q1, Kq = stream(q, Kt, 'T')
-                for t in owned:
-                    if t < q:
-                        p0, p1 = self.functions(t)
-                        Kt[t] -= Lc[q0:q1, p0:p1].T @ Kq
-                del Kq
-            del Lc
-        else:
-            # Kt = U (e^-1 (U^T L)). The explicit pseudo-inverse's product
-            # carries round-off of |V^+| ~ 1/LINEAR_DEP_THR into every
-            # direction of Kt; the factors confine it to the near-null
-            # eigenvectors, which the force reads only through the fit's
-            # residual. Y = e^-1 U^T L in fixed blocks of eigenvectors (block
-            # b rank b % size's), each summed over the tiles of L in tile
-            # order, then Kt from the blocks of Y in block order: the same
-            # bits at every rank count.
-            nkeep = len(e)
-            width = SKELETON_AUX_TILE
-            blocks = [(k, min(k + width, nkeep)) for k in range(0, nkeep, width)]
-            mine = [k for k in range(len(blocks)) if k % size == rank]
-            Y = {k: np.zeros((blocks[k][1] - blocks[k][0], nocc * nao))
-                 for k in mine}
-            for q in range(nt):
-                q0, q1, Lq = stream(q, Lt)
-                for k in mine:
-                    k0, k1 = blocks[k]
-                    Y[k] += U[q0:q1, k0:k1].T @ Lq
-                del Lq
-            del Lt
-            for k in mine:
-                k0, k1 = blocks[k]
-                Y[k] /= e[k0:k1, None]
-            self._hold('Y_blocks', sum(x.nbytes for x in Y.values()))
-            Kt = {t: np.zeros((self.functions(t)[1] - self.functions(t)[0],
-                               nocc * nao)) for t in owned}
-            for k, (k0, k1) in enumerate(blocks):
-                owner = k % size
-                Yk = Y.pop(k) if rank == owner else np.empty((k1 - k0, nocc * nao))
-                broadcast_rows(Yk, owner, comm)
-                self._hold('Kt_stream', Yk.nbytes)
-                for t in owned:
-                    p0, p1 = self.functions(t)
-                    Kt[t] += U[p0:p1, k0:k1] @ Yk
-                del Yk
-            del U, e
-        for t in owned:
-            # (g Kt^P)^T, the only form of Kt pass 2 reads
-            self.At[t] = np.matmul(Kt[t].reshape(-1, nocc, nao), self.g)
-        self._hold('At_tiles', sum(x.nbytes for x in self.At.values()))
-        # the rows of Vinv T Vinv as <g Kt^P, Kt^Q>, the tiles of Kt streamed
-        # once more: the product Vinv T Vinv loses digits as the square of
-        # the metric's condition number
+                # the pseudo-inverse as its factors, U (e^-1 (U^T L)): the
+                # explicit one carries round-off of 1/LINEAR_DEP_THR into
+                # every direction of Kt
+                Kb = U @ ((U.T @ X) / e[:, None])
+            Kb = Kb.reshape(naux, b1 - b0, nao)
+            # (g Kt^P), the only form of Kt pass 2 reads
+            At[:, b0:b1, :] = np.matmul(Kb, self.g)
+            terms[b] = (At[:, b0:b1, :].reshape(naux, -1)
+                        @ Kb.reshape(naux, -1).T)
+            del Kb, X
+        Lb = None
+        self._hold('VTV_terms', sum(x.nbytes for x in terms.values()))
+        # Vinv T Vinv = <g Kt^P, Kt^Q>: the product of the inverses would lose
+        # digits as the square of the metric's condition number
+        VTV = ordered_chain_sum(terms, block_owner, comm, np.zeros((naux, naux)))
+        terms = None
         for t in owned:
             p0, p1 = self.functions(t)
-            self.VTV[t] = np.empty((p1 - p0, naux))
-        for q in range(nt):
-            q0, q1, Kq = stream(q, Kt)
-            for t in owned:
-                p0, p1 = self.functions(t)
-                self.VTV[t][:, q0:q1] = self.At[t].reshape(p1 - p0, -1) @ Kq.T
-            del Kq
-        del Kt
+            self.VTV[t] = np.ascontiguousarray(VTV[p0:p1])
+        VTV = None
+        # blocks back to tiles: each rank's tiles' rows of every rank's columns
+        back = exchange_blocks(
+            [np.ascontiguousarray(np.concatenate(
+                [At[p0:p1] for p0, p1 in rows[r]]) if rows[r]
+                else np.empty((0, mine, nao))).reshape(nrows[r], mine * nao)
+             for r in range(size)],
+            [(nrows[rank], (cols[r][1] - cols[r][0]) * nao) for r in range(size)],
+            comm)
+        At = None
+        at = 0
+        for t in owned:
+            p0, p1 = self.functions(t)
+            self.At[t] = np.empty((p1 - p0, nocc, nao))
+            for r in range(size):
+                c0, c1 = cols[r]
+                self.At[t][:, c0:c1, :] = back[r][at:at + p1 - p0].reshape(
+                    p1 - p0, c1 - c0, nao)
+            at += p1 - p0
+        back = None
+        self._hold('At_tiles', sum(x.nbytes for x in self.At.values()))
         return self
 
     def _pair_adjoint(self, t, a0, a1):
@@ -422,6 +421,14 @@ class FittedFockSkeleton:
         return out
 
 
+def occupied_column_blocks(nocc):
+    """(i0, i1) blocks of SKELETON_EXCHANGE_OCC_BLOCK consecutive occupied
+    orbitals: the column blocks of the fitted exchange skeleton's solve,
+    fixed by nocc, never by the rank count."""
+    w = SKELETON_EXCHANGE_OCC_BLOCK
+    return [(i, min(i + w, int(nocc))) for i in range(0, int(nocc), w)]
+
+
 def shell_runs(ao_loc, width):
     """(s0, s1) runs of consecutive shells of at most `width` functions each
     (`ao_loc` the shells' offsets), at least one shell per run, so a shell
@@ -483,61 +490,65 @@ def _derivative_exchange_screen(mol):
     return vhfopt
 
 
-def derivative_exchange_rows(mol, dms, shells):
+def derivative_exchange_rows(mol, dms, shells, vhfopt=None):
     """(ndm, 3, rows, nao): the K half of `pyscf.grad.rhf.get_jk`, signs
     included, for every density of `dms` in ONE direct pass over the
     four-centre derivative integrals, the rows of the AO shells
     [shells[0], shells[1]) only. The integrals and their screening are
-    pyscf's; J is not formed."""
+    pyscf's; J is not formed. vhfopt: the screening of
+    `_derivative_exchange_screen`, built once by a caller passing several
+    slices."""
     sh0, sh1 = shells
     nbas = mol.nbas
     vk = _vhf.direct_mapdm(mol._add_suffix('int2e_ip1'), 's2kl', 'jk->s1il',
                            np.asarray(dms, float), 3, mol._atm, mol._bas, mol._env,
-                           vhfopt=_derivative_exchange_screen(mol),
+                           vhfopt=(_derivative_exchange_screen(mol) if vhfopt is None
+                                   else vhfopt),
                            shls_slice=(sh0, sh1, 0, nbas, 0, nbas, 0, nbas))
     return -np.asarray(vk)
 
 
-def atom_share(mol, comm):
-    """[a0, a1): the contiguous atoms this rank differentiates, cut where the
-    running AO count crosses each rank's equal share (a row of the
-    four-centre pass costs the same whichever atom it sits on)."""
-    if comm is None or comm.Get_size() == 1:
-        return 0, mol.natm
-    size, rank = comm.Get_size(), comm.Get_rank()
-    nao_atom = np.array([p1 - p0 for _, _, p0, p1 in mol.aoslice_by_atom()])
-    ends = np.cumsum(nao_atom)
-    cut = [0] + [int(np.searchsorted(ends, ends[-1] * r / size, side='left')) + 1
-                 for r in range(1, size)] + [mol.natm]
-    cut = np.maximum.accumulate(np.minimum(cut, mol.natm))
-    return int(cut[rank]), int(cut[rank + 1])
+def exchange_skeleton_tiles(mol):
+    """(s0, s1) runs of consecutive shells of at most SKELETON_EXCHANGE_TILE
+    functions: the tiles of the exchange skeleton's derivative pass."""
+    return shell_runs(mol.ao_loc_nr(), SKELETON_EXCHANGE_TILE)
 
 
 def exchange_skeleton_by_atoms(mol, g_ao, D, omega, weight, comm=None):
     """(natm, 3) of weight * d/dR of one four-centre exchange channel
     (`mean_field_response.exchange_channel_skeleton`): both densities through
     one direct pass (`derivative_exchange_rows`) under the attenuation
-    `omega`. The pass costs nao^4, so over the ranks of `comm` (default
-    `current_comm()`, every rank calling) each differentiates its own atoms
-    (`atom_share`) and the (natm, 3) rows are summed: every atom's row comes
-    from one rank, so the sum adds zeros and the result is the same bits at
-    every rank count.
+    `omega`. The pass costs nao^4; its rows are cut into fixed shell tiles
+    (`exchange_skeleton_tiles`), tile t rank t % size's over the ranks of
+    `comm` (default `current_comm()`, every rank calling), so each rank's rows
+    interleave the whole molecule and the ranks finish together (a screened
+    row's cost differs between atoms far more than its AO count says); each
+    tile gives a (natm, 3) addend, added in tile order (`tile_sum`): the same
+    bits at every rank count.
     """
     comm = current_comm() if comm is None else comm
-    a0, a1 = atom_share(mol, comm)
-    grad = np.zeros((mol.natm, 3))
-    if a1 > a0:
-        slices = mol.aoslice_by_atom()
-        sh0, p0 = int(slices[a0][0]), int(slices[a0][2])
-        sh1, p1 = int(slices[a1 - 1][1]), int(slices[a1 - 1][3])
+    tiles = exchange_skeleton_tiles(mol)
+    ao_loc = mol.ao_loc_nr()
+    ao_atom = np.empty(mol.nao_nr(), dtype=int)
+    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
+        ao_atom[p0:p1] = ia
+    held = {}
+
+    def addend(t):
+        sh0, sh1 = tiles[t]
+        p0, p1 = int(ao_loc[sh0]), int(ao_loc[sh1])
         with mol.with_range_coulomb(omega):
-            vk_D, vk_g = derivative_exchange_rows(mol, [D, g_ao], (sh0, sh1))
-        t = -weight * (np.einsum('ac,xac->xa', g_ao[p0:p1], vk_D, optimize=True)
-                       + np.einsum('ad,xad->xa', D[p0:p1], vk_g, optimize=True))
-        for ia in range(a0, a1):
-            q0, q1 = slices[ia][2] - p0, slices[ia][3] - p0
-            grad[ia] = t[:, q0:q1].sum(axis=1)
-    return reduce_sum(grad, comm)
+            if 'screen' not in held:
+                held['screen'] = _derivative_exchange_screen(mol)
+            vk_D, vk_g = derivative_exchange_rows(mol, [D, g_ao], (sh0, sh1),
+                                                  held['screen'])
+        rows = -weight * (np.einsum('ac,xac->xa', g_ao[p0:p1], vk_D, optimize=True)
+                          + np.einsum('ad,xad->xa', D[p0:p1], vk_g, optimize=True))
+        out = np.zeros((mol.natm, 3))
+        np.add.at(out, ao_atom[p0:p1], rows.T)
+        return out
+
+    return tile_sum(addend, len(tiles), mol.natm, comm)
 
 
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,

@@ -47,6 +47,18 @@ class ReverseState:
     w_corr: np.ndarray = None
 
 
+@dataclass(eq=False)
+class HeldReverse:
+    """A root's reverse pass a relaxed density stopped at the integrals:
+    its `ReverseState`, the Casida `solution` it was taken off, and the
+    multiplier the density solved (`SolvedMultiplier`), which a force on
+    the same solution finishes (`ExcitedStateChain.excitation_gradient`)."""
+
+    state: ReverseState
+    solution: object
+    multiplier: object
+
+
 class ReversePass:
     """The reverse pass from the Casida adjoints to the nuclear gradient."""
 
@@ -105,11 +117,19 @@ class ReversePass:
         h_bar: the adjoint on the quasiparticle Hamiltonian's off-diagonal
         elements (`one_body_seed`), None on the diagonal route.
         """
+        return self._fold_integrals(shared, self.fold_to_integrals(
+            shared, eqp_bar, x_bar, d_bar, w_bar, release_tape=release_tape,
+            h_bar=h_bar))
+
+    def fold_to_integrals(self, shared, eqp_bar, x_bar, d_bar, w_bar,
+                          release_tape=True, h_bar=None):
+        """The `ReverseState` of `fold_to_nuclei` at its integrals: the
+        quasiparticle, screening and reaction-field stages folded."""
         st = self._fold_seeds(shared, eqp_bar, x_bar, d_bar, h_bar)
         self._fold_quasiparticle(shared, st, eqp_bar, release_tape)
         self._fold_screening(shared, st, w_bar)
         self._fold_reaction_field(shared, st, eqp_bar)
-        return self._fold_integrals(shared, st)
+        return st
 
     def _fold_seeds(self, shared, eqp_bar, x_bar, d_bar, h_bar):
         """The reverse pass's state: the seeds cut to tiles, the shared
@@ -306,8 +326,28 @@ class ReversePass:
         grad, diags = self.fold_to_nuclei(shared, *seeds,
                                           release_tape=release_tape,
                                           h_bar=h_bar)
-        om = solution.omega
-        return grad, dict(diags, omega=float(om[root]), root=int(root))
+        return grad, self._root_record(diags, solution, root)
+
+    def root_state(self, shared, solution, root, release_tape=True):
+        """The `ReverseState` of dOmega_root at the integrals
+        (`fold_to_integrals`), off one forward and its Casida solution."""
+        with self.chain.phase('t_bse_backward'):
+            seeds = self.chain.follower.casida_seeds(shared, solution, root)
+            h_bar = self.chain.quasiparticles.one_body_seed(shared, solution, root)
+        return self.fold_to_integrals(shared, *seeds, release_tape=release_tape,
+                                      h_bar=h_bar)
+
+    def integrals_gradient(self, shared, solution, root, st):
+        """(dOmega_root/dR, diagnostics) from the root's reverse state `st`
+        at the integrals (`root_state`), which it consumes."""
+        if shared.resolved is not None:
+            self.chain.resolved_view = shared.resolved
+        grad, diags = self._fold_integrals(shared, st)
+        return grad, self._root_record(diags, solution, root)
+
+    @staticmethod
+    def _root_record(diags, solution, root):
+        return dict(diags, omega=float(solution.omega[root]), root=int(root))
 
     def interstate_gradient_of(self, shared, solution, m, n,
                                release_tape=True):

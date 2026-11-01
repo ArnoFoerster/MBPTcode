@@ -13,6 +13,10 @@
     minimum        `StateMinimum`: what the rate layer reads of a geometry,
                    filled by GW-BSE or ADC(2) alike
     rate_models    the TADF rate table off three minima and the S0 modes
+    rate_chain     ISC and RISC of one method from its own minima on a
+                   declared full model, and every ablation of it
+    transfer_rates golden-rule triplet (Dexter) transfer and
+                   triplet-triplet annihilation rates between molecules
     rates          the rate formulas: golden-rule transfer (Marcus,
                    Marcus-Levich-Jortner, spin-vibronic, internal
                    conversion), radiative, and the photoluminescence kinetics

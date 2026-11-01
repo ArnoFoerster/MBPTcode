@@ -303,7 +303,7 @@ def run(args, comm):
             if (stored.get('state_specific', 'off') == args.state_specific
                     and stored.get('ss_density', 'unrelaxed') == args.ss_density
                     and stored.get('spin_scaling', 'none') == args.spin_scaling
-                    # a channel written before it carried its medium is reused
+                    # a channel that records no medium is reused
                     and stored.get('medium', describe(env)) == describe(env)):
                 channels[spin] = stored
                 say(f'{spin}: reused {path}', flush=True)

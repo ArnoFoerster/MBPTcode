@@ -126,7 +126,7 @@ from src.gradients.gwbse.reaction_field_adjoint import (added_reaction_field_adj
                                                         reaction_field_shift,
                                                         static_screening)
 from src.gradients.isdf_derivatives import GaugeAdjoint
-from src.gradients.mean_field_response import relaxed_density_mo
+from src.gradients.mean_field_response import relaxed_multiplier
 from src.gradients.gwbse.static_correction import (qp_xc_correction_Y,
                                                    qp_xc_correction_skeleton)
 from src.gradients.gwbse.conventions import FrozenConventions, ResolvedConventions
@@ -136,7 +136,7 @@ from src.SingleReference.GW.qp_solve import (add_reaction_field,
                                              static_exchange_diagonal)
 from src.gradients.gwbse.adaptive_selection import QuasiparticleSelection
 from src.gradients.gwbse.qp_set import QuasiparticleSet
-from src.gradients.gwbse.reverse_fold import ReversePass
+from src.gradients.gwbse.reverse_fold import HeldReverse, ReversePass
 from src.gradients.gwbse.state_following import StateFollower
 
 
@@ -819,7 +819,12 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
 
     def excitation_gradient(self, mol=None, mf=None):
         """(dOmega/dR, diagnostics). Nothing larger than three-index; taken
-        once per geometry and root, and read back after that."""
+        once per geometry and root, and read back after that.
+
+        After a relaxed density of the root on the same mean field and
+        solution (a solvation loop's last cycle), the force finishes that
+        reverse pass: its integrals, with the multiplier the density solved
+        where the right-hand side is the same bits (`SolvedMultiplier`)."""
         self.require_differentiable_environment()
         mol, mf = self.mean_field(mol, mf)
         self.require_scf_quality(mf, 'excitation_gradient')
@@ -827,7 +832,18 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         held = self.follower.held(mol, mf)
         if held is not None and ('omega', root) in held.forces:
             return held.forces[('omega', root)]
-        out = self.reverse.root_gradient(shared, solution, root)
+        kept = None if held is None else held.reverse.pop(root, None)
+        if kept is not None and kept.solution is solution:
+            # the quasiparticle tape the density kept is read no further
+            shared.release()
+            self._held_multiplier = kept.multiplier
+            try:
+                out = self.reverse.integrals_gradient(shared, solution, root,
+                                                      kept.state)
+            finally:
+                self._held_multiplier = None
+        else:
+            out = self.reverse.root_gradient(shared, solution, root)
         if held is not None:
             held.forces[('omega', root)] = out
         return out
@@ -868,18 +884,24 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             return C @ p_mo @ C.T
         # the reverse pass up to the orbital branch's inputs only: the
         # multiplier, collocation and fit branches past them are the force's
+        state = self.reverse.root_state(shared, solution, root,
+                                        release_tape=False)
         capture = OrbitalCapture(density_only=True)
         self._orbital_capture = capture
         try:
-            self.reverse.root_gradient(shared, solution, root, release_tape=False)
+            self.reverse.integrals_gradient(shared, solution, root, state)
         finally:
             self._orbital_capture = None
         gammas = [np.diag(e) if e.ndim == 1 else e for e, _ in capture]
-        p_mo, _ = relaxed_density_mo(mf, sum(gammas), nocc,
-                                     Y_extra=sum(y for _, y in capture),
-                                     environment=not frozen_field,
-                                     numerics=self.settings)
-        return C @ p_mo @ C.T
+        gamma, solved = relaxed_multiplier(mf, sum(gammas), nocc,
+                                           Y_extra=sum(y for _, y in capture),
+                                           environment=not frozen_field,
+                                           numerics=self.settings)
+        held = self.follower.held(mol, mf)
+        if held is not None:
+            # a force on this solution finishes the pass (excitation_gradient)
+            held.reverse[root] = HeldReverse(state, solution, solved)
+        return C @ (gamma + solved.lam) @ C.T
 
     def state_specific_correction(self, mol=None, mf=None):
         """Scheme B's record at one geometry (`ClassicalStateSpecific`):

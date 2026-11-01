@@ -1,22 +1,28 @@
-"""The four-centre exchange skeleton in one pass, its atoms split over ranks.
+"""The four-centre exchange skeleton in one pass, its rows in shell tiles dealt
+over the ranks.
 
 `mean_field_response.exchange_channel_skeleton` (`skeleton_tiles.exchange_skeleton_by_atoms`) differentiates one exchange
 channel (the erf-attenuated one of a range-separated hybrid is never density
 fitted) with pyscf's direct derivative integrals, nao^4 work. It runs both
-densities through ONE pass (`derivative_exchange_rows`) and, under ranks,
-each rank only the rows of its own atoms (`atom_share`); the (natm, 3) rows
-are summed.
+densities through ONE pass (`derivative_exchange_rows`) on fixed tiles of
+consecutive shells (`exchange_skeleton_tiles`), tile t rank t % size's, and
+adds the tiles' (natm, 3) addends in tile order.
+
+WHAT BREAKS IF THIS FAILS. Contiguous atom shares balanced by AO count left
+ranks idle for most of the pass on CzBN1 (2 nodes: 105 s mean, 177 s max
+waiting in the sum): a screened row's cost differs between atoms far more
+than its AO count says. Interleaved tiles spread every part of the molecule
+over every rank.
 
 Gates, formaldehyde/aug-cc-pVDZ, random symmetric densities, omega 0 and 0.3:
   * one rank: the skeleton of two separate `pyscf.grad.rhf.get_jk` passes
     within 1e-12 relative (one pass screens on both densities at once, so a
     quartet near the screening bound can move the last bits);
-  * 2 and 3 simulated ranks: every rank the same bits, the one-rank result
-    within 1e-12 relative, and
-    each rank asks libcint only for its own atoms' shells, together every
-    shell once;
-  * the atom shares cover every atom once, contiguous and balanced by AO
-    count.
+  * 2 and 3 simulated ranks: the one-rank result bit for bit on every rank,
+    each rank asking libcint for exactly its tiles t % size, and together
+    for every shell once;
+  * the tiles cover the shells once, in order, none wider than the tile
+    width unless a single shell is.
 """
 import threading
 
@@ -29,7 +35,8 @@ from pyscf.scf import _vhf
 from src.Base.utils.parallel.mpi_grid import distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.mean_field_response import exchange_channel_skeleton
-from src.gradients.skeleton_tiles import atom_share
+from src.Base.numerics.constants import SKELETON_EXCHANGE_TILE
+from src.gradients.skeleton_tiles import exchange_skeleton_tiles
 
 FORMALDEHYDE = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.59; H 0.02 -0.94 -0.6'
 
@@ -71,7 +78,7 @@ def test_one_pass_is_two_passes(omega):
 
 @pytest.mark.parametrize('size', [2, 3])
 @pytest.mark.parametrize('omega', [0.0, 0.3])
-def test_ranks_differentiate_their_atoms(size, omega, monkeypatch):
+def test_ranks_take_interleaved_tiles(size, omega, monkeypatch):
     mol = molecule()
     D, g_ao = densities(mol.nao)
     with distributed(None):
@@ -90,36 +97,23 @@ def test_ranks_differentiate_their_atoms(size, omega, monkeypatch):
                 exchange_channel_skeleton(_Mf(molecule()), g_ao, D, omega, 0.7))
 
     out = run_simulated(one_rank, size)
-    slices = mol.aoslice_by_atom()
+    tiles = exchange_skeleton_tiles(mol)
+    assert len(tiles) > 2 * size
     shells = []
     for rank, (name, grad) in enumerate(out):
-        np.testing.assert_array_equal(grad, out[0][1])
-        assert np.abs(grad - serial).max() <= 1e-12 * np.abs(serial).max()
-        a0, a1 = atom_share(mol, type('C', (), {'Get_size': lambda s: size,
-                                                 'Get_rank': lambda s, r=rank: r})())
-        expect = [] if a1 == a0 else [(int(slices[a0][0]), int(slices[a1 - 1][1]))]
-        assert [tuple(int(x) for x in sl) for sl in asked.get(name, [])] == expect
-        shells.extend(range(*expect[0]) if expect else [])
+        np.testing.assert_array_equal(grad, serial)
+        mine = [tuple(int(x) for x in sl) for sl in asked.get(name, [])]
+        assert mine == [tiles[t] for t in range(rank, len(tiles), size)]
+        shells.extend(s for s0, s1 in mine for s in range(s0, s1))
     assert sorted(shells) == list(range(mol.nbas))
 
 
-@pytest.mark.parametrize('size', [1, 2, 3, 4, 7])
-def test_atom_shares_cover_and_balance(size):
+def test_tiles_cover_the_shells():
     mol = gto.M(atom='\n'.join(f'C {1.4 * i} 0 0' if i % 3 else f'H {1.4 * i} 0 0'
                                for i in range(12)), basis='aug-cc-pvdz', verbose=0)
-    nao = np.array([p1 - p0 for _, _, p0, p1 in mol.aoslice_by_atom()])
-
-    class Ranks:
-        def __init__(self, r):
-            self.r = r
-
-        def Get_size(self):
-            return size
-
-        def Get_rank(self):
-            return self.r
-    shares = [atom_share(mol, Ranks(r)) for r in range(size)]
-    covered = [a for a0, a1 in shares for a in range(a0, a1)]
-    assert covered == list(range(mol.natm))
-    loads = [nao[a0:a1].sum() for a0, a1 in shares]
-    assert max(loads) <= nao.sum() / size + nao.max()
+    ao_loc = mol.ao_loc_nr()
+    tiles = exchange_skeleton_tiles(mol)
+    assert tiles[0][0] == 0 and tiles[-1][1] == mol.nbas
+    assert all(a[1] == b[0] for a, b in zip(tiles, tiles[1:]))
+    assert all(s1 - s0 == 1 or ao_loc[s1] - ao_loc[s0] <= SKELETON_EXCHANGE_TILE
+               for s0, s1 in tiles)

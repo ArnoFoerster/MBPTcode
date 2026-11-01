@@ -52,6 +52,17 @@ RELAXED_SOLVATION = ('equilibrium', 'nonequilibrium')
 #: central differences of the declared mean field's force, or a Hessian
 #: computed elsewhere at R0 and read from its file (`ExternalHessian`).
 HESSIAN_ROUTES = ('analytic-df', 'numerical', 'external')
+#: What the vertical stage computes besides the energies: 'all' (the
+#: oscillator strengths and transition dipoles, the spin-orbit table, the
+#: Condon element and every derivative coupling a rate reads) or 'energies'
+#: (the energies, oscillator strengths and transition dipoles alone).
+PROPERTY_SETS = ('all', 'energies')
+#: The stages a run declaring properties 'energies' can take: the rest walk
+#: excited states for, or read, the couplings it does not compute.
+ENERGY_STAGES = ('s0', 'hess', 'vert')
+#: Where R0 comes from: the ground-state walk from the input geometry, or the
+#: input geometry itself.
+R0_ROUTES = ('walk', 'input')
 #: The geometry optimizers (`properties.optimize.relax`).
 ENGINES = ('auto', 'cartesian', 'geometric')
 #: How each SCF is finished.
@@ -180,6 +191,12 @@ class Policies:
         density.
     engine: the walk's optimizer (ENGINES).
     scf_finish: 'diis', or second-order steps at the end ('newton').
+    properties: PROPERTY_SETS, what the vertical stage computes besides the
+        energies; 'energies' skips the spin-orbit table and every coupling
+        (a vertical of a large cluster, where the spin-orbit pass dominates).
+    r0: R0_ROUTES, where R0 comes from: 'walk' relaxes the ground state from
+        the input geometry (the s0 stage), 'input' takes the input geometry
+        as it is (a frame of a film or a trajectory), with no SCF.
     """
     nudge_bohr: float
     far_start: Optional[FarStart]
@@ -193,6 +210,8 @@ class Policies:
     scf_finish: str
     external_hessian: Optional[ExternalHessian]
     tda_t1_minimum: Optional[TdaMinimum]
+    r0: str = 'walk'
+    properties: str = 'all'
 
 
 @dataclass(frozen=True)
@@ -425,6 +444,8 @@ def refuse_choices(d):
            RELAXED_SOLVATION)
     choose('policies.hessian', p.hessian, HESSIAN_ROUTES)
     choose('policies.engine', p.engine, ENGINES)
+    choose('policies.r0', p.r0, R0_ROUTES)
+    choose('policies.properties', p.properties, PROPERTY_SETS)
     choose('policies.scf_finish', p.scf_finish, SCF_FINISH)
     choose('solvent_scheme', d.solvent_scheme, SOLVENT_SCHEMES)
     choose('numerics.scf.route', d.numerics.scf.route, SCF_ROUTES)

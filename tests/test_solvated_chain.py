@@ -51,7 +51,7 @@ from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
                                                         reaction_field_shift,
                                                         static_screening)
 from src.properties.characters import ct_character, roots
-from tests.isdf_test_grid import g1_numerics, legacy
+from tests.isdf_test_grid import g1_numerics, duchemin_blase
 from tests.pins import RECORDING_BLAS, matches
 
 BASIS = 'cc-pvdz'
@@ -275,7 +275,7 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
     """
     mol, mf = water
     # the Duchemin-Blase fit's adjoint over its pair layout
-    chain = solvated(mol, mf, numerics=legacy(g1_numerics(mol)))
+    chain = solvated(mol, mf, numerics=duchemin_blase(g1_numerics(mol)))
     mol, mf = chain.mean_field(mol, mf)
     x_mo, d, eps, auxmol, crd, _ = chain.factors_at(mol, mf)
     d_bare = chain.bare_factor(mol, auxmol, crd)

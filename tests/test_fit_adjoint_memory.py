@@ -55,7 +55,7 @@ from src.gradients.isdf_derivatives import (dfactor_adjoint_gauges,
                                             product_pairs,
                                             require_whole_fit_adjoint,
                                             whole_fit_adjoint_gb)
-from tests.isdf_test_grid import g1, g1_numerics, LEGACY_FIT, legacy
+from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import assert_same
 
 BASIS = 'cc-pvdz'
@@ -199,7 +199,7 @@ def same_layout(a, b):
 def fit_inputs():
     """Ethylene's frozen layout, points and auxiliary molecule."""
     mol = gto.M(atom=ETHYLENE, basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     return mol, fz.auxmol(mol), fz.coords(mol), fz.layout
 
 
@@ -261,9 +261,8 @@ def test_fit_adjoint_holds_two_arrays_of_d_beside_it(fit_inputs):
     assert tail <= tail_bound, (tail, tail_bound)
     # On G1 D is 33.8 MB (ethylene/cc-pVDZ), so the bound is set by the (M, M)
     # and (naux, M) terms, not by D: 149.5 MB against the whole form's 223.9 MB
-    # and the blocked form's 98.5 MB. The retired 148-point D was larger than
-    # these terms, and the old form of this line, 4 n_D > bound, no longer
-    # holds; the whole form exceeds the bound itself.
+    # and the blocked form's 98.5 MB. The whole form exceeds four times D and
+    # the bound itself.
     assert peak_whole > 4 * n_D, (peak_whole, n_D)
     assert peak_whole > bound, (peak_whole, bound)
 
@@ -307,7 +306,7 @@ def test_consecutive_gradients_peak_flat():
                         ('rows', dict(sliced=True, fit='rows'))):
             chain = ExcitedStateChain(
                 mol, chain_scf, mf=mf,
-                numerics=legacy(g1_numerics(mol, numerics_of({'solver': 'davidson', **kw}))))
+                numerics=duchemin_blase(g1_numerics(mol, numerics_of({'solver': 'davidson', **kw}))))
             rows = four_gradient_peaks(chain, displaced)
             del chain
             starts = [r[0] for r in rows]
@@ -343,13 +342,13 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
     """With the cap below water's estimate, every whole form refuses before
     it builds the three-centre tensor or the test set."""
     mol = gto.M(atom=WATER, basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     auxmol, crd = fz.auxmol(mol), fz.coords(mol)
 
     def built(*args, **kwargs):
         raise AssertionError('an array of the whole form was built')
 
-    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)), numerics=legacy())
+    mf = isdf_jk_with_force(scf.RHF(mol), auxbasis=BASIS + '-ri', counts=g1(scf.RHF(mol)), numerics=duchemin_blase())
     mf.with_df.build()
     monkeypatch.setattr(isdf_derivatives, 'WHOLE_FIT_ADJOINT_MAX_GB', 1e-4)
     monkeypatch.setattr(isdf_derivatives, 'fit_test_set_D', built)
@@ -375,7 +374,7 @@ def test_the_whole_fit_adjoint_refuses_before_allocating(monkeypatch):
 def test_the_test_molecules_pass_the_cap(name):
     """The molecules the whole form's gates run on sit orders under it."""
     mol = gto.M(atom=CAP_MOLECULES[name], basis=BASIS, verbose=0)
-    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    fz = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     gb = require_whole_fit_adjoint(mol.nao_nr(), fz.auxmol(mol).nao_nr(),
                                    len(fz.coords(mol)),
                                    len(product_pairs(mol)[0]), name)

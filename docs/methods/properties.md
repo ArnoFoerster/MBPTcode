@@ -220,8 +220,8 @@ Ulstrup and Jortner (J. Chem. Phys. 63, 4358 (1975)). DMABN RISC then sits
 0.53 eV above its 0-0 line against a reorganization of 0.45 eV and is
 accepted; a cutoff of 200 cm^-1 moves its rate by 5%, one of 50 cm^-1 by a
 factor 3. With no mode below the cutoff nothing changes, bit for bit; every
-mode quantum is a rung of its own (`quantum_soft_modes`). The Cartesian J is a rung of its own (`rectilinear_duschinsky`), and the
-displaced-oscillator rung still runs. `ablation_ladder` removes
+mode quantum is a rung of its own (`quantum_soft_modes`). The Cartesian J is a rung of its own (`rectilinear_duschinsky`), and so is the
+displaced-oscillator model. `ablation_ladder` removes
 one ingredient at a time down to a single Marcus-Levich-Jortner mode with an
 assumed reorganization energy, and every rung records its model:
 

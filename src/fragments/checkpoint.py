@@ -16,7 +16,8 @@ resolvent, Omega_0, the margin and a digest of the diabat vectors they were
 computed from. It also holds a FINGERPRINT of the arrays the discrete key
 cannot name: the operator's orbital energies (quasiparticle energies for
 GW-BSE), the local orbital rotations projected on fixed random vectors, and the
-operator's action on a fixed random block at 4096 fixed rows.
+operator's action on a fixed random block at FRAGMENT_CHECKPOINT_PROBE_ROWS
+fixed rows.
 A different geometry, basis, mean field, kernel route, localization or screening
 moves the fingerprint far above FRAGMENT_CHECKPOINT_MATCH_TOL (a 5e-4 Bohr step
 moves it by ~1e-4); the same problem rerun on another node moves it by at most
@@ -47,9 +48,6 @@ from src.Base.numerics import constants
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 
 VERSION = 1
-PROBE_SEED = 20261025
-PROBE_ROWS = 4096
-PROBE_COLUMNS = 2
 
 _SOLVER_CONSTANTS = ('FRAGMENT_DAVIDSON_EXTRA_ROOTS',
                      'FRAGMENT_DAVIDSON_MAX_CYCLE', 'FRAGMENT_CG_MAX_ITER',
@@ -86,11 +84,13 @@ class PartitionCheckpoint:
         """Fix the key and the fingerprint of this build (a collective: the
         operator acts once on the probe block). `settings`: the build's
         `tol`, `margin` and `dense_max`, recorded in the key as given."""
-        probe_rng = np.random.default_rng(PROBE_SEED)
+        probe_rng = np.random.default_rng(
+            constants.FRAGMENT_CHECKPOINT_PROBE_SEED)
         dim = operator.dim
-        rows = np.sort(probe_rng.choice(dim, size=min(PROBE_ROWS, dim),
-                                        replace=False))
-        x = probe_rng.standard_normal((dim, PROBE_COLUMNS))
+        n_rows = min(constants.FRAGMENT_CHECKPOINT_PROBE_ROWS, dim)
+        rows = np.sort(probe_rng.choice(dim, size=n_rows, replace=False))
+        x = probe_rng.standard_normal(
+            (dim, constants.FRAGMENT_CHECKPOINT_PROBE_COLUMNS))
         y = np.asarray(operator.apply(x), float)
         proj_o = probe_rng.standard_normal(orbitals.u_occ.shape[1])
         proj_v = probe_rng.standard_normal(orbitals.u_vir.shape[1])

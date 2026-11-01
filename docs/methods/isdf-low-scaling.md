@@ -13,7 +13,7 @@ max(0.16 x the candidate points, 200 x the atoms), or `pivot_points` of them.
 There is no default level: a calculation names one. The separable RI of
 Duchemin and Blase
 ([J. Chem. Phys. 150, 174120 (2019)](https://doi.org/10.1063/1.5090605)) on
-the tabulated grid is still there by name,
+the tabulated grid is reached by naming it,
 `Numerics(isdf={'level': 'G3', 'test_set': 'duchemin_blase'})`.
 
 ## Augmented basis sets

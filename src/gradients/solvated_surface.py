@@ -243,8 +243,10 @@ class SolvatedSurface(PotentialEnergySurface):
                 getattr(state, 'freezes_on_first_call', False)
                 or getattr(state, 'surface_key', None) is not None):
             # S0's equilibrium charges here (module docstring)
-            q0 = sl.equilibrate(self.make_ground(mol, field), field,
-                                **self.loop_kw).q
+            seed = sl.equilibrate(self.make_ground(mol, field), field,
+                                  **self.loop_kw)
+            self._log_flags(mol, seed.flags)
+            q0 = seed.q
         f = self._fraction(state)
         stop, tie = None, None
         if f is not None and self._kappa is None and calibrate:

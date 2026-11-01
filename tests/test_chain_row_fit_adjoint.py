@@ -81,7 +81,7 @@ from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
                                       state_pair, watch)
 from tests.test_chain_sliced_factors import (H2O, H2O_DISPLACED, chain_scf,
                                              own_water)
-from tests.isdf_test_grid import g1, g1_kw, LEGACY_FIT
+from tests.isdf_test_grid import g1, g1_kw, DUCHEMIN_BLASE_FIT
 from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
 
 SIZES = [1, 2, 3, 8]
@@ -101,7 +101,7 @@ def test_the_adjoint_on_fixed_adjoints(atom):
     tolerances."""
     mol = molecule(atom)
     with distributed(None):
-        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux, nao = len(crd), aux.nao_nr(), mol.nao
     rng = np.random.default_rng(3)
@@ -277,7 +277,7 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
     with monkeypatch.context() as patch:
         patch_whole_assembly(patch)
         out = run_simulated(rank, 2)
-    npts = FrozenFactorization(own_water(), Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(own_water())})).M
+    npts = FrozenFactorization(own_water(), Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(own_water())})).M
     for r, log in enumerate(out):
         found, faults = log[-1]
         assert (npts, npts) in found, (r, found)
@@ -297,7 +297,7 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     mol.build(False, False)
     with distributed(None):
         chain = RPAGroundStateChain(mol, chain_scf,
-                                    numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=LEGACY_FIT)))
+                                    numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT)))
         grad = chain.total_gradient()[0]
         fd, crossed = [], []
         for ia, x in FD_COMPONENTS:

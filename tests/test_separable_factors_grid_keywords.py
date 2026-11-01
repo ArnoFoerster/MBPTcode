@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from tests.isdf_test_grid import legacy, LEGACY_FIT
+from tests.isdf_test_grid import duchemin_blase, DUCHEMIN_BLASE_FIT
 from src.Base.numerics.constants import (ISDF_GRID_ACCURACY,
                                          ISDF_RADII_MATCH_TOL)
 from src.Base.factorization.separable_ri import (PUBLISHED_COUNTS, SHELL_ORDER, atomic_grid,
@@ -101,7 +101,7 @@ def test_a_counts_sweep_moves_the_grid(ethylene):
     for counts in SWEEP:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            X_mo, D, _, coords = separable_factors(mf, mol, counts=counts, numerics=legacy())
+            X_mo, D, _, coords = separable_factors(mf, mol, counts=counts, numerics=duchemin_blase())
         assert not reoptimization_warnings(caught), (
             f'counts {counts} re-optimized instead of reading its row: '
             f'{[str(w.message) for w in reoptimization_warnings(caught)]}')
@@ -121,7 +121,7 @@ def test_nothing_asked_for_is_refused(ethylene):
     """A caller with no grid is refused (`require_grid`): no grid is a default."""
     mol, mf = ethylene
     with pytest.raises(ValueError, match='no ISDF grid asked for'):
-        separable_factors(mf, mol, numerics=legacy())
+        separable_factors(mf, mol, numerics=duchemin_blase())
 
 
 def test_grid_accuracy_agreeing_with_counts_proceeds(ethylene):
@@ -129,8 +129,8 @@ def test_grid_accuracy_agreeing_with_counts_proceeds(ethylene):
     accuracy level resolves to counts and must then take exactly the path
     those counts take."""
     mol, mf = ethylene
-    level = separable_factors(mf, mol, grid_accuracy='G2', numerics=legacy())
-    both = separable_factors(mf, mol, grid_accuracy='G2', counts=G2_COUNTS, numerics=legacy())
+    level = separable_factors(mf, mol, grid_accuracy='G2', numerics=duchemin_blase())
+    both = separable_factors(mf, mol, grid_accuracy='G2', counts=G2_COUNTS, numerics=duchemin_blase())
     for a, b in zip(level, both):
         assert_same(a, b, unit='1', quantity='root', label='factors')
 
@@ -141,7 +141,7 @@ def test_grid_accuracy_contradicting_counts_is_refused(ethylene):
     had explicitly asked against."""
     mol, mf = ethylene
     with pytest.raises(ValueError) as excinfo:
-        separable_factors(mf, mol, grid_accuracy='G2', counts=G3_COUNTS, numerics=legacy())
+        separable_factors(mf, mol, grid_accuracy='G2', counts=G3_COUNTS, numerics=duchemin_blase())
     message = str(excinfo.value)
     assert str(dict(sorted(G3_COUNTS.items()))) in message
     assert str(dict(sorted(G2_COUNTS.items()))) in message
@@ -153,8 +153,8 @@ def test_explicit_radii_equal_to_the_row_are_the_row(ethylene):
     mol, mf = ethylene
     radii = {el: atomic_grid(el, BASIS, AUXBASIS, G2_COUNTS)[0]
              for el in ('C', 'H')}
-    lookup = separable_factors(mf, mol, counts=G2_COUNTS, numerics=legacy())
-    explicit = separable_factors(mf, mol, radii=radii, counts=G2_COUNTS, numerics=legacy())
+    lookup = separable_factors(mf, mol, counts=G2_COUNTS, numerics=duchemin_blase())
+    explicit = separable_factors(mf, mol, radii=radii, counts=G2_COUNTS, numerics=duchemin_blase())
     for a, b in zip(lookup, explicit):
         assert_same(a, b, unit='1', quantity='root', label='factors')
 
@@ -169,15 +169,15 @@ def test_a_matching_row_brings_its_nuclear_point(carbon):
     mol, mf = carbon
     radii, origin = atomic_grid('C', BASIS, AUXBASIS, CARBON_PUBLISHED_COUNTS)
     assert origin, 'the published carbon row is the case this test exists for'
-    lookup = separable_factors(mf, mol, counts=CARBON_PUBLISHED_COUNTS, numerics=legacy())
+    lookup = separable_factors(mf, mol, counts=CARBON_PUBLISHED_COUNTS, numerics=duchemin_blase())
     explicit = separable_factors(mf, mol, radii={'C': radii},
-                                 counts=CARBON_PUBLISHED_COUNTS, numerics=legacy())
+                                 counts=CARBON_PUBLISHED_COUNTS, numerics=duchemin_blase())
     for a, b in zip(lookup, explicit):
         assert_same(a, b, unit='1', quantity='root', label='factors')
     # The same radii where no row claims them: the nuclear point is the caller's
     # to add, so the grid is one point smaller.
     no_row = separable_factors(mf, mol, radii={'C': radii},
-                               counts=untabulated_counts(('C',)), numerics=legacy())
+                               counts=untabulated_counts(('C',)), numerics=duchemin_blase())
     assert len(explicit[3]) == len(no_row[3]) + 1
 
 
@@ -192,7 +192,7 @@ def test_radii_contradicting_the_row_are_refused(ethylene):
     bad = {el: dict(r) for el, r in radii.items()}
     bad['C']['A1'] = table + np.eye(len(table))[0] * 1e-3
     with pytest.raises(ValueError) as excinfo:
-        separable_factors(mf, mol, radii=bad, counts=G2_COUNTS, numerics=legacy())
+        separable_factors(mf, mol, radii=bad, counts=G2_COUNTS, numerics=duchemin_blase())
     message = str(excinfo.value)
     assert message.startswith('C ')
     assert np.array2string(bad['C']['A1'], precision=12) in message
@@ -209,7 +209,7 @@ def test_radii_within_the_match_tolerance_are_the_row(ethylene):
     nudged = {el: {shell: np.atleast_1d(r) + 0.5 * ISDF_RADII_MATCH_TOL
                    for shell, r in shells.items()}
               for el, shells in radii.items()}
-    separable_factors(mf, mol, radii=nudged, counts=G2_COUNTS, numerics=legacy())
+    separable_factors(mf, mol, radii=nudged, counts=G2_COUNTS, numerics=duchemin_blase())
 
 
 def test_explicit_radii_at_untabulated_counts_proceed(ethylene):
@@ -223,9 +223,9 @@ def test_explicit_radii_at_untabulated_counts_proceed(ethylene):
     counts = untabulated_counts(('C', 'H'))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        explicit = separable_factors(mf, mol, radii=radii, counts=counts, numerics=legacy())
+        explicit = separable_factors(mf, mol, radii=radii, counts=counts, numerics=duchemin_blase())
     assert not reoptimization_warnings(caught)
-    alone = separable_factors(mf, mol, radii=radii, numerics=legacy())
+    alone = separable_factors(mf, mol, radii=radii, numerics=duchemin_blase())
     for a, b in zip(explicit, alone):
         assert_same(a, b, unit='1', quantity='root', label='factors')
 
@@ -245,7 +245,7 @@ def test_untabulated_counts_without_radii_name_what_the_table_holds(ethylene,
 
     monkeypatch.setattr(separable_ri, 'optimize_atomic_radii', stub)
     with pytest.raises(UntabulatedISDFGrid) as refused:
-        separable_factors(mf, mol, counts=counts, numerics=legacy())
+        separable_factors(mf, mol, counts=counts, numerics=duchemin_blase())
     assert asked == [], 'searched before refusing'
     said = str(refused.value)
     assert 'C' in said and str(sorted(counts.items())) in said
@@ -272,7 +272,7 @@ def test_declared_untabulated_counts_are_searched_at_those_counts(
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
         separable_factors(mf, mol, counts=counts,
-                          numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'runtime_radii': True}))
+                          numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'runtime_radii': True}))
     assert sorted(el for el, _ in asked) == ['C', 'H']
     assert all(c == counts for _, c in asked)
 

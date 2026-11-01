@@ -35,8 +35,8 @@ from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 
 from src.Base.utils.parallel.mpi_grid import ordered_sum, partition
-from src.Base.numerics.constants import (BYTES_PER_GB, INT32_MAX, ISDF_TILE_GB, PCM_CROSS_TERM_STEP, PCM_DM_CACHE_TOL,
-                                 PCM_FORCE_DENSITY_SYMMETRY_TOL)
+from src.Base.numerics.constants import (BYTES_PER_GB, INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
+                                 PCM_DM_CACHE_TOL, PCM_FORCE_DENSITY_SYMMETRY_TOL)
 
 PI = np.pi
 
@@ -66,7 +66,7 @@ def by_atom(per_point, gridslice):
     return np.asarray([per_point[p0:p1].sum(axis=0) for p0, p1 in gridslice])
 
 
-def cavity_blocks(nao, ngrids, comp=3, budget_gb=ISDF_TILE_GB):
+def cavity_blocks(nao, ngrids, comp=3, budget_gb=PCM_CAVITY_BLOCK_GB):
     """[(k0, k1)] slices of the cavity grid, one (comp, nao, nao, k1 - k0)
     three-centre integral block each.
 
@@ -98,7 +98,7 @@ def bound_pyscf_pcm_blocks(pcmobj):
     return pcmobj
 
 
-def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=ISDF_TILE_GB,
+def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLOCK_GB,
                                 comm=None):
     """(natm, 3) of the surface charges' interaction with the density `dm`,
     differentiated through the integrals at fixed charges: pyscf's
@@ -152,16 +152,25 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=ISDF_TILE_GB,
         fakemol = gto.fakemol_for_charges(grid_coords[p0:p1],
                                           expnt=exponents[p0:p1] ** 2)
         out = np.zeros((mol.natm, 3))
-        # the AOs' side, doubled: d/dR on the first index of a symmetric dm
+        q = q_sym[p0:p1]
+        # the AOs' side, doubled: d/dR on the first index of a symmetric dm;
+        # sum_k v[x, i, j, k] q_k first, a matrix-vector product on each
+        # component (libcint writes (i, j, k) column-major, so the (nao^2, nk)
+        # view needs no copy)
         v_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=ip1, aosym='s1',
                                       cintopt=opt1)
-        dvj = np.einsum('xijk,ij,k->xi', v_nj, dm, q_sym[p0:p1])
+        dvj = np.empty((3, nao))
+        for x in range(3):
+            vq = _points_matrix(v_nj[x], nao) @ q
+            dvj[x] = np.sum(vq.reshape(nao, nao, order='F') * dm, axis=1)
         del v_nj
         np.add.at(out, ao_atom, 2.0 * dvj.T)
         # the cavity points' side, each riding its own atom
         q_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=ip2, aosym='s1',
                                       cintopt=opt2)
-        dq = np.einsum('xijk,ij,k->xk', q_nj, dm, q_sym[p0:p1])
+        flat = dm.ravel(order='F')
+        dq = np.stack([(flat @ _points_matrix(q_nj[x], nao)) * q
+                       for x in range(3)])
         del q_nj
         np.add.at(out, point_atom[p0:p1], dq.T)
         return out
@@ -169,6 +178,12 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=ISDF_TILE_GB,
     return ordered_sum([(int(k), addend(int(k)))
                         for k in partition(len(blocks), rank, size)], comm,
                        onto=np.zeros((mol.natm, 3)))
+
+
+def _points_matrix(block, nao):
+    """One component of a (nao, nao, nk) three-centre block as (nao^2, nk),
+    rows (i, j) column-major: a view of libcint's layout, a copy otherwise."""
+    return np.reshape(block, (nao * nao, -1), order='F')
 
 
 def solver_bilinear_gradient(pcmobj, v_left, v_right):
@@ -305,7 +320,7 @@ def solvation_gradient(pcmobj, dm, comm=None):
 
 
 def reaction_field_fock_skeleton(pcmobj, dm, gamma_ao,
-                                 step=PCM_CROSS_TERM_STEP):
+                                 step=PCM_CROSS_TERM_STEP, comm=None):
     """(natm, 3) of d/dR Tr[gamma_ao V_PCM[dm]], both densities held fixed.
 
     The reaction-field term a correlated relaxed density gamma (dRPA, BSE)
@@ -325,10 +340,14 @@ def reaction_field_fock_skeleton(pcmobj, dm, gamma_ao,
 
     The PCM charge cache is restored to `dm` on return, since pyscf's pieces
     leave it holding the charges of the last density they were given.
+
+    With `comm` (every rank calling) both solver gradients divide their cavity
+    blocks over the ranks (`solvation_gradient`): the same bits at every rank
+    count.
     """
     g = np.asarray(gamma_ao, float)
     g = 0.5 * (g + g.T)
-    grad = (solvation_gradient(pcmobj, dm + step * g)
-            - solvation_gradient(pcmobj, dm - step * g)) / (2.0 * step)
+    grad = (solvation_gradient(pcmobj, dm + step * g, comm=comm)
+            - solvation_gradient(pcmobj, dm - step * g, comm=comm)) / (2.0 * step)
     pcmobj._get_vind(dm)
     return grad

@@ -5,8 +5,8 @@ asks for one. G1 is the lowest validated accuracy level (< 8 meV on the
 three lowest BSE roots at its basis); a basis with no validated level has no
 G1 and is refused by `resolve_isdf_grid`. A named grid is the AO-product
 fit on pivoted points; a test premised on the Duchemin-Blase fit (its pair
-layout, its row fit's pins, its gather counts) names that one (`legacy`,
-LEGACY_FIT).
+layout, its row fit's pins, its gather counts) names that one (`duchemin_blase`,
+DUCHEMIN_BLASE_FIT).
 """
 from src.gradients.rpa.chain_settings import with_setting
 from src.Base.numerics.numerics import Numerics
@@ -15,13 +15,13 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 #: The validated level tests run on.
 TEST_GRID_LEVEL = 'G1'
 #: The test set a test premised on the Duchemin-Blase fit names.
-LEGACY_FIT = 'duchemin_blase'
+DUCHEMIN_BLASE_FIT = 'duchemin_blase'
 
 
-def legacy(numerics=None):
+def duchemin_blase(numerics=None):
     """`numerics` (default `Numerics()`) on the Duchemin-Blase fit."""
     numerics = Numerics() if numerics is None else numerics
-    return with_setting(numerics, 'isdf.test_set', LEGACY_FIT)
+    return with_setting(numerics, 'isdf.test_set', DUCHEMIN_BLASE_FIT)
 
 
 def counts_at(obj, level):

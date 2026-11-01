@@ -25,8 +25,10 @@ class Evaluation:
     (a `CasidaSolution`, the spectrum kept when the forward is dropped), how
     many of the lowest
     roots the solve guaranteed converged (`read`, None for all), the forces
-    asked for there, by root, and the state each chain sharing the cache
-    matched there, by its token (what `ExcitedStateChain.commit` adopts)."""
+    asked for there, by root, the state each chain sharing the cache
+    matched there, by its token (what `ExcitedStateChain.commit` adopts), and
+    by root the reverse pass a relaxed density stopped at the integrals,
+    which a force on the same solution finishes (`HeldReverse`)."""
 
     mf: object
     shared: object = None
@@ -34,6 +36,7 @@ class Evaluation:
     read: object = None
     forces: dict = field(default_factory=dict)
     followed: dict = field(default_factory=dict)
+    reverse: dict = field(default_factory=dict)
 
 
 class GeometryCache:

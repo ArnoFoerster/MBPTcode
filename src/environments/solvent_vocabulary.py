@@ -1,7 +1,7 @@
 """The words every solvation entry point shares: how a state's solvation is
 named, in one place.
 
-Three vocabularies used to be spelled where they were read and could drift:
+Three vocabularies are spelled here once, so that their readers cannot drift:
 the density a state-specific term is taken of, the scheme an environment is
 built in, and the scheme a run declares. A run's scheme names a way of
 solvating every state of it; the environment's scheme is the way one

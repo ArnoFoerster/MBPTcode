@@ -43,9 +43,9 @@ def test_the_options_select_the_ao_product_fit():
     plain = declaration().numerics
     assert (plain.isdf.fit, plain.isdf.pivot_points) == ('rows', None)
     assert plain.isdf.test_set_named() == 'ao_products'
-    legacy = declaration('--isdf-test-set', 'duchemin_blase').numerics
-    assert (legacy.isdf.fit, legacy.isdf.test_set) == ('rows', 'duchemin_blase')
-    assert len({n.identity(), plain.identity(), legacy.identity()}) == 3
+    duchemin_blase = declaration('--isdf-test-set', 'duchemin_blase').numerics
+    assert (duchemin_blase.isdf.fit, duchemin_blase.isdf.test_set) == ('rows', 'duchemin_blase')
+    assert len({n.identity(), plain.identity(), duchemin_blase.identity()}) == 3
 
 
 def test_a_pivot_count_beside_the_duchemin_blase_set_is_refused():

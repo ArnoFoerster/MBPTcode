@@ -53,7 +53,7 @@ from src.properties.nonadiabatic import (derivative_couplings, nabla_mo,
                                          spectrum_solve, translational_sum)
 from src.gradients.state_identity import (aligned_overlap, follow_state,
                                           mo_overlap, state_overlap)
-from tests.isdf_test_grid import g1_numerics, legacy
+from tests.isdf_test_grid import g1_numerics, duchemin_blase
 from tests.reference_scf import rhf_tight_default_cycles
 
 #: The two lowest BSE roots: formaldehyde's dark n->pi* (A2) and the bright
@@ -78,7 +78,7 @@ def chain(mol):
     # the Duchemin-Blase fit on the tabulated grid, which keeps the
     # molecule's symmetry (the irreps and the atom sum below read it)
     return ExcitedStateChain(
-        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol), numerics=legacy(g1_numerics(mol, Numerics(bse={'solver': 'dense'}))))
+        mol, rhf_tight_default_cycles, mf=rhf_tight_default_cycles(mol), numerics=duchemin_blase(g1_numerics(mol, Numerics(bse={'solver': 'dense'}))))
 
 
 @pytest.fixture(scope='module')
@@ -260,7 +260,7 @@ def test_every_entry_point_drives_the_same_solve(chain, mol, reference):
     """
     surface = RPABSESurface(
         mol, rhf_tight_default_cycles, state=0, mf=reference[0],
-        numerics=legacy(g1_numerics(mol, Numerics(bse={'solver': 'dense'}))))
+        numerics=duchemin_blase(g1_numerics(mol, Numerics(bse={'solver': 'dense'}))))
     manifold = StateManifold(surface, states=STATES)
     base = spectrum_solve(chain)(mol)
     for source in (surface, manifold):

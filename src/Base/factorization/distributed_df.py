@@ -169,7 +169,8 @@ from pyscf.dft import gen_grid, numint
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 from pyscf.lib import logger
 
-from src.Base.numerics.constants import BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION
+from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION, DF_JK_BLOCK_GB,
+                                         DF_JK_BLOCK_ROWS_MAX, XC_BLOCK_MAX_MB)
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
@@ -634,6 +635,15 @@ class InstalledWithDF:
         return self
 
 
+def exchange_block_rows(nao):
+    """Auxiliary rows per block of a rank's J/K build at `nao` AOs: pyscf's
+    K loop holds (2, rows, nao, nao), kept under DF_JK_BLOCK_GB, between 4
+    and DF_JK_BLOCK_ROWS_MAX. Depends on nao alone, so the K sum's blocking,
+    and its bits, never depend on the free memory."""
+    rows = int(DF_JK_BLOCK_GB * BYTES_PER_GB / (16.0 * int(nao) ** 2))
+    return max(4, min(DF_JK_BLOCK_ROWS_MAX, rows))
+
+
 class DistributedDF(InstalledWithDF, df.df.DF):
     """A `with_df` holding one contiguous block of the auxiliary index.
 
@@ -714,6 +724,9 @@ class DistributedDF(InstalledWithDF, df.df.DF):
                 'or more would hold it in core. This route keeps its slice in '
                 'core by construction and will not spill it to disk, which is '
                 'the cost it exists to remove.')
+        # pyscf's J/K loops block by min(blockdim, free memory): a block of
+        # this many rows keeps their buffers under DF_JK_BLOCK_GB
+        self.blockdim = exchange_block_rows(nao)
         blocks = self._blocks = _column_blocks(mol, nao_pair, naux, size)
         self.column_blocks = tuple(int(i) for i
                                    in partition(len(blocks), rank, size))
@@ -809,11 +822,8 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         """
         C = np.ascontiguousarray(columns, dtype=float)
         nao, k = C.shape
-        left = memory.left_mb(self.max_memory)
-        blksize = max(4, int(min(self.blockdim,
-                                 0.3e6 * max(left, 0) / 8 / nao**2)))
         KC = np.zeros((nao, k))
-        for eri1 in self.loop(blksize):
+        for eri1 in self.loop(exchange_block_rows(nao)):
             L = lib.unpack_tril(eri1).reshape(-1, nao)       # (nb nao, nao)
             nb = L.shape[0] // nao
             X = (L @ C).reshape(nb, nao, k)                  # L_Q C
@@ -940,7 +950,8 @@ class DistributedNumInt(numint.NumInt):
 
     def _follow_grid(self, mol, grids, max_memory):
         """Rank 0's grid decision on every rank, this rank's points of it
-        taken where it is new; rank 0's `max_memory`. Collective."""
+        taken where it is new; rank 0's `max_memory`, at most XC_BLOCK_MAX_MB.
+        Collective."""
         t0 = time.time()
         header = None
         if self.comm.Get_rank() == 0 and grids.coords is not None:
@@ -958,7 +969,7 @@ class DistributedNumInt(numint.NumInt):
         if fresh:
             self._take_grid(mol, grids, npoints, cutoff)
         add_seconds(self.timings, 'scf_grid' if fresh else 'scf_lockstep', t0)
-        return max_memory
+        return min(max_memory, XC_BLOCK_MAX_MB)
 
     # -- the response quadrature an orbital-response solve calls -------------
 

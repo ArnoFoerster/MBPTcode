@@ -102,7 +102,7 @@ from src.gradients.surface import evaluate
 from tests.pins import assert_pin, assert_same, recorded_blas
 from src.gradients.gwbse.surface_factory import (potential_energy_surface,
                                                  reference_mean_field)
-from tests.isdf_test_grid import g1, g1_numerics, LEGACY_FIT, legacy
+from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -171,20 +171,20 @@ def own_water(atom=H2O):
 def own_ground():
     """A fresh RPAGroundStateChain on this rank's own Mole."""
     mol = own_water()
-    return RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol), numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))
+    return RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol), numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
 
 
 def own_bse():
     """A fresh RPABSESurface on this rank's own Mole, one mean field shared
     by its two halves."""
     mol = own_water()
-    return RPABSESurface(mol, chain_scf, spin='singlet', mf=chain_scf(mol), numerics=legacy(g1_numerics(mol)))
+    return RPABSESurface(mol, chain_scf, spin='singlet', mf=chain_scf(mol), numerics=duchemin_blase(g1_numerics(mol)))
 
 
 def own_qp():
     """A fresh RPAQPSurface on this rank's own Mole."""
     mol = own_water()
-    return RPAQPSurface(mol, chain_scf, mf=chain_scf(mol), numerics=legacy(g1_numerics(mol)))
+    return RPAQPSurface(mol, chain_scf, mf=chain_scf(mol), numerics=duchemin_blase(g1_numerics(mol)))
 
 
 def at_reference(surface):
@@ -225,10 +225,10 @@ def _r0(baseline, label):
 
 
 @pytest.mark.parametrize('label,build', [
-    ('RPAGroundStateChain', lambda mol, f: RPAGroundStateChain(mol, f, numerics=Numerics(isdf={'test_set': LEGACY_FIT, 'counts': g1(mol)}))),
+    ('RPAGroundStateChain', lambda mol, f: RPAGroundStateChain(mol, f, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))),
     ('RPABSESurface[singlet]',
-     lambda mol, f: RPABSESurface(mol, f, spin='singlet', numerics=legacy(g1_numerics(mol)))),
-    ('RPAQPSurface', lambda mol, f: RPAQPSurface(mol, f, numerics=legacy(g1_numerics(mol))))])
+     lambda mol, f: RPABSESurface(mol, f, spin='singlet', numerics=duchemin_blase(g1_numerics(mol)))),
+    ('RPAQPSurface', lambda mol, f: RPAQPSurface(mol, f, numerics=duchemin_blase(g1_numerics(mol))))])
 def test_serially_every_surface_is_the_baseline(baseline, baseline_water,
                                                 baseline_scf, label, build):
     recorded, pin = _r0(baseline, label), PINS[label]
@@ -325,21 +325,21 @@ def self_converged_chain():
     """The BSE@GW chain on a factory that converges its own SCF per rank."""
     mol = own_water()
     return ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol),
-                              numerics=legacy(g1_numerics(mol)))
+                              numerics=duchemin_blase(g1_numerics(mol)))
 
 
 def build_only_chain():
     """The BSE@GW chain whose SCF at every geometry the ranks converge
     together: a rank's own molecule would enter that reduction."""
     return ExcitedStateChain(own_water(), chain_scf_unrun,
-                              numerics=legacy(g1_numerics(own_water())))
+                              numerics=duchemin_blase(g1_numerics(own_water())))
 
 
 def perturbed_evaluation(comm, perturb, build=self_converged_chain):
     """One audited evaluation of the BSE@GW chain at the displaced geometry,
     with rank 1's copy of that geometry one ulp off when `perturb`."""
     mol = own_water()
-    chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol), numerics=legacy(g1_numerics(mol)))
+    chain = ExcitedStateChain(mol, chain_scf, mf=chain_scf(mol), numerics=duchemin_blase(g1_numerics(mol)))
     here = own_water(H2O_DISPLACED)
     if perturb and comm.Get_rank() == 1:
         coords = here.atom_coords()
@@ -393,9 +393,9 @@ def test_the_chains_own_share_of_the_gradient_is_rank_zeros(
     def one_rank(comm):
         mol = own_water()
         return ExcitedStateChain(mol, chain_scf,
-                                 mf=chain_scf(mol), numerics=legacy(g1_numerics(mol))).excitation_gradient()[0]
+                                 mf=chain_scf(mol), numerics=duchemin_blase(g1_numerics(mol))).excitation_gradient()[0]
 
-    serial = ExcitedStateChain(own_water(), chain_scf, numerics=legacy(g1_numerics(own_water())))
+    serial = ExcitedStateChain(own_water(), chain_scf, numerics=duchemin_blase(g1_numerics(own_water())))
     clean = serial.excitation_gradient()[0]
     out = run_simulated(one_rank, 2)
     for g in out:
@@ -425,12 +425,12 @@ def perturbed_scf(mol):
 def chain_given_mf():
     mol = own_water()
     return ExcitedStateChain(mol, chain_scf, mf=perturbed_scf(mol),
-                              numerics=legacy(g1_numerics(mol))).mf0
+                              numerics=duchemin_blase(g1_numerics(mol))).mf0
 
 
 def chain_mean_field_elsewhere():
     chain = ExcitedStateChain(own_water(), chain_scf,
-                               numerics=legacy(g1_numerics(own_water())))
+                               numerics=duchemin_blase(g1_numerics(own_water())))
     here = own_water(H2O_DISPLACED)
     return chain.mean_field(here, perturbed_scf(here))[1]
 
