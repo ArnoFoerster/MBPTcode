@@ -7,6 +7,8 @@ spread of the summed partials over the orders a reduction adds them in, whole
 and in windows: to a few ulp over simulated ranks, which add both in rank order,
 at that bar over MPI ranks, whose Reduce_scatter and Allreduce may add in
 different orders (tests/test_sliced_factors.py gates it under pytest).
+Moved through a staging buffer, as a communicator over several nodes moves
+them, the broadcasts keep their bits and the reductions agree to a few ulp.
 
     python tests/test_mpi_grid_distribution.py           # partition algebra
     mpirun -n 3 python tests/test_mpi_grid_distribution.py   # the real check
@@ -84,6 +86,40 @@ else:
                  if not matches(b[k], a[k], RECORDING_BLAS, unit='1',
                                 quantity='root')]
         all_ok &= check(not moved, f'over {s} simulated ranks', f'moved: {moved}')
+
+if rank == 0:
+    print('\n-- every collective moved through a staging buffer of 7 doubles, as on '
+          'a communicator over several nodes: the broadcasts bit for bit, the '
+          'reductions to a few ulp')
+
+
+def staged(run):
+    """(direct, staged): what `run` returns as it is and with every rank's
+    data moved through a 7-double staging buffer."""
+    direct = run()
+    saved = mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES
+    mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES = (lambda c: True), 7
+    mpi_grid._STAGE.buf = None
+    try:
+        through = run()
+    finally:
+        mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES = saved
+        mpi_grid._STAGE.buf = None
+    return direct, through
+
+
+if size > 1:
+    direct, through = staged(lambda: collectives(comm))
+    exact = ('broadcast_rows', 'lockstep.x', 'lockstep.y', 'replicate',
+             'reduce_max')
+    moved = [k for k in direct
+             if not (np.array_equal(through[k], direct[k]) if k in exact else
+                     matches(through[k], direct[k], RECORDING_BLAS, unit='1',
+                             quantity='root'))]
+    moved = [m for own in comm.allgather(moved) for m in own]
+    all_ok &= check(not moved, f'over {size} MPI ranks', f'moved: {moved}')
+else:
+    check(True, 'serial: nothing is staged', 'rerun under mpirun to compare')
 
 if rank == 0:
     print(f'\n-- reduce_scatter_rows: each rank\'s rows of the all-reduce, '

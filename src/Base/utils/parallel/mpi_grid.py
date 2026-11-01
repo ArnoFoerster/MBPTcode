@@ -85,7 +85,7 @@ import traceback
 import numpy as np
 
 from src.Base.numerics.constants import (AGREEMENT_DIGEST_BLOCK, AGREEMENT_DIGEST_SEED,
-                                         MPI_COUNT_MAX)
+                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES)
 from src.Base.utils.parallel.simulated_comm import SimulatedComm
 
 MPI = None
@@ -202,7 +202,9 @@ def reduce_sum(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_sum(part)
         else:
-            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().SUM)
+            for piece, stage in _staged(part, comm):
+                comm.Allreduce(_mpi().IN_PLACE, stage, op=_mpi().SUM)
+                piece[...] = stage
     if buf is not a:
         a[...] = buf
     return a
@@ -530,7 +532,9 @@ def reduce_max(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_max(part)
         else:
-            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().MAX)
+            for piece, stage in _staged(part, comm):
+                comm.Allreduce(_mpi().IN_PLACE, stage, op=_mpi().MAX)
+                piece[...] = stage
     if buf is not a:
         a[...] = buf
     return a
@@ -545,6 +549,8 @@ def broadcast_rows(a, root, comm):
     `allgather_rows`, so a block past 2^31 doubles still moves. The shape is
     the caller's to know on every rank, as for any Bcast. A block past
     `MPI_COUNT_MAX` doubles goes in row windows, at most that many a call.
+    Over several nodes every rank moves it through its staging buffer
+    (`_staged`), the root's bits either way.
     """
     if comm is None or comm.Get_size() == 1:
         return a
@@ -557,6 +563,10 @@ def broadcast_rows(a, root, comm):
         part = a if len(windows) == 1 else a[w0:w1]
         if isinstance(comm, SimulatedComm):
             comm.bcast_into(part, root)
+        elif part.size and _spans_nodes(comm):
+            for piece, stage in _staged(part, comm):
+                comm.Bcast(stage, root=root)
+                piece[...] = stage
         elif part.size:
             rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
@@ -695,6 +705,51 @@ def _runs(rows):
     return [(int(r[0]), int(r[-1]) + 1) for r in np.split(rows, cut)]
 
 
+_SPANS_KEY = []
+_STAGE = threading.local()
+
+
+def _spans_nodes(comm):
+    """True when a genuine mpi4py communicator has ranks on more than one
+    node. Asked once per communicator (a collective on it, so the first
+    collective of `comm` asks on every rank) and kept on it as an MPI
+    attribute."""
+    mod = sys.modules.get('mpi4py.MPI')
+    if (comm is None or comm.Get_size() == 1 or mod is None
+            or not isinstance(comm, mod.Comm)):
+        return False
+    if not _SPANS_KEY:
+        _SPANS_KEY.append(mod.Comm.Create_keyval())
+    spans = comm.Get_attr(_SPANS_KEY[0])
+    if spans is None:
+        node = comm.Split_type(mod.COMM_TYPE_SHARED, key=comm.Get_rank())
+        spans = bool(comm.allreduce(int(node.Get_size() < comm.Get_size()),
+                                    op=mod.MAX))
+        node.Free()
+        comm.Set_attr(_SPANS_KEY[0], spans)
+    return spans
+
+
+def _staged(part, comm):
+    """(piece, stage) pairs that move the C-contiguous float64 `part` through
+    this thread's staging buffer when `comm` spans several nodes: each piece
+    is copied into its stage, the caller runs the collective on the stage and
+    copies it back. Memory the network has registered once serves every
+    transfer, where a freshly allocated array would be registered again each
+    time. On one node `part` is its own stage, one piece."""
+    if part.dtype != np.float64 or not _spans_nodes(comm):
+        yield part, part
+        return
+    stage = getattr(_STAGE, 'buf', None)
+    if stage is None:
+        stage = _STAGE.buf = np.empty(MPI_STAGE_DOUBLES)
+    flat = part.reshape(-1)
+    for w0, w1 in _windows(flat.size, stage.size):
+        piece, window = flat[w0:w1], stage[:w1 - w0]
+        window[...] = piece
+        yield piece, window
+
+
 def _windows(n, per):
     """[start, stop) windows of at most `per` over range(n); a single window,
     empty for n = 0, when one call carries it all."""
@@ -733,7 +788,9 @@ def _bcast_array(buf, root, comm):
         if isinstance(comm, SimulatedComm):
             comm.bcast_into(part, root)
         else:
-            comm.Bcast(part, root=root)
+            for piece, stage in _staged(part, comm):
+                comm.Bcast(stage, root=root)
+                piece[...] = stage
 
 
 def exchange_rows(send, send_ranges, recv, recv_ranges, comm):

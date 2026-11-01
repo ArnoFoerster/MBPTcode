@@ -1433,6 +1433,15 @@ INT32_MAX = 2 ** 31 - 1
 # call, in windows; below it a call is one window, the unchunked call itself.
 MPI_COUNT_MAX = INT32_MAX
 
+# The window, in float64, through which a collective of
+# `Base.utils.parallel.mpi_grid` on a communicator spread over several nodes
+# moves its data: a buffer each thread keeps for the run. An array the caller
+# has just allocated sits in fresh pages that the network must register before
+# every transfer (glibc maps each array above 32 MB on its own and unmaps it
+# when it is freed); a broadcast of 40 MB slices into fresh arrays between two
+# nodes ran 36 times slower than into one reused buffer. 128 MiB a thread.
+MPI_STAGE_DOUBLES = 2 ** 24
+
 # Relative Coulomb-energy error above which the ISDF-K mean field
 # (`Base.factorization.isdf_jk.ISDFJK.check`) warns that its grid is weak, on the first density the SCF
 # asks about: benzene/cc-pVDZ on `optimize_atomic_radii`'s default single
