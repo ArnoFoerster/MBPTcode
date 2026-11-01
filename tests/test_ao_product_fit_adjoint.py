@@ -18,7 +18,9 @@ from the G1 parent:
   * on aug-cc-pVDZ (400 points from the G1 parent), the production
     declaration's S1 force with the sum-over-poles residues and with the
     explicit contour-deformation residues is the derivative of its energy
-    within ISDF_GRADIENT_FLOOR (measured 1.4e-9 and 6.9e-10). Every residue
+    within ISDF_GRADIENT_FLOOR, differenced at NUCLEAR_FD_STEP (measured
+    6.0e-10 and 2.0e-10; at the 1e-4 Bohr step of the cc-pVDZ checks the
+    energy's round-off over the step gives 1.0e-8 and 2.9e-9). Every residue
     route reaches the fit through `FactorChain.whole_fit_branches`; the
     Pade continuation has no force (its derivative is of order 1e11) and
     only selects states.
@@ -39,7 +41,7 @@ from src.Base.factorization import ao_product_fit as apf
 from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  resolve_grid)
 from src.Base.geometry.body_frame import BodyFrame
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR,
+from src.Base.numerics.constants import (NUCLEAR_FD_STEP,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
 from src.Base.numerics.numerics import Numerics, numerics_of
@@ -53,6 +55,7 @@ from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_body_fixed_frames import (ENERGY_TOL, RIGID_TOL, five_point,
                                           moved, rhf, rigid_part, rotation,
                                           water)
+from tests.pins import isdf_gradient_bar
 
 H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 #: Force bar of the fit adjoint against the five-point difference, Ha/Bohr.
@@ -165,11 +168,11 @@ def test_the_chain_force_is_the_derivative_of_its_energy():
     assert force < RIGID_TOL and torque < RIGID_TOL, (force, torque)
     fd, d = five_point(energy, mol,
                        np.random.default_rng(0).normal(size=g0.shape))
-    assert abs(fd - float((g0 * d).sum())) < ISDF_GRADIENT_FLOOR
+    assert abs(fd - float((g0 * d).sum())) < isdf_gradient_bar()
     m2 = moved(mol)
     assert abs(energy(m2) - e0) < ENERGY_TOL
     g2 = chain.total_gradient(m2)[0]
-    assert np.abs(g2 - g0 @ rotation().T).max() < ISDF_GRADIENT_FLOOR
+    assert np.abs(g2 - g0 @ rotation().T).max() < isdf_gradient_bar()
 
 
 
@@ -199,9 +202,12 @@ def test_the_production_force_on_an_augmented_basis(residues):
     def energy(m):
         ev = StateManifold(surface, states=key).evaluate(m, gradients=())
         return float(ev.energy[key[0]])
-    fd, d = five_point(energy, mol, np.random.default_rng(0).normal(size=g.shape))
+    # the augmented basis's energy carries more round-off than the cc-pVDZ
+    # checks', which a 1e-4 Bohr step turns into ~1e-8 Ha/Bohr
+    fd, d = five_point(energy, mol, np.random.default_rng(0).normal(size=g.shape),
+                       h=NUCLEAR_FD_STEP)
     err = abs(fd - float((g * d).sum()))
-    assert err < ISDF_GRADIENT_FLOOR, err
+    assert err < isdf_gradient_bar(), err
 
 
 if __name__ == '__main__':

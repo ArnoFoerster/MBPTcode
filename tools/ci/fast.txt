@@ -335,6 +335,7 @@ pytest test_gca_qp_set_memory.py
 pytest test_gca_refreeze_one_scf.py
 pytest test_gca_views_own_keys.py
 pytest test_geometric_step_failed_retry.py
+pytest test_walk_convention_events.py
 pytest test_ground_reads_numerics.py
 pytest test_ground_state_residual_force.py
 pytest test_ground_surface_stands_on_excited_numerics.py

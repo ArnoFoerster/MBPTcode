@@ -148,6 +148,7 @@ class GWBSEState:
         self._owns_chain = chain is None
         # a followed state handed over by `refrozen`, for the chain built first
         self._handover = None
+        self._absorbed = ()
         self._first = None
         self.mf = None
         # (h, e, result) of the last call, read back for the same operator
@@ -221,6 +222,9 @@ class GWBSEState:
         self._require_same_continuum(fresh)
         if following is not None:
             fresh._handover = following
+        # the orbitals a frozen group mixed with on the walk, taken in by the
+        # fresh chain (`ExcitedStateChain.absorb_groups`)
+        fresh._absorbed = chain.conventions.absorbed_at_keys()
         return fresh
 
     def commit(self, mol):
@@ -230,16 +234,19 @@ class GWBSEState:
             self.chain.commit(mol)
 
     def _chain(self, mf):
-        if self.chain is None and self.build_chain is not None:
+        if self.chain is not None:
+            return self.chain
+        if self.build_chain is not None:
             self.chain = self.build_chain(self.mol, mf, self.spin, self.state,
                                           self.bse_tda, self.environment)
-        elif self.chain is None:
+        else:
             self.chain = ExcitedStateChain(
                 self.mol, self._no_factory, spin=self.spin, state=self.state,
                 bse_tda=self.bse_tda, environment=self.environment, mf=mf,
                 numerics=self.numerics)
             if self._handover is not None:
                 self.chain.hand_over(self._handover)
+        self.chain.absorb_groups(self._absorbed)
         return self.chain
 
     def __call__(self, h, e):

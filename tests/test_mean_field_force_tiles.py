@@ -32,7 +32,7 @@ from pyscf.grad import rhf as rhf_grad
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
+from src.Base.numerics.constants import ISDF_ROW_FORCE_ENERGY_TOL
 from src.Base.pyscf.dispersion import dispersion_gradient
 from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
@@ -48,7 +48,7 @@ from src.gradients.isdf_mean_field import (isdf_exchange_skeleton,
 from src.Base.pyscf.pyscf_interface import auxmol_of, xc_hybrid_coeff
 from tests.test_skeleton_tiles import GEOMS
 from tests.isdf_test_grid import g1
-from tests.pins import assert_same
+from tests.pins import assert_same, isdf_gradient_bar
 
 AUX = 'cc-pvdz-ri'
 XCS = ('hf', 'pbe0', 'lrc-wpbeh', 'tpss')
@@ -144,7 +144,7 @@ def test_the_pruned_grid_moves_only_its_own_points():
     n_whole = converged('water', 'pbe0', cutoff=0.0).grids.weights.size
     assert n_pruned <= n_whole
     if n_pruned < n_whole:
-        assert PYSCF_BAR < apart < ISDF_GRADIENT_FLOOR
+        assert PYSCF_BAR < apart < isdf_gradient_bar()
     else:
         assert apart < PYSCF_BAR
 
@@ -268,7 +268,7 @@ def test_on_a_distributed_scf(size):
         assert_same(f, out[0], quantity='gradient', label='rank force')
     apart = float(np.abs(out[0] - serial).max())
     print(f'\n{size} ranks: distributed SCF - serial {apart:.1e}')
-    assert apart < ISDF_GRADIENT_FLOOR
+    assert apart < isdf_gradient_bar()
 
 
 if __name__ == '__main__':

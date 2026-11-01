@@ -79,7 +79,7 @@ from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels  # noqa:
 from tests import test_force_serial_shaped as shaped  # noqa: E402
 from tests.test_mpi_routes import HeldCensus  # noqa: E402
 from tests.isdf_test_grid import g1
-from tests.pins import RECORDING_BLAS, assert_same, matches  # noqa: E402
+from tests.pins import RECORDING_BLAS, assert_same, isdf_gradient_bar, matches  # noqa: E402
 
 GEOMS = {
     'water': 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4492',
@@ -268,7 +268,7 @@ def test_fitted_skeleton_is_the_whole_contraction(case):
         d = float(np.abs(got - ref).max())
         print(f'{name} {xc} {label}: |tiled - whole| {d:.2e} of '
               f'{np.abs(ref).max():.2e}')
-        assert d <= ISDF_GRADIENT_FLOOR, (label, d)
+        assert d <= isdf_gradient_bar(), (label, d)
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -278,7 +278,7 @@ def test_fitted_skeleton_over_ranks(size):
         print(f'{size} ranks {case}: |d| {worst:.2e}, every rank the serial '
               f'skeleton to a few ulp: {same}')
         assert same, f'{case}: a rank holds another skeleton than the serial'
-        assert worst <= ISDF_GRADIENT_FLOOR, (case, worst)
+        assert worst <= isdf_gradient_bar(), (case, worst)
 
 
 @pytest.mark.parametrize('plant', ('dropped', 'doubled'))
@@ -374,7 +374,7 @@ def test_rows_is_replicated_where_every_pair_is_kept():
     whole = isdf_mean_field_gradient(mf, fit='replicated')
     d = float(np.abs(rows - whole).max())
     print(f'water PBE0 mean-field force, rows - replicated {d:.2e}')
-    assert d <= ISDF_GRADIENT_FLOOR
+    assert d <= isdf_gradient_bar()
 
 
 def test_the_distributed_screen_is_the_whole_screen():

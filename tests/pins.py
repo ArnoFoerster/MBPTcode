@@ -32,7 +32,8 @@ import numpy as np
 import pyscf.lib
 from threadpoolctl import threadpool_info
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
+from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_GRADIENT_FLOOR,
+                                         PIN_CROSS_BLAS_BAR,
                                          PIN_CROSS_BLAS_CONTINUED_BAR,
                                          PIN_CROSS_BLAS_GRADIENT_BAR,
                                          PIN_CROSS_BLAS_ROOT_BAR,
@@ -237,6 +238,15 @@ def assert_pin(got, pin, blas, unit='Ha', quantity='energy', label=None):
 #: (the pin file of the one fit, which is the workstation's).
 RECORDING_BLAS = recorded_blas(
     pathlib.Path(__file__).resolve().parent / 'one_fit_pins.json')
+
+
+def isdf_gradient_bar():
+    """What an ISDF force may miss another computation of itself by (the
+    finite difference of its energy, another fit layout, other ranks, a rotated
+    frame): ISDF_GRADIENT_FLOOR, measured on the recording workstation, under
+    `RECORDING_BLAS`; the gradient class bar under any other BLAS, where the
+    fit's conditioning turns other last bits into a larger miss."""
+    return bar_under(RECORDING_BLAS, ISDF_GRADIENT_FLOOR, quantity='gradient')
 
 
 def assert_same(got, want, unit='Ha', quantity='energy', label=None):

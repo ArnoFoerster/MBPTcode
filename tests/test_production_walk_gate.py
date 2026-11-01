@@ -57,14 +57,14 @@ import pytest
 
 
 from src.properties.optimize import derived_walk
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
+from src.Base.numerics.constants import (NUCLEAR_FD_STEP,
                                          REFREEZE_TOL_MEV, ROOT_FOLLOW_WEIGHT_MIN)
 from src.Base.geometry.geometry import molecule_at
 from src.properties.optimize import (RefreezeNotConverged, relax,
                                      translation_rotation_basis)
 from src.gradients.surface import driven_chain
 from tests.photophysics_cases import production
-from tests.pins import assert_same
+from tests.pins import assert_same, isdf_gradient_bar
 
 SLOW = pytest.mark.skipif(
     not os.environ.get('MBPT_SLOW_GATES'),
@@ -159,7 +159,7 @@ def test_the_production_walk(setting, tmp_path, gate_surface):
                   for h in FD_STEPS]
         print(f'{setting}: g.u {analytic:+.6e}, five-point misses '
               f'{misses[0]:.2e}, {misses[1]:.2e} Ha/Bohr at h = {FD_STEPS}')
-        assert min(misses) < ISDF_GRADIENT_FLOOR, (
+        assert min(misses) < isdf_gradient_bar(), (
             f'{setting}: analytic {analytic:.6e} Ha/Bohr misses the finite '
             f'difference at the minimum by {misses} at h = {FD_STEPS}')
 

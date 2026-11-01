@@ -82,7 +82,7 @@ from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
 from tests.test_chain_sliced_factors import (H2O, H2O_DISPLACED, chain_scf,
                                              own_water)
 from tests.isdf_test_grid import g1, g1_kw, DUCHEMIN_BLASE_FIT
-from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
+from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, isdf_gradient_bar, matches
 
 SIZES = [1, 2, 3, 8]
 #: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ on G1
@@ -329,8 +329,8 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     print(f'\nethylene dRPA on the row fit: |analytic - fd| {err:.2e}, the '
           f'whole assembly {whole:.2e}, the screened-Gram estimator {wrong:.2e} '
           'Ha/Bohr')
-    assert err < ISDF_GRADIENT_FLOOR
-    assert whole < ISDF_GRADIENT_FLOOR
+    assert err < isdf_gradient_bar()
+    assert whole < isdf_gradient_bar()
     assert wrong > 100 * ISDF_GRADIENT_FLOOR
 
 

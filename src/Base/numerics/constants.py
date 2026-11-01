@@ -1695,6 +1695,14 @@ WALK_STEP_SHRINK = 0.25
 
 WALK_TRUST_MIN_BOHR = 2e-3
 
+# A trial step refused because a frozen orbital group MIXED with orbitals
+# outside it (`ConventionsLost` naming them) is not a step too long: the walk
+# refreezes the conventions at the last accepted geometry with those orbitals
+# absorbed into the group and retries the step at the same radius. At most
+# WALK_CONVENTION_REFREEZES_MAX such refreezes per walk; past them, or when
+# absorbing grows nothing, the refusal is an ordinary rejected step.
+WALK_CONVENTION_REFREEZES_MAX = 4
+
 # The walk's step cap and its trust radius (Bohr, the norm of the 3N-vector
 # step). The first step is taken on a guessed Hessian, and a longer one can
 # carry a quasiparticle root far enough that the root followed from the last

@@ -18,10 +18,11 @@ aug-cc-pVDZ on an emitter's atoms and cc-pVDZ on its hosts.
     under one map refuses a run under another, per-element or per-atom (the
     solvated driver's record too);
   * the solvent's auxiliary-partner check is made key by key;
-  * a map naming the same basis on every element is the plain name to the
-    bit: the S1 energy and force on formaldehyde/cc-pVDZ, ISDF-K and DF
-    mean fields; a per-atom map (a labelled hydrogen) that gives every atom
-    the set of the per-element map is that map to the bit on water;
+  * a map naming the same basis on every element is the plain name: the S1
+    energy (to CROSS_PATH_RTOL) and force (to the gradient class bar) on
+    formaldehyde/cc-pVDZ, ISDF-K and DF mean fields; a per-atom map (a
+    labelled hydrogen) that gives every atom the set of the per-element map
+    is that map on water, to the same bars;
   * water with aug-cc-pVDZ on O and cc-pVDZ on H: the S1 force of the
     production chain (G3 AO-product factors) is the derivative of its energy
     along an internal direction within ISDF_GRADIENT_FLOOR, on the DF mean
@@ -46,7 +47,6 @@ from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
 from src.Base.factorization.separable_ri import (grid_identity, resolve_isdf_grid,
                                                  validated_levels)
 from src.Base.geometry.geometry import elements_of, molecule_at
-from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.gwbse.surface_factory import reference_mean_field
 from src.photophysics import chain, solvated
@@ -55,6 +55,8 @@ from src.photophysics.stages import ground_minimum
 from src.photophysics.store import StoreRefused
 from src.properties.hessian import require_hessian_counts
 from tests.photophysics_cases import FORMALDEHYDE, declaration, run_in
+from tests.pins import (CROSS_PATH_RTOL, PIN_CROSS_BLAS_GRADIENT_BAR,
+                         isdf_gradient_bar)
 
 WATER = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 HYBRID = {'H': 'cc-pvdz', 'O': 'aug-cc-pvdz'}
@@ -235,6 +237,15 @@ def s1_chain(store_root, decl):
     return run, run.excited_at(run.relaxed_spec, run.mol_in, mf0)
 
 
+def assert_same_s1(a, b):
+    """Two S1 (energy, force) pairs of one molecule given its basis two ways:
+    two SCFs whose last bits differ with the BLAS, so the energy to
+    CROSS_PATH_RTOL and the force to the gradient class bar."""
+    assert abs(a[0] - b[0]) <= CROSS_PATH_RTOL * abs(a[0]), (a[0], b[0])
+    apart = np.abs(a[1] - b[1]).max()
+    assert apart <= PIN_CROSS_BLAS_GRADIENT_BAR, apart
+
+
 @pytest.mark.parametrize('route', [('--scf', 'isdf'), ('--scf', 'df')])
 def test_a_uniform_map_is_the_plain_name(route, tmp_path):
     plain = declaration(*route)
@@ -247,8 +258,7 @@ def test_a_uniform_map_is_the_plain_name(route, tmp_path):
         assert run.mol_in.basis == decl.system.basis
         g, e, _ = ch.total_gradient(run.mol_in)
         out.append((e, np.asarray(g)))
-    assert out[0][0] == out[1][0], (out[0][0], out[1][0])
-    assert np.array_equal(out[0][1], out[1][1]), np.abs(out[0][1] - out[1][1]).max()
+    assert_same_s1(*out)
 
 
 @pytest.mark.parametrize('route', [('--scf', 'isdf', '--scf-grid', 'G3'),
@@ -257,7 +267,7 @@ def test_a_per_atom_map_is_its_per_element_map(route, tmp_path):
     """Water with its second H labelled and given the H set of the
     per-element map: every atom carries the same set, the labelled one under
     its label (basis, auxiliary sets, grid row), and the S1 energy and force
-    are the per-element map's to the bit."""
+    are the per-element map's (`assert_same_s1`)."""
     element = declaration('--atom', WATER, '--system', 'water', '--basis',
                           'aug-cc-pvdz', '--basis-for', 'H=cc-pvdz', *route)
     labelled = WATER.replace('H 0 -', 'H@1 0 -')
@@ -268,8 +278,7 @@ def test_a_per_atom_map_is_its_per_element_map(route, tmp_path):
         run, ch = s1_chain(tmp_path / name, decl)
         g, e, _ = ch.total_gradient(run.mol_in)
         out.append((e, np.asarray(g)))
-    assert out[0][0] == out[1][0], (out[0][0], out[1][0])
-    assert np.array_equal(out[0][1], out[1][1]), np.abs(out[0][1] - out[1][1]).max()
+    assert_same_s1(*out)
 
 
 def internal_direction(mol, seed):
@@ -306,4 +315,4 @@ def test_the_s1_force_on_a_hybrid_basis(route, basis_for, nao, tmp_path):
     err = abs(fd - float((np.asarray(g) * u).sum()))
     print(f'{route}: dE/ds analytic {float((np.asarray(g) * u).sum()):.10f}, '
           f'five-point {fd:.10f}, error {err:.2e} Ha/Bohr')
-    assert err < ISDF_GRADIENT_FLOOR, err
+    assert err < isdf_gradient_bar(), err

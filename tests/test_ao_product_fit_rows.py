@@ -37,7 +37,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.factorization import ao_product_fit as apf
 from src.Base.factorization.separable_ri import (atomic_frames, resolve_grid)
 from src.Base.geometry.body_frame import BodyFrame
-from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.mpi_grid import partition
 from src.Base.factorization.separable_ri import tile_collocation
@@ -53,6 +52,7 @@ from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
                                             collocation_adjoint)
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds
 from tests.test_body_fixed_frames import rhf, water as body_water
+from tests.pins import isdf_gradient_bar
 
 H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 #: Rounding of the fit through its balanced Gram matrix, relative.
@@ -232,7 +232,7 @@ def test_the_chain_on_the_row_fit_is_the_chain_on_the_whole_fit():
     assert rows.factorization.fit == 'rows'
     assert abs(rows.energy(mol)[0] - whole.energy(mol)[0]) < 1e-9
     g_rows, g_whole = rows.total_gradient(mol)[0], whole.total_gradient(mol)[0]
-    assert np.abs(g_rows - g_whole).max() < ISDF_GRADIENT_FLOOR
+    assert np.abs(g_rows - g_whole).max() < isdf_gradient_bar()
 
 
 if __name__ == '__main__':

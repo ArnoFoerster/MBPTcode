@@ -222,6 +222,15 @@ of the folded ADC(2) operator are the same bytes on every rank:
 OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_df_factor_build_mpi.py
 ```
 
+`test_node_shared_mpi` builds node-shared arrays more often than an MPI
+process has communicator contexts, and checks that the node communicator is
+split once and that a window is freed only when no rank of the node still
+holds its array. Run it on at least two nodes with several ranks per node:
+
+```bash
+OMP_NUM_THREADS=1 srun --mpi=pmi2 -N 2 --ntasks-per-node=4 python tests/test_node_shared_mpi.py
+```
+
 `test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:
 
 ```bash
