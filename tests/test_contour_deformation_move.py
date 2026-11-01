@@ -245,11 +245,19 @@ def states(nocc):
 def test_the_gradient_side_holds_no_second_copy():
     """A re-implementation on the gradient side would be a second route: the
     adjoint screening subclasses the forward one, and what qp_space_time and
-    space_time_adjoint import back from production is production's object."""
+    space_time_adjoint import back from production is production's object.
+    Every function production defines that qp_space_time also holds under the
+    same name has to be that object, so a copy cannot hide behind an import
+    that is no longer used."""
     assert issubclass(adjoint.ExplicitRealScreeningAdjoint,
                       ExplicitRealScreening)
-    for name in ('cd_screening_contraction_multi', 'residue_route_auto'):
+    for name in ('cd_integral_weights', 'cd_pair_contraction_multi',
+                 'residue_route_auto', 'screening_solver'):
         assert getattr(qst, name) is getattr(prod, name), name
+    for name, obj in vars(prod).items():
+        if (callable(obj) and getattr(obj, '__module__', None) == prod.__name__
+                and hasattr(qst, name)):
+            assert getattr(qst, name) is obj, name
     assert sta.owned_frequency_blocks is owned_frequency_blocks
 
 
