@@ -5,8 +5,10 @@ and its nuclear adjoint in the same tiles
 Gated on C1 water/cc-pVDZ, 150 points pivoted from the G1 parent, tiles of
 40 points and several shell runs:
   * the rows are the replicated fit's M^T to the rounding of its balanced
-    Gram matrix (1e-8 relative, measured 2.9e-9), and three simulated ranks
-    give the one-rank tiles bit for bit;
+    Gram matrix (1e-8 relative on the recording BLAS, measured 4e-9; 5e-8 on
+    any other, where the Gram matrix's conditioning turns other last bits of
+    the projection, 6e-16 relative, into up to 1.1e-8 of the fit), and three
+    simulated ranks give the one-rank tiles bit for bit;
   * the adjoint of every kind of seed -- on D in the bare gauge, on a gauge
     a continuum dresses, on X_mo, and the exchange's seeds on M^T, the AO
     collocation and the bare metric -- is the replicated pass's force
@@ -54,11 +56,15 @@ from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
                                             collocation_adjoint)
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds
 from tests.test_body_fixed_frames import rhf, water as body_water
-from tests.pins import isdf_gradient_bar
+from tests.pins import RECORDING_BLAS, blas_identity, isdf_gradient_bar
 
 H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
-#: Rounding of the fit through its balanced Gram matrix, relative.
+#: Rounding of the fit through its balanced Gram matrix, relative, under the
+#: recording BLAS.
 FIT_ROUNDING = 1e-8
+#: The same under any other BLAS: the projection's last bits differ, and the
+#: Gram matrix's conditioning carries them into the fit.
+CROSS_BLAS_FIT_ROUNDING = 5e-8
 #: The row adjoint against the replicated one, relative to the force's scale.
 ADJOINT_ROUNDING = 1e-8
 TILE = 40
@@ -78,6 +84,13 @@ def water():
     chain = PointChain(pts, owner, frames, False,
                        body=BodyFrame(mol.atom_coords()))
     return mol, auxmol, apf.placed(mol, pts, frames), chain
+
+
+def fit_rounding():
+    """The fit's relative rounding bar under this process's BLAS."""
+    if RECORDING_BLAS == blas_identity():
+        return FIT_ROUNDING
+    return CROSS_BLAS_FIT_ROUNDING
 
 
 def tiles_of(nk):
@@ -100,7 +113,7 @@ def test_the_rows_are_the_replicated_fit_on_any_rank_count(water):
     tiles = tiles_of(len(coords))
     assert sorted(serial) == list(range(len(tiles)))
     MT = np.vstack([serial[t] for t in range(len(tiles))])
-    assert np.abs(MT - M.T).max() < FIT_ROUNDING * np.abs(M).max()
+    assert np.abs(MT - M.T).max() < fit_rounding() * np.abs(M).max()
     held = {}
     for part in run_simulated(rows, 3):
         assert not set(part) & set(held)
@@ -245,7 +258,7 @@ def test_the_factors_on_the_row_fit():
     whole = separable_factors(mf, mol, numerics=numerics)
     rows = separable_factors(mf, mol, fit='rows', numerics=numerics)
     for a, b in zip(rows[:3], whole[:3]):
-        assert np.abs(a - b).max() < FIT_ROUNDING * np.abs(b).max()
+        assert np.abs(a - b).max() < fit_rounding() * np.abs(b).max()
 
 
 def test_the_chain_on_the_row_fit_is_the_chain_on_the_whole_fit():
