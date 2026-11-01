@@ -51,13 +51,27 @@ the tiled route as the MP2 model's force_route decides (state_models
 .tiled_force_route). Over MPI ranks the fold and the relaxed densities are
 shared out (solve_ee_adc under the current communicator) and every call and
 force returns rank 0's bits on every rank (state_models docstring).
+
+A call after another starts the fold's block from the last call's roots
+(fold_start, carried between geometries by a walk). Such a warm solve checks
+completeness with its seeded search alone, which finds a state the fold model
+puts low but not one spread over many configurations; every
+EE_FOLD_FULL_CHECK_EVERY-th warm call runs the random-vector walk as well
+(solve_folded full_check), and a branch only the walk finds is flagged
+'fold_root_crossed'. confirm(mol), asked by a walk at its converged geometry
+(gradients.surface.confirm), runs that full check on the last call's roots
+where the call did not, and returns 'fold_root_crossed' when a branch was
+missed there or the call itself flagged one: the walk does not report that
+minimum as converged.
 """
 import numpy as np
 from pyscf import gto
 
-from src.Base.numerics.constants import EE_FORCE_OMEGA_MATCH, ROOT_FOLLOW_WEIGHT_MIN
+from src.Base.numerics.constants import (EE_FOLD_FULL_CHECK_EVERY, EE_FORCE_OMEGA_MATCH,
+                                         ROOT_FOLLOW_WEIGHT_MIN)
 from src.Base.numerical_flags import collecting as cphf_flags_into
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, distributed, lockstep
+from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC.ee_driver import relaxed_densities
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, flag,
@@ -93,10 +107,15 @@ class ADC2State:
         # force at the same field and orbitals polishes on op instead of
         # solving every root again; dropped at the next call
         self.solved = None
-        # (mol, T (nroots, nao, nao)): the last call's roots as AO transition
-        # amplitudes, the next call's block start (carried between geometries
-        # by a walk, as y_follow is)
+        # (mol, T (nroots, nao, nao), warm): the last call's roots as AO
+        # transition amplitudes, the next call's block start (carried between
+        # geometries by a walk, as y_follow is), and the count of warm calls
+        # behind them, which times the full check (module docstring)
         self.fold_start = None
+        # (op, omega, y) of the last call's roots when its check ran the
+        # seeded search alone, for confirm; the call's 'fold_root_crossed'
+        # flags
+        self.unchecked, self.crossed = None, []
 
     @property
     def numerics(self):
@@ -108,7 +127,7 @@ class ADC2State:
         orbitals at this geometry, C_o^T S12^T T S12 C_v, or None."""
         if self.fold_start is None:
             return None
-        mol0, T = self.fold_start
+        mol0, T = self.fold_start[:2]
         S12 = gto.intor_cross('int1e_ovlp', mol0, self.mol)
         C = np.asarray(mf.mo_coeff, float)
         nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
@@ -121,6 +140,9 @@ class ADC2State:
         r = self.mp2(h, e)
         mf = self.mp2.mf
         flags = list(r.info.get('flags', []))
+        start = self._start(mf)
+        warm = 0 if start is None else self.fold_start[2] + 1
+        full = start is not None and warm % EE_FOLD_FULL_CHECK_EVERY == 0
         with cphf_flags_into(flags):
             _, _, res = solve_ee_adc(mf, self.mol, level=self.level,
                                      spin=self.spin, nroots=self.nroots, fold=True,
@@ -133,7 +155,7 @@ class ADC2State:
                                      tile_gb=self.tile_gb,
                                      numerics=self.mp2.numerics,
                                      spin_scaling=self.mp2.scaling,
-                                     start=self._start(mf))
+                                     start=start, full_check=full)
         omega_all, y, t1_all, conv = lockstep((
             np.array(res.omega, float), np.array(res.y), np.array(res.t1, float),
             np.array(np.atleast_1d(res.converged), bool)))
@@ -141,7 +163,10 @@ class ADC2State:
         flags = broadcast(flags + list(res.flags), current_comm())
         flag_unconverged(conv, f'ADC(2) {self.spin}', flags)
         T = transition_amplitudes(mf, self.mp2.frozen or 0, y)
-        self.fold_start = (self.mol, T)
+        self.fold_start = (self.mol, T, warm)
+        self.crossed = [f for f in flags if f['flag'] == 'fold_root_crossed']
+        self.unchecked = (None if start is None or full else
+                          (res.operator, omega_all, np.array(y)))
         if self.y_follow is None or self.follow == 'index':
             k = self.root
             if root_missing(k, omega_all.size, f'ADC(2) {self.spin}', flags):
@@ -178,6 +203,37 @@ class ADC2State:
             t1=float(t1_all[k]), converged=conv, flags=flags,
             delta_dipole=-np.einsum('xmn,mn->x', r_dip, d_rel)))
 
+    def confirm(self, mol):
+        """Flags ({'flag', 'message'} each, empty when none) that the last
+        call, at `mol`, missed a branch below its roots: its own
+        'fold_root_crossed', and where its check ran the seeded search alone,
+        the full check on its roots (ee_fold.check_roots, the walk included;
+        rank 0's on every rank). Another geometry's call has nothing to
+        confirm: refused."""
+        if not np.allclose(mol.atom_coords(), self.mol.atom_coords(), rtol=0,
+                           atol=1e-12):
+            raise ValueError('confirm(mol): the last call was at another geometry')
+        flags = [dict(f) for f in self.crossed]
+        if self.unchecked is None:
+            return flags
+        op, omega, y = self.unchecked
+        tol_residual = self.mp2.numerics.adc.residual_tol or self.conv_tol
+
+        def solve(o):
+            mu, top = ee_fold.check_roots(o.pieces(), o.spin, omega, y,
+                                          self.conv_tol, tol_residual,
+                                          label=f'ADC(2) {self.spin} confirm')
+            return [mu, top]
+        mu, top = ee_ri_fold.drive(op, solve)
+        self.unchecked = None
+        if mu <= top:
+            flag(flags, 'fold_root_crossed',
+                 f'ADC(2) {self.spin}: the full check at the last geometry found a '
+                 f'branch at {mu:.8f} Ha, at or below the highest root '
+                 f'{float(np.max(omega)):.8f} Ha, that the warm solve missed: the '
+                 'state followed may not be the one asked for')
+        return flags
+
     def checkpoint(self):
         """The reference's warm start, the followed root's amplitude and the
         roots' fold start (state_models docstring)."""
@@ -202,7 +258,9 @@ class ADC2State:
             y.mol, y.T = self.mol, np.array(saved['y_follow'], float)
             self.y_follow = y
         if saved.get('fold_start') is not None:
-            self.fold_start = (self.mol, np.array(saved['fold_start'], float))
+            # the warm count starts again: the next full check comes
+            # EE_FOLD_FULL_CHECK_EVERY warm calls after the restart
+            self.fold_start = (self.mol, np.array(saved['fold_start'], float), 0)
 
     def force(self, h, e):
         """(F, info) of the root in the fixed field (state_models docstring),

@@ -108,9 +108,10 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
                     numerics=None, state_specific='off',
                     ss_density=SS_DENSITY_DEFAULT, scaling=None,
-                    relaxed_density=False, start=None, residual_tol=None):
-    """fold=True: the density-fitted tiled fold of ee_ri_fold; start the
-    block solver's (ee_fold.solve_folded), level 'adc2'."""
+                    relaxed_density=False, start=None, residual_tol=None,
+                    full_check=False):
+    """fold=True: the density-fitted tiled fold of ee_ri_fold; start and
+    full_check the block solver's (ee_fold.solve_folded), level 'adc2'."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
         raise ValueError('fold=True is a closed-shell spin-free route')
     if level not in ee_ri_fold.LEVELS:
@@ -145,7 +146,7 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                                      tol_residual=tol_residual,
                                      dense_limit=dense_limit, solver='block',
                                      verbose=int(mol.verbose >= logger.INFO),
-                                     start=start)
+                                     start=start, full_check=full_check)
         else:
             r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
         return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,

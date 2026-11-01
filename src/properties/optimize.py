@@ -86,7 +86,7 @@ from src.Base.utils.parallel.mpi_grid import lockstep
 from src.gradients.mean_field_surface import MeanFieldSurface, mean_field_force
 from src.gradients.surface_identity import force_identity
 from src.gradients.surface import evaluate, lockstep_geometry
-from src.gradients.surface import commit, driven_chain, provides
+from src.gradients.surface import commit, confirm, driven_chain, provides
 from src.gradients.gwbse.conventions import ConventionsLost
 
 
@@ -474,6 +474,12 @@ def optimize(surface, mol=None, hess_init=None, conv=None, refreeze=0,
     The start and every accepted step are committed to the surface's root
     following (`surface.commit`); a rejected step never is.
 
+    A converged walk asks the surface to confirm its minimum
+    (`surface.confirm`: an ADC(2) model runs the fold's full completeness
+    check there). A flag back (a state crossed below the one followed) marks
+    the walk not converged: `converged` False, `status` saying so, the flags
+    in `info['walk_flags']`, and no refreeze (`confirmed_minimum`).
+
     checkpoint: `checkpoint(state)` after the start and every accepted
         step of either pass, `state` the walk at that point (`walk_state`);
         resume: such a state, read back, from which the walk goes on instead
@@ -758,6 +764,19 @@ class CartesianWalk:
         return info
 
 
+def confirmed_minimum(surface, mol, info):
+    """`info` of a walk converged at `mol`, marked not converged when the
+    surface does not confirm that minimum (gradients.surface.confirm):
+    `converged` False, `status` naming the flags, which go to `walk_flags`."""
+    flags = confirm(surface, mol)
+    if flags:
+        names = sorted({f['flag'] for f in flags})
+        info.update(converged=False,
+                    status=f'converged geometry not confirmed ({", ".join(names)})')
+        info['walk_flags'] = list(info.get('walk_flags') or []) + flags
+    return info
+
+
 def finish_walk(info, refreeze):
     """`info` marked with why its refreeze drift is null (never measured)."""
     # a refreeze asked for on a run that never converged had no minimum to
@@ -792,7 +811,9 @@ def _trust_region_walk(surface, mol, max_cycle, trust, trust_max, trust_min,
         return mol, failed_start
     walk.descend(max_cycle, conv, verbose)
     info = walk.record(resume)
-    if refreeze and walk.converged:
+    if walk.converged:
+        info = confirmed_minimum(walk.surface, walk.m_cur, info)
+    if refreeze and info['converged']:
         return refreeze_pass(walk_again, walk.surface, walk.m_cur, info,
                              verbose, checkpoint=checkpoint)
     return walk.m_cur, finish_walk(info, refreeze)
@@ -1241,7 +1262,9 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
         # geomeTRIC stops on convergence before its accepted-step hook
         commit(walk.surface, mol_opt)
     info = walk.record(converged, status, coordsys, resume)
-    if refreeze and converged:
+    if converged:
+        info = confirmed_minimum(walk.surface, mol_opt, info)
+    if refreeze and info['converged']:
         return refreeze_pass(walk_again, walk.surface, mol_opt, info, verbose,
                              checkpoint=checkpoint)
     return mol_opt, finish_walk(info, refreeze)

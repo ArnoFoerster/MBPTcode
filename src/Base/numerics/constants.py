@@ -2359,6 +2359,10 @@ EE_FOLD_CHECK_SHIFT = 0.1
 EE_FOLD_CHECK_RESIDUAL = 1e-4
 # unit vectors on the lowest lifted diagonal beside the random one
 EE_FOLD_CHECK_SEEDS = 8
+# a state model's warm solves: every this many runs the check's random-vector
+# walk as cold (solve_folded full_check), so a crossing state the fold model
+# misses is caught within this many calls
+EE_FOLD_FULL_CHECK_EVERY = 5
 # relative norm left off a span below which a start vector is in it
 EE_FOLD_SPAN = 1e-8
 # full-vector overlap above which two roots are one

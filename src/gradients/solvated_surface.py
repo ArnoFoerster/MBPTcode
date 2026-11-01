@@ -45,6 +45,9 @@ surface: make_state then moves the first model
 and a model on another surface is refused before its loop runs. The walkers'
 accepted steps (gradients.surface.commit) reach the model's own
 `commit(mol)`, which moves a chain's conventions and followed state there.
+A walk's converged geometry (gradients.surface.confirm) reaches the model's
+own `confirm(mol)` (ADC(2): the fold's full completeness check there); its
+flags are logged at that geometry and returned.
 
 Refreeze (`refreeze(mol)`, the outer loop of `optimize.relax(...,
 refreeze=1)`): a model on a surface of its own is rebuilt at `mol` by its
@@ -350,6 +353,22 @@ class SolvatedSurface(PotentialEnergySurface):
         accept = getattr(state, 'commit', None)
         if accept is not None:
             accept(mol)
+
+    def confirm(self, mol):
+        """Flags that the walk's converged geometry `mol` is not on the state
+        followed (gradients.surface.confirm): the state model's
+        `confirm(mol)` on its evaluation at `mol` (made again when the last
+        evaluation was elsewhere, as for a walk resumed at its minimum),
+        logged at `mol`; empty for a model without one."""
+        if self.last is None or not np.allclose(
+                self.last['mol'].atom_coords(), mol.atom_coords(), rtol=0, atol=1e-12):
+            self._solve(mol)
+        check = getattr(self.last['state'], 'confirm', None)
+        if check is None:
+            return []
+        flags = list(check(mol))
+        self._log_flags(mol, flags)
+        return flags
 
     def refreeze(self, mol, mf=None):
         """This surface with its model's frozen conventions rebuilt at `mol`

@@ -1080,7 +1080,8 @@ def _lowest_beside(matvec, diag_s, V, w0, top, tol_residual, label, extra=None,
     the random vector alone with the shifted diagonal correction, which walks
     down M's diagonal (not with walk False). The two searches are the check of
     each other: neither runs the eigensolver's own search off its converged
-    vector."""
+    vector. Returns (μ, z, walked), walked True when the walk ran and found μ
+    at or below top, which the seeded search had not."""
     n = diag_s.size
     sigma = top - w0 + 1.0
 
@@ -1111,7 +1112,7 @@ def _lowest_beside(matvec, diag_s, V, w0, top, tol_residual, label, extra=None,
                  jacobi_davidson_precond(diag))]
     if walk:
         searches.append(([r], walker))
-    for cand, precond in searches:
+    for i, (cand, precond) in enumerate(searches):
         # sum_q A'_pq z_q = μ z_p, the lowest, by Davidson from the start
         mu, z, _ = _solve(lifted, diag, nroots=1,
                           x0=extend_orthonormal(V, cand, rtol=EE_FOLD_SPAN),
@@ -1120,7 +1121,7 @@ def _lowest_beside(matvec, diag_s, V, w0, top, tol_residual, label, extra=None,
                           label=label + ' check', complete_lowest=False)
         if float(mu[0]) <= top:
             break
-    return float(mu[0]), np.asarray(z, float)[:, 0]
+    return float(mu[0]), np.asarray(z, float)[:, 0], i == 1 and float(mu[0]) <= top
 
 
 def _lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols, tol=None,
@@ -1157,8 +1158,8 @@ def _lowest_at(pieces, omega, spin, k, dense, tol_residual, label, cols, tol=Non
                 break
             # a start whose vectors are exact eigenvectors converges at once
             # and can hide a branch below ω + tol: look for one off span v
-            mu, z = _lowest_beside(matvec, diag_s, v, float(w[0]), omega + tol,
-                                   tol_residual, label)
+            mu, z, _ = _lowest_beside(matvec, diag_s, v, float(w[0]), omega + tol,
+                                      tol_residual, label)
             if mu > omega + tol:
                 break
             cols, k = np.column_stack([v, z]), k + 1
@@ -1604,10 +1605,11 @@ class _Roots:
             self.add(float(lam.mean()), Z[:, j], t1[j], lv, k, 'index', conv)
 
 
-def _solve_block(R, m0, diag_s, nroots, start=None):
+def _solve_block(R, m0, diag_s, nroots, start=None, full_check=False):
     """All nroots at once (_block_roots), appended to the _Roots R; False when
-    the window reaches min_K D_K, where the interpolation has no bound. start:
-    solve_folded's, the seeds in place of M's."""
+    the window reaches min_K D_K, where the interpolation has no bound. start,
+    full_check: solve_folded's, the seeds in place of M's and the walk on a
+    warm solve."""
     pieces, spin, n, label = R.pieces, R.spin, R.n, R.label
     tol_omega, tol_residual, verbose = R.tol_omega, R.tol_residual, R.verbose
     k = min(nroots + EE_FOLD_BLOCK_BUFFER, n)
@@ -1686,15 +1688,23 @@ def _solve_block(R, m0, diag_s, nroots, start=None):
         # operator models the fold's diagonal: the seeded search then starts on
         # the lowest of M plus the model at ω_c, where a state the fold pulls
         # below its configurations (charge transfer) that the start never held
-        # sits; without the model only the walk reaches it
+        # sits; without the model only the walk reaches it. full_check runs
+        # the walk as well, for a state the model does not see
         warm = start is not None and fold_diag is not None
-        mu, z = _lowest_beside(folded_operator(pieces, cut, spin)[0],
-                               diag_s + fold_diag(cut) if warm else diag_s,
-                               X_c[:, :nr], float(om[0]), cut + win,
-                               tol_residual, label, extra=X_c[:, nr:],
-                               walk=not warm)
+        mu, z, walked = _lowest_beside(folded_operator(pieces, cut, spin)[0],
+                                       diag_s + fold_diag(cut) if warm else diag_s,
+                                       X_c[:, :nr], float(om[0]), cut + win,
+                                       tol_residual, label, extra=X_c[:, nr:],
+                                       walk=not warm or full_check)
         if verbose:
             _say(label, f'check: mu - cut {mu - cut:.2e} Ha, window {win:.1e}')
+        if walked and start is not None:
+            # only the walk found it: the start held no trace of it and a warm
+            # solve without the walk would have missed it, as earlier ones may
+            _flag('fold_root_crossed', f'{label}: a branch at or below omega = '
+                  f'{cut:.8f} Ha (mu {mu:.8f} Ha) that the start lacked and only '
+                  'the random-vector walk found: a state crossed into the roots',
+                  stacklevel=3)
         if mu > cut + win:
             break
         if rnd == EE_FOLD_COUNT_ROUNDS:
@@ -1722,7 +1732,7 @@ def _solve_block(R, m0, diag_s, nroots, start=None):
 
 def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
                  t_min=0.3, max_newton=12, max_fixed=30, dense_limit=None,
-                 verbose=0, solver='davidson', start=None):
+                 verbose=0, solver='davidson', start=None, full_check=False):
     """The nroots lowest folded roots, each level at its own frequency.
 
     solver 'davidson' (the default): from the seeds below, one Davidson in the
@@ -1864,6 +1874,11 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
         diagonal; the random-vector walk down M's diagonal is the cold solve's.
         Without the model the check runs both searches, as cold. Unread on the
         dense branch.
+    full_check : bool, with start: the check runs the random-vector walk as
+        well, as cold, which finds a state the model does not see (one spread
+        over many configurations); a branch that only the walk finds is flagged
+        'fold_root_crossed' (the start lacked it, so a warm solve without the
+        walk would have missed it).
     solver : {'davidson', 'newton', 'block'}, the root-wise Davidson, the
         per-level Newton loops from the seeds, or the block Davidson over images
         at Chebyshev frequencies (its trace counts each image at a node as one
@@ -1884,14 +1899,36 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     try:
         return _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min,
                              max_newton, max_fixed, dense_limit, verbose, solver,
-                             flags, start)
+                             flags, start, full_check)
     finally:
         _TRACE.reset(token)
         _FLAGS.reset(flag_token)
 
 
+def check_roots(pieces, spin, omega, Y, tol_omega, tol_residual,
+                label='ee-ADC fold'):
+    """The completeness check of solved roots, both searches as cold: omega (m,)
+    and Y (n, m), the roots of a solve_folded call on pieces. Below min_K D_K the
+    roots at or below ω_c = max omega number the eigenvalues of A_eff(ω_c) at or
+    below it, so an eigenvalue μ of A_eff(ω_c) off span Y at or below ω_c + win
+    (win = max(2 tol_omega, EE_FOLD_DEGENERATE)) is a branch the solve missed
+    (_lowest_beside, its seeded search and the random-vector walk). Returns
+    (μ, ω_c + win): μ at or below the second is a missed branch."""
+    omega = np.asarray(omega, float)
+    cut = float(omega.max())
+    win = max(2.0 * tol_omega, EE_FOLD_DEGENERATE)
+    _, _, diag_s, _, _ = folded_operator(pieces, None, spin)
+    # the roots' span: A_eff(ω_c) lifts it, whatever basis spans it
+    V = np.linalg.qr(np.asarray(Y, float))[0]
+    mu, _, _ = _lowest_beside(folded_operator(pieces, cut, spin)[0], diag_s, V,
+                              float(omega.min()), cut + win, tol_residual, label,
+                              walk=True)
+    return mu, cut + win
+
+
 def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newton,
-                  max_fixed, dense_limit, verbose, solver, flags, start=None):
+                  max_fixed, dense_limit, verbose, solver, flags, start=None,
+                  full_check=False):
     """solve_folded inside its trace; the arguments are solve_folded's, flags
     the call's named flags (FoldResult.flags)."""
     _check_level(pieces)
@@ -1920,7 +1957,7 @@ def _solve_folded(pieces, nroots, spin, tol_omega, tol_residual, t_min, max_newt
     R.note(f'start: {n} singles, nroots {nroots}, {"dense" if dense else "Davidson"}, '
            f'tol_omega {tol_omega:g}, tol_residual {tol_residual:g}, solver {solver}')
     block = not dense and solver == 'block' and _solve_block(R, m0, diag_s, nroots,
-                                                             start)
+                                                             start, full_check)
     if not block:
         # the Davidson starts from whole levels as far as it may follow past
         # nroots: residuals keep a level's symmetry, so a partner the start

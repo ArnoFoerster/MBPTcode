@@ -60,7 +60,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
                  numerics=None, state_specific='off', ss_density=SS_DENSITY_DEFAULT,
                  spin_scaling=None, relaxed_density=False, start=None,
-                 residual_tol=None):
+                 residual_tol=None, full_check=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
     an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
     per root (a Davidson or fold root that did not converge also warns).
@@ -141,7 +141,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
 
     start (fold=True, level 'adc2'): the singles vectors (no * nv, m) of a
     neighbouring problem's roots in this mean field's orbitals, the block
-    solver's start in place of the seeds of M (ee_fold.solve_folded)."""
+    solver's start in place of the seeds of M (ee_fold.solve_folded);
+    full_check: with start, the completeness check runs its random-vector walk
+    as cold and flags a branch only the walk finds (solve_folded)."""
     mol = mol if mol is not None else mf.mol
     scaling = spin_scaling_factors(spin_scaling)
     if scaling is not None and not (fold and level == 'adc2'):
@@ -164,6 +166,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
         raise ValueError(f'ss_density={ss_density!r} needs state_specific')
     if start is not None and not (fold and level == 'adc2'):
         raise ValueError("start needs fold=True and level 'adc2'")
+    if full_check and start is None:
+        raise ValueError('full_check needs a start: a cold solve runs the full '
+                         'check always')
     if relaxed_density and not (fold and return_fold and level in ('adc1', 'adc2')):
         raise ValueError('relaxed_density needs fold=True, return_fold=True and '
                          "level 'adc1' or 'adc2'")
@@ -181,7 +186,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                                     en_dress, frozen, auxbasis, dense_limit,
                                     return_fold, env, tile_gb, route, numerics,
                                     state_specific, ss_density, scaling,
-                                    relaxed_density, start, residual_tol)
+                                    relaxed_density, start, residual_tol,
+                                    full_check)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
