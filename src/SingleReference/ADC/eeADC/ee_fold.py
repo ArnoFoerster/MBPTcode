@@ -222,7 +222,10 @@ def folded_operator(pieces, omega, spin=None):
         K(y1, omega, powers) -> (ws, dn2) with y1 an SB singles vector, ws[i]
         the SB singles sum_K V_K,ia (V y1)_K / (D_K - ω)^powers[i] and dn2 the
         float sum_K (V y1)_K² / (D_K - ω)², for a pieces set that streams the
-        doubles instead of forming V(y1); powers may be empty).
+        doubles instead of forming V(y1); powers may be empty);
+        'fold_diagonal' (optional: ω -> (n,), a model of the fold's diagonal
+        on the channel's vectors, read by the block solve as an operator's
+        fold_diagonal).
     omega : float or None
         Frequency in Hartree; None gives the bare singles block M.
     spin : {'singlet', 'triplet', None}
@@ -347,6 +350,15 @@ def _d_min(pieces):
     if pieces.get('operator') is not None:
         return float(pieces['d_min'])
     return float(np.min(pieces['D']))
+
+
+def _fold_model(pieces):
+    """ω -> (n,), the model of the fold's diagonal: the operator's
+    (fold_diagonal), else pieces['fold_diagonal']; None without one."""
+    op = pieces.get('operator')
+    if op is not None:
+        return getattr(op, 'fold_diagonal', None)
+    return pieces.get('fold_diagonal')
 
 
 def dense_effective(matvec, n):
@@ -1294,7 +1306,7 @@ def _block_roots(pieces, spin, X0, nroots, k, lo, hi, fold, tol_residual, tol_om
     _, _, diag_s, _, _ = folded_operator(pieces, None, spin)
     images = _node_images(pieces, spin)
     d_min = _d_min(pieces)
-    fold_diag = getattr(pieces.get('operator'), 'fold_diagonal', None)
+    fold_diag = _fold_model(pieces)
     V, om, moves, moved = X0, None, 0, True
     for it in range(1, EE_FOLD_BLOCK_MAX_ITER + 1):
         if moved:
@@ -1610,7 +1622,7 @@ def _solve_block(R, m0, diag_s, nroots, start=None):
                              tol_residual=max(tol_residual, EE_FOLD_M_SEED_RESIDUAL),
                              label=label + ' seeds of M')
         e_m, X_m = np.asarray(e_m, float), np.asarray(X_m, float)
-    fold_diag = getattr(pieces.get('operator'), 'fold_diagonal', None)
+    fold_diag = _fold_model(pieces)
     if fold_diag is not None and start is None:
         # the doubles pull some configurations (charge transfer) far below
         # where M puts them: the seeds are the k lowest of M plus the
@@ -1670,10 +1682,17 @@ def _solve_block(R, m0, diag_s, nroots, start=None):
         # the model's next eigenvectors at ω_c, the branches the block carried
         # past nroots, start the search
         X_c = ritz(cut, k)
-        mu, z = _lowest_beside(folded_operator(pieces, cut, spin)[0], diag_s,
+        # a start leaves the random-vector walk to the cold solve where the
+        # operator models the fold's diagonal: the seeded search then starts on
+        # the lowest of M plus the model at ω_c, where a state the fold pulls
+        # below its configurations (charge transfer) that the start never held
+        # sits; without the model only the walk reaches it
+        warm = start is not None and fold_diag is not None
+        mu, z = _lowest_beside(folded_operator(pieces, cut, spin)[0],
+                               diag_s + fold_diag(cut) if warm else diag_s,
                                X_c[:, :nr], float(om[0]), cut + win,
                                tol_residual, label, extra=X_c[:, nr:],
-                               walk=start is None)
+                               walk=not warm)
         if verbose:
             _say(label, f'check: mu - cut {mu - cut:.2e} Ha, window {win:.1e}')
         if mu > cut + win:
@@ -1836,11 +1855,14 @@ def solve_folded(pieces, nroots, spin=None, tol_omega=1e-6, tol_residual=1e-6,
     start : ndarray (n, m) or None, solver 'block' only: the roots of a
         neighbouring problem (the same channel at a nearby field or geometry),
         whose span replaces the seeds of M as the block's start; the window and
-        the block are as without it, and the completeness check runs its seeded
-        search alone: the start carries the neighbouring problem's branches, so
-        a branch that reaches the roots arrives through the block's next Ritz
-        vectors, and the random-vector walk down M's diagonal, which finds a
-        state the seeds of M never reach, is the cold solve's. Unread on the
+        the block are as without it. Where the operator models the fold's
+        diagonal the completeness check runs its seeded search alone, on the
+        lowest of M plus the model: the start carries the neighbouring problem's
+        branches, a branch that reaches the roots arrives through the block's
+        next Ritz vectors, and a state the fold pulls below its configurations
+        (charge transfer) that the start never held sits low on the model's
+        diagonal; the random-vector walk down M's diagonal is the cold solve's.
+        Without the model the check runs both searches, as cold. Unread on the
         dense branch.
     solver : {'davidson', 'newton', 'block'}, the root-wise Davidson, the
         per-level Newton loops from the seeds, or the block Davidson over images

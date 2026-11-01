@@ -19,6 +19,13 @@ frozen 1, aug-cc-pvdz-ri, 3 singlet roots at tol_omega 1e-8.
      that geometry to 1e-9 Ha.
   5. a cold block first solves A_eff at one frequency from the seeds, loosely (one
      eigensolve labelled 'seeds of A_eff'); a start skips it.
+  6. a state that drops below root 1 between two calls and is absent from the
+     start (synthetic pieces of test_ee_adc_fold_block, 800 singles, one double,
+     nroots 1 and 3) is found by the warm solve, every root equal to the
+     supermatrix's to 1e-8 Ha: a configuration last on M's diagonal, with the
+     model of the fold's diagonal (the seeded search starts on the model's lowest
+     entries), and a block of 50 configurations, without the model (the check runs
+     the random-vector walk as cold).
 
 Run: python -m pytest -q tests/test_ee_adc_fold_solve_speed.py
 """
@@ -158,3 +165,43 @@ def test_cold_block_seeds_on_aeff():
     _, n_warm = searches(OP, tag=' seeds of A_eff', start=np.asarray(COLD.y))
     assert (n_cold, n_warm) == (1, 0), (n_cold, n_warm)
     assert np.max(np.abs(r.omega - COLD.omega)) < 1e-12
+
+
+def crossing(kind, c, model):
+    """Synthetic fold pieces (test_ee_adc_fold_block) of 800 singles and one
+    double, coupling c, and their exact roots: 'alone', a configuration last on
+    M's diagonal (3.0 Ha) coupled to a double at 3.1 Ha; 'coupled', a block of 50
+    configurations (1.5-2.0 Ha) coupled to a double at 2.2 Ha by a random unit
+    row. model: pieces['fold_diagonal'] is the exact fold diagonal."""
+    from tests.test_ee_adc_fold_block import supermatrix_roots, synthetic_pieces
+    n, rng = 800, np.random.default_rng(7)
+    m = np.diag(0.5 + 0.5 * np.arange(n) / n)
+    C = np.zeros((1, n))
+    if kind == 'alone':
+        m[-1, -1], C[0, -1], D = 3.0, 1.0, 3.1
+    else:
+        B = rng.standard_normal((50, 50)) * 2e-3
+        m[-50:, -50:] = np.diag(1.5 + 0.5 * np.arange(50) / 50) + 0.5 * (B + B.T)
+        C[0, -50:] = rng.standard_normal(50)
+        C, D = C / np.linalg.norm(C), 2.2
+    p = synthetic_pieces(m, c * C, [D])
+    if model:
+        p['fold_diagonal'] = lambda w: (c * C[0]) ** 2 / (w - D)
+    return p, supermatrix_roots(m, c * C, np.array([D]))
+
+
+def test_warm_check_finds_a_crossing_state():
+    for kind, c0, c1, model in (('alone', 0.5, 2.75, True), ('coupled', 0.6, 2.2, False)):
+        for nroots in (1, 3):
+            p0, w0 = crossing(kind, c0, model)
+            r0 = ee_fold.solve_folded(p0, nroots, spin='singlet', dense_limit=0,
+                                      solver='block', tol_omega=1e-10)
+            assert np.max(np.abs(r0.omega[:nroots] - w0[:nroots])) < 1e-8
+            # the planted state drops below root 1 and the cold roots start
+            p1, w1 = crossing(kind, c1, model)
+            assert w1[0] < w0[0] - 0.1
+            r1 = ee_fold.solve_folded(p1, nroots, spin='singlet', dense_limit=0,
+                                      solver='block', tol_omega=1e-10,
+                                      start=np.asarray(r0.y))
+            d = np.max(np.abs(r1.omega[:nroots] - w1[:nroots]))
+            assert d < 1e-8 and r1.converged.all(), (kind, nroots, d)
