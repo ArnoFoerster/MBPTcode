@@ -11,7 +11,6 @@ from it, never from each other's private names):
 - occ_chunk, chunk_ranges: the chunk size of that axis and the chunks one MPI
   rank works on.
 """
-import os
 
 import numpy as np
 
@@ -72,16 +71,12 @@ def to_l(t_arr, rank, block=None):
 # matvec of a mid-sized molecule runs about 1.5x faster with chunks of 16 than of 4) at
 # the price of chunk_size O V^2 memory per live array. A fixed cap keeps that memory
 # O(N^3); half the occupied axis keeps every streamed array smaller than O^2 V^2 on small
-# molecules too. MBPT_ADC_OCC_CHUNK sets the chunk size exactly (timing studies).
+# molecules too.
 OCC_CHUNK = 16
-_OCC_CHUNK_ENV = os.environ.get('MBPT_ADC_OCC_CHUNK')
 
 
 def occ_chunk(n_occ):
-    """Chunk size of the occupied axis of length n_occ: MBPT_ADC_OCC_CHUNK if set,
-    else min(OCC_CHUNK, ceil(n_occ / 2))."""
-    if _OCC_CHUNK_ENV:
-        return int(_OCC_CHUNK_ENV)
+    """Chunk size of the occupied axis of length n_occ: min(OCC_CHUNK, ceil(n_occ / 2))."""
     return max(1, min(OCC_CHUNK, -(-n_occ // 2)))
 
 

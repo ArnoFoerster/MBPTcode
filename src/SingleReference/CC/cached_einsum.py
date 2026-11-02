@@ -56,7 +56,7 @@ import os
 import numpy as np
 import opt_einsum
 
-from src.Base.utils.threaded_copies import threaded_copies_active
+from src.Base.utils.threaded_copies import BACKEND as THREADED_BACKEND, threaded_copies_active
 
 _PATH_CACHE = {}
 _OPTIMAL_MAX_OPERANDS = 4
@@ -184,7 +184,7 @@ def einsum(subscripts, *operands, optimize=True):
         optimize = _cached_path(subscripts, operands, strategy)
         if threaded_copies_active():
             return opt_einsum.contract(subscripts, *operands, optimize=optimize[1:],
-                                       backend='threaded')
+                                       backend=THREADED_BACKEND)
     return np.einsum(subscripts, *operands, optimize=optimize)
 
 

@@ -4,9 +4,11 @@ A contraction handed to BLAS first copies each operand into the (free, contracte
 matrix layout; numpy does that copy on one thread, which on a many-core node
 outlasts the multithreaded GEMM it feeds. use_threaded_transposes() splits the
 copies over a thread pool and routes the cached einsum through opt_einsum with a
-tensordot that uses them. The matrices handed to BLAS are the same ones numpy
-builds, so results do not change. Off for every caller until switched on; the DF
-ADC operators switch it on (threaded_transposes_default).
+tensordot that uses them: this module is that opt_einsum backend (`BACKEND`), whose
+`tensordot`, `transpose` and `einsum` opt_einsum imports by name. The matrices
+handed to BLAS are the same ones numpy builds, so results do not change. Off for
+every caller until switched on; the DF ADC operators switch it on
+(threaded_transposes_default).
 """
 import math
 import os
@@ -17,6 +19,8 @@ _COPY_POOL = None
 _COPY_THREADS = 1
 _COPY_MIN_ELEMENTS = 1 << 18
 _COPY_CHOSEN = False
+# the module path opt_einsum imports the backend functions below from
+BACKEND = __name__
 
 
 def _copy_axis(shape):
@@ -84,23 +88,27 @@ def use_threaded_transposes(n_threads=None, min_elements=None):
         _COPY_POOL, _COPY_THREADS = None, 1
         return
     from concurrent.futures import ThreadPoolExecutor
-    from opt_einsum.backends import dispatch
     _COPY_POOL, _COPY_THREADS = ThreadPoolExecutor(n_threads), n_threads
-    dispatch._cached_funcs[('tensordot', 'threaded')] = threaded_tensordot
-    dispatch._cached_funcs[('transpose', 'threaded')] = np.transpose
-    dispatch._cached_funcs[('einsum', 'threaded')] = lambda sub, *ops: np.einsum(sub, *ops, optimize=True)
 
 
 def threaded_transposes_default():
     """Switch threaded copies on with the defaults of use_threaded_transposes, unless
-    a caller already chose (either way) or MBPT_EINSUM_COPY_THREADS sets the thread
-    count (1 = off)."""
-    if _COPY_CHOSEN:
-        return
-    env = os.environ.get('MBPT_EINSUM_COPY_THREADS')
-    use_threaded_transposes(int(env) if env else None)
+    a caller already chose (either way)."""
+    if not _COPY_CHOSEN:
+        use_threaded_transposes()
 
 
 def threaded_copies_active():
     """True while the copy pool is switched on."""
     return _COPY_POOL is not None
+
+
+# The opt_einsum backend interface (`BACKEND`).
+tensordot = threaded_tensordot
+transpose = np.transpose
+
+
+def einsum(subscripts, *operands):
+    """numpy's einsum with its own path search, for the steps opt_einsum does not
+    hand to tensordot."""
+    return np.einsum(subscripts, *operands, optimize=True)
