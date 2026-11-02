@@ -105,7 +105,6 @@ from src.Base.numerics.numerics import numerics_of
 from src.environments.split_equilibrium import LinearResponseOnly
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
-from src.gradients.scf_loop_response import loop_density_response
 from src.gradients.state_models import HFState, StateResult
 from src.gradients.gwbse.excited_state import ExcitedStateChain, dipole_change
 from src.gradients.surface import followed_root
@@ -290,14 +289,12 @@ class GWBSEState:
         return lockstep(F), dict(dm_eff=r.dm_eff, lr=[], flags=r.info['flags'])
 
     def loop_response(self, h, field, numerics=None):
-        """The reference's `HFState.loop_response` on the mean field of its
-        last call; an excited state has none."""
+        """The reference's `HFState.loop_response`, on the mean field of its
+        last call (this model's); an excited state has none."""
         if self.spin is not None:
             raise ValueError('the loop response is the reference\'s (spin None): '
                              'the slow charges follow the ground state')
-        return lockstep(loop_density_response(self.mf, self.reference._h0,
-                                              field.scf_continuum(), h,
-                                              numerics))
+        return self.reference.loop_response(h, field, numerics)
 
     def identity(self):
         """What this model computes (module docstring)."""

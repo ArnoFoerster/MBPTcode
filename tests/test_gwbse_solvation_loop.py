@@ -102,6 +102,7 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.state_model import GWBSEState
+from src.gradients.scf_loop_response import loop_density_response
 from src.properties.optimize import relax
 from src.gradients.solvated_surface import SolvatedSurface
 from src.gradients.surface import commit
@@ -210,6 +211,20 @@ def test_the_reference_loop_is_the_pcm_scf(mol, loops):
     g.verbose = 0
     d = np.abs(sl.force(state, field, r) - g.kernel()).max()
     assert d < 1e-8, d
+
+
+def test_the_ground_loop_response_is_its_references(loops):
+    """S0's loop response is `HFState.loop_response` of its reference on the
+    mean field of its last call, the same bits as the response formed on
+    that mean field directly; an excited state has none."""
+    field, state, _ = loops['ground']
+    mu = 1e-3 * np.cos(np.arange(field.nsites))
+    h = field.operator(mu)[0]
+    want = loop_density_response(state.mf, state.reference._h0,
+                                 field.scf_continuum(), h, state.numerics)
+    assert np.array_equal(state.loop_response(h, field, state.numerics), want)
+    with pytest.raises(ValueError, match='reference'):
+        loops['singlet'][1].loop_response(h, field)
 
 
 @pytest.mark.parametrize('kind', ['singlet', 'triplet'])
