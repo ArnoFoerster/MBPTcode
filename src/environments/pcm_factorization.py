@@ -27,25 +27,24 @@ whole (nao, nao, n_surf) array in one block: 16 GB for a 62-atom emitter in
 aug-cc-pVDZ, on every rank, in every SCF cycle. `tile_cavity` gives the PCM
 object versions of both on `cavity_blocks` tiles instead. Where the SCF runs
 over ranks, `distributed_fock` attaches its communicator (`attach_cavity_comm`)
-for as long as it locks the continuum; each rank then evaluates only a contiguous
-range of the tiles, so it holds one tile at a time and the integrals cost
-about 1 / n of a cycle. The tiles depend on the cavity and the basis alone
-(ISDF_TILE_GB, libcint's index bound; a cavity past one tile is cut into at
-least PCM_CAVITY_MIN_TILES), and the
-reaction-field matrix is added tile by tile in tile order (`ordered_sum`), so
-the result is the same bits at every rank count. Every rank enters both calls
+for as long as it locks the continuum; each rank then evaluates only its share of
+the tiles (`owned_blocks`, as the force does), so it holds one tile at a time
+and the integrals cost about 1 / n of a cycle. The tiles depend on the cavity
+and the basis alone (PCM_CAVITY_BLOCK_GB, libcint's index bound; a cavity past
+one tile is cut into at least PCM_CAVITY_MIN_TILES), and the reaction-field
+matrix is added tile by tile in tile order (`ordered_sum`), so the result is the
+same bits at every rank count. Every rank enters both calls
 at the same point of the loop there, which is what the reduction needs;
 outside that block the tiles run replicated.
 """
 import numpy as np
 import scipy.linalg
-from pyscf import df as pyscf_df
-from pyscf import gto
 
 from src.Base.environment_seam import cavity_comm
-from src.Base.numerics.constants import ISDF_TILE_GB, PCM_CAVITY_MIN_TILES
-from src.Base.utils.parallel.mpi_grid import contiguous_block, ordered_sum, reduce_sum
-from src.environments.pcm_derivatives import cavity_blocks
+from src.Base.numerics.constants import PCM_CAVITY_BLOCK_GB, PCM_CAVITY_MIN_TILES
+from src.Base.utils.parallel.mpi_grid import ordered_sum, reduce_sum
+from src.environments.pcm_derivatives import (cavity_blocks, cavity_cintopt, cavity_integrals,
+                                              owned_blocks)
 
 #: Attribute the factorization is cached under, on the PCM object itself.
 _CACHE = '_cached_pcm_lu'
@@ -101,12 +100,12 @@ def _get_vind(self, dms):
 
 
 def cavity_tiles(nao, ngrids):
-    """[(p0, p1)] tiles of the surface points: `cavity_blocks` (ISDF_TILE_GB,
-    libcint's index bound); a cavity that needs more than one is cut finer, to
-    at least PCM_CAVITY_MIN_TILES, so that many ranks can share it. One tile
-    is pyscf's own block and its bits. A function of the cavity and the basis
-    only."""
-    tiles = cavity_blocks(nao, ngrids, comp=1, budget_gb=ISDF_TILE_GB)
+    """[(p0, p1)] tiles of the surface points: `cavity_blocks` (one
+    integral component, PCM_CAVITY_BLOCK_GB, libcint's index bound); a cavity
+    that needs more than one is cut finer, to at least PCM_CAVITY_MIN_TILES,
+    so that many ranks can share it. One tile is pyscf's own block and its
+    bits. A function of the cavity and the basis only."""
+    tiles = cavity_blocks(nao, ngrids, comp=1, budget_gb=PCM_CAVITY_BLOCK_GB)
     if len(tiles) == 1:
         return tiles
     width = min(tiles[0][1] - tiles[0][0], -(-ngrids // PCM_CAVITY_MIN_TILES))
@@ -115,30 +114,25 @@ def cavity_tiles(nao, ngrids):
 
 
 def _cavity_share(self, nao):
-    """(tiles, comm): the [(index, (p0, p1))] tiles this rank evaluates, a
-    contiguous range of `cavity_tiles`, and the communicator their partials
-    are summed over (None: all of them, here)."""
+    """(tiles, comm): the [(index, (p0, p1))] tiles of `cavity_tiles` this
+    rank evaluates (`owned_blocks`), and the communicator their partials are
+    summed over (None: all of them, here)."""
     ngrids = self.surface['grid_coords'].shape[0]
     tiles = list(enumerate(cavity_tiles(nao, ngrids)))
     comm = cavity_comm(self)
     if comm is None or comm.Get_size() == 1:
         return tiles, None
-    start, stop = contiguous_block(len(tiles), comm.Get_rank(), comm.Get_size())
-    return tiles[start:stop], comm
+    return [tiles[k] for k in owned_blocks(len(tiles), comm)], comm
 
 
 def _cavity_integrals(self, tiles):
     """(index, (p0, p1), (nao, nao, p1 - p0) potential integrals) for each
     tile: pyscf's `_get_v` block, one tile at a time."""
-    mol = self.mol
-    coords = self.surface['grid_coords']
-    exponents = self.surface['charge_exp']
-    int3c2e = mol._add_suffix('int3c2e')
-    cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, int3c2e)
+    int3c2e = self.mol._add_suffix('int3c2e')
+    cintopt = cavity_cintopt(self.mol, int3c2e)
     for index, (p0, p1) in tiles:
-        fakemol = gto.fakemol_for_charges(coords[p0:p1], expnt=exponents[p0:p1] ** 2)
-        yield index, (p0, p1), pyscf_df.incore.aux_e2(mol, fakemol, intor=int3c2e,
-                                                      aosym='s1', cintopt=cintopt)
+        yield index, (p0, p1), cavity_integrals(self.mol, self.surface, p0, p1,
+                                                int3c2e, cintopt)
 
 
 def _get_v(self, dms):

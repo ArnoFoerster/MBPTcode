@@ -5,13 +5,13 @@ three-centre integrals with k sized by `max_memory` alone, so a large memory
 share puts the whole (nao, nao, n_surf) array in one block on every rank, in
 every SCF cycle (16 GB for a 62-atom emitter in aug-cc-pVDZ).
 `pcm_factorization.tile_cavity` evaluates both on `cavity_tiles`, and inside
-`distributed_fock` each rank only a contiguous range of them.
+`distributed_fock` each rank only its share of them (`owned_blocks`).
 
 Gates (water/cc-pVDZ in toluene, the tile budget lowered to a few points
 where the gate needs several tiles):
   * at nao 2000 and 2600 surface points (a 118-atom emitter in aug-cc-pVDZ),
     on one rank and over 8, every tile holds at most LIBCINT_BLOCK_LIMIT
-    integrals and at most ISDF_TILE_GB, there are at least
+    integrals and at most PCM_CAVITY_BLOCK_GB, there are at least
     PCM_CAVITY_MIN_TILES of them, and the ranks' tiles cover the cavity once;
   * a cavity inside one tile is evaluated in pyscf's own block, bit for bit;
   * on tiles of a few points the potential and the reaction-field matrix are
@@ -35,13 +35,13 @@ from pyscf.solvent.pcm import PCM
 
 from src.Base.environment_seam import attach_cavity_comm, cavity_comm
 from src.Base.factorization.distributed_df import distributed_mean_field
-from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_TILE_GB, PCM_CAVITY_MIN_TILES,
+from src.Base.numerics.constants import (BYTES_PER_GB, PCM_CAVITY_BLOCK_GB, PCM_CAVITY_MIN_TILES,
                                          RANK_SPLIT_ENERGY_TOL, SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
-from src.Base.utils.parallel.mpi_grid import contiguous_block, distributed
+from src.Base.utils.parallel.mpi_grid import distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.environments import pcm_factorization
-from src.environments.pcm_derivatives import LIBCINT_BLOCK_LIMIT
+from src.environments.pcm_derivatives import LIBCINT_BLOCK_LIMIT, owned_blocks
 from src.environments.pcm_factorization import _cavity_share, cavity_tiles, factorize_once
 
 WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
@@ -69,7 +69,7 @@ def density(mol):
 
 def small_tiles(monkeypatch, nao):
     """Lower the tile budget to PER_TILE surface points."""
-    monkeypatch.setattr(pcm_factorization, 'ISDF_TILE_GB', PER_TILE * 8.0 * nao * nao / 1e9)
+    monkeypatch.setattr(pcm_factorization, 'PCM_CAVITY_BLOCK_GB', PER_TILE * 8.0 * nao * nao / 1e9)
 
 
 class Census:
@@ -112,7 +112,7 @@ def test_tiles_fit_libcint_at_emitter_size(size):
         tiles, _ = _cavity_share(cavity, nao)
         for _, (p0, p1) in tiles:
             assert nao * nao * (p1 - p0) <= LIBCINT_BLOCK_LIMIT
-            assert 8.0 * nao * nao * (p1 - p0) <= ISDF_TILE_GB * BYTES_PER_GB
+            assert 8.0 * nao * nao * (p1 - p0) <= PCM_CAVITY_BLOCK_GB * BYTES_PER_GB
             covered.extend(range(p0, p1))
     assert sorted(covered) == list(range(ngrids))
 
@@ -172,8 +172,8 @@ def test_ranks_evaluate_their_tiles(size, monkeypatch):
 
     out = run_simulated(one_rank, size)
     for rank, (name, v, vmat) in enumerate(out):
-        start, stop = contiguous_block(len(tiles), rank, size)
-        mine = sum(p1 - p0 for p0, p1 in tiles[start:stop])
+        mine = sum(tiles[k][1] - tiles[k][0]
+                   for k in owned_blocks(len(tiles), _Ranks(rank, size)))
         assert sum(census.points[name]) == 2 * mine
         assert max(census.points[name]) <= PER_TILE
         np.testing.assert_array_equal(v, v_serial)
@@ -210,8 +210,8 @@ def test_scf_over_ranks_evaluates_the_cavity_once(monkeypatch):
     for rank, (name, e_tot, converged, attached) in enumerate(out):
         assert converged and not attached
         assert abs(e_tot - serial.e_tot) < RANK_SPLIT_ENERGY_TOL
-        start, stop = contiguous_block(len(tiles), rank, size)
-        shares.append(sum(p1 - p0 for p0, p1 in tiles[start:stop]))
+        shares.append(sum(tiles[k][1] - tiles[k][0]
+                          for k in owned_blocks(len(tiles), _Ranks(rank, size))))
         assert max(census.points[name]) <= PER_TILE
     # every rank evaluates the same number of cavity passes, each over its own tiles
     passes = {sum(census.points[name]) / share for (name, *_), share in zip(out, shares)}

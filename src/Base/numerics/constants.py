@@ -2464,12 +2464,13 @@ PCM_DM_CACHE_TOL = 1e-10
 # field is the same bits at every rank count, and up to this many ranks share
 # its integrals in a cycle.
 PCM_CAVITY_MIN_TILES = 32
-# The largest block (GB) of a cavity grid's three-centre integral derivatives,
-# (3, nao, nao, nk) (src.environments.pcm_derivatives.cavity_blocks): every rank
-# holds one at a time in a force's continuum terms. Fixed, never derived from
-# the free memory, so the blocks and the force's bits are a function of the
-# cavity and the basis alone. The flop count does not depend on it; at nao 1090
-# a block is 46 cavity points.
+# The largest block (GB) of a cavity grid's three-centre integrals, (comp, nao,
+# nao, nk) (src.environments.pcm_derivatives.cavity_blocks): every rank holds one
+# at a time, in the SCF's surface potential (comp 1, `cavity_tiles`) and in a
+# force's continuum terms (comp 3). Fixed, never derived from the free memory,
+# so the blocks and the bits are a function of the cavity and the basis alone.
+# The flop count does not depend on it; at nao 1090 a force block is 46 cavity
+# points.
 PCM_CAVITY_BLOCK_GB = 0.5
 
 # Folded ADC(2) nuclear force (src.gradients.adc.ee_gradient)

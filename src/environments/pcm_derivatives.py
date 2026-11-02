@@ -85,6 +85,30 @@ def cavity_blocks(nao, ngrids, comp=3, budget_gb=PCM_CAVITY_BLOCK_GB):
     return [(k0, min(k0 + nk, ngrids)) for k0 in range(0, ngrids, nk)]
 
 
+def owned_blocks(n_blocks, comm=None):
+    """The cavity blocks this rank evaluates, round-robin over `comm` (all of
+    them without one). The callers add the blocks' terms in block order
+    (`ordered_sum`), so the result does not depend on who owns which."""
+    rank, size = (0, 1) if comm is None else (comm.Get_rank(), comm.Get_size())
+    return [int(k) for k in partition(n_blocks, rank, size)]
+
+
+def cavity_cintopt(mol, intor):
+    """libcint's optimizer for the three-centre integral `intor` of `mol`
+    against the cavity's point charges, built once per sweep."""
+    return gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, intor)
+
+
+def cavity_integrals(mol, surface, p0, p1, intor, cintopt=None):
+    """The (comp, nao, nao, p1 - p0) block (comp dropped when 1) of `intor`
+    between the AO pairs of `mol` and the Gaussian-smeared surface charges
+    p0:p1 of `surface`: pyscf's PCM charges, exponent `charge_exp`^2."""
+    fakemol = gto.fakemol_for_charges(surface['grid_coords'][p0:p1],
+                                      expnt=surface['charge_exp'][p0:p1] ** 2)
+    return pyscf_df.incore.aux_e2(mol, fakemol, intor=intor, aosym='s1',
+                                  cintopt=cintopt)
+
+
 def bound_pyscf_pcm_blocks(pcmobj):
     """Cap `pcmobj.max_memory` at PYSCF_PCM_MAX_MEMORY_MB and return it.
 
@@ -107,8 +131,8 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLO
     cc-pVDZ with a large memory budget).
 
     Each block gives one (natm, 3) addend, the blocks are added in block
-    order (`ordered_sum`), and with `comm` (every rank calling) block k is
-    rank k % size's: the integrals are divided over the ranks and the force
+    order (`ordered_sum`), and with `comm` (every rank calling) each rank
+    evaluates its `owned_blocks`: the integrals are divided over the ranks and the force
     is the same bits at every rank count. Without one this rank takes every
     block.
 
@@ -131,11 +155,9 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLO
         q_sym = pcmobj._intermediates['q_sym']
     mol = pcmobj.mol
     nao = mol.nao
-    grid_coords = pcmobj.surface['grid_coords']
-    exponents = pcmobj.surface['charge_exp']
+    surface = pcmobj.surface
     ngrids = q_sym.shape[0]
     blocks = cavity_blocks(nao, ngrids, comp=3, budget_gb=budget_gb)
-    rank, size = (0, 1) if comm is None else (comm.Get_rank(), comm.Get_size())
     # each cavity point's atom, the atom each AO sits on
     point_atom = np.empty(ngrids, dtype=int)
     for ia, (p0, p1) in enumerate(pcmobj.surface['gslice_by_atom']):
@@ -144,21 +166,17 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLO
     for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
         ao_atom[p0:p1] = ia
     ip1, ip2 = mol._add_suffix('int3c2e_ip1'), mol._add_suffix('int3c2e_ip2')
-    opt1 = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, ip1)
-    opt2 = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, ip2)
+    opt1, opt2 = cavity_cintopt(mol, ip1), cavity_cintopt(mol, ip2)
 
     def addend(k):
         p0, p1 = blocks[k]
-        fakemol = gto.fakemol_for_charges(grid_coords[p0:p1],
-                                          expnt=exponents[p0:p1] ** 2)
         out = np.zeros((mol.natm, 3))
         q = q_sym[p0:p1]
         # the AOs' side, doubled: d/dR on the first index of a symmetric dm;
         # sum_k v[x, i, j, k] q_k first, a matrix-vector product on each
         # component (libcint writes (i, j, k) column-major, so the (nao^2, nk)
         # view needs no copy)
-        v_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=ip1, aosym='s1',
-                                      cintopt=opt1)
+        v_nj = cavity_integrals(mol, surface, p0, p1, ip1, opt1)
         dvj = np.empty((3, nao))
         for x in range(3):
             vq = _points_matrix(v_nj[x], nao) @ q
@@ -166,8 +184,7 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLO
         del v_nj
         np.add.at(out, ao_atom, 2.0 * dvj.T)
         # the cavity points' side, each riding its own atom
-        q_nj = pyscf_df.incore.aux_e2(mol, fakemol, intor=ip2, aosym='s1',
-                                      cintopt=opt2)
+        q_nj = cavity_integrals(mol, surface, p0, p1, ip2, opt2)
         flat = dm.ravel(order='F')
         dq = np.stack([(flat @ _points_matrix(q_nj[x], nao)) * q
                        for x in range(3)])
@@ -175,9 +192,8 @@ def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLO
         np.add.at(out, point_atom[p0:p1], dq.T)
         return out
 
-    return ordered_sum([(int(k), addend(int(k)))
-                        for k in partition(len(blocks), rank, size)], comm,
-                       onto=np.zeros((mol.natm, 3)))
+    return ordered_sum([(k, addend(k)) for k in owned_blocks(len(blocks), comm)],
+                       comm, onto=np.zeros((mol.natm, 3)))
 
 
 def _points_matrix(block, nao):
