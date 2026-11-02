@@ -66,13 +66,20 @@ AO_NUMERICS = Numerics(isdf={'level': 'G1', 'test_set': 'ao_products',
                              'pivot_points': 150})
 
 
-@pytest.fixture(scope='module')
-def water():
+def pivoted_water():
+    """(mol, auxmol, pts, owner, frames): C1 water/cc-pVDZ and 150 points
+    pivoted from its G1 parent, on the atomic frames."""
     mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis='cc-pvdz-ri')
     radii, origins, _, _ = resolve_grid(mol, Numerics(isdf={'level': 'G1'}).isdf)
     frames = atomic_frames(mol)[0]
     pts, owner, _ = apf.pivoted_points(mol, radii, origins, frames, 150)
+    return mol, auxmol, pts, owner, frames
+
+
+@pytest.fixture(scope='module')
+def water():
+    mol, auxmol, pts, _, frames = pivoted_water()
     return mol, auxmol, apf.placed(mol, pts, frames)
 
 
@@ -89,7 +96,8 @@ def test_the_equations_are_the_explicit_ao_products(water):
     mol, auxmol, coords = water
     D, pq = explicit(mol, auxmol, coords)
     X = mol.eval_gto('GTOval_sph', coords)
-    G, s = apf.balanced_gram(X)
+    G, d = apf.balanced_gram(X)
+    s = 1.0 / d
     Dt = D / np.linalg.norm(D, axis=1)[:, None]
     assert np.abs(s - np.linalg.norm(D, axis=1)).max() < 1e-12 * s.max()
     assert np.abs(G - (Dt @ Dt.T + REG * np.eye(len(D)))).max() < 1e-12

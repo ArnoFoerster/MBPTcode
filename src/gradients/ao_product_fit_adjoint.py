@@ -158,8 +158,7 @@ def ao_product_fit_adjoint(mol, auxmol, coords, chain, seeds, numerics=None):
     # the ranks of the enclosing distribution, if any (`distributed`)
     comm = current_comm()
     X = ao_values(mol, coords)
-    G, s = balanced_gram(X, numerics)
-    d = 1.0 / s
+    G, d = balanced_gram(X, numerics)
     V = auxmol.intor('int2c2e', aosym='s1')
     E = ao_product_projection(mol, auxmol, X, numerics, comm)
     F = np.linalg.solve(V, E)

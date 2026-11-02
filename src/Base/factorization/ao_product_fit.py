@@ -241,21 +241,26 @@ def own_tiles(n, comm):
 
 # ------------------------------------------------------------- the equations
 
+def inverse_norms(s):
+    """d = 1/s for the row norms s of the AO-product test set, a vanishing
+    norm taken as 1."""
+    s[s == 0.0] = 1.0
+    return 1.0 / s
+
+
 def balanced_gram(X, numerics=None):
-    """(G, s): G = (A o A) o (d d^T) + reg I with A = X X^T, d = 1/s and
-    s_g = A_gg, the norm of point g's row of the AO-product test set (1 where
-    it vanishes), reg the fit's regularization (`fit_settings`). G is the
-    Gram matrix of the balanced test rows, formed in place."""
+    """(G, d): G = (A o A) o (d d^T) + reg I with A = X X^T and d = 1/s
+    (`inverse_norms`), s_g = A_gg the norm of point g's row of the
+    AO-product test set, reg the fit's regularization (`fit_settings`). G is
+    the Gram matrix of the balanced test rows, formed in place."""
     regularization, = fit_settings(numerics, 'regularization')
     G = X @ X.T
-    s = np.diag(G).copy()
-    s[s == 0.0] = 1.0
-    d = 1.0 / s
+    d = inverse_norms(np.diag(G).copy())
     G *= G
     G *= d[:, None]
     G *= d[None, :]
     G[np.diag_indices_from(G)] += regularization
-    return G, s
+    return G, d
 
 
 def _shell_runs(mol, max_aos):
@@ -368,8 +373,7 @@ def ao_product_fit(mol, auxmol, coords, numerics=None, comm=None):
 
     def build():
         X = ao_values(mol, coords)
-        G, s = balanced_gram(X, numerics)
-        d = 1.0 / s
+        G, d = balanced_gram(X, numerics)
         E = ao_product_projection(mol, auxmol, X, numerics, comm)
         V = auxmol.intor('int2c2e', aosym='s1')
         F = np.linalg.solve(V, E)
@@ -385,10 +389,8 @@ def ao_product_fit(mol, auxmol, coords, numerics=None, comm=None):
 
 def inverse_row_norms(X):
     """d = 1/s with s_g = |X_g|^2, the norm of point g's row of the
-    AO-product test set (1 where it vanishes), from these rows alone."""
-    s = np.einsum('gm,gm->g', X, X)
-    s[s == 0.0] = 1.0
-    return 1.0 / s
+    AO-product test set (`inverse_norms`), from these rows alone."""
+    return inverse_norms(np.einsum('gm,gm->g', X, X))
 
 
 def product_gram_tiles(mol, coords, tiles, owners, rank, numerics, ext,

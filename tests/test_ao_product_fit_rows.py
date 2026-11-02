@@ -39,7 +39,6 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.Base.factorization import ao_product_fit as apf
-from src.Base.factorization.separable_ri import (atomic_frames, resolve_grid)
 from src.Base.geometry.body_frame import BodyFrame
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.mpi_grid import partition
@@ -55,10 +54,10 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
                                             collocation_adjoint)
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds
+from tests.test_ao_product_fit import H2O_C1, pivoted_water
 from tests.test_body_fixed_frames import rhf, water as body_water
 from tests.pins import RECORDING_BLAS, blas_identity, isdf_gradient_bar
 
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 #: Rounding of the fit through its balanced Gram matrix, relative, under the
 #: recording BLAS.
 FIT_ROUNDING = 1e-8
@@ -76,11 +75,7 @@ MANY_RUNS = Numerics().derive('many shell runs', layout={'fit_gb': 2e-4})
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom=H2O_C1, basis='cc-pvdz', verbose=0)
-    auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis='cc-pvdz-ri')
-    radii, origins, _, _ = resolve_grid(mol, Numerics(isdf={'level': 'G1'}).isdf)
-    frames = atomic_frames(mol)[0]
-    pts, owner, _ = apf.pivoted_points(mol, radii, origins, frames, 150)
+    mol, auxmol, pts, owner, frames = pivoted_water()
     chain = PointChain(pts, owner, frames, False,
                        body=BodyFrame(mol.atom_coords()))
     return mol, auxmol, apf.placed(mol, pts, frames), chain
