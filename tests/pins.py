@@ -15,10 +15,14 @@ class instead (`PIN_CROSS_BLAS_BARS`): an energy, a force or gradient, or a
 quasiparticle energy or pole strength read off a Pade continuation, which
 amplifies the fit's last bits.
 
-The identity has two parts, since numpy and pyscf's C kernels need not
+The identity has three parts, since numpy and pyscf's C kernels need not
 link the same library: numpy's BLAS as threadpoolctl reports it (vendor and
-version, MKL's instruction-set code path, OpenBLAS's core type), and the
-BLAS pyscf's libnp_helper links.
+version, MKL's instruction-set code path, OpenBLAS's core type), the
+BLAS pyscf's libnp_helper links, and the operating system's release. A
+system library such as Accelerate is named, not versioned, by the link: an
+upgrade of the operating system replaces it and moved quasiparticle energies
+on one workstation by up to 9e-13 eV with no other change, so a pin recorded
+under another release is read as recorded under another BLAS.
 """
 import ctypes
 import functools
@@ -121,10 +125,19 @@ def pyscf_blas():
     return '; '.join(sorted(names)) or 'none linked'
 
 
+def os_release():
+    """The operating system's release, which ships its system libraries:
+    the macOS version, elsewhere the system and its C library's version."""
+    if platform.system() == 'Darwin':
+        return f'macOS {platform.mac_ver()[0]}'
+    libc, version = platform.libc_ver()
+    return ' '.join(part for part in (platform.system(), libc, version) if part)
+
+
 @functools.lru_cache(maxsize=None)
 def _identity():
     return (('numpy', numpy_blas()), ('pyscf', pyscf_blas()),
-            ('machine', platform.machine()))
+            ('machine', platform.machine()), ('os', os_release()))
 
 
 def blas_identity():
