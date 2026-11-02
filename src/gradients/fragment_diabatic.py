@@ -130,7 +130,13 @@ differentiates.
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, minres
 
-from src.Base.numerics.constants import DIABAT_GAP_MIN, FRAGMENT_SOLVE_TOL
+from src.Base.numerics.constants import (DIABAT_GAP_MIN, DIABAT_RESPONSE_PRECONDITIONER_FLOOR,
+                                         FRAGMENT_DECOUPLING_RESIDUAL_FACTOR,
+                                         FRAGMENT_LOCALIZATION_FULL_MAX_ITER,
+                                         FRAGMENT_LOCALIZATION_MINRES_MAX_ITER,
+                                         FRAGMENT_RESPONSE_ACCEPT_FACTOR,
+                                         FRAGMENT_RESPONSE_MINRES_MAX_ITER, FRAGMENT_ROOT_MATCH_TOL,
+                                         FRAGMENT_SOLVE_TOL)
 from src.fragments.localization import (FragmentOrbitals,
                                         fragment_ao_indices)
 from src.fragments.partition import (FragmentCanonical, FragmentPartition,
@@ -214,7 +220,7 @@ class _PMResponse:
         m = self.c.T @ self.c_bar(z_anti)
         return 0.5 * (m - m.T)
 
-    def solve(self, d_anti, labels, tol=FRAGMENT_SOLVE_TOL):
+    def solve(self, d_anti, labels):
         """Antisymmetric z with H^T z = D (D antisymmetric, zero inside each
         fragment), by MINRES over the rotations BETWEEN fragments.
 
@@ -225,8 +231,9 @@ class _PMResponse:
         the between-fragment ones to the solver's precision, so the reduced
         system is solved and the FULL residual checked; if the decoupling
         fails, MINRES runs on the full system, which a singular but
-        consistent symmetric system admits.
+        consistent symmetric system admits. Tolerance: FRAGMENT_SOLVE_TOL.
         """
+        tol = FRAGMENT_SOLVE_TOL
         n = d_anti.shape[0]
         iu = np.triu_indices(n, 1)
         if len(iu[0]) == 0:
@@ -248,19 +255,21 @@ class _PMResponse:
                 full[between] = v
                 return full_mv(full)[between]
             op = LinearOperator((between.size,) * 2, matvec=red_mv, dtype=float)
-            sol_b, _ = minres(op, rhs[between], rtol=tol, maxiter=5000)
+            sol_b, _ = minres(op, rhs[between], rtol=tol,
+                              maxiter=FRAGMENT_LOCALIZATION_MINRES_MAX_ITER)
             sol = np.zeros(len(iu[0]))
             sol[between] = sol_b
             resid = float(np.abs(full_mv(sol) - rhs).max())
             self.residual = resid / scale
-            if resid <= 10 * tol * scale:
+            if resid <= FRAGMENT_DECOUPLING_RESIDUAL_FACTOR * tol * scale:
                 return unpack(sol)
         op = LinearOperator((len(iu[0]),) * 2, matvec=full_mv, dtype=float)
-        sol, info = minres(op, rhs, rtol=tol, maxiter=20000)
+        sol, info = minres(op, rhs, rtol=tol,
+                           maxiter=FRAGMENT_LOCALIZATION_FULL_MAX_ITER)
         resid = float(np.abs(full_mv(sol) - rhs).max())
         self.residual = resid / scale
         # a solve that stops short keeps its last iterate (`converged`)
-        self.converged = resid <= 1e3 * tol * scale
+        self.converged = resid <= FRAGMENT_RESPONSE_ACCEPT_FACTOR * tol * scale
         return unpack(sol)
 
     def s_bar_from_l_bar(self, l_bars):
@@ -441,7 +450,7 @@ class DiabaticGradient:
         work = FragmentCanonical(self.orbitals, self.operator.eps)
         d_ov = work.diagonal()
         diag = np.tile(d_ov, len(p) // len(d_ov))[rows] - e_c * sig
-        prec = 1.0 / np.maximum(np.abs(diag), 1e-2)
+        prec = 1.0 / np.maximum(np.abs(diag), DIABAT_RESPONSE_PRECONDITIONER_FLOOR)
 
         def rotate(x, to):
             full = np.zeros((len(p), x.shape[1]))
@@ -463,10 +472,10 @@ class DiabaticGradient:
             op = LinearOperator((dim, dim), matvec=mv, dtype=float)
             pre = LinearOperator((dim, dim), dtype=float, matvec=apply_prec)
             sol, info = minres(op, -gb, M=pre, rtol=FRAGMENT_SOLVE_TOL,
-                               maxiter=5000)
+                               maxiter=FRAGMENT_RESPONSE_MINRES_MAX_ITER)
             resid = np.abs(mv(sol) + gb).max()
-            short = resid > 1e3 * FRAGMENT_SOLVE_TOL * max(np.abs(gb).max(),
-                                                           1e-300)
+            short = resid > (FRAGMENT_RESPONSE_ACCEPT_FACTOR * FRAGMENT_SOLVE_TOL
+                             * max(np.abs(gb).max(), 1e-300))
             return sol, (float(resid) if short else None)
         # a response that stops short keeps its last iterate; the solution and
         # the verdict are rank 0's on every rank
@@ -601,7 +610,7 @@ class DiabaticGradient:
         part = self.partition
         evals, evecs = np.linalg.eigh(part.a_eff)
         k = int(np.argmin(np.abs(evals - guess)))
-        if abs(evals[k] - part.omega0) > 1e-8:
+        if abs(evals[k] - part.omega0) > FRAGMENT_ROOT_MATCH_TOL:
             raise ValueError(f'the partition is built at Omega_0 = '
                              f'{part.omega0:.10f}, not at the root '
                              f'{evals[k]:.10f}; rebuild it there')

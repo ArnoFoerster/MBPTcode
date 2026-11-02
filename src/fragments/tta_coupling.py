@@ -62,29 +62,26 @@ from dataclasses import dataclass
 import numpy as np
 from pyscf import df, lib
 
+from src.Base.numerics.constants import BYTES_PER_GB, TTA_DF_BLOCK_GB
+from src.Base.pyscf.pyscf_interface import mo_factor_block
 from src.fragments.transfer import require_below
 
-#: Megabytes of three-index factors held at once when the fitted integrals
-#: are streamed over the auxiliary index.
-DF_BLOCK_MB = 2000
 
-
-def local_factors(mol, c, auxbasis, max_memory_mb=DF_BLOCK_MB):
+def local_factors(mol, c, auxbasis):
     """Yield blocks B^Q_pq (nQ, n, n) of the density-fitted integrals
     (pq|rs) = sum_Q B^Q_pq B^Q_rs in the orbitals `c` (nao, n), over the
-    auxiliary index of `auxbasis`."""
+    auxiliary index of `auxbasis`, TTA_DF_BLOCK_GB at a time."""
     fit = df.DF(mol, auxbasis=auxbasis)
     fit.build()
     nao, n = c.shape
-    blk = max(1, int(max_memory_mb * 1e6 / (8 * (nao * nao + n * nao
-                                                  + n * n))))
+    blk = max(1, int(TTA_DF_BLOCK_GB * BYTES_PER_GB
+                     / (8 * (nao * nao + n * nao + n * n))))
     for packed in fit.loop(blksize=blk):
-        b = lib.unpack_tril(packed)
-        yield np.einsum('Qmn,mp,nq->Qpq', b, c, c, optimize=True)
+        yield mo_factor_block(lib.unpack_tril(packed), c, c)
 
 
 def triplet_pair_elements(mol, hcore, c_occ, c_vir, auxbasis, t_a, t_b,
-                          singles, max_memory_mb=DF_BLOCK_MB):
+                          singles):
     """The configuration model's elements on the determinant of `c_occ`
     (module docstring). t_a, t_b (nocc, nvir): the two triplets' unit
     amplitudes on two fragments; singles (k, nocc, nvir): unit singlet
@@ -110,7 +107,7 @@ def triplet_pair_elements(mol, hcore, c_occ, c_vir, auxbasis, t_a, t_b,
     lu = {key: np.zeros((nv, nv)) for key in ('a', 'b')}
     rho_s = []
     ex_s = np.zeros_like(singles)
-    for b in local_factors(mol, c, auxbasis, max_memory_mb):
+    for b in local_factors(mol, c, auxbasis):
         boo, bov, bvv = b[:, o, o], b[:, o, v], b[:, v, v]
         j += np.einsum('Q,Qpq->pq', 2.0 * np.einsum('Qkk->Q', boo), b)
         k += np.einsum('Qpk,Qkq->pq', b[:, :, o], b[:, o, :])
@@ -171,7 +168,7 @@ def _amplitudes(partition, label):
 
 
 def tta_coupling(singlet, triplet, mf, auxbasis, energy=None,
-                 triplets=('site 0.0', 'site 1.0'), max_memory_mb=DF_BLOCK_MB):
+                 triplets=('site 0.0', 'site 1.0')):
     """{site singlet label: TTACoupling} from a singlet partition (both
     site singlets and both charge-transfer diabats explicit) and a triplet
     partition (both site triplets) on the same local orbitals of the mean
@@ -198,7 +195,7 @@ def tta_coupling(singlet, triplet, mf, auxbasis, energy=None,
     order = sites + cts
     singles = np.array([_amplitudes(singlet, lab) for lab in order])
     el = triplet_pair_elements(o.mol, mf.get_hcore(), o.c_occ, o.c_vir,
-                               auxbasis, t_a, t_b, singles, max_memory_mb)
+                               auxbasis, t_a, t_b, singles)
     a = singlet.a_eff
     ic = [singlet.labels.index(lab) for lab in cts]
     a_cc = a[np.ix_(ic, ic)]

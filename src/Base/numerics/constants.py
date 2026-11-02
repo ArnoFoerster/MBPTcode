@@ -1072,6 +1072,37 @@ DIABAT_OVERLAP_FLOOR = 0.9
 # block holds another state closer than this (Hartree) has no well-defined
 # eigenvector response, which divides by the gap.
 DIABAT_GAP_MIN = 1e-4
+# The localization response of a diabatic gradient
+# (`gradients.fragment_diabatic`): MINRES over the rotations between fragments
+# (FRAGMENT_LOCALIZATION_MINRES_MAX_ITER steps), accepted when its full
+# residual is within FRAGMENT_DECOUPLING_RESIDUAL_FACTOR of the tolerance (the
+# inside-fragment rotations decouple to that), else MINRES on the full system
+# (FRAGMENT_LOCALIZATION_FULL_MAX_ITER steps); a last iterate whose residual is
+# within FRAGMENT_RESPONSE_ACCEPT_FACTOR of the tolerance counts as converged.
+# The diabat response's MINRES takes FRAGMENT_RESPONSE_MINRES_MAX_ITER steps
+# and the same acceptance factor.
+FRAGMENT_LOCALIZATION_MINRES_MAX_ITER = 5000
+FRAGMENT_LOCALIZATION_FULL_MAX_ITER = 20000
+FRAGMENT_DECOUPLING_RESIDUAL_FACTOR = 10.0
+FRAGMENT_RESPONSE_ACCEPT_FACTOR = 1e3
+FRAGMENT_RESPONSE_MINRES_MAX_ITER = 5000
+# Hartree. The smallest magnitude the diagonal preconditioner of the diabat
+# response's MINRES may take (`gradients.fragment_diabatic`).
+DIABAT_RESPONSE_PRECONDITIONER_FLOOR = 1e-2
+# Hartree. A root gradient's partition must have been built at the root: the
+# A_eff eigenvalue nearest the guess and Omega_0 agree to this.
+FRAGMENT_ROOT_MATCH_TOL = 1e-8
+# Columns per folded ADC(2) product when a fragment operator's K(Omega_0) is
+# formed whole (`gradients.adc.fragment_adc2`).
+ADC2_FRAGMENT_DENSE_BLOCK = 64
+# Eigenvalues of the ADC(2) fragment pair matrix sum_k w_k sym(s_k t_k^T) below
+# this fraction of its largest carry no weight (`ADC2Response.pair_force`): the
+# pair vectors' span holds the rest exactly.
+ADC2_FRAGMENT_PAIR_RANK_CUT = 1e-14
+# Gigabytes of three-index factors the triplet-pair coupling
+# (`fragments.tta_coupling`) holds at once while it streams the fitted
+# integrals over the auxiliary index.
+TTA_DF_BLOCK_GB = 2.0
 # Roots carried beyond those asked for in the full-BSE block Davidson of the
 # fragment partition (`davidson.run_davidson`'s extra_roots): with only the
 # quasiparticle diagonal as preconditioner, a root just above the last one

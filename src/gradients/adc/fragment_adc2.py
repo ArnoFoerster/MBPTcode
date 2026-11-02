@@ -47,6 +47,7 @@ here); open shells; the tiled force route (the dense pieces hold the
 import numpy as np
 
 from src.Base.environment_seam import NoEnvironment
+from src.Base.numerics.constants import ADC2_FRAGMENT_DENSE_BLOCK, ADC2_FRAGMENT_PAIR_RANK_CUT
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.Base.utils.timing import stage
 from src.SingleReference.ADC.eeADC import ee_ri_fold
@@ -62,12 +63,6 @@ SPINS = ('singlet', 'triplet')
 #: (blocks of the partition up to FRAGMENT_MATRIX_FREE_DENSE_MAX rows formed
 #: by its action), 'dense' forms K(Omega_0) whole (n_ov folded products).
 ROUTES = ('auto', 'dense', 'fold')
-#: Columns per folded product when K(Omega_0) is formed whole.
-DENSE_BLOCK = 64
-#: Eigenvalues of the pair matrix sum_k w_k sym(s_k t_k^T) below this
-#: fraction of its largest carry no weight (`ADC2Response.pair_force`): the
-#: pair vectors' span holds the rest exactly.
-PAIR_RANK_CUT = 1e-14
 
 
 class ADC2Operator:
@@ -147,8 +142,8 @@ class ADC2Operator:
         if route == 'dense':
             n = op.n_ov
             k = np.empty((n, n))
-            for c0 in range(0, n, DENSE_BLOCK):
-                c1 = min(c0 + DENSE_BLOCK, n)
+            for c0 in range(0, n, ADC2_FRAGMENT_DENSE_BLOCK):
+                c1 = min(c0 + ADC2_FRAGMENT_DENSE_BLOCK, n)
                 cols = np.zeros((n, c1 - c0))
                 cols[np.arange(c0, c1), np.arange(c1 - c0)] = 1.0
                 k[:, c0:c1] = op.apply(cols)
@@ -230,7 +225,8 @@ class ADC2Response:
             bs, bt = basis.T @ cols[2 * k], basis.T @ cols[2 * k + 1]
             small += 0.5 * wgt * (np.outer(bs, bt) + np.outer(bt, bs))
         lam, vec = np.linalg.eigh(small)
-        keep = np.abs(lam) > PAIR_RANK_CUT * max(np.abs(lam).max(), 1e-300)
+        keep = (np.abs(lam)
+                > ADC2_FRAGMENT_PAIR_RANK_CUT * max(np.abs(lam).max(), 1e-300))
         return [(float(lam[j]), basis @ vec[:, j]) for j in np.flatnonzero(keep)]
 
     def pair_force(self, pairs):

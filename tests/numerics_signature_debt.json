@@ -563,9 +563,6 @@
  "src/fragments/partition.py::_q_lowest": [
   "tol"
  ],
- "src/gradients/fragment_diabatic.py::solve": [
-  "tol"
- ],
  "src/gradients/gwbse/qp_set.py::resolve_qp_set": [
   "tol"
  ],
