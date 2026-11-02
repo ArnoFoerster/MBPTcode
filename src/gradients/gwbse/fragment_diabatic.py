@@ -23,6 +23,14 @@ THE QUASIPARTICLE HAMILTONIAN. Where the chain solves one
 (`QPHamiltonian.one_body_adjoint`) to the reverse pass, which takes it
 through each group's fixed point as the chain's own roots do.
 
+A near-degenerate pair solved diagonally is refused
+(`refuse_diagonal_near_degeneracies`): two orbitals closer than
+`qp.degeneracy_tol` whose own corrections differ (an accidental
+near-degeneracy, which the chain keeps on separate corrections) give an A_eff
+that depends on how the two rotate into each other, so A_eff(R) steps where
+they mix. Only a group of the quasiparticle Hamiltonian that holds both is
+invariant to that.
+
 THE GAUGE (term 3). The chain keeps the Kohn-Sham Fock matrix diagonal, the
 canonical condition, so its reverse pass moves the canonical orbitals with the
 canonical derivative overlap: `frame_force` is
@@ -74,6 +82,7 @@ class BSEFragmentMethod:
         | 'isdf'. The kernel does not depend on Omega, so `omega0` is the
         partition's alone."""
         op, shared = BSEOperator.from_chain(self.chain, mol, mf, route=route)
+        refuse_diagonal_near_degeneracies(self.chain)
         return op, BSEResponse(self.chain, op, shared, mol, mf)
 
     def ground_energy(self, mf):
@@ -84,6 +93,31 @@ class BSEFragmentMethod:
 
     def refreeze(self, mol, mf=None):
         return BSEFragmentMethod(self.chain.refreeze(mol, mf=mf))
+
+
+def refuse_diagonal_near_degeneracies(chain):
+    """Raise ValueError if the chain's frozen set holds a near-degenerate
+    pair with corrections of its own that no frozen group of the
+    quasiparticle Hamiltonian holds whole (module docstring). The pairs are
+    the chain's own record (`qp_block_record`'s rejected blocks), decided at
+    the reference geometry; true degeneracies share one correction and pass."""
+    frozen = getattr(chain, 'conventions', chain)
+    record = getattr(frozen, 'qp_block_record', None) or {}
+    subspaces = getattr(frozen, 'qp_subspaces', None)
+    groups = [set(g) for g in subspaces[1]] if subspaces else []
+    loose = [b for b in record.get('rejected', [])
+             if not any(set(b['members']) <= g for g in groups)]
+    if loose:
+        raise ValueError(
+            'fragment-diabatic GW-BSE: near-degenerate orbitals solved on '
+            'separate quasiparticle corrections, '
+            f'{[b["members"] for b in loose]} (orbital-energy spreads (Ha) '
+            f'{[b["energy_spread_Ha"] for b in loose]}, correction spreads '
+            f'(Ha) {[b["correction_spread_Ha"] for b in loose]}). A_eff then '
+            'depends on how they rotate into each other. Solve them in one '
+            "group of the quasiparticle Hamiltonian: numerics 'qp_hamiltonian'"
+            ": True, with every member on the pole model (residue_route "
+            "'sop').")
 
 
 class BSEResponse:

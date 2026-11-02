@@ -15,8 +15,9 @@ WHAT EACH GATE IS FOR:
 - INVARIANCE. With the pair made exactly degenerate (the second pi energy set
   to the first, an artificial but consistent mean field), every rotation of
   the pair is an equally canonical basis. A_eff in a basis mixed by 0.3 is
-  A_eff unrotated to solver precision; on the diagonal route it moves by meV,
-  which is the defect the quasiparticle Hamiltonian removes.
+  A_eff unrotated to solver precision. On the diagonal route the pair keeps
+  its own corrections, which follow the rotation (A_eff moves by about
+  20 meV), so that route is refused.
 - the root gradient through the partition equals the chain's own root
   gradient, which differentiates the same H: the pairs' adjoint on H's
   off-diagonal elements reaches the chain's reverse pass.
@@ -137,26 +138,23 @@ def test_the_pair_is_a_group_with_a_real_coupling(chain, mol):
     assert abs(h[0, 1]) * HARTREE_TO_MEV > 10.0
 
 
-@pytest.mark.parametrize('hamiltonian', [True, False])
-def test_a_eff_does_not_depend_on_the_basis_of_a_degenerate_group(
-        mol, chain, hamiltonian):
+def test_a_eff_does_not_depend_on_the_basis_of_a_degenerate_group(mol, chain):
     mf = degenerate(chain.mf0)
     turned = rotated(mf, np.arcsin(np.sqrt(MIXING)))
-    frozen = make_chain(mol, hamiltonian=hamiltonian, mf=mf)
+    # one chain, frozen in the unrotated basis: the rotated orbitals are
+    # matched to the group by its span and carry the same conventions
+    frozen = make_chain(mol, mf=mf)
     reference = a_eff(frozen, mf)
-    if hamiltonian:
-        # one chain, frozen in the unrotated basis: the rotated orbitals are
-        # matched to the group by its span and carry the same conventions
-        moved = np.abs(a_eff(frozen, turned) - reference).max() * HARTREE_TO_MEV
-        assert moved < INVARIANT_MEV, moved
-    else:
-        # the defect: a chain frozen in each basis, the pair's own diagonal
-        # corrections following the rotation (one chain refuses the rotated
-        # orbitals: each holds 0.7 of its own span)
-        turned_chain = make_chain(mol, hamiltonian=False, mf=turned)
-        moved = np.abs(a_eff(turned_chain, turned) - reference).max() \
-            * HARTREE_TO_MEV
-        assert moved > 1.0, moved
+    moved = np.abs(a_eff(frozen, turned) - reference).max() * HARTREE_TO_MEV
+    assert moved < INVARIANT_MEV, moved
+
+
+def test_a_degenerate_pair_solved_diagonally_is_refused(mol, chain):
+    # the same pair on separate corrections: A_eff would follow the rotation
+    frozen = make_chain(mol, hamiltonian=False, mf=degenerate(chain.mf0))
+    with pytest.raises(ValueError, match='qp_hamiltonian') as refused:
+        a_eff(frozen, frozen.mf0)
+    assert str(list(PAIR)) in str(refused.value)
 
 
 def test_root_gradient_is_the_chains_root_gradient(chain):
