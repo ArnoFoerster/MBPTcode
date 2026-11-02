@@ -65,7 +65,8 @@ from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, a
                                                  screened_layout, fit_test_set_D,
                                                  fit_test_set_layout)
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds, fit_rows_adjoints
-from src.gradients.skeleton_tiles import isdf_exchange_seeds, shell_runs
+from src.gradients.skeleton_tiles import isdf_exchange_seeds
+from src.Base.factorization.shell_runs import shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels

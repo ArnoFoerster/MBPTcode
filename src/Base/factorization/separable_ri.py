@@ -122,6 +122,7 @@ from src.Base.numerics.numerics import numerics_or_default
 from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
                                         missing_row_hint, paired_auxbasis,
                                         pure_element)
+from src.Base.factorization.shell_runs import shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block, current_comm,
@@ -2057,11 +2058,7 @@ def _ri_density_coefficients(mol, auxmol, orbitals, V, comm=None):
     many = comm is not None and comm.Get_size() > 1
     rank, size = (comm.Get_rank(), comm.Get_size()) if many else (0, 1)
     out = np.zeros((auxmol.nao_nr(), n))
-    s0, block = 0, 0
-    while s0 < auxmol.nbas:
-        s1 = s0 + 1
-        while s1 < auxmol.nbas and offs[s1 + 1] - offs[s0] <= per_function:
-            s1 += 1
+    for block, (s0, s1) in enumerate(shell_runs(offs, per_function)):
         if block % size == rank:
             g = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
                                  shls_slice=(0, mol.nbas, 0, mol.nbas, s0, s1))
@@ -2069,7 +2066,6 @@ def _ri_density_coefficients(mol, auxmol, orbitals, V, comm=None):
             for q in range(g.shape[2]):
                 out[offs[s0] + q] = np.einsum('mp,mp->p', orbitals,
                                               g[:, :, q] @ orbitals)
-        s0, block = s1, block + 1
     if many:
         reduce_sum(out, comm)
     return scipy.linalg.solve(V, out, assume_a='pos')

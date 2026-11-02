@@ -67,6 +67,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FO
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics, numerics_or_default
+from src.Base.factorization.shell_runs import shell_ranges
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
@@ -77,7 +78,7 @@ from src.SingleReference.common import df_amplitudes as dfa
 from src.gradients.grad_engine import one_electron_skeleton
 from src.gradients.isdf_mean_field import (fitted_force_supported,
                                            mean_field_skeleton_force)
-from src.gradients.skeleton_tiles import fitted_fock_skeleton, shell_runs
+from src.gradients.skeleton_tiles import fitted_fock_skeleton
 
 
 
@@ -309,13 +310,6 @@ def _int3c(mol, auxmol, intor):
     return get
 
 
-def shell_blocks(ao_loc, width):
-    """(s0, s1, p0, p1) runs of consecutive shells of at most `width`
-    functions each (`skeleton_tiles.shell_runs`) with their function ranges."""
-    return [(s0, s1, int(ao_loc[s0]), int(ao_loc[s1]))
-            for s0, s1 in shell_runs(ao_loc, width)]
-
-
 def _owners(n, size):
     """Consecutive runs of n units over size ranks."""
     return [k * size // max(n, 1) for k in range(n)]
@@ -399,7 +393,7 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
         ao_atom[p0:p1] = a
     nmu = max(1, int(block_gb * BYTES_PER_GB
                      / (8.0 * DF_FORCE_BLOCK_ARRAYS * nao * width)))
-    blocks = shell_blocks(mol.ao_loc, nmu)
+    blocks = shell_ranges(mol.ao_loc, nmu)
     owners = _owners(len(blocks), size)
     prepared = []
     for fit in fits:
@@ -407,7 +401,7 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
         aux_atom = np.zeros(aux.nao, dtype=int)
         for a, (_, _, p0, p1) in enumerate(aux.aoslice_by_atom()):
             aux_atom[p0:p1] = a
-        prepared.append((fit, shell_blocks(aux.ao_loc, width), aux_atom,
+        prepared.append((fit, shell_ranges(aux.ao_loc, width), aux_atom,
                          _int3c(mol, aux, 'int3c2e_ip1'),
                          _int3c(mol, aux, 'int3c2e_ip2')))
     addends = []

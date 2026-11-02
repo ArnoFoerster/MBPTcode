@@ -40,7 +40,9 @@ src/Base/                      the foundation
                                used as the ISDF fit),
                                isdf_jk.py (ISDF Coulomb and exchange for the
                                SCF), the distributed DF and ISDF builds,
-                               sliced_factors.py
+                               sliced_factors.py, shell_runs.py (the
+                               bounded runs of consecutive shells every
+                               blocked integral pass is cut into)
     geometry/                  displaced geometries, body frames, Kabsch
     basis/                     CP2K's aug-MOLOPT orbital and RI sets, read at
                                run time (see basis-sets.md); the auxiliary

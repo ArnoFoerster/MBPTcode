@@ -40,7 +40,7 @@ from src.gradients.mean_field_response import (fock_partial_Y,
                                                solve_lambda)
 from src.gradients.multipliers import solve_orbital_multipliers
 from src.gradients.one_electron import one_electron_skeleton
-from src.gradients.skeleton_tiles import shell_runs
+from src.Base.factorization.shell_runs import shell_runs
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ def _permutation_sum(G_ao):
 
 def _shell_blocks(mol, max_bytes):
     """Shell ranges whose (grad mu nu|lam sig) block, 3 nao^3 * 8 bytes per
-    AO of its leading index, fits in max_bytes (`skeleton_tiles.shell_runs`)."""
+    AO of its leading index, fits in max_bytes (`shell_runs`)."""
     return shell_runs(mol.ao_loc_nr(), max_bytes // (3 * mol.nao ** 3 * 8))
 
 

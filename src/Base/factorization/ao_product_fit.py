@@ -100,7 +100,8 @@ from pyscf import df as pyscf_df
 
 from src.Base.numerical_flags import flag
 from src.Base.geometry.geometry import grid_key
-from src.Base.numerics.constants import (BYTES_PER_GB, FIT_CHOLESKY_BLOCK,
+from src.Base.numerics.constants import (AO_PRODUCT_BLOCK_SHARE, BYTES_PER_GB,
+                                         FIT_CHOLESKY_BLOCK,
                                          ISDF_PIVOT_CANDIDATES,
                                          ISDF_PIVOT_FRACTION,
                                          ISDF_PIVOT_MAX_GB,
@@ -113,6 +114,7 @@ from src.Base.factorization.separable_ri import (RowFit, ao_values,
                                                  fit_settings,
                                                  tile_collocation,
                                                  total_bytes)
+from src.Base.factorization.shell_runs import shell_ranges
 from src.Base.utils.parallel.mpi_grid import (allgather_blocks,
                                               allgather_ranges, broadcast_rows,
                                               contiguous_block,
@@ -263,35 +265,21 @@ def balanced_gram(X, numerics=None):
     return G, d
 
 
-def _shell_runs(mol, max_aos):
-    """[(sh0, sh1)]: consecutive shells of `mol` in runs of at most `max_aos`
-    AOs (one shell where a single shell holds more)."""
-    loc = mol.ao_loc_nr()
-    runs, sh0 = [], 0
-    while sh0 < mol.nbas:
-        sh1 = sh0 + 1
-        while sh1 < mol.nbas and loc[sh1 + 1] - loc[sh0] <= max_aos:
-            sh1 += 1
-        runs.append((sh0, sh1))
-        sh0 = sh1
-    return runs
-
-
-def shell_runs(mol, auxmol, numerics=None, comp=1):
-    """[(sh0, sh1, a0, a1)]: runs of consecutive shells of `mol` whose
-    (comp, a1 - a0, nao, naux) block of three-centre integrals takes at most
-    a quarter of the fit's working set (`fit_settings` 'block_memory_gb';
-    one shell where a single one takes more)."""
+def fit_shell_runs(mol, auxmol, numerics=None, comp=1):
+    """[(sh0, sh1, a0, a1)]: runs of consecutive shells of `mol`
+    (`shell_ranges`) whose (comp, a1 - a0, nao, naux) block of three-centre
+    integrals takes at most the share AO_PRODUCT_BLOCK_SHARE of the fit's
+    working set (`fit_settings` 'block_memory_gb'; one shell where a single
+    one takes more)."""
     block_memory_gb, = fit_settings(numerics, 'block_memory_gb')
     per_ao = comp * mol.nao_nr() * auxmol.nao_nr() * 8
-    max_aos = max(1, int(0.25 * block_memory_gb * BYTES_PER_GB // per_ao))
-    loc = mol.ao_loc_nr()
-    return [(sh0, sh1, loc[sh0], loc[sh1])
-            for sh0, sh1 in _shell_runs(mol, max_aos)]
+    max_aos = max(1, int(AO_PRODUCT_BLOCK_SHARE * block_memory_gb
+                         * BYTES_PER_GB // per_ao))
+    return shell_ranges(mol.ao_loc_nr(), max_aos)
 
 
 def three_centre_block(mol, auxmol, run, intor='int3c2e', comp=1):
-    """(mu nu|P) for the AOs mu of one shell run (`shell_runs`), shape
+    """(mu nu|P) for the AOs mu of one shell run (`fit_shell_runs`), shape
     (a1 - a0, nao, naux), or (comp, a1 - a0, nao, naux) for a derivative
     integral."""
     sh0, sh1, a0, a1 = run
@@ -337,7 +325,7 @@ def ao_product_projection(mol, auxmol, X, numerics=None, comm=None):
     comm = current_comm() if comm is None else comm
     nk, naux = X.shape[0], auxmol.nao_nr()
     Et = np.zeros((nk, naux))
-    for run in own_runs(shell_runs(mol, auxmol, numerics), comm):
+    for run in own_runs(fit_shell_runs(mol, auxmol, numerics), comm):
         a0, a1 = run[2], run[3]
         operand = half_transform_operand(three_centre_block(mol, auxmol, run))
         for t0, t1 in point_tiles(nk):
@@ -438,7 +426,7 @@ def product_gram_tiles(mol, coords, tiles, owners, rank, numerics, ext,
 
 
 def lower_block(mol, auxmol, run):
-    """(mu nu|P) for the AOs mu of one shell run (`shell_runs`) and every nu
+    """(mu nu|P) for the AOs mu of one shell run (`fit_shell_runs`) and every nu
     up to the run's end, (a1 - a0) a1 rows of naux: the pairs the
     symmetric projection reads (`projection_rows`)."""
     sh0, sh1, a0, a1 = run
@@ -462,7 +450,7 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
                     also=None, node=None):
     """{t: E^T_t}, E[P, g] = sum_mn (P|mn) X_gm X_gn on this rank's tiles
     (X_own, {tile: collocation}), one pass over the shell runs
-    (`shell_runs`), largest first.
+    (`fit_shell_runs`), largest first.
 
     Every node makes the whole pass itself: the runs go in rounds of one per
     rank of the node, each rank evaluates its run's integrals and every run
@@ -487,7 +475,7 @@ def projection_rows(mol, auxmol, X_own, numerics=None, comm=None, hold=None,
     rank, nranks = (0, 1) if node is None else (node.Get_rank(),
                                                 node.Get_size())
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
-    runs = shell_runs(mol, auxmol, numerics)
+    runs = fit_shell_runs(mol, auxmol, numerics)
     lower = also is None
     cost = [(a1 - a0) * (a1 if lower else nao) for _, _, a0, a1 in runs]
     order = sorted(range(len(runs)), key=lambda ib: (-cost[ib], ib))

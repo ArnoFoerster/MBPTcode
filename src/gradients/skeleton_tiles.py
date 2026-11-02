@@ -117,6 +117,7 @@ from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_TEST_SETS,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
 from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.separable_ri import tile_collocation, fit_rows
+from src.Base.factorization.shell_runs import shell_runs
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
                                             fit_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
@@ -427,25 +428,6 @@ def occupied_column_blocks(nocc):
     fixed by nocc, never by the rank count."""
     w = SKELETON_EXCHANGE_OCC_BLOCK
     return [(i, min(i + w, int(nocc))) for i in range(0, int(nocc), w)]
-
-
-def shell_runs(ao_loc, width):
-    """(s0, s1) runs of consecutive shells of at most `width` functions each
-    (`ao_loc` the shells' offsets), at least one shell per run, so a shell
-    wider than `width` is still a run of its own: fixed by the basis, never by
-    the rank count. A byte budget is a width: max_bytes // per-function
-    bytes."""
-    out, s0 = [], 0
-    nsh = len(ao_loc) - 1
-    width = int(width)
-    while s0 < nsh:
-        s1 = s0 + 1
-        # int(): ao_loc is int32, and a block's bytes are not
-        while s1 < nsh and int(ao_loc[s1 + 1]) - int(ao_loc[s0]) <= width:
-            s1 += 1
-        out.append((s0, s1))
-        s0 = s1
-    return out
 
 
 def fitted_fock_skeleton(mol, auxmol, g_ao, dm, occ=None, coulomb=True,

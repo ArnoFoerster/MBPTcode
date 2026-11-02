@@ -120,7 +120,7 @@ def test_the_rows_are_the_replicated_fit_on_any_rank_count(water):
 def test_every_node_makes_the_whole_three_centre_pass(water, monkeypatch):
     mol, auxmol, coords, _ = water
     tiles = tiles_of(len(coords))
-    runs = apf.shell_runs(mol, auxmol, MANY_RUNS)
+    runs = apf.fit_shell_runs(mol, auxmol, MANY_RUNS)
     assert len(runs) > 4
     evaluated = []
     block = apf.lower_block
@@ -156,7 +156,7 @@ def test_the_pass_reads_each_ao_pair_once(water, monkeypatch):
     upper triangles, and its rows are the explicit sum over every AO product
     to rounding (1e-13 of their scale)."""
     mol, auxmol, coords, _ = water
-    runs = apf.shell_runs(mol, auxmol, MANY_RUNS)
+    runs = apf.fit_shell_runs(mol, auxmol, MANY_RUNS)
     assert len(runs) > 4
     rows = []
     block = apf.lower_block

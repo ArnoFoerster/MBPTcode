@@ -313,6 +313,12 @@ ISDF_SQUARE_TILE_ROWS = 2048
 # count. 512 keeps the trailing update's inner dimension at two BLAS panels.
 FIT_CHOLESKY_BLOCK = 512
 
+# Share of the fit's working set (`fit_settings` 'block_memory_gb') one shell
+# run's block of three-centre integrals may take in the AO-product fit's
+# projection and its adjoint (`ao_product_fit.fit_shell_runs`); the rest holds
+# the half-transformed tiles formed from it.
+AO_PRODUCT_BLOCK_SHARE = 0.25
+
 # How an ISDF fit is realized: 'replicated', the whole fit on every rank
 # (`fit_M_streaming`), or 'rows', `separable_ri.fit_rows` by the grid-row tiles
 # above. A realization, not a functional: both solve one estimator, the Gram

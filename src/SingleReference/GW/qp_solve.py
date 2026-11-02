@@ -27,6 +27,7 @@ from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_METRIC_FLOOR,
                                          DF_EXCHANGE_OCCUPATION_FLOOR)
 from src.Base.factorization.distributed_df import distributed_fock
+from src.Base.factorization.shell_runs import shell_ranges
 from src.Base.environment_seam import environment_of
 from src.Base.utils.grids.analytic_continuation import PadeFit
 from src.Base.utils.parallel.mpi_grid import (current_comm, lockstep,
@@ -392,17 +393,11 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
     # Big blocks: each aux_e2 call rebuilds a shell-pair list over
     # nbas x auxnbas, so the CALL COUNT costs at large nbas.
     max_ao = max(1, int(block_memory_gb * BYTES_PER_GB / (nao * naux * 8)))
-    sh0 = 0
-    while sh0 < mol.nbas:
-        sh1 = sh0 + 1
-        while sh1 < mol.nbas and ao_loc[sh1 + 1] - ao_loc[sh0] <= max_ao:
-            sh1 += 1
+    for sh0, sh1, a0, a1 in shell_ranges(ao_loc, max_ao):
         ints = _df_incore.aux_e2(mol, auxmol, 'int3c2e', aosym='s1',
                                  shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas))
-        a0, a1 = ao_loc[sh0], ao_loc[sh1]
         T += np.einsum('mnP,mp->Ppn', ints, mo_states[a0:a1], optimize=True)
         del ints
-        sh0 = sh1
     n, v = np.linalg.eigh(dm)
     keep = n > DF_EXCHANGE_OCCUPATION_FLOOR * n.max()
     B = np.einsum('Ppn,nk->Ppk', T, v[:, keep] * np.sqrt(n[keep]), optimize=True)

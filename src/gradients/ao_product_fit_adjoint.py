@@ -63,12 +63,12 @@ import scipy.linalg
 
 from src.Base.factorization.ao_product_fit import (ao_product_projection,
                                                    balanced_gram,
+                                                   fit_shell_runs,
                                                    half_transform_operand,
                                                    half_transformed,
                                                    own_runs, point_tiles,
                                                    product_gram_tiles,
                                                    projection_rows,
-                                                   shell_runs,
                                                    three_centre_block)
 from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
                                                  backward_tiles,
@@ -236,7 +236,7 @@ def _projection_adjoint(mol, auxmol, X, E_bar, X_bar, numerics):
     x_bar = np.zeros_like(X_bar)
     t_ao = np.zeros((3, nao))
     aux_terms = []
-    runs = shell_runs(mol, auxmol, numerics, comp=3)
+    runs = fit_shell_runs(mol, auxmol, numerics, comp=3)
     mine = own_runs(runs, comm)
     first = runs.index(mine[0]) if mine else 0
     for k, run in enumerate(mine, start=first):
@@ -478,7 +478,7 @@ def _projection_rows_adjoint(mol, auxmol, coords, Ub, X_own, tiles, owners,
     (mn|P)_bar = sum_g E_bar[P, g] X_gm X_gn, Ub each target's tiles of
     E_bar^T.
 
-    The shell runs (`shell_runs` sized for the three derivative components)
+    The shell runs (`fit_shell_runs` sized for the three derivative components)
     go largest first, run order[c] to rank c % size. Its owner accumulates
     every target's (mn|P)_bar over E_bar streamed tile by tile in grid
     order, in batches of consecutive rounds whose accumulators stay within
@@ -490,7 +490,7 @@ def _projection_rows_adjoint(mol, auxmol, coords, Ub, X_own, tiles, owners,
     nranks = len(owners)
     nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
     ntargets = len(Ub)
-    runs = shell_runs(mol, auxmol, numerics, comp=3)
+    runs = fit_shell_runs(mol, auxmol, numerics, comp=3)
     width = [a1 - a0 for _, _, a0, a1 in runs]
     order = sorted(range(len(runs)), key=lambda ib: (-width[ib], ib))
     owner_of = {ib: c % nranks for c, ib in enumerate(order)}
