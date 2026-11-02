@@ -56,6 +56,7 @@ import numpy as np
 from pyscf import scf
 from scipy import linalg
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
                                          UPFOLDED_BSE_DAVIDSON_TOL, UPFOLDED_BSE_DENSE_LIMIT,
                                          UPFOLDED_BSE_IMAG_TOL, UPFOLDED_BSE_LINDEP_TOL,
@@ -88,9 +89,8 @@ def _complex_roots(theta, imag, imag_tol, scale, X, flags, what):
                    f'above {imag_tol:.0e} relative): the dynamical BSE has no real '
                    f'solution there; root(s) {np.flatnonzero(bad).tolist()} are '
                    'returned as NaN')
-        warnings.warn(message, RuntimeWarning, stacklevel=3)
-        if flags is not None:
-            flags.append({'flag': 'upfolded_bse_complex_roots', 'message': message})
+        flag('upfolded_bse_complex_roots', message, RuntimeWarning,
+             stacklevel=3, into=flags)
         X = np.array(X, float)
         theta[bad] = np.nan
         X[:, bad] = np.nan
@@ -109,10 +109,8 @@ def _dropped_roots(w_real, flags, what):
                    f'{low.min():.4e} Ha) are left out of the returned '
                    'excitation energies; the upfolded problem has a '
                    'non-positive root.')
-        warnings.warn(message, RuntimeWarning, stacklevel=3)
-        if flags is not None:
-            flags.append({'flag': 'upfolded_bse_dropped_roots',
-                          'message': message})
+        flag('upfolded_bse_dropped_roots', message, RuntimeWarning,
+             stacklevel=3, into=flags)
 
 
 def dimensions(no, nv):
@@ -523,9 +521,8 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
                    f'values are not converged roots.')
         if refuse_unconverged:
             raise UpfoldedBSERefusal(message)
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
-        if flags is not None:
-            flags.append({'flag': 'upfolded_bse_not_converged', 'message': message})
+        flag('upfolded_bse_not_converged', message, RuntimeWarning,
+             stacklevel=2, into=flags)
     return theta, X
 
 

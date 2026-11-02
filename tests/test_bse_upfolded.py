@@ -15,6 +15,7 @@ from pyscf import gto, scf
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_two_electron_integrals_chemist,
                                             DFIntegrals)
+from src.Base.numerical_flags import collecting
 from src.SingleReference.BSE import bse_upfolded as B
 from src.Base.numerics.constants import HARTREE_TO_EV
 
@@ -201,6 +202,18 @@ def test_a_complex_ritz_pair_is_nan_and_flagged():
     assert np.isnan(w).all() and np.isnan(X).all()
     # the pair's residual stays: the loop also ends unconverged, flagged
     assert [f['flag'] for f in flags] == ['upfolded_bse_complex_roots',
+                                          'upfolded_bse_not_converged']
+
+
+def test_the_upfolded_flags_reach_an_enclosing_collecting_block():
+    """With no `flags` list handed in, the named events still reach the
+    `collecting` block of the caller that keeps the record."""
+    H = np.diag([1.0, 1.0, 3.0, 4.0, 5.0, 6.0])
+    H[0, 1], H[1, 0] = 0.5, -0.5
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning, match='complex'):
+        B.davidson_nonsymmetric(lambda v: H @ v, np.diag(H).copy(), nroots=2)
+    assert [f['flag'] for f in block] == ['upfolded_bse_complex_roots',
                                           'upfolded_bse_not_converged']
 
 

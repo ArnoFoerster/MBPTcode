@@ -42,6 +42,7 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.sum_over_poles import sigma_sop
 from src.SingleReference.LinearResponse.davidson import _davidson_counters
 from src.SingleReference.LinearResponse.davidson_shared import guess_indices
+from src.Solvers.davidson import diagonal_seeds
 from src.Solvers.qp_equation import bracketed_root
 
 
@@ -60,6 +61,17 @@ def test_a_truncated_davidson_guess_is_counted():
     clean = _davidson_counters()
     guess_indices(np.arange(100.0).reshape(10, 10), 10, counters=clean)
     assert clean['guess_truncated'] is False
+
+
+def test_a_truncated_davidson_seed_is_a_named_flag():
+    """Both seed builders raise 'davidson_guess_truncated' into the
+    enclosing `collecting` block."""
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning, match='truncated'):
+        guess_indices(np.zeros((10, 10)), 10)
+    with collecting(block), pytest.warns(RuntimeWarning, match='seeds cut'):
+        diagonal_seeds(np.zeros(100), 10)
+    assert [f['flag'] for f in block] == ['davidson_guess_truncated'] * 2
 
 
 def test_sigma_sop_names_an_excluded_state():

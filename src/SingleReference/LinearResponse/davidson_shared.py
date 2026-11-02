@@ -1,10 +1,10 @@
 """What the Casida and the Tamm-Dancoff Davidson loops share: guess pairs, trial-space sizing, the preconditioner diagonal and the corrections."""
-import warnings
 
 import numpy as np
 from pyscf.lib import param
 from pyscf.tdscf._lr_eig import MAX_SPACE_INC
 
+from src.Base.numerical_flags import flag
 from src.Solvers.davidson import cluster_extended_count
 from src.Base.numerics.constants import (BYTES_PER_GB, DAVIDSON_DENOMINATOR_FLOOR,
                                          DAVIDSON_EXTRA_ROOTS_DIVISOR, DAVIDSON_GUESS_DEG_TOL,
@@ -44,13 +44,13 @@ def guess_indices(diag_d, nroots, guess_factor=DAVIDSON_GUESS_FACTOR,
     if truncated:
         if counters is not None:
             counters['guess_truncated'] = True
-        warnings.warn(
-            f'Davidson guess truncated at {n} vectors inside a cluster of '
-            f'orbital-energy differences degenerate to {deg_tol:g} Ha, so the '
-            'cut may split a degenerate set and lose the symmetry blocks its '
-            'other members would have opened. Ask for fewer roots, or raise '
-            'guess_factor and check the roots stop moving.',
-            RuntimeWarning, stacklevel=4)
+        flag('davidson_guess_truncated',
+             f'Davidson guess truncated at {n} vectors inside a cluster of '
+             f'orbital-energy differences degenerate to {deg_tol:g} Ha, so the '
+             'cut may split a degenerate set and lose the symmetry blocks its '
+             'other members would have opened. Ask for fewer roots, or raise '
+             'guess_factor and check the roots stop moving.',
+             RuntimeWarning, stacklevel=4)
     return order[:n]
 
 

@@ -30,6 +30,7 @@ import numpy as np
 from pyscf import lib as pyscf_lib
 from pyscf.lib.linalg_helper import LinearDependenceError
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
                                          DAVIDSON_DENOMINATOR_FLOOR,
                                          DAVIDSON_FOLLOW_OVERLAP_TIE,
@@ -145,12 +146,12 @@ def diagonal_seeds(diag, count, limit=None, counters=None, warn=True):
         if counters is not None:
             counters['guess_truncated'] = True
     if truncated and warn:
-        warnings.warn(
-            f'Davidson seeds cut at {count} vectors inside a cluster of '
-            f'diagonal entries degenerate to {DAVIDSON_GUESS_DEG_TOL:g} Ha, so '
-            'the cut may split a degenerate set and lose the symmetry blocks '
-            'its other members would have opened. Ask for fewer roots and '
-            'check the roots stop moving.', RuntimeWarning, stacklevel=3)
+        flag('davidson_guess_truncated',
+             f'Davidson seeds cut at {count} vectors inside a cluster of '
+             f'diagonal entries degenerate to {DAVIDSON_GUESS_DEG_TOL:g} Ha, so '
+             'the cut may split a degenerate set and lose the symmetry blocks '
+             'its other members would have opened. Ask for fewer roots and '
+             'check the roots stop moving.', RuntimeWarning, stacklevel=3)
     seeds = np.zeros((count, diag.size))
     seeds[np.arange(count), order[:count]] = 1.0
     return [seeds[i] for i in range(count)]
