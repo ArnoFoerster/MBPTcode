@@ -15,7 +15,7 @@ from src.gradients.gwbse.bse_isdf import screening_backward
 from src.gradients.gwbse.reaction_field_adjoint import (
     added_reaction_field_adjoint, offdiagonal_reaction_field_seeds,
     reaction_field_backward)
-from src.gradients.isdf_derivatives import GaugeAdjoint
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint
 from src.gradients.rpa.space_time_adjoint import chi0_backward, chi0_backward_rows
 
 

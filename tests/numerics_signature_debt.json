@@ -597,7 +597,7 @@
  "src/gradients/gwbse/targets.py::solve_Z": [
   "tol"
  ],
- "src/gradients/isdf_derivatives.py::sqrtm_adjoint": [
+ "src/gradients/isdf_adjoint_pieces.py::sqrtm_adjoint": [
   "tol"
  ],
  "src/gradients/rpa/space_time_adjoint.py::_static_sweep_backward": [

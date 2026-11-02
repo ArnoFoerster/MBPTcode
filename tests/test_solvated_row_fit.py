@@ -67,9 +67,8 @@ from src.environments.split_equilibrium import SplitEquilibrium
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.rpa.factor_chain import FrozenFactorization
-from src.gradients.isdf_derivatives import (GaugeAdjoint,
-                                            dfactor_adjoint_gauges,
-                                            point_chain, product_pairs)
+from src.gradients.isdf_derivatives import dfactor_adjoint_gauges, product_pairs
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint, point_chain
 from src.properties.excitations import SurfaceSpec, surface_of
 from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.test_chain_row_fit import (TILE, adjoint_ledger_faults,

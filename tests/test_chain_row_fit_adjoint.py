@@ -69,10 +69,9 @@ from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.rpa.factor_chain import FrozenFactorization
-from src.gradients.isdf_derivatives import (collocation_adjoint,
-                                            dfactor_adjoint_gauges,
-                                            orbital_rotation_rows,
-                                            point_chain, product_pairs)
+from src.gradients.isdf_derivatives import (collocation_adjoint, dfactor_adjoint_gauges,
+                                            orbital_rotation_rows, product_pairs)
+from src.gradients.isdf_adjoint_pieces import point_chain
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.surface import evaluate
 from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,

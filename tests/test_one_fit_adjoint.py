@@ -73,6 +73,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.rpa import factor_chain
 from src.gradients import isdf_derivatives
 from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.isdf_adjoint_pieces import PointChain
 from src.gradients.isdf_derivatives import (PendingFitAdjoint,
                                             isdf_fock_partial_exchange,
                                             one_fit_adjoint)
@@ -552,7 +553,7 @@ def test_the_force_makes_one_fit_adjoint_call(xc, switches, monkeypatch):
             assert ('handed', True) in log_p, log_p
         d = np.abs(pooled - separate).max() / np.abs(separate).max()
         lines.append(f'{size} ranks: pooled - separate {d:.1e} rel')
-    monkeypatch.setattr(isdf_derivatives.PointChain, 'same',
+    monkeypatch.setattr(PointChain, 'same',
                         lambda self, other: self is other)
     for size in (1, 2):
         out = run_simulated(unpooled, size)

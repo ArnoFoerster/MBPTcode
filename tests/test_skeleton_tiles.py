@@ -69,9 +69,9 @@ from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
                                           isdf_exchange_rows)
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.gradients.isdf_derivatives import (  # noqa: E402
-    isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
-    two_centre_adjoint)
+from src.gradients.isdf_derivatives import (isdf_exchange_skeleton, isdf_scf_handle,
+                                            three_centre_adjoint)
+from src.gradients.isdf_adjoint_pieces import two_centre_adjoint
 from src.gradients.mean_field_response import (  # noqa: E402
     exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa

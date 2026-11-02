@@ -119,6 +119,7 @@ from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.separable_ri import (Held, fit_rows, row_layout,
                                                  tile_collocation, tile_edge)
 from src.Base.factorization.shell_runs import shell_runs
+from src.gradients.ao_product_fit_adjoint import ao_product_fit_rows_adjoints
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
                                             fit_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
@@ -557,9 +558,6 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=block,
         numerics=numerics, comm=comm, test_set=test_set)
     if test_set == 'ao_products':
-        # cycle: that module builds on the pieces of this one
-        from src.gradients.ao_product_fit_adjoint import (
-            ao_product_fit_rows_adjoints)
         adjoint = ao_product_fit_rows_adjoints(
             mol, auxmol, coords, [seeds], numerics=numerics, comm=comm,
             block=block)[0]

@@ -32,7 +32,7 @@ shells of the first AO, each rank on its own share of the blocks
 of the second AO's centre equals the first's and only int3c2e_ip1 and
 int3c2e_ip2 of the block are needed. X_bar closes on the AO centres and,
 through the frozen points carried with their atoms, on the point chain
-(`isdf_derivatives.point_chain`).
+(`isdf_adjoint_pieces.point_chain`).
 
 The forward's arithmetic is repeated here rather than read from the fit:
 the force is the derivative of the energy the fit gives, to the rounding of
@@ -88,12 +88,12 @@ from src.gradients.isdf_fit_adjoint import (centre_forces, collocation_rows,
                                             tiles_at_root)
 from src.environments.environment import dresses_interaction
 from src.Base.pyscf.pyscf_interface import auxmol_of
-from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
-                                            basis_centre_forces,
-                                            isdf_exchange_adjoints,
-                                            mean_field_point_chain,
-                                            point_layout, sqrtm_adjoint,
-                                            two_centre_adjoint)
+from src.gradients.isdf_adjoint_pieces import (GaugeAdjoint, PointChain,
+                                               basis_centre_forces,
+                                               isdf_exchange_adjoints,
+                                               mean_field_point_chain,
+                                               point_layout, sqrtm_adjoint,
+                                               two_centre_adjoint)
 
 
 def ao_product_fit_adjoint_gauges(mol, auxmol, coords, gauges, pts_local,

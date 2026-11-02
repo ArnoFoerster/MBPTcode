@@ -79,6 +79,7 @@ CENSUS_FILES = tuple(os.path.join(SRC, f) for f in (
     'Base/factorization/isdf_jk.py',
     'Base/factorization/distributed_isdf_jk.py',
     'gradients/ao_product_fit_adjoint.py',
+    'gradients/isdf_adjoint_pieces.py',
     'gradients/isdf_fit_adjoint.py',
     'gradients/isdf_derivatives.py',
     'gradients/isdf_mean_field.py',

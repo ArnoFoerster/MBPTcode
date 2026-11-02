@@ -126,7 +126,7 @@ from src.gradients.gwbse.reaction_field_adjoint import (added_reaction_field_adj
                                                         reaction_field_backward,
                                                         reaction_field_shift,
                                                         static_screening)
-from src.gradients.isdf_derivatives import GaugeAdjoint
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint
 from src.gradients.mean_field_response import relaxed_multiplier
 from src.gradients.gwbse.static_correction import (qp_xc_correction_Y,
                                                    qp_xc_correction_skeleton)

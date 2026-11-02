@@ -38,7 +38,8 @@ import src.Base.numerics.constants as constants
 import src.gradients.rpa.factor_chain as factor_chain
 from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.isdf_derivatives import one_fit_adjoint, sqrtm_adjoint
+from src.gradients.isdf_derivatives import one_fit_adjoint
+from src.gradients.isdf_adjoint_pieces import sqrtm_adjoint
 import src.gradients.gwbse.qp_set as qp_set
 from src.gradients.gwbse.qp_set import QuasiparticleRootLost, QuasiparticleSet
 from src.gradients.gwbse.state_following import CasidaSolution, StateFollower

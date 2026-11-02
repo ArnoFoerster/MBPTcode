@@ -18,7 +18,7 @@ from pyscf import gto
 import src.Base.factorization.separable_ri as separable_ri
 from src.Base.numerics.constants import AUX_METRIC_ROOT_FLOOR
 from src.Base.factorization.separable_ri import aux_metric_sqrt, metric_eigensystem
-from src.gradients.isdf_derivatives import sqrtm_adjoint
+from src.gradients.isdf_adjoint_pieces import sqrtm_adjoint
 
 WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
 

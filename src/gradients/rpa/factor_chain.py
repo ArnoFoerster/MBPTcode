@@ -102,15 +102,12 @@ from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
-from src.gradients.isdf_derivatives import (collocation_adjoint,
-                                            dfactor_adjoint_gauges,
-                                            GaugeAdjoint, isdf_scf_handle,
-                                            one_fit_adjoint,
-                                            orbital_rotation_rows,
-                                            pending_fit_adjoint, point_layout,
-                                            product_pairs,
-                                            require_whole_fit_adjoint,
+from src.gradients.isdf_derivatives import (collocation_adjoint, dfactor_adjoint_gauges,
+                                            isdf_scf_handle, one_fit_adjoint,
+                                            orbital_rotation_rows, pending_fit_adjoint,
+                                            product_pairs, require_whole_fit_adjoint,
                                             row_fit_adjoint)
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint, point_layout
 from src.gradients.mean_field_response import eps_chain_gradient, held_skeletons
 from src.gradients.ao_product_fit_adjoint import ao_product_fit_adjoint_gauges
 from src.gradients.rpa.exchange_double_counting import (exx_double_counting_Y,

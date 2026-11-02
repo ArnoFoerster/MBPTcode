@@ -51,8 +51,8 @@ from src.gradients.ao_product_fit_adjoint import (ao_product_fit_adjoint,
                                                   ao_product_fit_adjoint_gauges,
                                                   ao_product_fit_rows_adjoints)
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.isdf_derivatives import (GaugeAdjoint, PointChain,
-                                            collocation_adjoint)
+from src.gradients.isdf_derivatives import collocation_adjoint
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint, PointChain
 from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds
 from tests.test_ao_product_fit import H2O_C1, pivoted_water
 from tests.test_body_fixed_frames import rhf, water as body_water
