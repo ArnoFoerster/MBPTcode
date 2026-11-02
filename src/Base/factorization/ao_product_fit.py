@@ -836,7 +836,6 @@ def pivoted_points(mol, element_radii, origins, frames, count, numerics=None,
     formed. Under ranks (`comm`, default `current_comm()`) every rank places
     the parent on the `frames` it is handed (a caller locksteps them).
     """
-    regularization, = fit_settings(numerics, 'regularization')
     comm = current_comm() if comm is None else comm
     pts_local, owner = parent_layout(mol, element_radii, origins)
     n_parent = len(owner)

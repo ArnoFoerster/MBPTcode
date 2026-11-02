@@ -970,14 +970,6 @@ def tile_sum(addend, ntiles, natm, comm=None):
     return out.reshape(natm, 3)
 
 
-def fitted_coulomb_energy_skeleton(mol, auxmol, dm, comm=None, tile=None):
-    """(natm, 3) of d/dR E_J = (1/2) d/dR Tr[dm J[dm]] on the fitted metric
-    (the density-fitted Coulomb energy an SCF with `j_route='df-direct'`
-    minimized), dm held, rank 0's on every rank: `fitted_energy_skeleton`
-    with no exchange."""
-    return fitted_energy_skeleton(mol, auxmol, dm, comm=comm, tile=tile)
-
-
 def fitted_energy_skeleton(mol, auxmol, dm, occ=None, channels=(), comm=None,
                            tile=None):
     """(natm, 3) of d/dR (1/2) Tr[dm (J - (1/2) sum_w w K_omega)[dm]], the

@@ -38,7 +38,7 @@ from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
 from src.gradients.isdf_mean_field import exchange_free_reference
 from src.gradients.isdf_mean_field import isdf_jk_with_force
-from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
+from src.gradients.skeleton_tiles import (fitted_energy_skeleton,
                                           one_electron_energy_skeleton, tile_sum,
                                           xc_energy_grid_skeleton)
 from src.Base.utils.parallel.mpi_grid import distributed
@@ -216,7 +216,7 @@ def terms(mf, xc_tile=None):
     hcore = rhf_grad.Gradients(mf).hcore_generator(mol.copy())
     return np.stack([
         one_electron_energy_skeleton(mol, hcore, dm, dme),
-        fitted_coulomb_energy_skeleton(mol, auxmol_of(mf), dm),
+        fitted_energy_skeleton(mol, auxmol_of(mf), dm),
         xc_energy_grid_skeleton(mol, mf.grids, mf._numint, mf.xc, dm,
                                 tile=xc_tile),
         isdf_mean_field_gradient(mf)])
