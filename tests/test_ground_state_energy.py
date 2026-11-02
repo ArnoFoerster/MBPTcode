@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import pytest
 from pyscf import dft, gto, scf
 
-from tests.pins import RECORDING_BLAS, assert_same, bar_under
+from tests.pins import CROSS_PATH_RTOL, assert_same
 from src.Base.numerics.constants import (HARTREE_TO_EV, SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import GroundState
@@ -164,11 +164,12 @@ def test_the_rpa_ground_state_on_a_kohn_sham_reference(water):
     assert_same(e0.terms['E_ref'] + e0.terms['E_x^HF - E_xc'], e_hf)
     assert_same(e0.terms['E_c^dRPA'], e_c)
     # the middle term is the double counting AS THE TOTAL CARRIES IT, E_HF
-    # minus E_ref, so it differs from the operator expression by the rounding
-    # of that subtraction and not by any physics
+    # minus E_ref, so it differs from the operator expression, another
+    # computation path, by the rounding of that subtraction and not by any
+    # physics
     assert (e0.terms['E_x^HF - E_xc']
             == pytest.approx(exx_double_counting(mf, water),
-                             abs=bar_under(RECORDING_BLAS, 1e-14)))
+                             rel=CROSS_PATH_RTOL, abs=0.0))
 
     perturbed = float(mf.e_tot) + e_c
     assert perturbed != e0.total

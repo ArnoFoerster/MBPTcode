@@ -60,9 +60,7 @@ from pyscf.df import addons
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 
 from tests.archived_tree import require_commit, unpack_commit
-from tests.blas_bar import bar_with_drift
-from tests.pins import (RECORDING_BLAS, assert_archive_same, assert_same,
-                        bar_under)
+from tests.pins import CROSS_PATH_RTOL, assert_archive_same, assert_same
 from tests.archive_radii import install_current_radii
 from src.Base.factorization import distributed_df
 from src.Base.numerics.constants import COMPOSED_GRAD_K
@@ -107,11 +105,6 @@ PERTURBATION = 1e-6
 #: enough into the iteration that DIIS holds several vectors, so a rank that
 #: kept its own density would extrapolate another Fock matrix from there on.
 PERTURBED_BUILD = 4
-#: How far the fitted tensor may sit from pyscf's own default-blocked one.
-#: Not the split's error: `incore.cholesky_eri` differs from itself by 2.5e-17
-#: on ethylene/cc-pVTZ between max_memory 4000 and 20, because the number of
-#: columns in one `solve_triangular` decides how LAPACK blocks the solve.
-CDERI_BLOCKING_TOL = bar_with_drift(1e-15)  # plus the energy class bar off the recording BLAS
 WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
@@ -399,8 +392,11 @@ def test_slices_tile_the_auxiliary_index(serial):
             rebuilt = np.concatenate([r['cderi'] for r in out], axis=0)
             assert_same(rebuilt, serial_column_walk(ref['mf'], out[0]['all']),
                         unit='1', quantity='root', label=(name, size))
-            assert np.abs(rebuilt - whole).max() <= bar_under(
-                RECORDING_BLAS, CDERI_BLOCKING_TOL, unit='1')
+            # pyscf's default-blocked tensor is another computation path: the
+            # number of columns in one `solve_triangular` decides how LAPACK
+            # blocks the solve
+            assert (np.abs(rebuilt - whole).max()
+                    <= CROSS_PATH_RTOL * np.abs(whole).max())
             rows = -(-naux // size)             # ceil
             assert max(b[1] - b[0] for b in blocks) == rows
             assert [r['nbytes'] for r in out] == [(b[1] - b[0]) * nao_pair * 8
