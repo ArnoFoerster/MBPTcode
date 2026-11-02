@@ -15,6 +15,8 @@ BOHR_TO_ANGSTROM = 0.52917721092         # CODATA 2010 = pyscf nist.BOHR
 # Bytes in one GB and MB in one GB (decimal, as pyscf's max_memory MB is 1e6
 # bytes), for every memory estimate.
 BYTES_PER_GB = 1e9
+# float64 numbers per gigabyte, BYTES_PER_GB / 8: what a block budget in GB holds
+FLOAT64_PER_GB = BYTES_PER_GB / 8
 MB_PER_GB = 1000.0
 
 # Auxiliary functions per chunk of a pyscf DF loop turned into MO factors
@@ -1373,6 +1375,9 @@ DF_EXCHANGE_TRANSIENT_FRACTION = 0.5
 # are the same in every run. At nao 1090 a block is 26 rows (0.49 GB), where
 # pyscf's 240 rows are 4.6 GB.
 DF_JK_BLOCK_GB = 0.5
+# The working set (GB) of the DF particle-particle ladder (`SingleReference.common.df_ladder`):
+# the integral slab or the auxiliary chunk it holds at once when the caller names none.
+DF_LADDER_BLOCK_GB = 2.0
 
 DF_JK_BLOCK_ROWS_MAX = 240
 
