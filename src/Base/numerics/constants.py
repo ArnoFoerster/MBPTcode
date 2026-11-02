@@ -1057,7 +1057,7 @@ FRAGMENT_CHECKPOINT_MATCH_TOL = 1e-10
 # vectors, the rows of the operator's action it keeps and the columns of the
 # random block the operator acts on. Any seed: a probe only has to be the same
 # in the run that saves and the run that reads.
-FRAGMENT_CHECKPOINT_PROBE_SEED = 20261025
+FRAGMENT_CHECKPOINT_PROBE_SEED = 1
 FRAGMENT_CHECKPOINT_PROBE_ROWS = 4096
 FRAGMENT_CHECKPOINT_PROBE_COLUMNS = 2
 
