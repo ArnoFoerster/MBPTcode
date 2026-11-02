@@ -609,6 +609,14 @@ def allgather_ranges(a, ranges, comm):
     return a
 
 
+def _genuine_mpi(comm):
+    """True when `comm` is an mpi4py communicator of more than one rank (not
+    None, a world of one or a `SimulatedComm`). Nothing here starts MPI."""
+    mod = sys.modules.get('mpi4py.MPI')
+    return (comm is not None and comm.Get_size() > 1 and mod is not None
+            and isinstance(comm, mod.Comm))
+
+
 def node_comm(comm):
     """The ranks of `comm` that share this rank's node, in `comm`'s rank
     order: an MPI shared-memory split of a genuine mpi4py communicator (a
@@ -616,9 +624,7 @@ def node_comm(comm):
     -- serially, on a world of one and on a `SimulatedComm`. A kernel that
     would send every rank the same large block computed on demand can compute
     it once per node instead and move it only inside the node."""
-    mod = sys.modules.get('mpi4py.MPI')
-    if (comm is None or comm.Get_size() == 1 or mod is None
-            or not isinstance(comm, mod.Comm)):
+    if not _genuine_mpi(comm):
         return comm
     return comm.Split_type(_mpi().COMM_TYPE_SHARED, key=comm.Get_rank())
 
@@ -641,10 +647,7 @@ class NodeShared:
     def __init__(self, shape, comm):
         shape = tuple(int(x) for x in shape)
         self.node = None
-        # a window only on a genuine mpi4py communicator; nothing here starts MPI
-        mod = sys.modules.get('mpi4py.MPI')
-        if (comm is None or comm.Get_size() == 1 or mod is None
-                or not isinstance(comm, mod.Comm)):
+        if not _genuine_mpi(comm):
             self.array, self.fills = np.empty(shape), True
             return
         node = _node_of(comm)

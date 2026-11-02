@@ -37,11 +37,10 @@ def spin_scaling_factors(spin_scaling):
 
 
 def spin_weights(scaling):
-    """(c_os, c_ss) of a scaling (c_os, c_ss) or None (unscaled: (1, 1))."""
-    if scaling is None:
-        return 1.0, 1.0
-    c_os, c_ss = (float(c) for c in scaling)
-    return c_os, c_ss
+    """(c_os, c_ss) of a spin scaling (`spin_scaling_factors`); (1, 1)
+    unscaled."""
+    factors = spin_scaling_factors(scaling)
+    return (1.0, 1.0) if factors is None else factors
 
 
 def singlet_pairs(X, Xx, scaling=None):

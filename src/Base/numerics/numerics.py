@@ -75,6 +75,25 @@ from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
 from src.Base.utils.record_io import record_hash
 
 
+def _check_fit_points(test_set, pivot_points, section):
+    """Refuse an ISDF fit's test_set outside ISDF_TEST_SETS, a pivot_points
+    that is not a positive count, and pivoted points for the
+    'duchemin_blase' fit, which on pivoted points binds the same spurious BSE
+    root as on the tabulated grid on augmented bases. `section` prefixes the
+    setting names in the message."""
+    if test_set is not None and test_set not in ISDF_TEST_SETS:
+        raise ValueError(f'{section}test_set={test_set!r} not in '
+                         f'{ISDF_TEST_SETS}')
+    if pivot_points is None:
+        return
+    if int(pivot_points) != pivot_points or pivot_points < 1:
+        raise ValueError(f'{section}pivot_points={pivot_points!r}: a '
+                         'positive point count')
+    if test_set == 'duchemin_blase':
+        raise ValueError(f"{section}pivot_points selects points for "
+                         "test_set='ao_products', not 'duchemin_blase'")
+
+
 @dataclass(frozen=True)
 class IsdfNumerics:
     """The interpolation grid of the post-SCF factorization and its fit.
@@ -140,19 +159,7 @@ class IsdfNumerics:
     def __post_init__(self):
         if self.fit is not None and self.fit not in FIT_REALIZATIONS:
             raise ValueError(f'fit={self.fit!r} not in {FIT_REALIZATIONS}')
-        if self.test_set is not None and self.test_set not in ISDF_TEST_SETS:
-            raise ValueError(f'test_set={self.test_set!r} not in '
-                             f'{ISDF_TEST_SETS}')
-        if self.pivot_points is not None:
-            if int(self.pivot_points) != self.pivot_points or self.pivot_points < 1:
-                raise ValueError(f'pivot_points={self.pivot_points!r}: a '
-                                 'positive point count')
-            if self.test_set == 'duchemin_blase':
-                raise ValueError(
-                    "pivot_points selects points for test_set='ao_products': "
-                    "the 'duchemin_blase' fit on pivoted points binds the "
-                    'same spurious BSE root as on the tabulated grid on '
-                    'augmented bases')
+        _check_fit_points(self.test_set, self.pivot_points, '')
 
     def grid_named(self):
         """Whether this section names an interpolation grid: a level,
@@ -200,17 +207,7 @@ class ScfNumerics:
     pivot_points: Optional[int] = None
 
     def __post_init__(self):
-        if self.test_set is not None and self.test_set not in ISDF_TEST_SETS:
-            raise ValueError(f'scf test_set={self.test_set!r} not in '
-                             f'{ISDF_TEST_SETS}')
-        if self.pivot_points is not None and (
-                int(self.pivot_points) != self.pivot_points
-                or self.pivot_points < 1):
-            raise ValueError(f'scf pivot_points={self.pivot_points!r}: a '
-                             'positive point count')
-        if self.pivot_points is not None and self.test_set == 'duchemin_blase':
-            raise ValueError("scf pivot_points selects points for "
-                             "test_set='ao_products', not 'duchemin_blase'")
+        _check_fit_points(self.test_set, self.pivot_points, 'scf ')
         if (self.test_set, self.pivot_points) != (None, None) and \
                 self.route not in (None, 'isdf'):
             raise ValueError(f'scf test_set and pivot_points are the ISDF-K '

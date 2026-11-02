@@ -128,11 +128,20 @@ def cluster_extended_count(sorted_diag, count, limit, deg_tol=DAVIDSON_GUESS_DEG
     return n, bool(n == n_max < size and sorted_diag[n] <= cut)
 
 
+def seed_limit(count):
+    """The most unit-vector seeds a degenerate cluster may extend the guess of
+    `count` roots to (`cluster_extended_count`): 4 count, at least 20.
+    pyscf's real_eig sizes its trial-space holders at max(4 nroots,
+    2 space_inc) in the worst (memory-starved) case, with space_inc at least
+    min(20, n_pair // 2), and a guess wider than that overruns them."""
+    return max(4 * count, 20)
+
+
 def diagonal_seeds(diag, count, limit=None, counters=None, warn=True):
     """Unit vectors on the lowest entries of `diag` -- the zeroth-order guess
     for the lowest roots: `count` of them, extended through a degenerate
     cluster the cut would split (`cluster_extended_count`) up to `limit`
-    (default 4 * count, at least 20). A cut that `limit` still leaves inside a cluster is
+    (default `seed_limit`). A cut that `limit` still leaves inside a cluster is
     warned about (unless warn=False) and named in `counters['guess_truncated']`. Seeding wider than
     nroots is deliberate: a bare-nroots seed can collapse a degenerate pair,
     because the members of a degenerate set are generally distinct
@@ -141,7 +150,7 @@ def diagonal_seeds(diag, count, limit=None, counters=None, warn=True):
     count = max(1, min(int(count), diag.size))
     order = np.argsort(diag)
     count, truncated = cluster_extended_count(
-        diag[order], count, max(4 * count, 20) if limit is None else limit)
+        diag[order], count, seed_limit(count) if limit is None else limit)
     if truncated:
         if counters is not None:
             counters['guess_truncated'] = True
