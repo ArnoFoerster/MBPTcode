@@ -279,8 +279,13 @@ def metric_density(factors, d, Xw):
 
 
 def raw_basis(factors, A, Xw):
-    """(A Xw)^T (naux, rows), auxiliary-major, each chunk of columns from its
-    owner: a factored Gamma (rows, naux) taken to the raw auxiliary basis."""
+    """(A Xw)^T (naux, rows), auxiliary-major: a factored Gamma (rows, kept)
+    taken to the raw auxiliary basis (naux functions). With X = L^-1, square
+    and lower triangular, each chunk of columns comes from its owner; with
+    the eigen-replacement (`df_correlation_force.whitening`, fewer kept rows
+    than functions) every rank forms the whole product, the same call."""
+    if Xw.shape[0] != Xw.shape[1]:
+        return np.ascontiguousarray((A @ Xw).T)
     naux = Xw.shape[0]
     out = np.zeros((naux, A.shape[0]))
     for ch in factors.my_chunks:
@@ -347,7 +352,7 @@ class _RIFit:
     def __init__(self, auxmol, C, nf, no, d, Xw, factors):
         nocc = nf + no
         self.auxmol = auxmol
-        naux = Xw.shape[0]
+        naux = Xw.shape[1]
         nv = C.shape[1] - nocc
         self.Co, self.Cv = C[:, nf:nocc], C[:, nocc:]
         self.GL = raw_basis(factors, d.GL, Xw).reshape(naux, no, nv)
@@ -489,9 +494,14 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
     C = np.asarray(mf.mo_coeff)
     nocc = mol.nelectron // 2
     nmo, no = C.shape[1], factors.no
-    if auxmol.nao != factors.f.naux:
-        raise ValueError(f'the factors hold {factors.f.naux} auxiliary functions, the fit '
-                         f'{auxmol.nao}: a linearly dependent metric was pruned')
+    # the correlation fit: X = L^-1, or the eigen-replacement the factors'
+    # fit took where the metric is not positive definite (X^T X = V^+)
+    _, Xw = dcf.whitening(auxmol)
+    lockstep(Xw, comm)
+    if Xw.shape != (factors.f.naux, auxmol.nao):
+        raise ValueError(f'the factors hold {factors.f.naux} auxiliary rows, the '
+                         f'fit of {auxmol.nao} functions keeps {Xw.shape[0]}: they '
+                         'were made on another metric')
     if nmo != nf + factors.no + factors.nv:
         raise ValueError('the operator does not span the mean field\'s orbitals')
     gamma, Y = relaxed_gamma(mf, mol, factors, d, nf, Bc, Y_extra, numerics, flags)
@@ -500,9 +510,6 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
     gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
     f1, = on_root(lambda: one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao]),
                   [(mol.natm, 3)], comm)
-    # the correlation fit
-    _, Xw = dcf.whitening(auxmol)
-    lockstep(Xw, comm)
     G2ri = metric_density(factors, d, Xw)
     ri = _RIFit(auxmol, C, nf, no, d, Xw, factors)
     f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + metric_force(auxmol, G2ri)
