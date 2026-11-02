@@ -186,6 +186,9 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
     the least squares, whose rank deficiency would hand the next relocation
     to rounding.
 
+    The amplitudes of f are eliminated before each solve, so the least
+    squares has M unknowns whatever the number of columns.
+
     stride: fit every stride-th column of wc. The poles are common to all
             orbitals, so they need only enough columns to be determined, and
             the least-squares problem grows linearly in the number kept.
@@ -203,23 +206,30 @@ def fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
     om = np.asarray(poles, float).copy()
     lo, hi = bounds if bounds is not None else (om[0], om[-1])
     u_s = -np.asarray(nu_points, float) ** 2
-    cols = range(0, wc.shape[1], max(int(stride), 1))
-    f_cols = [wc[:, q] for q in cols]
-    n_col = len(f_cols)
+    f = wc[:, ::max(int(stride), 1)].T
     for _ in range(int(n_iter)):
         if merge_tol is not None:
             om = merge_poles(om, merge_tol)
         n_poles = om.size
         kern = 1.0 / (u_s[:, None] - (om ** 2)[None, :])
-        block = np.zeros((len(u_s) * n_col, n_col * n_poles + n_poles))
-        rhs = np.concatenate(f_cols)
-        for j, f in enumerate(f_cols):
-            rows = slice(j * len(u_s), (j + 1) * len(u_s))
-            block[rows, j * n_poles:(j + 1) * n_poles] = kern
-            block[rows, -n_poles:] = -f[:, None] * kern
-        x = _vector_fit_lstsq(block, rhs)
+        # Column j's rows are K a_j - diag(f_j) K b = f_j. The a_j are free,
+        # so the residual is least over them where it is orthogonal to the
+        # range of K: with P = 1 - Q Q^T, Q K's left singular vectors above
+        # lstsq's rank cut, the weight's b alone solves P diag(f_j) K b =
+        # -P f_j over every column, (n_col * nfreq) x M instead of
+        # (n_col * nfreq) x (n_col + 1) M. It is the full problem's b where
+        # that block has full numerical rank; where the spread between the
+        # K and f K columns puts it below the cut, this b is the one of
+        # smaller residual. The cut keeps a coalesced pair's null direction
+        # out of Q.
+        q, sv, _ = np.linalg.svd(kern, full_matrices=False)
+        q = q[:, sv > sv[0] * np.finfo(float).eps * max(kern.shape)]
+        fk = f[:, :, None] * kern[None]
+        fk -= q[None] @ (q.T[None] @ fk)
+        pf = f - (f @ q) @ q.T
+        b = _vector_fit_lstsq(fk.reshape(-1, n_poles), -pf.reshape(-1))
         zeros = np.linalg.eigvals(np.diag(om ** 2)
-                                  - np.ones((n_poles, 1)) @ x[-n_poles:][None, :])
+                                  - np.ones((n_poles, 1)) @ b[None, :])
         om = np.sqrt(np.sort(np.clip(np.real(zeros), lo ** 2, hi ** 2)))
     return om if merge_tol is None else merge_poles(om, merge_tol)
 
