@@ -77,6 +77,7 @@ optional third-party one.
 | Förster annihilation and transfer: dipoles between two excited states against a full-CI transition density (singlets and triplets), the overlap of many lines of one band by one lattice convolution against the direct sum, C6 against Gaussian bands, the golden-rule radius against the spectroscopic Förster equation and its textbook constant | `test_forster` (about 5 minutes) |
 | force constants by differencing the analytic gradient | `test_numerical_hessian`, `test_mode_hessian`, `test_hessian_frozen_pair_layout` |
 | fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
+| the fragment-diabatic BSE with the quasiparticle Hamiltonian: A_eff does not depend on how a degenerate group's orbitals rotate into each other, the root gradient through the partition is the chain's, the element gradients match finite differences (Tamm-Dancoff and full) | `test_fragment_diabatic_qp_hamiltonian` (about 8 minutes) |
 | fragment-diabatic ADC(2) (singlets and triplets) and its analytic gradient | `test_fragment_adc2` |
 | the fragment partition's checkpoint over ranks: rank 0 reads, every rank gets its verdict and arrays bit for bit | `test_fragment_checkpoint_ranks` (thread-ranks under pytest; `mpirun -n 2` as a script) |
 | the triplet fragment partition (GW-BSE and ADC(2)) and the triplet-triplet (Dexter) coupling with its gradient | `test_fragment_triplet_transfer` |

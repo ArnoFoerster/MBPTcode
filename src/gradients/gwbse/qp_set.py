@@ -102,6 +102,27 @@ class QPHamiltonian:
         return ((o, self.h[np.ix_(o, o)]),
                 (v - nocc, self.h[np.ix_(v, v)]))
 
+    def coupled_pairs(self):
+        """(norb, norb) booleans, symmetric: the orbital pairs inside one
+        group, whose element of H is solved as a matrix element."""
+        out = np.zeros(self.h.shape, bool)
+        for _, _, p, q in self.pairs:
+            out[p, q] = out[q, p] = True
+        return out
+
+    def one_body_adjoint(self, nocc, terms):
+        """(norb, norb) adjoint of sum w s^T K t on H's off-diagonal elements,
+        symmetric, zero outside the coupled pairs: K's one-body part is
+        A_ia,jb += delta_ij H_ab - delta_ab H_ij on the X and on the Y half
+        alike. terms: [(x_s, y_s, x_t, y_t, w)], each amplitude (nocc, nvir).
+        An element zero by symmetry here keeps its seed: it still has a
+        derivative along a displacement that breaks the symmetry."""
+        out = np.zeros_like(self.h)
+        for xs, ys, xt, yt, w in terms:
+            out[nocc:, nocc:] += w * (xs.T @ xt + ys.T @ yt)
+            out[:nocc, :nocc] -= w * (xs @ xt.T + ys @ yt.T)
+        return np.where(self.coupled_pairs(), 0.5 * (out + out.T), 0.0)
+
 
 class QPContinuationFailed(RuntimeWarning):
     """The analytic continuation of a quasiparticle-set member failed
@@ -776,21 +797,13 @@ class QuasiparticleSet:
             return None
         no = self.chain.nocc
         nv = len(shared.eps) - no
-        out = np.zeros_like(qp_h.h)
-        for bra, ket, wt in (((n, n, 1.0),) if m is None else
-                             ((m, n, 0.5), (n, m, 0.5))):
-            xm = solution.x[:, bra].reshape(no, nv)
-            ym = solution.y[:, bra].reshape(no, nv)
-            xk = solution.x[:, ket].reshape(no, nv)
-            yk = solution.y[:, ket].reshape(no, nv)
-            out[no:, no:] += wt * (xm.T @ xk + ym.T @ yk)
-            out[:no, :no] -= wt * (xm @ xk.T + ym @ yk.T)
-        # the coupled pairs alone: an element zero by symmetry here still
-        # has a derivative along a displacement that breaks it
-        coupled = np.zeros(out.shape, bool)
-        for _, _, p, q in qp_h.pairs:
-            coupled[p, q] = coupled[q, p] = True
-        return np.where(coupled, 0.5 * (out + out.T), 0.0)
+
+        def amp(k):
+            return (solution.x[:, k].reshape(no, nv),
+                    solution.y[:, k].reshape(no, nv))
+        return qp_h.one_body_adjoint(no, [
+            (*amp(bra), *amp(ket), wt) for bra, ket, wt in
+            (((n, n, 1.0),) if m is None else ((m, n, 0.5), (n, m, 0.5)))])
 
     def qp_hamiltonian_backward(self, qp_h, h_bar, eqp_bar, eps):
         """(positions of the groups' members in the set, eps_bar, pair

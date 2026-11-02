@@ -17,10 +17,22 @@ amplitude arrays, so the diabat vectors take the place of roots, and
 unchanged. With the chain's `bse_adjoint='grid'` that pass runs over the ISDF
 grid without any (naux, n_occ, n_vir) block.
 
-THE GAUGE (term 3). The chain keeps the quasiparticle block diagonal, which
-is the canonical condition, so its reverse pass moves the canonical orbitals
-with the canonical derivative overlap: `frame_force` is
-`orbital_coupling.configuration_coupling`, with its one Z-vector.
+THE QUASIPARTICLE HAMILTONIAN. Where the chain solves one
+(`qp.hamiltonian`), K carries its off-diagonal one-body blocks
+(`fragment_bse`), and every pair adds its adjoint on them
+(`QPHamiltonian.one_body_adjoint`) to the reverse pass, which takes it
+through each group's fixed point as the chain's own roots do.
+
+THE GAUGE (term 3). The chain keeps the Kohn-Sham Fock matrix diagonal, the
+canonical condition, so its reverse pass moves the canonical orbitals with the
+canonical derivative overlap: `frame_force` is
+`orbital_coupling.configuration_coupling`, with its one Z-vector. This holds
+inside a group of the quasiparticle Hamiltonian too. H is invariant to how a
+group's orbitals rotate into each other, but the screening and the
+self-energy's internal lines read the members' Kohn-Sham energies on the
+diagonal, so a rotation inside a group still costs a canonical rotation:
+what it carries is proportional to the members' gap, and so is its weight
+1/(eps_p - eps_q)'s numerator.
 
 GATED (tests/test_fragment_diabatic.py, offset ethylene dimer, cc-pVDZ), in
 both kernels: a root's gradient through the partition equals the
@@ -31,6 +43,9 @@ canonical-gauge and localization terms several percent of the total. The
 iterative path reproduces the dense one to 1e-8 relative on the test system.
 """
 
+import numpy as np
+
+from src.Base.utils.parallel.mpi_grid import lockstep
 from src.fragments.partition import split_xy
 from src.gradients.gwbse.bse_isdf import bse_backward, bse_cache, interstate_backward
 from src.gradients.gwbse.fragment_bse import BSEOperator
@@ -81,6 +96,22 @@ class BSEResponse:
         # the chain records its own numerical events; none of this pass's
         self.flags = {}
 
+    def _one_body_adjoint(self, pairs):
+        """The pairs' adjoint on the quasiparticle Hamiltonian's off-diagonal
+        elements, rank 0's on every rank, or None without one."""
+        qp_h, nocc = self.shared.qp_h, self.operator.nocc
+        if qp_h is None:
+            return None
+        nv, n_ov = self.operator.nvir, self.operator.n_ov
+        terms = []
+        for v, _, wgt in pairs:
+            xs, ys = split_xy(v, n_ov)
+            terms.append((xs[:, 0].reshape(nocc, nv), ys[:, 0].reshape(nocc, nv),
+                          xs[:, 1].reshape(nocc, nv), ys[:, 1].reshape(nocc, nv),
+                          wgt))
+        return lockstep(np.ascontiguousarray(qp_h.one_body_adjoint(nocc, terms)),
+                        check=True)
+
     def pair_force(self, pairs):
         """The reverse chain for every pair, in the chain's `bse_adjoint`
         realization: 'explicit' through the three-index blocks, 'grid' over
@@ -114,7 +145,8 @@ class BSEResponse:
                                            omega_bar=wgt)
             total = part if total is None else tuple(
                 x + y for x, y in zip(total, part))
-        return chain.reverse.fold_to_nuclei(self.shared, *total)[0]
+        return chain.reverse.fold_to_nuclei(
+            self.shared, *total, h_bar=self._one_body_adjoint(pairs))[0]
 
     def frame_force(self, dc_o, dc_v):
         """The canonical gauge: - sum D (.) A^can, `configuration_coupling`."""

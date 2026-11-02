@@ -12,7 +12,12 @@ DENSE AND MATRIX-FREE ARE ONE CODE PATH. `BSEOperator` applies K to a block
 of vectors, densely from `bse_blocks` for small systems and through the ISDF
 block action of the Davidson solver otherwise.
 
-WHICH KERNEL is the chain's: `ExcitedStateChain(bse_tda=...)`.
+WHICH KERNEL is the chain's: `ExcitedStateChain(bse_tda=...)`, with the
+quasiparticle Hamiltonian's off-diagonal one-body blocks where the chain
+solves one (`qp.hamiltonian`): A_ia,jb gains delta_ij H_ab - delta_ab H_ij
+inside each group (`with_one_body`), so the diabats and A_eff do not depend
+on how a group's orbitals rotate into each other, as the chain's own roots
+do not.
 
 WHAT IS NOT HERE. No nuclear derivatives: the method-neutral Lagrangian is
 `src.gradients.fragment_diabatic` and the GW-BSE reverse pass it seeds is
@@ -25,7 +30,9 @@ from src.Base.numerics.constants import FRAGMENT_DENSE_MAX
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.gradients.gwbse.bse_isdf import bse_blocks
+from src.gradients.gwbse.state_following import dense_one_body
 from src.SingleReference.LinearResponse.block_actions import isdf_block_action
+from src.SingleReference.LinearResponse.davidson import with_one_body
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
 
@@ -36,8 +43,8 @@ class BSEOperator:
     Tamm-Dancoff (`tda=True`): K = A and dim = n_ov. Full BSE: x stacks the
     (X, Y) halves, K = [[A, B], [B, A]] and dim = 2 n_ov. Built from a chain's
     `shared_forward`, so it is the same kernel that chain's roots and gradients
-    use: the same quasiparticle energies, the same static screening, the same
-    factors.
+    use: the same quasiparticle energies and quasiparticle Hamiltonian, the
+    same static screening, the same factors.
     """
 
     #: K does not depend on Omega (the `SinglesOperator` protocol)
@@ -97,12 +104,15 @@ class BSEOperator:
         nocc, tda = chain.nocc, bool(chain.bse_tda)
         nv = len(eps_qp) - nocc
         n_ov = nocc * nv
+        one_body = None if shared.qp_h is None else shared.qp_h.one_body(nocc)
         if route == 'auto':
             route = ('dense' if (n_ov if tda else 2 * n_ov) <= FRAGMENT_DENSE_MAX
                      else 'isdf')
         if route == 'dense':
             a, b = bse_blocks(x_mo, d, eps_qp, w_aux, nocc, spin=chain.spin,
                               bse_tda=tda)[:2]
+            if one_body is not None:
+                a = dense_one_body(a, one_body, nocc, nv)
             k = 0.5 * (a + a.T)
             if not tda:
                 b = 0.5 * (b + b.T)
@@ -115,8 +125,10 @@ class BSEOperator:
         lr = LinearResponseSolver(np.asarray(eps_qp, float),
                                   spin_mode='restricted')
         factors = x_mo if isinstance(x_mo, SlicedFactors) else (x_mo, d)
-        apply_ab = isdf_block_action(lr, nocc, True, w_aux, factors,
-                                     spin=chain.spin)[0]
+        apply_ab = with_one_body(isdf_block_action(lr, nocc, True, w_aux,
+                                                   factors,
+                                                   spin=chain.spin)[0],
+                                 one_body)
 
         def apply(x):
             k = x.shape[1]
