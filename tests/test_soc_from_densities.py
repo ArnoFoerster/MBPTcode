@@ -202,7 +202,8 @@ def run():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
         mol, mf = setup()
-        h = spin_orbit.soc_operator_mo(mf, mol)
+        h = spin_orbit.soc_operator_mo(mf, mol, two_electron='somf',
+                                       one_electron='x2c')
         ok = check_cis(mol, mf, h)
         ok &= check_spin_algebra(mol, mf, h)
     return ok

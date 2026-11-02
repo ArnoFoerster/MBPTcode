@@ -38,8 +38,7 @@ def oscillator_strengths(omega, dipoles):
                                                               dipoles)
 
 
-def spectrum_properties(spectrum, n_states, two_electron='somf',
-                        one_electron='x2c'):
+def spectrum_properties(spectrum, n_states, *, numerics):
     """The rate layer's ingredients of one geometry from a spectrum that
     supplies transition densities -- any object with `mol`, `mf`, `omega`
     ({'singlet', 'triplet'}: (n,) Hartree), `flags` (its named numerical
@@ -52,11 +51,13 @@ def spectrum_properties(spectrum, n_states, two_electron='somf',
                 state (`spin_orbit.socme_table_from_densities`)
         dipole  (n_states, 3) <0|r|S_I>; f_osc (n_states,) their oscillator
                 strengths
-        h_mo    the spin-orbit operator in the MO basis
+        h_mo    the spin-orbit operator in the MO basis, the one `numerics`
+                declares; soc_term its declaration
+                (`spin_orbit.declared_operator`)
         flags   the spectrum's flags, for the record (empty when clean)
     """
-    h_mo = spin_orbit.soc_operator_mo(spectrum.mf, spectrum.mol, two_electron,
-                                      one_electron)
+    term = spin_orbit.declared_operator(numerics)
+    h_mo = spin_orbit.soc_operator_mo(spectrum.mf, spectrum.mol, **term)
     ground, singlets = ('ground', 0), [('singlet', i) for i in range(n_states)]
     triplets = [('triplet', j) for j in range(n_states)]
     pairs = ([(ground, t) for t in triplets] + [(s, t) for s in singlets for t in triplets]
@@ -70,5 +71,5 @@ def spectrum_properties(spectrum, n_states, two_electron='somf',
     return {'socme': table,
             'dipole': dipole,
             'f_osc': oscillator_strengths(spectrum.omega['singlet'][:n_states], dipole),
-            'h_mo': h_mo,
+            'h_mo': h_mo, 'soc_term': term,
             'flags': list(spectrum.flags)}

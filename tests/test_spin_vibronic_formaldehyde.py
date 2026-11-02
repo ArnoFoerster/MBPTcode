@@ -40,6 +40,9 @@ from src.properties.spin_orbit import soc_operator_mo, soc_vectors
 from src.properties.spin_vibronic import spin_vibronic_coupling
 from tests.isdf_test_grid import g1_numerics
 
+# the exact SOMF with X2C, which the couplings here were recorded with
+EXACT = {'two_electron': 'somf', 'one_electron': 'x2c'}
+
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 S1, S2, S3, T1, T2 = (('singlet', 0), ('singlet', 1), ('singlet', 2),
                       ('triplet', 0), ('triplet', 1))
@@ -85,7 +88,7 @@ def displaced_elements(man, ev, mol, u, h):
         assert abs(ov[j]) > 0.99, (spin, ov)
         followed.append((j, np.sign(ov[j])))
     (js, ss), (jt, st) = followed
-    h_mo = soc_operator_mo(e.mf, m)
+    h_mo = soc_operator_mo(e.mf, m, **EXACT)
     _, xs, ys = e.spectrum['singlet']
     _, xt, yt = e.spectrum['triplet']
     single = ss * st * soc_vectors(h_mo, nocc, (xs[:, js], ys[:, js]),
@@ -113,7 +116,7 @@ def case(request):
         mol, rhf, mf=rhf(mol), numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid', 'nroots': 3})))
     man = StateManifold(chain, states=(S1, S2, S3, T1, T2))
     ev = man.evaluate(couplings=((S2, S1), (S3, S1), (T2, T1)))
-    out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol), S1, T1,
+    out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol, **EXACT), S1, T1,
                                  (t2_partner(ev),), (T2,))
     u = direction(mol.natm)
     b0 = float(out['v0_vector'] @ out['v0_vector']

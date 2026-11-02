@@ -46,6 +46,11 @@ from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
 
+# the exact SOMF with X2C, which every table here was recorded with
+EXACT = {'two_electron': 'somf', 'one_electron': 'x2c'}
+SOMF = Numerics().derive('the exact operator the tables were recorded with',
+                         properties={'soc_two_electron': 'somf'})
+
 BASIS = 'cc-pvdz'
 CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
         'H 0.0000 0.9376 -1.1188; H 0.0000 -0.9376 -1.1188')
@@ -80,7 +85,7 @@ def formaldehyde():
     mf.kernel()
     assert mf.converged
     nocc = mol.nelectron // 2
-    return (mol, mf, soc_operator_mo(mf, mol), nocc,
+    return (mol, mf, soc_operator_mo(mf, mol, **EXACT), nocc,
             tda(mf, False), tda(mf, True))
 
 
@@ -123,8 +128,8 @@ def test_two_electron_term_screens_the_nuclear_one(formaldehyde):
     would make the operator grow instead of shrink.
     """
     mol, mf = formaldehyde[0], formaldehyde[1]
-    bare = abs(soc_operator(mol, two_electron=None)).max()
-    somf = abs(soc_operator(mol, mf.make_rdm1(), 'somf')).max()
+    bare = abs(soc_operator(mol, two_electron=None, one_electron='x2c')).max()
+    somf = abs(soc_operator(mol, mf.make_rdm1(), **EXACT)).max()
     assert somf < bare, 'the two-electron term must screen, not amplify'
     assert somf > 0.3 * bare, 'it must not annihilate the operator either'
 
@@ -135,12 +140,12 @@ def test_amfi_tracks_somf_and_keeps_one_centre_blocks(formaldehyde):
     strictly one-centre, which is what makes it cheap enough for an emitter."""
     mol, mf = formaldehyde[0], formaldehyde[1]
     dm = mf.make_rdm1()
-    somf = soc_operator(mol, dm, 'somf')
-    amfi = soc_operator(mol, dm, 'amfi')
+    somf = soc_operator(mol, dm, **EXACT)
+    amfi = soc_operator(mol, dm, two_electron='amfi', one_electron='x2c')
     off = np.ones((mol.nao_nr(), mol.nao_nr()), bool)
     for _, _, p0, p1 in mol.aoslice_by_atom():
         off[p0:p1, p0:p1] = False
-    two_e = amfi - soc_operator(mol, two_electron=None)
+    two_e = amfi - soc_operator(mol, two_electron=None, one_electron='x2c')
     assert abs(two_e[:, off]).max() < 1e-14, 'AMFI kept a multi-centre block'
     assert abs(amfi - somf).max() < 0.25 * abs(somf).max()
 
@@ -152,12 +157,12 @@ def test_koseki_route_needs_no_density(formaldehyde):
     assert abs(soc_operator(mol, two_electron=None,
                             one_electron='koseki')).max() > 0
     with pytest.raises(ValueError, match='MEAN-FIELD'):
-        soc_operator(mol, dm=None, two_electron='somf')
+        soc_operator(mol, dm=None, **EXACT)
     # it is a one-electron approximation, so neither misuse is silent: naming it
     # as a two-electron one would ignore `one_electron`, and pairing it with a
     # mean-field term would count the screening twice
     with pytest.raises(ValueError, match='ONE-electron approximation'):
-        soc_operator(mol, two_electron='koseki')
+        soc_operator(mol, two_electron='koseki', one_electron='x2c')
     with pytest.raises(ValueError, match='twice'):
         soc_operator(mol, dm=np.eye(mol.nao_nr()), one_electron='koseki',
                      two_electron='somf')
@@ -227,7 +232,7 @@ def test_coupling_is_rotationally_invariant(formaldehyde):
         mf.kernel()
         _, xs, ys = tda(mf, False, 3)
         _, xt, yt = tda(mf, True, 3)
-        return socme_table(soc_operator_mo(mf, m), m.nelectron // 2,
+        return socme_table(soc_operator_mo(mf, m, **EXACT), m.nelectron // 2,
                            xs, ys, xt, yt)
 
     a = table(mol.atom_coords())
@@ -366,8 +371,10 @@ def test_dense_and_davidson_give_the_same_couplings(water_bse_modes):
     the module reads eigenvectors and not a solver's internals.
     """
     mol, mf, nocc, modes = water_bse_modes
-    a = spin_orbit_couplings(mf, mol, nocc, *modes['dense/df'], nroots=3)
-    b = spin_orbit_couplings(mf, mol, nocc, *modes['davidson/df'], nroots=3)
+    a = spin_orbit_couplings(mf, mol, nocc, *modes['dense/df'],
+                             nroots=3, numerics=SOMF)
+    b = spin_orbit_couplings(mf, mol, nocc, *modes['davidson/df'],
+                             nroots=3, numerics=SOMF)
     gap = abs(a['socme'] - b['socme']).max() * HARTREE_TO_CM
     assert gap < 1e-4, f'dense and Davidson disagree by {gap:.3e} cm^-1'
 
@@ -381,8 +388,10 @@ def test_df_and_full_eri_routes_agree(water_bse_modes):
     route-dependent factor or a sign flip.
     """
     mol, mf, nocc, modes = water_bse_modes
-    a = spin_orbit_couplings(mf, mol, nocc, *modes['dense/df'], nroots=3)
-    b = spin_orbit_couplings(mf, mol, nocc, *modes['dense/full'], nroots=3)
+    a = spin_orbit_couplings(mf, mol, nocc, *modes['dense/df'],
+                             nroots=3, numerics=SOMF)
+    b = spin_orbit_couplings(mf, mol, nocc, *modes['dense/full'],
+                             nroots=3, numerics=SOMF)
     va = a['socme'] * HARTREE_TO_CM
     vb = b['socme'] * HARTREE_TO_CM
     assert abs(va - vb).max() < 0.5, (
@@ -397,7 +406,8 @@ def test_isdf_manifolds_run_the_whole_bse_at_gw_route(water):
     mol, mf = water
     nocc = mol.nelectron // 2
     singlet, triplet = isdf_manifolds(mf, mol, nocc, numerics=Numerics(bse={'nroots': 3}), n_start=4, counts=g1(mol))
-    out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=2)
+    out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet,
+                               nroots=2, numerics=SOMF)
     v = out['socme'] * HARTREE_TO_CM
     assert v.shape == (3, 2)
     assert np.all(np.isfinite(v)) and v.max() > 0
@@ -426,7 +436,7 @@ def test_socme_on_bse_at_gw_chain_roots(water):
     chain = ExcitedStateChain(mol, scf_factory, spin='singlet', mf=mf, numerics=g1_numerics(mol))
     singlet, triplet = chain_manifolds(chain)
     out = spin_orbit_couplings(mf, mol, mol.nelectron // 2, singlet, triplet,
-                               nroots=3)
+                               nroots=3, numerics=SOMF)
     v = out['socme'] * HARTREE_TO_CM
     assert v.shape == (4, 3)
     assert np.all(np.isfinite(v))

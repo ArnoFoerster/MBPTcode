@@ -77,10 +77,11 @@ def test_spin_orbit_manifolds_carry_the_flags(water, monkeypatch):
     s, t = spin_orbit.isdf_manifolds(mf, mol, 5)
     assert s.davidson_flags == {}
     assert t.davidson_flags == STUCK
-    out = spin_orbit.spin_orbit_couplings(mf, mol, 5, s, t)
+    out = spin_orbit.spin_orbit_couplings(mf, mol, 5, s, t, numerics=Numerics())
     assert out['davidson_flags'] == {'triplet': STUCK}
     plain = spin_orbit.spin_orbit_couplings(
-        mf, mol, 5, Stamped(tuple(s), 'id'), Stamped(tuple(t), 'id'))
+        mf, mol, 5, Stamped(tuple(s), 'id'), Stamped(tuple(t), 'id'),
+        numerics=Numerics())
     assert plain['davidson_flags'] == {}
 
 

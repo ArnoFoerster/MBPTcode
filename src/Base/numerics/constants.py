@@ -1704,6 +1704,20 @@ SCREENED_CHUNK_BYTES = 2 << 30
 # memory and the GEMM shapes, never a number beyond the summation order.
 EE_RI_TILE_GB = 8.0
 
+# Working set, in GB, of one tile of the density-fitted spin-orbit mean field
+# (`Base.pyscf.spin_orbit_mean_field`, two_electron='ri-somf'): a block of the
+# spin-orbit three-centre integrals or of the fitted occupied half-transform.
+# It moves the memory and the GEMM shapes, and the summation order with them.
+SOMF_RI_TILE_GB = 1.0
+
+# The two-electron terms of the spin-orbit mean-field operator: 'somf' the
+# exact integral pass, 'ri-somf' the same operator with its density side
+# fitted in a named auxiliary basis, 'amfi' its one-centre blocks alone.
+SOC_TWO_ELECTRON_TERMS = ('somf', 'ri-somf', 'amfi')
+# The one-electron operators a run may declare: 'x2c' the exact two-component
+# operator, 'breit-pauli' its leading term.
+SOC_ONE_ELECTRON_TERMS = ('x2c', 'breit-pauli')
+
 # Spin-component scaling (c_os, c_ss) of the doubles in ADC(2): SCS (Grimme,
 # J. Chem. Phys. 118, 9095 (2003); Hellweg, Gruen and Haettig, Phys. Chem.
 # Chem. Phys. 10, 4119 (2008)) and SOS (Jung, Lochan, Dutoi and Head-Gordon,

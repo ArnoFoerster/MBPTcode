@@ -27,7 +27,9 @@ src/Base/                      the foundation
                                (grids, quadratures, solver settings);
                                constants.py: every named number
     pyscf/                     pyscf_interface.py (integrals, the mean field's
-                               pieces), scf_convergence.py, dispersion.py
+                               pieces), spin_orbit_mean_field.py (the
+                               two-electron spin-orbit mean-field operator),
+                               scf_convergence.py, dispersion.py
                                (empirical D3/D4), cphf.py (the CPHF /
                                Z-vector solve of the relaxed densities; the
                                gradient layer's multiplier solve is
@@ -132,8 +134,6 @@ src/gradients/                 the method-neutral core: surface.py (the
                                state and surface identity, state models and
                                the solvated surface, the force of a
                                density-fitted correlated energy, the
-                               two-electron spin-orbit mean-field term
-                               (built once over the ranks), the
                                mean-field orbital couplings and the
                                fragment-diabatic gradient Lagrangian
     rpa/                       the dRPA ground state and the RPA screening

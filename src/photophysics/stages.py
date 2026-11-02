@@ -226,7 +226,7 @@ from src.properties.optimize import (relax, resolved_conv, saddle_test,
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.environments import solvation_loop as sl
 from src.gradients.solvated_surface import SolvatedSurface
-from src.properties.spin_orbit import spin_orbit_couplings
+from src.properties.spin_orbit import declared_operator, spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
                                           condon_element, spin_vibronic_coupling)
 from src.gradients.surface import lockstep_geometry
@@ -958,7 +958,7 @@ def merged_flags(*parts):
 
 # ------------------------------------------------------------ properties
 def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
-                        spin_orbit=True):
+                        spin_orbit=True, *, numerics):
     """Everything a rate needs at one geometry, off ONE evaluation: the
     energies of every reported root, the oscillator strengths and transition
     dipoles, the spin-orbit table, d(S0, S), d(S, S+1), d(T, T+1) and the
@@ -970,14 +970,18 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
     None for every derivative (d_ground, nac, soc_dv_cart, soc_dv_paths).
     spin_orbit=False (policies.properties 'energies'): the energies,
     oscillator strengths and dipoles, and None for the spin-orbit table, the
-    Condon element and every derivative; derivatives must be False then."""
+    Condon element and every derivative; derivatives must be False then.
+    numerics: the run's `Numerics`, whose properties section names the
+    spin-orbit operator (`spin_orbit.declared_operator`); the record names
+    it ('soc_term'; a record without it holds the exact SOMF's table, the
+    pass before the declaration existed)."""
     if spin_orbit is False and derivatives:
         raise ValueError('the derivative couplings read the spin-orbit pass')
     nocc = occupied_count(ev.mf)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     f_osc, dipole = oscillator_strengths(ev.mf, ev.mol, nocc, *singlet)
     soc = (spin_orbit_couplings(ev.mf, ev.mol, nocc, singlet, triplet,
-                                nroots=n_states, two_electron='somf')
+                                nroots=n_states, numerics=numerics)
            if spin_orbit else None)
     keys = list(ev.energy)
     common = {'coords_bohr': ev.mol.atom_coords(), 'e0': ev.e0,
@@ -986,7 +990,8 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
               'root': {label(k): int(ev.root[k]) for k in keys},
               'emitter': label(s_key), 'reservoir': label(t_key),
               'f_osc': f_osc[:n_states], 'dipole': dipole[:n_states],
-              'socme': None if soc is None else soc['socme']}
+              'socme': None if soc is None else soc['socme'],
+              'soc_term': None if soc is None else declared_operator(numerics)}
     if soc is None:
         return dict(common, d_ground=None, nac=None, soc_v0=None,
                     soc_v0_vector=None, soc_dv_cart=None, soc_dv_paths=None,
@@ -1197,7 +1202,7 @@ def vertical(run, walks_next=False):
         return run.read('vert')
     props = geometry_properties(ev, run.s_key, run.t_key, d.n_states,
                                 derivatives=derivatives,
-                                spin_orbit=spin_orbit)
+                                spin_orbit=spin_orbit, numerics=d.numerics)
     record = {'props': props, 'seconds': time.time() - t0,
               'residues': d.numerics.qp.residue_route,
               'qp_states': man.chain.realization.qp_states,
@@ -1237,7 +1242,8 @@ def scheme_b_vertical(run):
     props = free_energies(
         geometry_properties(ev, run.s_key, run.t_key, d.n_states,
                             derivatives=d.policies.properties == 'all',
-                            spin_orbit=d.policies.properties == 'all'),
+                            spin_orbit=d.policies.properties == 'all',
+                            numerics=d.numerics),
         {label(run.s_key): e0 + r['singlet']['absorption'],
          label(run.t_key): e0 + r['triplet']['absorption']}, e0)
     absorption_flags = {label(k): r[k[0]]['flags']
@@ -1323,7 +1329,8 @@ def finish_minimum(run, stage, walked, t0, extra):
                       couplings=(following(*s_key), following(*t_key)))
     if singlet:
         run.first['t1'] = (man, ev, mol)
-    props = geometry_properties(ev, s_key, t_key, d.n_states)
+    props = geometry_properties(ev, s_key, t_key, d.n_states,
+                                numerics=d.numerics)
     record = {'props': props, 'root_followed': root,
               'solvation': d.solvation,
               'adaptive_posteriori': run.posteriori(man, ev, key),
@@ -1374,7 +1381,8 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
         e0, vertical_g = final.last_ground['result'].energy, r['G']['neq_state']
     else:
         e0, vertical_g = g_walk - r['emission'], r['G']['eq_state']
-    props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states),
+    props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states,
+                                              numerics=d.numerics),
                           {label(key): g_walk}, e0)
     refrozen = relaxation_fields(info).get('refreeze') in ('measured',
                                                            'not converged')

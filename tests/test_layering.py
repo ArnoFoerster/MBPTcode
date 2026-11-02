@@ -47,16 +47,14 @@ PACKAGES = ('src/gradients', 'src/properties')
 
 #: Realization kernels that live under src/gradients: the reverse-mode sweeps
 #: over imaginary time and frequency (`qp_set_gradient`, the space-time
-#: adjoint, the reaction-field screening), and the two-electron spin-orbit
-#: mean-field term, built on rank 0 and locked to every rank. They partition
+#: adjoint, the reaction-field screening). They partition
 #: and reduce, so they take `comm` and use the primitives. Their rule is the
 #: kernel rule: `comm` defaults to None, the context decides, and no serve
 #: loop or broadcast appears. Everything else under PACKAGES is the physics
 #: layer.
 KERNEL_MODULES = frozenset({'src/gradients/gwbse/qp_space_time.py',
                             'src/gradients/rpa/space_time_adjoint.py',
-                            'src/gradients/gwbse/reaction_field_adjoint.py',
-                            'src/gradients/spin_orbit_mean_field.py'})
+                            'src/gradients/gwbse/reaction_field_adjoint.py'})
 
 #: Distributed kernels and state models that live under src/gradients
 #: (the MPI rule goes by role, not by folder): the tiled

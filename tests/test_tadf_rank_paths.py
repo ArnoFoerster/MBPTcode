@@ -148,7 +148,8 @@ def property_block(solvent=None):
                       couplings=((S0, S1), (T0, T1)))
     nocc = mol.nelectron // 2
     soc = spin_orbit_couplings(ev.mf, ev.mol, nocc, ev.spectrum['singlet'],
-                               ev.spectrum['triplet'], nroots=2)
+                               ev.spectrum['triplet'], nroots=2,
+                               numerics=spec.numerics)
     sv = spin_vibronic_coupling(ev, soc['h_mo'], S0, T0, singlet_paths=(S1,),
                                 triplet_paths=(T1,))
     return {'force': ev.gradient[S0], 'omega': np.array([ev.omega[k] for k in

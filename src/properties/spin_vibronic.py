@@ -233,7 +233,8 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
 
         man = StateManifold(chain, states=(S1, S2, T1, T2))
         ev = man.evaluate(couplings=((S2, S1), (T2, T1)))
-        h_mo = spin_orbit.soc_operator_mo(ev.mf, ev.mol)
+        h_mo = spin_orbit.soc_operator_mo(
+            ev.mf, ev.mol, **spin_orbit.declared_operator(numerics))
         out = spin_vibronic_coupling(ev, h_mo, S1, T1, (S2,), (T2,),
                                      modes=modes, masses=masses, omega=omega)
         rates.spin_vibronic_rate(dE, out['v0'], out['dv_dq'], omega, rho, T)

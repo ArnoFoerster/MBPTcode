@@ -161,26 +161,26 @@ def from_adc2(where, coords_bohr, e0, omega_singlet, omega_triplet,
 
 
 def from_adc2_spectrum(spectrum, where, n_states, solvation='gas', emitter='S1',
-                       reservoir='T1', two_electron='somf', one_electron='x2c'):
+                       reservoir='T1', *, numerics):
     """The `StateMinimum` of an ADC(2) spectrum at one geometry
     (`gradients.adc.ee_spectrum.ADC2Spectrum`): E_0, the n_states lowest
     roots of each spin, and the method's own spin-orbit table, transition
     dipoles and oscillator strengths from its ISR transition densities
-    (`properties.transition_moments.spectrum_properties`, the operator
-    two_electron + one_electron). The triplet sublevels follow from the Ms = 0
+    (`properties.transition_moments.spectrum_properties`, the spin-orbit
+    operator `numerics` declares, named in the provenance's soc_term). The triplet sublevels follow from the Ms = 0
     element by the Wigner-Eckart theorem, exact for ADC(2). An SCS-ADC(2)
     spectrum is refused (`SCS_SOC_REFUSAL`); its minimum comes from
     `from_adc2` without a table."""
     if spectrum.method != 'adc2':
         raise ValueError(f'spectrum method {spectrum.method!r}: {SCS_SOC_REFUSAL}')
-    props = spectrum_properties(spectrum, n_states, two_electron, one_electron)
+    props = spectrum_properties(spectrum, n_states, numerics=numerics)
     return from_adc2(where, spectrum.mol.atom_coords(), spectrum.e0,
                      spectrum.omega['singlet'][:n_states],
                      spectrum.omega['triplet'][:n_states], socme=props['socme'],
                      dipole=props['dipole'], f_osc=props['f_osc'],
                      solvation=solvation, emitter=emitter, reservoir=reservoir,
-                     provenance={'socme': f'ISR transition densities, {two_electron} '
-                                          f'+ {one_electron}',
+                     provenance={'socme': 'ISR transition densities',
+                                 'soc_term': props['soc_term'],
                                  'soc_sublevels': 'Ms = 0 element, Wigner-Eckart (exact)',
                                  'dipole': 'ISR ground-state transition density',
                                  'flags': props['flags']})

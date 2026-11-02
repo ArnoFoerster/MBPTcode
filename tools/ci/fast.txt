@@ -234,6 +234,7 @@ pytest test_space_time_shared_kernel.py
 pytest test_spin_adapt.py
 pytest test_spin_orbit.py
 pytest test_spin_orbit_ranks.py
+pytest test_spin_orbit_ri.py
 pytest test_spin_vibronic_model.py
 pytest test_state_manifold.py
 pytest test_state_model_ks_force.py

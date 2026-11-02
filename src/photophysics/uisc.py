@@ -65,8 +65,8 @@ from src.photophysics.rate_models import RateRefused, aligned_minima
 from src.photophysics.records import StageRefused, log
 from src.photophysics import rates
 from src.properties import franck_condon
-from src.properties.spin_orbit import (slope_from_squares, soc_vectors,
-                                       soc_operator_mo)
+from src.properties.spin_orbit import (declared_operator, slope_from_squares,
+                                       soc_vectors, soc_operator_mo)
 from src.gradients.state_identity import align_roots, transported_overlap
 from src.gradients.surface import lockstep_geometry
 from src.properties.curvilinear import huang_rhys_curvilinear
@@ -154,12 +154,13 @@ def solve_at(run, chain_, mol):
     manifolds as (omega, X, Y) triples from ONE quasiparticle set and one W,
     the spin-orbit vectors of every pair (`spin_orbit.soc_vectors`,
     (n_s, n_t, 3)), and the (mol, mo_coeff, nocc) they were solved on,
-    which `follow` matches them by. The spin-orbit operator is the mean-field one
-    of the spin-orbit stage ('somf')."""
+    which `follow` matches them by. The spin-orbit operator is the one the
+    run's numerics declare (`declared_operator`)."""
     manifold = run.manifold(run.s_key, run.t_key, chain=chain_)
     ev = manifold.evaluate(mol)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
-    h_mo = soc_operator_mo(ev.mf, ev.mol, two_electron='somf')
+    h_mo = soc_operator_mo(ev.mf, ev.mol,
+                           **declared_operator(run.declaration.numerics))
     nocc = occupied_count(ev.mf)
     return (singlet, triplet, soc_vectors(h_mo, nocc, singlet[1:], triplet[1:]),
             (ev.mol, np.asarray(ev.mf.mo_coeff, float), nocc))

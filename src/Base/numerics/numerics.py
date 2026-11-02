@@ -29,6 +29,7 @@ The fields:
     walk        the geometry optimizer and the finite-difference steps
     layout      memory and tiling: recorded, not in the identity
     adc         the excitation-energy ADC solve of a state model
+    properties  the spin-orbit operator of the properties pass
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -69,6 +70,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          XC_GRID_LEVEL, XC_GRID_LEVEL_UNRECORDED)
 from src.Base.numerics.constants import (WALK_GROUND_MAX_CYCLE, WALK_GROUND_TRUST_BOHR)
 from src.Base.numerics.constants import EE_ADC_CONV_TOL, LOOP_SOLVER_TOL_FRACTION
+from src.Base.numerics.constants import SOC_ONE_ELECTRON_TERMS, SOC_TWO_ELECTRON_TERMS
 from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
                                          ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                          ORBITAL_MULTIPLIER_TOL)
@@ -479,18 +481,56 @@ class ADCNumerics:
     dense_limit: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class PropertiesNumerics:
+    """The spin-orbit operator of the properties pass
+    (`properties.spin_orbit`): soc_two_electron, its two-electron term, one
+    of SOC_TWO_ELECTRON_TERMS ('ri-somf' the mean field fitted in
+    soc_auxbasis, 'somf' the exact integral pass it approximates, 'amfi'
+    one-centre blocks); soc_auxbasis, the fitting basis by name, None for the
+    JK-fitting basis of the orbital basis (`jkfit_auxbasis`), named for
+    'ri-somf' alone; soc_one_electron, its one-electron operator, one of
+    SOC_ONE_ELECTRON_TERMS ('x2c' the exact two-component operator,
+    'breit-pauli' its leading term). The fit's tiles are `layout.tile_gb`
+    (None: SOMF_RI_TILE_GB). The section chooses how a property is evaluated, not
+    the surface: it is recorded and not hashed (`IDENTITY_FIELDS`), and each
+    record that holds a spin-orbit table names its term."""
+    soc_two_electron: str = 'ri-somf'
+    soc_auxbasis: Optional[str] = None
+    soc_one_electron: str = 'x2c'
+
+    def __post_init__(self):
+        if self.soc_one_electron not in SOC_ONE_ELECTRON_TERMS:
+            raise ValueError(f'soc_one_electron={self.soc_one_electron!r}: '
+                             f'one of {SOC_ONE_ELECTRON_TERMS}')
+        if self.soc_two_electron not in SOC_TWO_ELECTRON_TERMS:
+            raise ValueError(f'soc_two_electron={self.soc_two_electron!r}: '
+                             f'one of {SOC_TWO_ELECTRON_TERMS}')
+        if self.soc_auxbasis is not None and self.soc_two_electron != 'ri-somf':
+            raise ValueError(
+                f'soc_two_electron={self.soc_two_electron!r} with '
+                f'soc_auxbasis={self.soc_auxbasis!r}: the fitting basis is '
+                "named for 'ri-somf' alone")
+
+
 #: The sections of `Numerics`, by field name.
 SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'qp': QPNumerics, 'quadrature': QuadratureNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
             'walk': WalkNumerics, 'layout': LayoutNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
-            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics}
+            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics,
+            'properties': PropertiesNumerics}
 
 #: Sections added after records and identities were first written: a record
 #: without one reads its defaults, and one at its defaults leaves the identity
 #: what it was before the section existed.
-LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'adc')
+LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'adc', 'properties')
+
+#: Later sections whose default is not what a record written without them was
+#: computed with: such a record reads these values, the rest at the defaults.
+#: The spin-orbit pass was the exact SOMF before the section existed.
+UNRECORDED_SECTIONS = {'properties': {'soc_two_electron': 'somf'}}
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -711,9 +751,11 @@ def numerics_of(choices):
     return Numerics(**sections)
 
 
-#: The sections the identity covers: all but `layout`, which is recorded
-#: and not hashed.
-IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
+#: The sections the identity covers: all but `layout` and `properties`, which
+#: are recorded and not hashed (how a calculation is laid out, and how a
+#: property is evaluated on a surface, choose no surface).
+IDENTITY_FIELDS = tuple(name for name in SECTIONS
+                        if name not in ('layout', 'properties'))
 # declarations that permit a calculation without changing any (the reason is
 # at each field)
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
@@ -770,6 +812,7 @@ class Numerics:
     qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
     imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
     adc: ADCNumerics = field(default_factory=ADCNumerics)
+    properties: PropertiesNumerics = field(default_factory=PropertiesNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None
@@ -795,8 +838,10 @@ class Numerics:
     @classmethod
     def from_record(cls, record):
         """The object `to_record` wrote. A record whose scf section names no
-        xc_grid is read on pyscf's default grid (XC_GRID_LEVEL_UNRECORDED)."""
-        sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
+        xc_grid is read on pyscf's default grid (XC_GRID_LEVEL_UNRECORDED); a
+        record without a later section reads `UNRECORDED_SECTIONS`."""
+        sections = {name: dict(record.get(name, UNRECORDED_SECTIONS.get(
+                        name, {}))) if name in LATER_SECTIONS
                     else dict(record[name]) for name in SECTIONS}
         sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
         sections = without_retired(sections)

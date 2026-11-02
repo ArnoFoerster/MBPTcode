@@ -52,6 +52,31 @@ assumed) plus the Herzberg-Teller dV/dq scan over `vibronic`'s ground-state
 modes that `spin_vibronic_rate` needs for an El-Sayed-forbidden pair, where the
 Condon term alone is not the whole story.
 
+**The spin-orbit operator on large molecules** — the two-electron part of the
+spin-orbit mean-field operator costs a pass over all four-index integrals,
+which grows with the fourth power of the basis and dominates the properties of
+an emitter-size molecule. The default of a photophysics run,
+`soc_two_electron='ri-somf'`, builds the same operator with the density side
+fitted in an auxiliary basis: three-index integrals and matrix products in
+place of the four-index pass, divided over the ranks of a parallel run. The
+fitting basis is the JK-fitting set of the orbital basis (aug-cc-pvdz-jkfit
+for aug-cc-pVDZ) unless `soc_auxbasis` names another; an orbital basis without
+such a set is refused, and the run must name one or declare the exact pass,
+`soc_two_electron='somf'`. The largest change of any coupling against the
+exact pass, with the JK-fitting set of the orbital basis:
+
+| molecule, basis | largest coupling | largest change |
+|---|---|---|
+| formaldehyde, aug-cc-pVDZ | 57 cm^-1 | 0.0006 cm^-1 |
+| thiophene, aug-cc-pVDZ | 32 cm^-1 | 0.0011 cm^-1 |
+| 2CzPN, cc-pVDZ | 3.0 cm^-1 | 0.0006 cm^-1 |
+
+The change falls further with a larger fitting basis. On 2CzPN in cc-pVDZ
+(594 basis functions) the fitted term takes one twentieth of the exact one's
+time. A run that wants the exact pass declares it in its numerics,
+`Numerics(properties={'soc_two_electron': 'somf'})`. A stored run written
+before the setting existed holds exact-pass couplings and resumes as it is.
+
 **Spin-vibronic coupling** — intersystem crossing between a singlet and a
 triplet of the same orbital character (both n -> pi*, or both pi -> pi*) is
 nearly forbidden by El-Sayed's rule: their spin-orbit coupling is close to
@@ -74,7 +99,7 @@ from pyscf import gto, scf
 from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.state_manifold import StateManifold
-from src.properties.spin_orbit import soc_operator_mo
+from src.properties.spin_orbit import declared_operator, soc_operator_mo
 from src.properties.spin_vibronic import spin_vibronic_coupling
 
 
@@ -94,7 +119,8 @@ chain = ExcitedStateChain(mol, rhf, mf=rhf(mol), numerics=numerics)
 S1, S2, T1, T2 = ('singlet', 0), ('singlet', 1), ('triplet', 0), ('triplet', 1)
 ev = StateManifold(chain, states=(S1, S2, T1, T2)).evaluate(
     couplings=((S2, S1), (T2, T1)))
-out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol), S1, T1,
+h_mo = soc_operator_mo(ev.mf, ev.mol, **declared_operator(numerics))
+out = spin_vibronic_coupling(ev, h_mo, S1, T1,
                              singlet_paths=(S2,), triplet_paths=(T2,))
 print('|<S1|H_SO|T1>| =', out['v0'], 'Hartree')
 print('|dV/dR| =', np.linalg.norm(out['dv_cart']), 'Hartree/Bohr')
