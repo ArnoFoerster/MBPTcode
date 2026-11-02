@@ -42,7 +42,10 @@ src/Base/                      the foundation
                                SCF), the distributed DF and ISDF builds,
                                sliced_factors.py, shell_runs.py (the
                                bounded runs of consecutive shells every
-                               blocked integral pass is cut into)
+                               blocked integral pass is cut into),
+                               test_sets.py (the replicated and the
+                               row fit of each ISDF test set, chosen by
+                               name)
     geometry/                  displaced geometries, body frames, Kabsch
     basis/                     CP2K's aug-MOLOPT orbital and RI sets, read at
                                run time (see basis-sets.md); the auxiliary

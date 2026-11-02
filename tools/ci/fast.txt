@@ -18,6 +18,7 @@ script test_analytical_continuation.py
 pytest test_ao_product_fit.py
 pytest test_ao_product_fit_adjoint.py
 pytest test_ao_product_fit_rows.py
+pytest test_isdf_test_sets.py
 pytest test_auxiliary_bosons.py
 pytest test_auxiliary_bosons_move.py
 script test_base.py

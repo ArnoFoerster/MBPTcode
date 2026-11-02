@@ -111,17 +111,17 @@ from pyscf.df.incore import LINEAR_DEP_THR
 from pyscf.dft import gen_grid, numint, radi
 from pyscf.scf import _vhf
 
-from src.Base.numerics.constants import (ISDF_TEST_SETS,
-                                         SKELETON_AUX_TILE, SKELETON_EXCHANGE_OCC_BLOCK,
+from src.Base.factorization.test_sets import row_fit
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, SKELETON_AUX_TILE,
+                                         SKELETON_EXCHANGE_OCC_BLOCK,
                                          SKELETON_EXCHANGE_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
-from src.Base.factorization.ao_product_fit import ao_product_fit_rows
-from src.Base.factorization.separable_ri import (Held, fit_rows, row_layout,
-                                                 tile_collocation, tile_edge)
+from src.Base.factorization.separable_ri import (Held, row_layout, tile_collocation,
+                                                 tile_edge)
 from src.Base.factorization.shell_runs import shell_runs
-from src.gradients.ao_product_fit_adjoint import ao_product_fit_rows_adjoints
-from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
-                                            fit_rows_adjoint)
+from src.gradients.ao_product_fit_adjoint import row_fit_adjoints
+from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root,
+                                            two_centre_rows_adjoint)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
                                               contiguous_block, current_comm,
                                               exchange_blocks, lockstep,
@@ -538,7 +538,7 @@ def exchange_skeleton_by_atoms(mol, g_ao, D, omega, weight, comm=None):
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
                        prefactor=1.0, channels=((0.0, 1.0),), mt=None, X=None,
                        block=None, numerics=None, comm=None,
-                       test_set=ISDF_TEST_SETS[0]):
+                       test_set=ISDF_DUCHEMIN_BLASE):
     """(centre, points, held) of d/dR E_K^ISDF at fixed densities on the row
     fit: the (natm, 3) centre terms of every integral and collocation, and
     the (nk, 3) adjoint on the points for the point and frame chain.
@@ -557,16 +557,8 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
         mol, auxmol, coords, layout, dm, dm_other=dm_other,
         prefactor=prefactor, channels=channels, mt=mt, X=X, block=block,
         numerics=numerics, comm=comm, test_set=test_set)
-    if test_set == 'ao_products':
-        adjoint = ao_product_fit_rows_adjoints(
-            mol, auxmol, coords, [seeds], numerics=numerics, comm=comm,
-            block=block)[0]
-    else:
-        adjoint = fit_rows_adjoint(mol, auxmol, coords, None, layout,
-                                   numerics=numerics, comm=comm,
-                                   block=block, mt_bar=seeds.mt_bar,
-                                   x_bar_ao=seeds.x_bar_ao,
-                                   metric_bar=seeds.metric_bar)
+    adjoint = row_fit_adjoints(test_set, mol, auxmol, coords, layout, [seeds],
+                               numerics=numerics, comm=comm, block=block)[0]
     held.update({f'adjoint_{k}': v for k, v in adjoint.held.items()})
     centre = adjoint.fit_centre + adjoint.coll_centre + two
     return centre, adjoint.fit_points + adjoint.coll_points, held
@@ -575,7 +567,7 @@ def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
 def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
                         prefactor=1.0, channels=((0.0, 1.0),), mt=None,
                         X=None, block=None, numerics=None, comm=None,
-                        test_set=ISDF_TEST_SETS[0]):
+                        test_set=ISDF_DUCHEMIN_BLASE):
     """(seeds, centre, held): what d/dR E_K^ISDF of `isdf_exchange_rows`
     hands the row fit's adjoint -- `isdf_fit_adjoint.AdjointSeeds` with MT_bar
     and X_bar on this rank's tiles and the bare metric's V_bar on rank 0 --
@@ -598,15 +590,9 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
     mine = owners[rank]
     hold = held = Held()
 
-    if mt is None and test_set == 'ao_products':
-        fit = ao_product_fit_rows(mol, auxmol, coords, numerics=numerics,
-                                  comm=comm, block=block)
-        mt = fit.mt
-        held.update({f'fit_{k}': v for k, v in fit.held.items()})
-        del fit
-    elif mt is None:
-        fit = fit_rows(mol, auxmol, coords, numerics=numerics, comm=comm,
-                       block=block, layout=layout)
+    if mt is None:
+        fit = row_fit(test_set, mol, auxmol, coords, numerics=numerics,
+                      comm=comm, block=block, layout=layout)
         mt = fit.mt
         held.update({f'fit_{k}': v for k, v in fit.held.items()})
         del fit

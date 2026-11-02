@@ -82,7 +82,9 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
                                               current_comm, lockstep,
                                               ordered_sum,
                                               reduce_sum)
+from src.Base.factorization.test_sets import is_ao_products
 from src.gradients.isdf_fit_adjoint import (centre_forces, collocation_rows,
+                                            fit_rows_adjoints,
                                             adjoint_inputs, closed_adjoints,
                                             root_sums, summed_seeds,
                                             tiles_at_root)
@@ -275,6 +277,20 @@ def _projection_adjoint(mol, auxmol, X, E_bar, X_bar, numerics):
     for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
         grad[ia] += aux_total[:, q0:q1].sum(axis=1)
     return grad
+
+
+def row_fit_adjoints(test_set, mol, auxmol, coords, layout, targets,
+                     numerics=None, comm=None, block=None):
+    """[RowFitAdjoint] of `targets` (`AdjointSeeds`) on the row fit of
+    `test_set` (`test_sets.row_fit`): `ao_product_fit_rows_adjoints`, or
+    `isdf_fit_adjoint.fit_rows_adjoints` on the pair `layout` the
+    Duchemin-Blase fit kept (None on the AO-product test set)."""
+    if is_ao_products(test_set):
+        return ao_product_fit_rows_adjoints(mol, auxmol, coords, targets,
+                                            numerics=numerics, comm=comm,
+                                            block=block)
+    return fit_rows_adjoints(mol, auxmol, coords, layout, targets,
+                             numerics=numerics, comm=comm, block=block)
 
 
 def ao_product_fit_rows_adjoints(mol, auxmol, coords, targets, numerics=None,

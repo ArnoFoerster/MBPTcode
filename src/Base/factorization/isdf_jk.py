@@ -74,25 +74,25 @@ import scipy.linalg
 from pyscf import df, scf
 from pyscf.lib import logger
 
+from src.Base.factorization.test_sets import is_ao_products, replicated_fit
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_TEST_SETS,
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
                                          ISDF_JK_CHECK_TOL,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION)
 from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.numerics import (ISDF_JK_REQUEST_FIELDS, IsdfNumerics,
                                         numerics_or_default, requested, same_setting)
-from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
-                                                 fit_M_streaming,
+from src.Base.factorization.separable_ri import (aux_metric_sqrt,
                                                  molecular_points_covariant,
-                                                 refuse_unrepresented_factors, require_grid,
-                                                 resolve_grid, resolve_isdf_grid)
+                                                 refuse_unrepresented_factors,
+                                                 require_grid, resolve_grid,
+                                                 resolve_isdf_grid)
 from src.Base.geometry.body_frame import BodyFrame
 from src.Base.factorization.separable_ri import atomic_frames
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.factorization.separable_ri import points_on_frames
-from src.Base.factorization.ao_product_fit import (ao_product_fit, placed,
-                                                   pivoted_points)
+from src.Base.factorization.ao_product_fit import placed, pivoted_points
 
 
 #: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on,
@@ -431,7 +431,7 @@ class ISDFJK(df.df.DF):
         # unnamed, the tabulated grid's fit: its points follow the atoms'
         # frames at every geometry, where pivoted points move smoothly only
         # inside `frozen_frames`, which a walk's mean field does not enter
-        self.test_set = self.numerics.isdf.test_set or ISDF_TEST_SETS[0]
+        self.test_set = self.numerics.isdf.test_set or ISDF_DUCHEMIN_BLASE
         self.pivot_points = self.numerics.isdf.pivot_points
         # None follows mol.verbose, so the knob that turns on the mean field's
         # output turns on the factorization's too, which can run for minutes
@@ -527,7 +527,7 @@ class ISDFJK(df.df.DF):
             auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
             frames=frames,
             runtime_radii=self.numerics.isdf.runtime_radii)
-        if self.test_set != 'ao_products':
+        if not is_ao_products(self.test_set):
             return pts, radii, origins
         mol = self.mol
         held = None if frames is None else frames.selection
@@ -563,15 +563,10 @@ class ISDFJK(df.df.DF):
             self.auxmol = df.addons.make_auxmol(mol, auxbasis=self.auxbasis)
         if self.coords is None:
             self.coords, self.grid_radii, self.grid_origins = self.place_grid()
-        if self.test_set == 'ao_products':
-            self.X, self.M, _ = ao_product_fit(mol, self.auxmol, self.coords,
-                                               self.numerics)
-        else:
-            self.X = ao_values(mol, self.coords)
-            self.M = fit_M_streaming(mol, self.auxmol, self.coords,
-                                     numerics=self.numerics,
-                                     progress=self.progress,
-                                     layout=self.fit_layout())
+        self.X, self.M = replicated_fit(self.test_set, mol, self.auxmol,
+                                        self.coords, self.numerics,
+                                        progress=self.progress,
+                                        layout=self.fit_layout)
         log.timer('ISDF factorization (M = %d points, nao = %d, naux = %d)'
                   % (self.nk, mol.nao_nr(), self.auxmol.nao_nr()), *t0)
         if self.j_route == 'isdf':

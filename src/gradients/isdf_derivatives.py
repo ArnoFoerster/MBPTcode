@@ -45,7 +45,7 @@ import warnings
 from contextlib import contextmanager
 
 import numpy as np
-from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS, ISDF_TEST_SETS,
                                          THREE_CENTER_BLOCK_BYTES,
                                          WHOLE_FIT_ADJOINT_MAX_GB)
@@ -62,10 +62,16 @@ from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, a
                                                  rows_transpose_product,
                                                  screened_layout, fit_test_set_D,
                                                  fit_test_set_layout)
-from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds, fit_rows_adjoints
-from src.gradients.ao_product_fit_adjoint import (ao_product_fit_rows_adjoints,
-                                                  exchange_skeleton)
-from src.gradients.isdf_adjoint_pieces import (GaugeAdjoint, PointChain, basis_centre_forces, isdf_exchange_adjoints, mean_field_point_chain, point_chain, point_layout, sqrtm_adjoint, two_centre_adjoint)
+from src.gradients.isdf_fit_adjoint import AdjointSeeds, GaugeSeeds
+from src.gradients.ao_product_fit_adjoint import (exchange_skeleton,
+                                                  row_fit_adjoints)
+from src.gradients.isdf_adjoint_pieces import (GaugeAdjoint, PointChain,
+                                               basis_centre_forces,
+                                               isdf_exchange_adjoints,
+                                               mean_field_point_chain,
+                                               point_chain, point_layout,
+                                               sqrtm_adjoint,
+                                               two_centre_adjoint)
 from src.gradients.skeleton_tiles import isdf_exchange_seeds
 from src.Base.factorization.shell_runs import shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
@@ -86,7 +92,7 @@ class FitKey:
     `ao_product_fit_adjoint.ao_product_fit_rows_adjoints`."""
 
     def __init__(self, mol, auxmol, coords, layout, block, numerics=None,
-                 test_set=ISDF_TEST_SETS[0]):
+                 test_set=ISDF_DUCHEMIN_BLASE):
         l_max_second, regularization, block_memory_gb = fit_settings(
             numerics, 'l_max_second', 'regularization', 'block_memory_gb')
         if test_set not in ISDF_TEST_SETS:
@@ -119,13 +125,9 @@ class FitKey:
 
     def contract(self, targets):
         """[RowFitAdjoint] of `targets` (`AdjointSeeds`) on this fit."""
-        if self.test_set == 'ao_products':
-            return ao_product_fit_rows_adjoints(
-                self.mol, self.auxmol, self.coords, targets,
-                numerics=self.numerics, block=self.block)
-        return fit_rows_adjoints(self.mol, self.auxmol, self.coords,
-                                 self.layout, targets, block=self.block,
-                                 numerics=self.numerics)
+        return row_fit_adjoints(self.test_set, self.mol, self.auxmol,
+                                self.coords, self.layout, targets,
+                                numerics=self.numerics, block=self.block)
 
 
 class PendingFitAdjoint:
@@ -626,7 +628,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
 def row_fit_adjoint(mol, auxmol, coords, d_bar, x_bar, mo_coeff, layout,
                     pts_local, atom_of_point, frames=None, decay=FRAME_DECAY,
                     with_frames=True, block=None, pending=None, body=None,
-                    gauges=(), test_set=ISDF_TEST_SETS[0]):
+                    gauges=(), test_set=ISDF_DUCHEMIN_BLASE):
     """(g_collocation, g_fit, held): the collocation branch of X_bar and the
     fit branch of D_bar on the row-distributed fit, `fit_rows`' estimator on
     the frozen `layout` (its Gram matrix over every product pair), or with

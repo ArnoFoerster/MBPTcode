@@ -79,11 +79,10 @@ from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.body_frame import BodyFrame
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.surface_identity import chain_identity
-from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, ENVIRONMENT_CACHE_SIZE,
                                          EVALUATION_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
-                                         FIT_REALIZATIONS,
-                                         ISDF_DEFAULT_TEST_SET,
-                                         ISDF_FIT_ERROR_FAILED, ISDF_TEST_SETS)
+                                         FIT_REALIZATIONS, ISDF_DEFAULT_TEST_SET,
+                                         ISDF_FIT_ERROR_FAILED)
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
                                         require_same_numerics)
 from src.environments.environment import dresses_interaction
@@ -120,7 +119,7 @@ FACTORIZATION_RECORD = ('basis', 'auxbasis', 'counts', 'n_start', 'radii_tag',
                         'frames', 'M', 'naux', 'layout', 'sliced', 'fit',
                         'fit_block', 'test_set', 'pivot_points')
 #: What a record written before a field existed reads it as.
-FACTORIZATION_RECORD_DEFAULTS = {'test_set': ISDF_TEST_SETS[0],
+FACTORIZATION_RECORD_DEFAULTS = {'test_set': ISDF_DUCHEMIN_BLASE,
                                  'pivot_points': None}
 
 

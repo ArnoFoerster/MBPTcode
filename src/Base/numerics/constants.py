@@ -347,9 +347,11 @@ WHOLE_FIT_ADJOINT_MAX_GB = 256.0
 # A grid named without a test set (a level, counts or radii) is 'ao_products'
 # on points pivoted by ISDF_PIVOT_FRACTION / ISDF_PIVOT_POINTS_PER_ATOM; the
 # first is reached only by naming it.
-ISDF_TEST_SETS = ('duchemin_blase', 'ao_products')
+ISDF_DUCHEMIN_BLASE = 'duchemin_blase'
+ISDF_AO_PRODUCTS = 'ao_products'
+ISDF_TEST_SETS = (ISDF_DUCHEMIN_BLASE, ISDF_AO_PRODUCTS)
 #: The test set a named grid means where none is named.
-ISDF_DEFAULT_TEST_SET = 'ao_products'
+ISDF_DEFAULT_TEST_SET = ISDF_AO_PRODUCTS
 
 # The parent grid points are hard-pivoted from (`IsdfNumerics.pivot_points`):
 # the tabulated atomic grid of the level or counts with every sub-shell's radii

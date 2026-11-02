@@ -81,6 +81,7 @@ from pyscf.df import addons
 from pyscf.lib import logger
 from pyscf.scf import _vhf, jk
 
+from src.Base.factorization.test_sets import is_ao_products, row_fit
 from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION,
                                          ISDF_SCF_METRIC_SLAB)
@@ -88,10 +89,9 @@ from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
                                                    lockstep_density,
                                                    reduce_parts, add_seconds,
                                                    distributed_handles)
-from src.Base.factorization.ao_product_fit import ao_product_fit_rows
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
-                                                 fit_M_streaming, screened_layout)
+                                                 screened_layout)
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block,
@@ -287,17 +287,10 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
             self.mine = [int(t) for t in partition(len(self.tiles), rank,
                                                    size)]
             t_fit = time.time()
-            if source.test_set == 'ao_products':
-                # the AO-product row fit, in the same tiles
-                fit = ao_product_fit_rows(mol, self.auxmol, coords,
-                                          numerics=source.numerics, comm=comm,
-                                          block=self.tile)
-            else:
-                fit = fit_M_streaming(mol, self.auxmol, coords,
-                                      numerics=source.numerics,
-                                      progress=source.progress, comm=comm,
-                                      fit='rows', block=self.tile,
-                                      layout=source.fit_layout())
+            fit = row_fit(source.test_set, mol, self.auxmol, coords,
+                          numerics=source.numerics, comm=comm,
+                          block=self.tile, progress=source.progress,
+                          layout=source.fit_layout)
             add_seconds(self.timings, 'scf_isdf_fit', t_fit)
         _ran_on(self.timings, 'scf_isdf_blas_fit', pool)
         if fit is not None:
@@ -754,7 +747,7 @@ def scf_pair_layout(mf):
         if handles is not None and isinstance(handles[0], DistributedISDFJK):
             handle = handles[0]
     source = with_df if handle is None else handle.source
-    if not isinstance(source, ISDFJK) or source.test_set == 'ao_products':
+    if not isinstance(source, ISDFJK) or is_ao_products(source.test_set):
         # the AO-product test set screens no pair
         return None
     if source.pair_layout is not None:

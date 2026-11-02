@@ -104,19 +104,17 @@ from scipy.optimize import minimize, basinhopping
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
-from src.Base.numerics.constants import (BYTES_PER_GB, AUX_METRIC_INDEFINITE_TOL, LEGACY_R_MAX,
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
+                                         AUX_METRIC_INDEFINITE_TOL, LEGACY_R_MAX,
                                          AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
-                                         METRIC_ROOT_CACHE_BYTES,
-                                         FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
-                                         FRAME_TURNING_RATE_BAR,
+                                         METRIC_ROOT_CACHE_BYTES, FIT_ROW_CHUNK_BYTES,
+                                         FIT_TRANSPOSE_TILE, FRAME_TURNING_RATE_BAR,
                                          ISDF_DENSITY_RESIDUAL_TOL, ISDF_GRID_ACCURACY,
-                                         ISDF_FITTED_DENSITY_ROWS,
-                                         ISDF_GRID_N_START, ISDF_ORBITAL_RESIDUAL_TOL,
+                                         ISDF_FITTED_DENSITY_ROWS, ISDF_GRID_N_START,
+                                         ISDF_ORBITAL_RESIDUAL_TOL,
                                          ISDF_REFUSED_ORBITALS_NAMED,
-                                         ISDF_RADII_MATCH_TOL,
-                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TEST_SETS,
-                                         ISDF_TILE_GB,
-                                         THREE_CENTER_BLOCK_BYTES)
+                                         ISDF_RADII_MATCH_TOL, ISDF_SPAN_OVERLAP_FLOOR,
+                                         ISDF_TILE_GB, THREE_CENTER_BLOCK_BYTES)
 from src.Base.geometry.geometry import elements_of, grid_key
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
@@ -309,7 +307,7 @@ class FitTiles:
     """
 
     def __init__(self, mol, auxmol, coords, block, mt, comm, held, settings,
-                 kept=None, test_set=ISDF_TEST_SETS[0]):
+                 kept=None, test_set=ISDF_DUCHEMIN_BLASE):
         self.test_set = str(test_set)
         self.keys = (content_key(mol), content_key(auxmol))
         self.kept = None if kept is None else _read_only(kept)
@@ -326,7 +324,7 @@ class FitTiles:
                          float(regularization), float(block_memory_gb))
 
     def row_fit(self, mol, auxmol, coords, block, comm, settings,
-                layout=None, test_set=ISDF_TEST_SETS[0]):
+                layout=None, test_set=ISDF_DUCHEMIN_BLASE):
         """The `RowFit` `fit_rows` would return for this call, read from
         these tiles, or None where the call asks for another fit: another
         test set, molecule, basis, point, tile edge, setting or rank layout,

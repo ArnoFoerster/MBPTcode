@@ -536,12 +536,12 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
         assert 'three-index' in got['rows, whole'][0]
 
 
-def rank_shaped_fit(fit_rows):
-    """`fit_rows` whose M^T tiles pass through one product over all of this
+def rank_shaped_fit(row_fit):
+    """`row_fit` whose M^T tiles pass through one product over all of this
     rank's tiles stacked, on the shape-sensitive BLAS: a GEMM whose shape is
     the rank's share, which the row kernel must not contain."""
     def fit(*args, **kwargs):
-        out = fit_rows(*args, **kwargs)
+        out = row_fit(*args, **kwargs)
         if out.mt:
             order = sorted(out.mt)
             stacked = shaped.shape_mm(np.vstack([out.mt[t] for t in order]),
@@ -564,7 +564,7 @@ def shape_main(size, plant=False):
     tiles = importlib.import_module('src.gradients.skeleton_tiles')
     sep = importlib.import_module('src.Base.factorization.separable_ri')
     if plant:
-        tiles.fit_rows = rank_shaped_fit(tiles.fit_rows)
+        tiles.row_fit = rank_shaped_fit(tiles.row_fit)
     ref = mean_field('ethylene', 'lrc-wpbeh', 'isdf')
     ref.with_df.build()
     crd, aux = ref.with_df.coords, auxmol_of(ref)
