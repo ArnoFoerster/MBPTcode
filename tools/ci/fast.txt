@@ -405,6 +405,7 @@ pytest test_solvated_memory_budget.py
 pytest test_solvated_adc2_scf.py
 pytest test_ee_adc_fold_start.py
 pytest test_ee_adc_fold_solve_speed.py
+pytest test_ee_adc_fold_full_check.py
 pytest test_host_medium.py
 pytest test_adc_davidson_degenerate_copies.py
 pytest test_codegen_optional.py
