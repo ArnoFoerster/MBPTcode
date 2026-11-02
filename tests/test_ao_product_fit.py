@@ -57,11 +57,17 @@ from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.rpa.factor_chain import FrozenFactorization
+from tests.pins import RECORDING_BLAS, blas_identity
 
 H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
 REG, = fit_settings(None, 'regularization')
 #: Rounding of the fit through its balanced Gram matrix, relative.
 FIT_ROUNDING = 1e-8
+#: How far below the largest remaining residual a pivot may sit, relative, off
+#: the recording BLAS: on water's G1 parent the greedy path holds an exact tie
+#: (step 3) and a 5.5e-12 one (step 2), which another BLAS's Gram entries may
+#: break the other way.
+PIVOT_TIE_RTOL = 1e-10
 AO_NUMERICS = Numerics(isdf={'level': 'G1', 'test_set': 'ao_products',
                              'pivot_points': 150})
 
@@ -145,7 +151,9 @@ def parent(mol):
 
 def test_the_pivot_is_the_greedy_pivot_on_the_whole_gram_matrix(water):
     """Columns formed on demand pick what the textbook pivot picks on the
-    whole balanced Gram matrix of the parent (1776 points)."""
+    whole balanced Gram matrix of the parent (1776 points): the same indices
+    under the recording BLAS; under another, at every step a largest remaining
+    residual to PIVOT_TIE_RTOL, since the path holds near-ties."""
     mol = water[0]
     coords = parent(mol)
     G, _ = apf.balanced_gram(mol.eval_gto('GTOval_sph', coords))
@@ -154,9 +162,19 @@ def test_the_pivot_is_the_greedy_pivot_on_the_whole_gram_matrix(water):
     np.fill_diagonal(G, 1.0 + REG)
     want = greedy(G, 150)
     got = apf.column_pivots(mol, coords, 150)
-    assert np.array_equal(got, want)
+    if RECORDING_BLAS == blas_identity():
+        assert np.array_equal(got, want)
+    else:
+        # a near-tie may go either way: each pick is a largest remaining
+        # residual of the whole matrix along the path `got` takes
+        assert len(set(got.tolist())) == len(got)
+        R = G.copy()
+        for k in got:
+            d = np.diag(R)
+            assert d[k] >= (1.0 - PIVOT_TIE_RTOL) * d.max(), (k, d[k], d.max())
+            R = R - np.outer(R[:, k], R[k, :]) / R[k, k]
     # every count's selection is a prefix of the next one's
-    assert np.array_equal(apf.column_pivots(mol, coords, 60), want[:60])
+    assert np.array_equal(apf.column_pivots(mol, coords, 60), got[:60])
 
 
 def test_the_blocked_pivot_takes_the_greedy_pivots_in_few_blocks(water):
