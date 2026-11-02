@@ -160,8 +160,12 @@ _NOTE_LOCK = threading.Lock()
 #: The handle's GEMM stages of a distributed ISDF-K SCF, by the call `note`
 #: keys them on: each must run on the whole node pool.
 GEMM_STAGES = {
-    ('dpotrf', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's Cholesky",
-    ('trsm', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's trsm",
+    ('dpotrf', 'src.Base.factorization.separable_ri', 'cholesky_tiles'):
+        "the fit's Cholesky",
+    ('trsm', 'src.Base.factorization.separable_ri', 'cholesky_tiles'):
+        "the fit's forward trsm",
+    ('trsm', 'src.Base.factorization.separable_ri', 'backward_tiles'):
+        "the fit's backward trsm",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_interaction_rows'):
         "G and Z's rows",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_exchange_rows'): 'the K builds',

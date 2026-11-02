@@ -66,20 +66,21 @@ from src.Base.factorization.ao_product_fit import (ao_product_projection,
                                                    fit_shell_runs,
                                                    half_transform_operand,
                                                    half_transformed,
-                                                   own_runs, point_tiles,
+                                                   own_runs,
                                                    product_gram_tiles,
                                                    projection_rows,
                                                    three_centre_block)
-from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
+from src.Base.factorization.separable_ri import (Held, ao_values,
+                                                 aux_metric_sqrt,
                                                  backward_tiles,
                                                  cholesky_tiles, fit_settings,
-                                                 forward_tiles,
-                                                 tile_collocation,
-                                                 total_bytes)
-from src.Base.numerics.constants import BYTES_PER_GB, FIT_CHOLESKY_BLOCK
+                                                 forward_tiles, point_tiles,
+                                                 row_layout, tile_collocation,
+                                                 tile_edge, total_bytes)
+from src.Base.numerics.constants import BYTES_PER_GB
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast_rows,
                                               current_comm, lockstep,
-                                              ordered_sum, partition,
+                                              ordered_sum,
                                               reduce_sum)
 from src.gradients.isdf_fit_adjoint import (centre_forces, collocation_rows,
                                             adjoint_inputs, closed_adjoints,
@@ -303,28 +304,21 @@ def ao_product_fit_rows_adjoints(mol, auxmol, coords, targets, numerics=None,
                                                 comm.Get_size())
     if nranks > 1:
         coords = lockstep(coords, comm)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    block = tile_edge(block)
     nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
     nk = len(coords)
-    tiles = [(t0, min(t0 + block, nk)) for t0 in range(0, nk, block)]
+    tiles, owners, _ = row_layout(nk, block, comm)
     ntiles = len(tiles)
-    owners = [[int(t) for t in partition(ntiles, r, nranks)]
-              for r in range(nranks)]
     mine = owners[rank]
     targets = [summed_seeds(t) if isinstance(t, (list, tuple)) else t
                for t in targets]
     ntargets = len(targets)
-    # every array the pass may hold, zero until it does: the same keys on
-    # every rank
-    held = dict.fromkeys((
+    hold = held = Held((
         'metric_lu', 'X_rows', 'X_ext', 'stream_tile', 'S_rows', 'panel',
         'metric_root', 'metric_slab', 'MT_bar_rows', 'W_rows', 'E_bar_rows',
         'X_bar_rows', 'E_rows', 'run_block', 'root_gather', 'MT_rows',
         'G3_batch', 'derivative_block', 'column_tile', 'root_adjoint',
-        'two_centre_slab'), 0)
-
-    def hold(name, nbytes):
-        held[name] = max(held[name], int(nbytes))
+        'two_centre_slab'))
 
     def total(per_target):
         return sum(total_bytes(a.values()) for a in per_target)

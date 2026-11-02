@@ -150,6 +150,56 @@ def fit_settings(numerics, *names):
     return tuple(held[name] for name in names)
 
 
+def point_tiles(n, block=FIT_CHOLESKY_BLOCK):
+    """[(t0, t1)]: the points in fixed tiles of `block`, the unit every row
+    fit and its adjoint work in, tile t owned by rank t % size (`row_layout`).
+    A tile's arithmetic is the same calls on the same shapes whoever owns it,
+    so every result is the same bits at every rank count."""
+    return [(t0, min(t0 + block, n)) for t0 in range(0, n, block)]
+
+
+def tile_edge(block):
+    """The tile edge of a row fit: `block`, FIT_CHOLESKY_BLOCK when None; an
+    edge below one point is refused."""
+    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    if block < 1:
+        raise ValueError(f'block={block}: a tile holds at least one point')
+    return block
+
+
+def row_extension(nk, block, rank, nranks):
+    """(e0, e1): the whole tiles over rank `rank`'s contiguous rows
+    (`contiguous_block`), the rows of the collocation a `RowFit` keeps."""
+    r0, r1 = contiguous_block(nk, rank, nranks)
+    if r1 <= r0:
+        return r0, r0
+    return (r0 // block) * block, min(-(-r1 // block) * block, nk)
+
+
+def row_layout(nk, block, comm):
+    """(tiles, owners, ext) of a row fit of `nk` points over the ranks of
+    `comm`: the `point_tiles`, owners[r] the tiles rank r owns
+    (round-robin, `partition`) and this rank's `row_extension`."""
+    rank, nranks = ((0, 1) if comm is None
+                    else (comm.Get_rank(), comm.Get_size()))
+    tiles = point_tiles(nk, block)
+    owners = [[int(t) for t in partition(len(tiles), r, nranks)]
+              for r in range(nranks)]
+    return tiles, owners, row_extension(nk, block, rank, nranks)
+
+
+class Held(dict):
+    """{array: most bytes of it this rank held at once}, every name a pass
+    may hold zero until it does, so the same keys on every rank; calling it
+    with (name, nbytes) records a peak."""
+
+    def __init__(self, names=()):
+        super().__init__(dict.fromkeys(names, 0))
+
+    def __call__(self, name, nbytes):
+        self[name] = max(self.get(name, 0), int(nbytes))
+
+
 class RowFit:
     """This rank's share of the row-distributed fit (`fit_rows`).
 
@@ -302,10 +352,7 @@ class FitTiles:
                     self.kept):
                 return None
         nk = len(coords)
-        r0, r1 = contiguous_block(nk, ranks[1], ranks[0])
-        e0 = e1 = r0
-        if r1 > r0:
-            e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
+        e0, e1 = row_extension(nk, block, ranks[1], ranks[0])
         X_ext = np.empty((e1 - e0, mol.nao_nr()))
         for k0 in range(e0, e1, block):
             k1 = min(k0 + block, nk)
@@ -1021,9 +1068,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
                     else (comm.Get_rank(), comm.Get_size()))
     if nranks > 1:
         coords = lockstep(coords, comm)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
-    if block < 1:
-        raise ValueError(f'block={block}: a tile holds at least one point')
+    block = tile_edge(block)
     if tiles is not None:
         _t = time.time()
         handed = tiles.row_fit(mol, auxmol, coords, block, comm,
@@ -1039,25 +1084,12 @@ def fit_rows(mol, auxmol, coords, numerics=None,
             return handed
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
-    ntiles = -(-nk // block)
-    tiles = [(t * block, min((t + 1) * block, nk)) for t in range(ntiles)]
-    owners = [[int(t) for t in partition(ntiles, r, nranks)]
-              for r in range(nranks)]
+    tiles, owners, (e0, e1) = row_layout(nk, block, comm)
+    ntiles = len(tiles)
     mine = owners[rank]
-    r0, r1 = contiguous_block(nk, rank, nranks)
-    e0 = e1 = r0             # the whole tiles over this rank's contiguous rows
-    if r1 > r0:
-        e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
-    # every array the fit may hold, zero until it does
-    held = dict.fromkeys(('metric_lu', 'X_rows', 'B_rows', 'aux_rows', 'X_ext',
-                          'stream_tile', 'S_rows', 'FD_rows', 'shell_block',
-                          'F_block', 'panel'), 0)
-
-    def hold(name, nbytes):
-        held[name] = max(held[name], int(nbytes))
-
-    def total(arrays):
-        return sum(int(a.nbytes) for a in arrays)
+    hold = Held(('metric_lu', 'X_rows', 'B_rows', 'aux_rows', 'X_ext',
+                 'stream_tile', 'S_rows', 'FD_rows', 'shell_block', 'F_block',
+                 'panel'))
 
     def _say(msg):
         # Same reason as `fit_M_streaming`: hours at production size.
@@ -1085,7 +1117,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     del B_own, P_own
     if timings is not None:
         timings['fit_gram'] = time.time() - _t
-    _say(f'Gram tiles built: {total(S.values()) / BYTES_PER_GB:.2f} GB on rank 0')
+    _say(f'Gram tiles built: {total_bytes(S.values()) / BYTES_PER_GB:.2f} GB on rank 0')
 
     # The three-centre pass: F moves, each rank accumulates its own points.
     _t = time.time()
@@ -1102,7 +1134,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     # molecule alone and is the order every point accumulates in.
     order = sorted(range(len(blocks)), key=lambda ib: (-width[ib], ib))
     R = {i: np.zeros((tiles[i][1] - tiles[i][0], naux)) for i in mine}
-    hold('FD_rows', total(R.values()))
+    hold('FD_rows', total_bytes(R.values()))
     n_mine = n_kept = 0
     # the co-densities in `row_map`'s threads, as in the replicated pass
     threads = openmp_threads()
@@ -1171,90 +1203,25 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     _say(f'three-centre pass done: {len(blocks)} blocks, {n_kept:,} of '
          f'{nao * n2:,} columns survived screening')
 
-    # Right-looking Cholesky, the forward substitution in the same sweep. Its
-    # GEMMs are BLAS's; each update's subtraction -- one flop an element
-    # against the GEMM's 2 `block`, which on a pool is as slow as the GEMM --
-    # is numpy's and runs in `row_map`'s threads, the same difference an
-    # element.
+    # Right-looking Cholesky, the forward substitution in the same sweep,
+    # then the backward one, each update's subtraction in `row_map`'s threads.
     _t = time.time()
-    t_solve = 0.0
-    diagonal, panels = {}, {}
-    for j, (j0, j1) in enumerate(tiles):
-        owner = j % nranks
-        LT = np.empty((j1 - j0, j1 - j0))
-        info = 0
-        if rank == owner:
-            # row tile j is down to its diagonal block
-            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
-            LT = L.T                                 # C order, L in F order
-        info = broadcast(info, comm, root=owner)
-        if info != 0:
-            raise np.linalg.LinAlgError(
-                f'Cholesky of the balanced Gram matrix failed at leading '
-                f'minor {j0 + info}: it is not positive definite, which for a '
-                f'Gram matrix plus a {regularization:g} shift means the grid '
-                'is degenerate -- points coincide, or a whole sub-shell '
-                'collapsed onto one radius.')
-        broadcast_rows(LT, owner, comm)
-        L = LT.T
-        _ts = time.time()
-        y = R[j] if rank == owner else np.empty((j1 - j0, naux))
-        if rank == owner:
-            trsm(L, y.T, side=1, trans_a=1)             # y^T L^T = R_j^T
-            diagonal[j] = L
-        broadcast_rows(y, owner, comm)
-        t_solve += time.time() - _ts
-        below = [i for i in mine if i > j]
-        Lcol = {}
-        for i in below:
-            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
-            trsm(L, Lcol[i].T, side=0, trans_a=0)       # L L_ij^T = S_ij^T
-        _ts = time.time()
-        for i in below:
-            _subtract(R[i], Lcol[i] @ y, threads)
-        t_solve += time.time() - _ts
-        del y
-        panel = np.empty((nk - j1, j1 - j0))
-        for i in below:
-            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
-        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
-                                  for i in own if i > j] for own in owners],
-                         comm)
-        for i in below:
-            # one GEMM per row tile; the consumed column block is dropped
-            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
-            S[i] = _difference(S[i][:, j1 - j0:], U, threads)
-            del U
-        if rank == owner:
-            panels[j] = panel
-        hold('panel', panel.nbytes)
-        hold('S_rows', total(S.values()) + total(panels.values())
-             + total(diagonal.values()))
-        del panel
-    # Backward substitution: z_j = L_jj^-T (y_j - sum_{k>j} L_kj^T z_k), the
-    # sum pushed by each solved block into the rows that own a panel.
+    clock = {'solve': 0.0}
+    diagonal, panels = cholesky_tiles(S, tiles, owners, rank, comm, [R],
+                                      regularization, hold, threads=threads,
+                                      clock=clock)
     _ts = time.time()
-    for j in reversed(range(ntiles)):
-        j0, j1 = tiles[j]
-        owner = j % nranks
-        z = R[j] if rank == owner else np.empty((j1 - j0, naux))
-        if rank == owner:
-            trsm(diagonal.pop(j), z.T, side=1, trans_a=0)   # z^T L = y^T
-            panels.pop(j, None)
-        broadcast_rows(z, owner, comm)
-        for i in mine:
-            if i < j:
-                i1 = tiles[i][1]
-                _subtract(R[i], panels[i][j0 - i1:j1 - i1].T @ z, threads)
-        del z
+    backward_tiles(diagonal, panels, R, tiles, owners, rank, comm, keep=False,
+                   threads=threads)
     for i in mine:
         R[i] *= d[slice(*tiles[i]), None]
-    t_solve += time.time() - _ts
+    t_solve = clock['solve'] + time.time() - _ts
     if timings is not None:
         timings['fit_cholesky'] = time.time() - _t - t_solve
         timings['fit_solve'] = t_solve
     _say('row-distributed fit done')
-    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held, kept=kept_mask)
+    return RowFit(nk, block, comm, R, X_ext, (e0, e1), dict(hold),
+                  kept=kept_mask)
 
 
 def rows_transpose_product(rows, r0, x_bar, block=None, comm=None):
@@ -1365,13 +1332,23 @@ def gram_tiles(mol, auxmol, coords, tiles, owners, rank, second, w,
 
 
 def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
-                    hold):
-    """(diagonal, panels): `fit_rows`' right-looking Cholesky of the Gram
-    tiles S (consumed), the forward substitution of each right-hand side of
-    `rhs_sets` riding in the sweep as it does there, and the factor kept for
-    later solves: the diagonal block and the gathered panel below it of
-    every tile this rank owns, the same arrays and the same calls as that
-    sweep's."""
+                    hold, threads=1, clock=None):
+    """(diagonal, panels): the right-looking Cholesky of the balanced Gram
+    tiles S (consumed) every row fit runs, with the forward substitution of
+    each right-hand side of `rhs_sets` riding in the sweep, and the factor
+    kept for later solves: the diagonal block and the gathered panel below
+    it of every tile this rank owns.
+
+    The owner of tile j (j % size) factors it (dpotrf), broadcasts it and
+    each solved right-hand side block; every rank solves its rows of the
+    panel (trsm), updates its right-hand sides, gathers the panel and
+    updates its trailing tiles one row tile per GEMM. Every call's shape is
+    fixed by the tiles alone, so the factor is the same bits at every rank
+    count. The GEMMs are BLAS's; each update's subtraction -- one flop an
+    element against the GEMM's 2 `block`, which on a pool is as slow as the
+    GEMM -- runs elementwise on `threads` threads (`row_map`), the same
+    difference an element at any thread count. clock: a dict whose 'solve'
+    gains the seconds of the forward substitution."""
     nk, nranks = tiles[-1][1], len(owners)
     mine = owners[rank]
     ncols = [broadcast(next(iter(rhs.values())).shape[1] if rhs else 0, comm)
@@ -1382,34 +1359,42 @@ def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
         LT = np.empty((j1 - j0, j1 - j0))
         info = 0
         if rank == owner:
+            # row tile j is down to its diagonal block
             L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
-            LT = L.T
+            LT = L.T                                 # C order, L in F order
         info = broadcast(info, comm, root=owner)
         if info != 0:
             raise np.linalg.LinAlgError(
                 f'Cholesky of the balanced Gram matrix failed at leading '
                 f'minor {j0 + info}: it is not positive definite, which for a '
                 f'Gram matrix plus a {regularization:g} shift means the grid '
-                'is degenerate.')
+                'is degenerate -- points coincide, or a whole sub-shell '
+                'collapsed onto one radius.')
         broadcast_rows(LT, owner, comm)
         L = LT.T
+        _ts = time.time()
         ys = []
         for rhs, ncol in zip(rhs_sets, ncols):
             y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
             if rank == owner:
-                trsm(L, y.T, side=1, trans_a=1)
+                trsm(L, y.T, side=1, trans_a=1)         # y^T L^T = R_j^T
             broadcast_rows(y, owner, comm)
             ys.append(y)
         if rank == owner:
             diagonal[j] = L
+        if clock is not None:
+            clock['solve'] += time.time() - _ts
         below = [i for i in mine if i > j]
         Lcol = {}
         for i in below:
             Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
-            trsm(L, Lcol[i].T, side=0, trans_a=0)
+            trsm(L, Lcol[i].T, side=0, trans_a=0)       # L L_ij^T = S_ij^T
+        _ts = time.time()
         for rhs, y in zip(rhs_sets, ys):
             for i in below:
-                rhs[i] -= Lcol[i] @ y
+                _subtract(rhs[i], Lcol[i] @ y, threads)
+        if clock is not None:
+            clock['solve'] += time.time() - _ts
         del ys
         panel = np.empty((nk - j1, j1 - j0))
         for i in below:
@@ -1418,8 +1403,9 @@ def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
                                   for i in own if i > j] for own in owners],
                          comm)
         for i in below:
+            # one GEMM per row tile; the consumed column block is dropped
             U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
-            S[i] = S[i][:, j1 - j0:] - U
+            S[i] = _difference(S[i][:, j1 - j0:], U, threads)
             del U
         if rank == owner:
             panels[j] = panel
@@ -1454,10 +1440,11 @@ def forward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm, hold):
 
 
 def backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
-                    keep=True):
-    """rhs <- L^-T rhs on the kept factor, `fit_rows`' backward sweep: each
-    solved block broadcast by its owner and pushed into the rows that own a
-    panel. keep=False drops the factor as it goes, as that sweep does."""
+                    keep=True, threads=1):
+    """rhs <- L^-T rhs on the kept factor of `cholesky_tiles`:
+    z_j = L_jj^-T (y_j - sum_{k>j} L_kj^T z_k), each solved block broadcast
+    by its owner and pushed into the rows that own a panel, the subtraction
+    on `threads` threads as there. keep=False drops the factor as it goes."""
     nranks = len(owners)
     mine = owners[rank]
     ncol = next(iter(rhs.values())).shape[1] if rhs else 0
@@ -1468,14 +1455,14 @@ def backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
         z = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
         if rank == owner:
             trsm(diagonal[j] if keep else diagonal.pop(j), z.T, side=1,
-                  trans_a=0)
+                  trans_a=0)                            # z^T L = y^T
             if not keep:
                 panels.pop(j, None)
         broadcast_rows(z, owner, comm)
         for i in mine:
             if i < j:
                 i1 = tiles[i][1]
-                rhs[i] -= panels[i][j0 - i1:j1 - i1].T @ z
+                _subtract(rhs[i], panels[i][j0 - i1:j1 - i1].T @ z, threads)
         del z
 
 

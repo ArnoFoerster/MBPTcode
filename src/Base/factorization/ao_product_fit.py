@@ -107,20 +107,19 @@ from src.Base.numerics.constants import (AO_PRODUCT_BLOCK_SHARE, BYTES_PER_GB,
                                          ISDF_PIVOT_MAX_GB,
                                          ISDF_PIVOT_PARENT_FACTOR,
                                          ISDF_PIVOT_POINTS_PER_ATOM)
-from src.Base.factorization.separable_ri import (RowFit, ao_values,
+from src.Base.factorization.separable_ri import (Held, RowFit, ao_values,
                                                  atomic_points, auxmol_key,
                                                  backward_tiles,
                                                  cholesky_tiles, content_key,
-                                                 fit_settings,
-                                                 tile_collocation,
-                                                 total_bytes)
+                                                 fit_settings, point_tiles,
+                                                 row_layout, tile_collocation,
+                                                 tile_edge, total_bytes)
 from src.Base.factorization.shell_runs import shell_ranges
 from src.Base.utils.parallel.mpi_grid import (allgather_blocks,
                                               allgather_ranges, broadcast_rows,
                                               contiguous_block,
                                               current_comm, lockstep,
-                                              node_comm, ordered_chain_sum,
-                                              partition)
+                                              node_comm, ordered_chain_sum)
 
 
 #: Pivots and fits already made, by content: the ISDF-K mean field and the
@@ -220,14 +219,6 @@ def placed(mol, pts_local, frames):
 
 
 # ------------------------------------------------------------- the tiles
-
-def point_tiles(n, block=FIT_CHOLESKY_BLOCK):
-    """[(t0, t1)]: the points in fixed tiles of `block`, the unit every
-    distributed step of this module works in, owned block-cyclically
-    (`tile_owner`). A tile's arithmetic is the same calls on the same shapes
-    whoever owns it, so every result is the same bits at every rank count."""
-    return [(t0, min(t0 + block, n)) for t0 in range(0, n, block)]
-
 
 def tile_owner(t, comm):
     """The rank that owns tile `t`."""
@@ -542,9 +533,7 @@ def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
                                                 comm.Get_size())
     if nranks > 1:
         coords = lockstep(coords, comm)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
-    if block < 1:
-        raise ValueError(f'block={block}: a tile holds at least one point')
+    block = tile_edge(block)
     if tiles is not None:
         _t = time.time()
         handed = tiles.row_fit(mol, auxmol, coords, block, comm, settings,
@@ -555,22 +544,10 @@ def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
                 timings['fit_reused_tiles'] = len(handed.mt)
             return handed
     nk = len(coords)
-    grid = [(t0, min(t0 + block, nk)) for t0 in range(0, nk, block)]
-    owners = [[int(t) for t in partition(len(grid), r, nranks)]
-              for r in range(nranks)]
+    grid, owners, (e0, e1) = row_layout(nk, block, comm)
     mine = owners[rank]
-    r0, r1 = contiguous_block(nk, rank, nranks)
-    e0 = e1 = r0             # the whole tiles over this rank's contiguous rows
-    if r1 > r0:
-        e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
-    # every array the fit may hold, zero until it does: the same keys on
-    # every rank
-    held = dict.fromkeys(('metric_lu', 'X_rows', 'X_ext', 'stream_tile',
-                          'S_rows', 'E_rows', 'run_block',
-                          'pair_products', 'panel', 'MT_rows'), 0)
-
-    def hold(name, nbytes):
-        held[name] = max(held[name], int(nbytes))
+    hold = Held(('metric_lu', 'X_rows', 'X_ext', 'stream_tile', 'S_rows',
+                 'E_rows', 'run_block', 'pair_products', 'panel', 'MT_rows'))
 
     _t = time.time()
     lu = scipy.linalg.lu_factor(auxmol.intor('int2c2e', aosym='s1'))
@@ -601,7 +578,7 @@ def ao_product_fit_rows(mol, auxmol, coords, numerics=None, comm=None,
     if timings is not None:
         timings['fit_cholesky'] = time.time() - _t
     hold('MT_rows', total_bytes(R.values()))
-    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held)
+    return RowFit(nk, block, comm, R, X_ext, (e0, e1), dict(hold))
 
 
 # ---------------------------------------------------------------- the pivot

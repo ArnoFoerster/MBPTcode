@@ -30,16 +30,17 @@ tiles of it, which `fit_rows(tiles=)` reads where they are its fit.
 import numpy as np
 import scipy.linalg
 
-from src.Base.numerics.constants import BYTES_PER_GB, FIT_CHOLESKY_BLOCK, THREE_CENTER_BLOCK_BYTES
+from src.Base.numerics.constants import BYTES_PER_GB, THREE_CENTER_BLOCK_BYTES
 from src.Base.factorization.sliced_factors import GridTileRows
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, broadcast_rows,
-                                              current_comm, exchange_blocks, lockstep, partition)
+                                              current_comm, exchange_blocks, lockstep)
 from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, fit_settings, KeptIntegrals,
                                                  ao_l_labels, ao_blocks, gram_tiles,
                                                  block_coefficients, total_bytes, frozen_columns,
                                                  tile_collocation, root_slab, metric_root,
                                                  metric_spectrum, cholesky_tiles,
-                                                 forward_tiles, backward_tiles)
+                                                 forward_tiles, backward_tiles,
+                                                 Held, row_layout, tile_edge)
 
 
 class RowFitAdjoint:
@@ -236,27 +237,22 @@ def fit_rows_adjoints(mol, auxmol, coords, layout, targets, numerics=None,
                     else (comm.Get_rank(), comm.Get_size()))
     if nranks > 1:
         coords = lockstep(coords, comm)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    block = tile_edge(block)
     nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
     nk = len(coords)
-    ntiles = -(-nk // block)
-    tiles = [(t * block, min((t + 1) * block, nk)) for t in range(ntiles)]
-    owners = [[int(t) for t in partition(ntiles, r, nranks)]
-              for r in range(nranks)]
+    tiles, owners, _ = row_layout(nk, block, comm)
+    ntiles = len(tiles)
     mine = owners[rank]
     targets = [summed_seeds(t) if isinstance(t, (list, tuple)) else t
                for t in targets]
     ntargets = len(targets)
-    held = dict.fromkeys((
+    hold = held = Held((
         'metric_lu', 'X_rows', 'B_rows', 'aux_rows', 'X_ext', 'stream_tile',
         'S_rows', 'panel', 'metric_root', 'metric_slab', 'MT_bar_rows',
         'Q_bar_rows', 'Q_rows', 'U_rows', 'MT_rows', 'X_bar_rows',
         'B_bar_rows', 'P_bar_rows', 'shell_block', 'F_block', 'root_gather',
         'column_tile', 'g_bar_batch', 'derivative_block', 'root_adjoint',
-        'two_centre_slab'), 0)
-
-    def hold(name, nbytes):
-        held[name] = max(held[name], int(nbytes))
+        'two_centre_slab'))
 
     def total(per_target):
         return sum(total_bytes(a.values()) for a in per_target)

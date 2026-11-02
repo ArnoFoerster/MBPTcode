@@ -111,12 +111,13 @@ from pyscf.df.incore import LINEAR_DEP_THR
 from pyscf.dft import gen_grid, numint, radi
 from pyscf.scf import _vhf
 
-from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_TEST_SETS,
+from src.Base.numerics.constants import (ISDF_TEST_SETS,
                                          SKELETON_AUX_TILE, SKELETON_EXCHANGE_OCC_BLOCK,
                                          SKELETON_EXCHANGE_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
 from src.Base.factorization.ao_product_fit import ao_product_fit_rows
-from src.Base.factorization.separable_ri import tile_collocation, fit_rows
+from src.Base.factorization.separable_ri import (Held, fit_rows, row_layout,
+                                                 tile_collocation, tile_edge)
 from src.Base.factorization.shell_runs import shell_runs
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root, two_centre_rows_adjoint,
                                             fit_rows_adjoint)
@@ -592,16 +593,12 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
     if size > 1:
         coords, dm, dm_other = lockstep((coords, dm, dm_other), comm,
                                         check=True)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    block = tile_edge(block)
     nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
     nk = len(coords)
-    tiles = [(t * block, min((t + 1) * block, nk))
-             for t in range(-(-nk // block))]
-    mine = [int(t) for t in partition(len(tiles), rank, size)]
-    held = {}
-
-    def hold(name, nbytes):
-        held[name] = max(held.get(name, 0), int(nbytes))
+    tiles, owners, _ = row_layout(nk, block, comm)
+    mine = owners[rank]
+    hold = held = Held()
 
     if mt is None and test_set == 'ao_products':
         fit = ao_product_fit_rows(mol, auxmol, coords, numerics=numerics,
@@ -697,7 +694,7 @@ def isdf_exchange_seeds(mol, auxmol, coords, layout, dm, dm_other=None,
                   else (-0.25 * prefactor * bare) * C)
     del C
     seeds = AdjointSeeds(mt_bar=MTb, x_bar_ao=Xb, metric_bar=metric_bar)
-    return seeds, two.reshape(natm, 3), held
+    return seeds, two.reshape(natm, 3), dict(held)
 
 
 def xc_grid_tiles(npoints, tile=None):
