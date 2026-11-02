@@ -32,9 +32,9 @@ env = medium.screening(mol)        # the SolventScreening every loop reads
 print(medium.record())
 ```
 
-The command-line drivers take the same spec: `--solvent` of
-`python -m src.photophysics solvated` and `--environment` of the vertical
-ADC(2) driver, each with `--cavity`.
+The command-line drivers take the same spec: `--environment` of
+`python -m src.photophysics solvated` and of the vertical ADC(2) driver,
+each with `--cavity`.
 
 Inside GW the reaction field is then Duchemin, Guido, Jacquemin and Blase,
 Chem. Sci. 9, 4430 (2018), Eq. (18): the

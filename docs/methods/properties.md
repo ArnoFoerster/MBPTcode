@@ -324,6 +324,6 @@ JSON record that a rerun continues:
 
 ```bash
 python -m src.photophysics solvated --xyz formaldehyde.xyz --basis cc-pvdz \
-    --auxbasis cc-pvdz-ri --jk-auxbasis cc-pvdz-jkfit --solvent toluene \
-    --out formaldehyde_solvated.json
+    --auxbasis cc-pvdz-ri --jk-auxbasis cc-pvdz-jkfit --environment toluene \
+    --saddle-check 1 --out formaldehyde_solvated.json
 ```

@@ -15,8 +15,8 @@ from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.step_failed import StepFailed
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL, QP_HAMILTONIAN_WINDOW,
-                                         CD_NFREQ, CD_NFREQ_SOP,
-                                         CONTINUATION_ROUTE)
+                                         QP_SUBSPACE_PROBE_STEPS, CD_NFREQ,
+                                         CD_NFREQ_SOP, CONTINUATION_ROUTE)
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range,
@@ -175,6 +175,17 @@ class QuasiparticleRootLost(StepFailed):
     frozen, or its Newton ended on a non-finite H. A pole strength outside
     (0, 1] or a Newton that stopped short of QP_SUBSPACE_TOL on a finite H is
     not one: warned about and logged (`qp_hamiltonian_log`)."""
+
+
+def _group_solve(e0, amp, d, seed, **kw):
+    """(H, Newton steps, converged) of one group (`subspace_hamiltonian`),
+    rank 0's on every rank. A group of at most QP_SUBSPACE_DENSE_MAX orbitals
+    is solved on each rank's own arithmetic, so its H, its step count and its
+    verdict can differ between ranks; every later decision (a warning, a
+    frozen seed, one more step) is taken from rank 0's."""
+    h, it, ok = subspace_hamiltonian(e0, amp, d, seed, **kw)
+    return lockstep((np.ascontiguousarray(h, float), int(it), bool(ok)),
+                    check=True)
 
 
 class QuasiparticleSet:
@@ -721,7 +732,7 @@ class QuasiparticleSet:
                     f'frozen')
             order = sorted(of)
             k = [order.index(p) for p in group]
-            h, it, ok = subspace_hamiltonian(e0, amp, d, whole[np.ix_(k, k)])
+            h, it, ok = _group_solve(e0, amp, d, whole[np.ix_(k, k)])
             if not ok:
                 self._unconverged_group(group, of, e0, amp, d, h, it)
             return h, it
@@ -729,14 +740,14 @@ class QuasiparticleSet:
         fresh = seed is None
         if fresh:
             seed = e0 - np.diag(np.diag(e0)) + np.diag(roots)
-        h, it, ok = subspace_hamiltonian(e0, amp, d, seed)
+        h, it, ok = _group_solve(e0, amp, d, seed)
         if fresh and not ok:
             # the reference H frozen as it ended, so the seed is still the
             # reference geometry's convention
             self._unconverged_group(group, group, e0, amp, d, h, it)
         if fresh:
             self.chain.conventions.freeze_group_seed(view, group, h)
-            h, it, ok = subspace_hamiltonian(e0, amp, d, h)
+            h, it, ok = _group_solve(e0, amp, d, h)
         if not ok:
             self._unconverged_group(group, group, e0, amp, d, h, it)
         return h, it
@@ -752,8 +763,9 @@ class QuasiparticleSet:
             raise QuasiparticleRootLost(
                 f'the quasiparticle Hamiltonian of group {list(group)} ended '
                 f'non-finite after {it} Newton steps')
-        step = float(np.abs(subspace_hamiltonian(e0, amp, d, h, max_iter=1)[0]
-                            - h).max())
+        probe = _group_solve(e0, amp, d, h,
+                             max_iter=QP_SUBSPACE_PROBE_STEPS)[0]
+        step = float(np.abs(probe - h).max())
         self._log_qp_hamiltonian('not_self_consistent', group, of,
                                  newton_steps=it, last_step=step)
 

@@ -53,7 +53,8 @@ excited-excited.
 import numpy as np
 
 from src.Base.numerics.constants import COUPLING_GAP_MIN, NUCLEAR_FD_STEP
-from src.Base.numerics.numerics import numerics_identity, require_same_identity
+from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
+                                        surface_numerics)
 from src.Base.pyscf.pyscf_interface import occupied_count
 from src.Base.geometry.geometry import displaced
 from src.gradients.orbital_coupling import configuration_coupling, ov_coupling
@@ -104,7 +105,7 @@ def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
     return (out[1] - out[0]) / (2 * step)
 
 
-def ground_state_coupling(mol, mf, nocc, xn, yn):
+def ground_state_coupling(mol, mf, nocc, xn, yn, numerics):
     """(natm, 3) d_0n = <Psi_0 | d/dR Psi_n>, the S1 -> S0 coupling.
 
     ONE TERM, not two, and this is what makes it different from every
@@ -126,10 +127,11 @@ def ground_state_coupling(mol, mf, nocc, xn, yn):
     So this needs a response solve where the other did not -- but it is still
     ONE Z-vector, because (X - Y) is a fixed vector and the energy denominator
     is absorbed into its weight. eps_a - eps_i never vanishes on a closed shell.
+    numerics: the run's `Numerics` (that Z-vector's solve), required.
     """
     x = np.asarray(xn, float).reshape(nocc, -1)
     y = np.asarray(yn, float).reshape(nocc, -1)
-    return ov_coupling(mol, mf, nocc, GROUND_SPIN_FACTOR * (x - y))
+    return ov_coupling(mol, mf, nocc, GROUND_SPIN_FACTOR * (x - y), numerics)
 
 
 def require_coupling_gap(gap, m, n):
@@ -167,8 +169,9 @@ def evaluated_coupling(evaluation, m, n):
     """(d_mn, diagnostics) in 1/Bohr between two roots of one
     `StateEvaluation`, m and n its state keys: the interstate numerator it
     computed over Omega_n - Omega_m, plus the configuration term's one
-    Z-vector. The numerator is symmetric in the pair, so either ordering held
-    in `evaluation.interstate` serves, and d_nm = -d_mn.
+    Z-vector, solved on the evaluation's `Numerics` (`numerics`). The
+    numerator is symmetric in the pair, so either ordering held in
+    `evaluation.interstate` serves, and d_nm = -d_mn.
     """
     pair = (m, n) if (m, n) in evaluation.interstate else (n, m)
     if pair not in evaluation.interstate:
@@ -187,7 +190,8 @@ def evaluated_coupling(evaluation, m, n):
     nocc = occupied_count(mf)
     goo, gvv = state_to_state_density(nocc, xm[:, rm], ym[:, rm],
                                       xn[:, rn], yn[:, rn])
-    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv,
+                                 getattr(evaluation, 'numerics', None))
     amp = np.asarray(num) / gap
     return amp + csf, dict(diags, gap=gap,
                            branch_amplitude=float(np.abs(amp).max()),
@@ -201,7 +205,8 @@ def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     Antisymmetric in m <-> n: the interstate numerator is symmetric -- both
     orderings are averaged in the chain's interstate backward pass -- and the
     gap changes sign. One forward pass serves the numerator and the
-    state-to-state density.
+    state-to-state density; the configuration term's Z-vector is solved on
+    the chain's `Numerics`.
 
     evaluation: a `StateEvaluation` whose `interstate` holds the pair, m and n
     its state keys (`evaluated_coupling`); `chain` is not used except to
@@ -224,7 +229,8 @@ def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     nocc = occupied_count(mf)
     goo, gvv = state_to_state_density(nocc, xn[:, rm], yn[:, rm],
                                       xn[:, rn], yn[:, rn])
-    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv,
+                                 surface_numerics(chain))
     amp = num / diags['gap']
     return amp + csf, dict(diags, branch_amplitude=float(np.abs(amp).max()),
                            branch_configuration=float(np.abs(csf).max()),
@@ -248,6 +254,7 @@ def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
                              f'singlet; state {n!r} is a {spin}')
         flags = evaluation.require_scf_quality('analytic_ground_coupling')
         mol, mf = evaluation.mol, evaluation.mf
+        numerics = getattr(evaluation, 'numerics', None)
     else:
         if chain.spin != 'singlet':
             raise ValueError(f'd_0n couples the closed-shell ground state to a '
@@ -258,8 +265,9 @@ def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
         solution = chain.forward(mol, mf)[1]
         om, xn, yn = solution.omega, solution.x, solution.y
         root = n
+        numerics = surface_numerics(chain)
     d = ground_state_coupling(mol, mf, occupied_count(mf), xn[:, root],
-                              yn[:, root])
+                              yn[:, root], numerics)
     return d, {'omega_n': float(om[root]), 'gap': float(om[root]),
                'branch_configuration': float(np.abs(d).max()),
                'scf_flags': flags}

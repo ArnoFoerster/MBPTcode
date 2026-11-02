@@ -202,7 +202,7 @@ def test_configuration_term_z_vector_matches_displaced_solves(chain):
     xn, yn, nocc = solution.x, solution.y, chain.nocc
     goo, gvv = state_to_state_density(nocc, xn[:, 0], yn[:, 0],
                                       xn[:, 1], yn[:, 1])
-    ana = configuration_coupling(mol, mf, nocc, goo, gvv)
+    ana = configuration_coupling(mol, mf, nocc, goo, gvv, Numerics())
     num = np.zeros_like(ana)
     for atom in range(mol.natm):
         for axis in range(3):
@@ -230,7 +230,7 @@ def test_ov_coupling_matches_displaced_solves(chain):
     nocc = chain.nocc
     w = np.random.default_rng(3).normal(size=(nocc,
                                               mf.mo_coeff.shape[1] - nocc))
-    ana = ov_coupling(mol, mf, nocc, w)
+    ana = ov_coupling(mol, mf, nocc, w, Numerics())
     num = np.zeros_like(ana)
     for atom in range(mol.natm):
         for axis in range(3):

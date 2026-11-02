@@ -48,6 +48,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.fragments import partition as fragment_partition
 from src.fragments.localization import FragmentOrbitals
 from src.fragments.partition import FragmentPartition
@@ -92,7 +93,7 @@ class Setup:
     def __init__(self, spin):
         self.spin = spin
         self.mol0 = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-        self.method = ADC2FragmentMethod(self.mol0, factory, spin, AUX)
+        self.method = ADC2FragmentMethod(self.mol0, factory, spin, AUX, numerics=Numerics())
         self.mol, self.mf = self.method.mean_field()
         _, _, self.roots = solve_root(self.mol, self.mf, spin, 3, 0, AUX)
         self.orbitals = FragmentOrbitals.from_mf(self.mf, FRAGMENTS)
@@ -238,7 +239,7 @@ def test_root_gradient_is_the_supermolecular_root_gradient():
     s = SETUPS.get('singlet') or SETUPS.setdefault('singlet', Setup('singlet'))
     omega = float(s.roots['omega'][0])
     ref, info = adc2_force(s.mf, s.mol, 'singlet', root=0, nroots=3,
-                           auxbasis=AUX)
+                           auxbasis=AUX, numerics=Numerics())
     assert abs(info['omega'] - omega) < 1e-10
     ref = ref - s.method.ground_gradient(s.mf)
     grad = DiabaticGradient(s.method, FRAGMENTS, SITES, omega0=omega)

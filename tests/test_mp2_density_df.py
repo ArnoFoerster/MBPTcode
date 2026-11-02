@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
@@ -174,8 +175,10 @@ if __name__ == '__main__':
     _sc.build_dressed_e_abij = _boom
     try:
         build_mp2_static_correction_restricted(mf6, mol6, nocc6, relax=True, B_aa=B6,
-                                               u2_denom_dress={'hh': True, 'pp': True})
-        build_mp2_static_correction_restricted(mf6, mol6, nocc6, relax=True, B_aa=B6)
+                                               u2_denom_dress={'hh': True, 'pp': True},
+                                               numerics=Numerics())
+        build_mp2_static_correction_restricted(mf6, mol6, nocc6, relax=True, B_aa=B6,
+                                               numerics=Numerics())
         guard_ok = True
     except AssertionError:
         guard_ok = False
@@ -189,13 +192,13 @@ if __name__ == '__main__':
     # hp-dress must FALL BACK (still exact) rather than stream
     stat_hp = build_mp2_static_correction_restricted(
         mf6, mol6, nocc6, relax=True, B_aa=B6,
-        u2_denom_dress={'hh': True, 'pp': True, 'hp': True})
+        u2_denom_dress={'hh': True, 'pp': True, 'hp': True}, numerics=Numerics())
     _ar_orig = _ar.dress_is_streamable
     _ar.dress_is_streamable = lambda d: False
     try:
         stat_hp_ref = build_mp2_static_correction_restricted(
             mf6, mol6, nocc6, relax=True, B_aa=B6,
-            u2_denom_dress={'hh': True, 'pp': True, 'hp': True})
+            u2_denom_dress={'hh': True, 'pp': True, 'hp': True}, numerics=Numerics())
     finally:
         _ar.dress_is_streamable = _ar_orig
     d_hp = np.abs(stat_hp - stat_hp_ref).max()

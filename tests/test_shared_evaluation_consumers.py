@@ -148,7 +148,7 @@ def coupling_before(chain, m, n):
     goo, gvv = state_to_state_density(chain.nocc, xn[:, m], yn[:, m],
                                       xn[:, n], yn[:, n])
     return (num / diags['gap']
-            + configuration_coupling(mol, mf, chain.nocc, goo, gvv))
+            + configuration_coupling(mol, mf, chain.nocc, goo, gvv, chain.settings))
 
 
 @pytest.mark.parametrize('case', ['hf-davidson-grid', 'production'])

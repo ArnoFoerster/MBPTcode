@@ -25,6 +25,7 @@ from tests.pins import assert_same
 from src.Base.numerics.constants import (HARTREE_TO_EV, HARTREE_TO_MEV,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
 from src.Base.declaration import GroundState
 from src.environments.environment import PointCharges
 from src.Base.environment_seam import attach_environment
@@ -144,7 +145,7 @@ def water():
 @pytest.mark.parametrize('screening', ('rpa', 'tda'))
 def test_the_gradient_is_the_derivative_of_the_energy(charge_change, screening):
     surface = QuasiparticleSurface(h2(), rhf, charge_change=charge_change,
-                                   screening=screening)
+                                   screening=screening, numerics=Numerics())
     g_analytic, e, _ = surface.total_gradient()
     g_fd, ratio = richardson(surface)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, (
@@ -169,7 +170,7 @@ def test_a_hartree_fock_reference_is_not_read_as_a_kohn_sham_one():
     smallest case here whose round-off is real.
     """
     mol = water()
-    surface = DenseBSESurface(mol, scf=rhf)
+    surface = DenseBSESurface(mol, scf=rhf, numerics=Numerics())
     shift = np.max(np.abs(np.asarray(surface.xc_shift(rhf(mol)))))
     assert 0.0 < shift < XC_SHIFT_GRADIENT_TOL, (
         f'this molecule does not exercise the defect: the Hartree-Fock '
@@ -195,7 +196,7 @@ def test_the_excited_state_gradient_is_the_derivative_of_its_own_energy():
     """The excited surface an optimizer walks on, gated the way the
     quasiparticle surfaces above are: an optimizer reports the energy and steps
     on the gradient, so a mismatch puts the minimum where neither describes."""
-    surface = DenseBSESurface(water(), scf=rhf)
+    surface = DenseBSESurface(water(), scf=rhf, numerics=Numerics())
     g_analytic, _, _ = surface.total_gradient()
     g_fd, ratio = richardson(surface)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, (
@@ -206,7 +207,7 @@ def test_the_excited_state_gradient_is_the_derivative_of_its_own_energy():
 
 def test_the_gradient_survives_more_than_one_bond_direction():
     """A diatomic tests one component of one atom. Water tests nine."""
-    surface = QuasiparticleSurface(water(), rhf, charge_change=-1)
+    surface = QuasiparticleSurface(water(), rhf, charge_change=-1, numerics=Numerics())
     g_analytic, _, _ = surface.total_gradient()
     g_fd, ratio = richardson(surface)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, ratio
@@ -220,14 +221,14 @@ def test_the_gradient_sums_to_zero_over_atoms():
     difference it cannot be fooled by an error the energy shares."""
     for charge_change in (-1, +1):
         surface = QuasiparticleSurface(water(), rhf,
-                                       charge_change=charge_change)
+                                       charge_change=charge_change, numerics=Numerics())
         g, _, _ = surface.total_gradient()
         assert np.max(np.abs(g.sum(axis=0))) < 1e-8, g.sum(axis=0)
 
 
 def test_it_is_a_potential_energy_surface():
     """`optimize` takes anything with this shape, so the shape is the contract."""
-    surface = QuasiparticleSurface(h2(), rhf)
+    surface = QuasiparticleSurface(h2(), rhf, numerics=Numerics())
     assert isinstance(surface, PotentialEnergySurface)
     assert 'G0W0' in surface.label()
 
@@ -236,7 +237,7 @@ def test_the_orbital_is_held_across_a_displacement():
     """The frozen convention: re-choosing the quasiparticle HOMO mid-walk would
     change WHICH ionization the surface describes, which is a discontinuity in
     the energy rather than a better answer."""
-    surface = QuasiparticleSurface(h2(), rhf, charge_change=-1)
+    surface = QuasiparticleSurface(h2(), rhf, charge_change=-1, numerics=Numerics())
     chosen = surface.orbital
     stretched = gto.M(atom='H 0 0 0; H 0 0 0.9', basis='cc-pvdz', verbose=0)
     surface.total_energy(stretched)
@@ -247,13 +248,13 @@ def test_the_orbital_is_held_across_a_displacement():
 def test_an_impossible_process_is_refused():
     for bad in (0, +2, -3):
         with pytest.raises(ValueError, match='charge_change'):
-            QuasiparticleSurface(h2(), rhf, charge_change=bad)
+            QuasiparticleSurface(h2(), rhf, charge_change=bad, numerics=Numerics())
     with pytest.raises(ValueError, match='screening'):
-        QuasiparticleSurface(h2(), rhf, screening='gw')
+        QuasiparticleSurface(h2(), rhf, screening='gw', numerics=Numerics())
 
 
 def test_the_ground_state_surface_is_also_its_own_derivative():
-    surface = DenseRPASurface(water(), rhf)
+    surface = DenseRPASurface(water(), rhf, numerics=Numerics())
     g_analytic, _, _ = surface.total_gradient()
     g_fd, ratio = richardson(surface)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, ratio
@@ -278,7 +279,7 @@ def test_the_two_legs_of_an_ionization_share_one_ground_state(screening, neutral
     """
     mol = h2()
     cation = QuasiparticleSurface(mol, rhf, charge_change=-1,
-                                  screening=screening)
+                                  screening=screening, numerics=Numerics())
     vertical = cation.total_energy(mol) - neutral(mol, rhf).total_energy(mol)
     _, _, diag = cation.total_gradient(mol)
     assert abs(vertical + diag['qp_energy_eV'] / HARTREE_TO_EV) < 1e-10, (
@@ -303,7 +304,7 @@ def test_the_excitation_is_reachable_on_a_kohn_sham_reference():
         return mf
 
     mol = water()
-    surface = DenseBSESurface(mol, scf=bhlyp)
+    surface = DenseBSESurface(mol, scf=bhlyp, numerics=Numerics())
     mf = surface.scf_factory(mol)
     shift = np.max(np.abs(np.asarray(surface.xc_shift(mf))))
     assert shift > XC_SHIFT_GRADIENT_TOL, (
@@ -318,7 +319,7 @@ def test_the_excitation_is_reachable_on_a_kohn_sham_reference():
     # is the genuine difference between two densities; uncorrected they are
     # 338 mHa apart, and that gap is E_xc - E_x^exact rather than anything
     # physical.
-    e0_hf = DenseBSESurface(mol, scf=rhf)._solve(mol, rhf(mol))[4]
+    e0_hf = DenseBSESurface(mol, scf=rhf, numerics=Numerics())._solve(mol, rhf(mol))[4]
     uncorrected = mf.e_tot + b.qp.qb.e_corr()
     assert abs(e0 - e0_hf) < 0.05, (
         f'E_0 moved {abs(e0 - e0_hf) * 1e3:.1f} mHa with the starting point')
@@ -368,9 +369,9 @@ def test_the_energy_threshold_does_not_move_an_excitation_energy():
 
     mol = water()
     tight = DenseBSESurface(mol, scf=ks(SCF_DIFFERENTIABLE_CONV_TOL,
-                                        SCF_DIFFERENTIABLE_GRAD_TOL))
+                                        SCF_DIFFERENTIABLE_GRAD_TOL), numerics=Numerics())
     loose = DenseBSESurface(mol, scf=ks(SCF_ENERGY_CONV_TOL,
-                                        SCF_ENERGY_GRAD_TOL))
+                                        SCF_ENERGY_GRAD_TOL), numerics=Numerics())
     a = tight._solve(mol, tight.scf_factory(mol))[0].Omega
     b = loose._solve(mol, loose.scf_factory(mol))[0].Omega
     worst = np.max(np.abs(np.asarray(a) - np.asarray(b))) * HARTREE_TO_MEV
@@ -380,8 +381,8 @@ def test_the_energy_threshold_does_not_move_an_excitation_energy():
 
 
 @pytest.mark.parametrize('build', (
-    lambda mol: DenseRPASurface(mol, pbe0),
-    lambda mol: QuasiparticleSurface(mol, pbe0, charge_change=-1)))
+    lambda mol: DenseRPASurface(mol, pbe0, numerics=Numerics()),
+    lambda mol: QuasiparticleSurface(mol, pbe0, charge_change=-1, numerics=Numerics())))
 def test_a_kohn_sham_reference_is_differentiated_and_not_refused(build):
     """The two ground-state surfaces on a Kohn-Sham starting point, gated the
     way their Hartree-Fock selves are: the force must be the derivative of the
@@ -443,7 +444,7 @@ def test_a_kohn_sham_excited_state_is_its_own_derivative(factory, spin):
     exact-exchange double counting; both come off
     `kohn_sham_gradient_correction`.
     """
-    surface = DenseBSESurface(h2(), scf=factory, spin=spin)
+    surface = DenseBSESurface(h2(), scf=factory, spin=spin, numerics=Numerics())
     g_analytic, _, _ = surface.total_gradient()
     g_fd, ratio = richardson(surface)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, (
@@ -491,11 +492,11 @@ def test_the_declaration_follows_the_reference_the_factory_builds():
     they share it, and a surface that called its PBE0 reference Hartree-Fock
     would let that difference be taken silently."""
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
-    assert DenseRPASurface(mol, rhf).physics_ground_state == GroundState('rpa',
+    assert DenseRPASurface(mol, rhf, numerics=Numerics()).physics_ground_state == GroundState('rpa',
                                                                          'hf')
-    assert DenseRPASurface(mol, pbe0).physics_ground_state == GroundState(
+    assert DenseRPASurface(mol, pbe0, numerics=Numerics()).physics_ground_state == GroundState(
         'rpa', 'pbe0')
-    assert QuasiparticleSurface(mol, pbe0).physics_ground_state == GroundState(
+    assert QuasiparticleSurface(mol, pbe0, numerics=Numerics()).physics_ground_state == GroundState(
         'rpa', 'pbe0')
 
 
@@ -510,7 +511,7 @@ def test_the_quasiparticle_shift_reaches_a_kohn_sham_surface():
     Hartree-Fock numbers the oracle they are gated as."""
     mol = h2()
     for factory, moves in ((pbe0, True), (rhf, False)):
-        surface = QuasiparticleSurface(mol, factory, charge_change=-1)
+        surface = QuasiparticleSurface(mol, factory, charge_change=-1, numerics=Numerics())
         mf = surface.scf_factory(mol)
         _, _, info = surface.total_gradient(mol, mf)
         bare = QPqb(mf.mo_energy, mo_eri(mf, mol), mol.nelectron // 2,
@@ -549,11 +550,12 @@ def test_a_solvated_mean_field_is_refused_wherever_e_c_is_reported():
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     for solvated in solvated_pair(mol):
         reporters = (
-            lambda: DenseRPASurface(mol, rhf).total_energy(mol, solvated),
-            lambda: DenseRPASurface(mol, rhf).total_gradient(mol, solvated),
-            lambda: QuasiparticleSurface(mol, rhf).total_energy(mol, solvated),
-            lambda: DenseBSESurface(mol, scf=rhf).total_energy(mol, solvated),
-            lambda: DenseBSESurface(mol, scf=rhf).total_gradient(mol, solvated),
+            lambda: DenseRPASurface(mol, rhf, numerics=Numerics()).total_energy(mol, solvated),
+            lambda: DenseRPASurface(mol, rhf, numerics=Numerics()).total_gradient(mol, solvated),
+            lambda: QuasiparticleSurface(mol, rhf, numerics=Numerics()).total_energy(mol, solvated),
+            lambda: DenseBSESurface(mol, scf=rhf, numerics=Numerics()).total_energy(mol, solvated),
+            lambda: DenseBSESurface(mol, scf=rhf,
+                                    numerics=Numerics()).total_gradient(mol, solvated),
         )
         for report in reporters:
             with pytest.raises(ValueError, match='continuum'):
@@ -570,22 +572,22 @@ def test_the_refusal_spares_everything_that_carries_no_correlation_energy():
     and an excitation energy is a difference that never sees E_0.
     """
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
-    gas = DenseRPASurface(mol, rhf).total_energy(mol)
+    gas = DenseRPASurface(mol, rhf, numerics=Numerics()).total_energy(mol)
     # each surface runs its own SCF: the same energy to a few ulp, not bitwise
-    assert_same(DenseRPASurface(mol, rhf).total_energy(mol, rhf(mol)),
+    assert_same(DenseRPASurface(mol, rhf, numerics=Numerics()).total_energy(mol, rhf(mol)),
                 gas, quantity='energy', label='gas, mean field handed')
-    assert np.isfinite(DenseRPASurface(mol, rhf).total_gradient(mol)[1])
+    assert np.isfinite(DenseRPASurface(mol, rhf, numerics=Numerics()).total_gradient(mol)[1])
 
     charges = attach_environment(rhf(mol), PointCharges([[0.0, 0.0, 5.0]],
                                                         [0.4]))
     # a fixed charge screens nothing, so the bare (pq|rs) is right for it
-    assert_same(DenseRPASurface(mol, rhf).total_energy(mol, charges),
+    assert_same(DenseRPASurface(mol, rhf, numerics=Numerics()).total_energy(mol, charges),
                 gas, quantity='energy', label='fixed point charges')
 
     pcm, _ = solvated_pair(mol)
-    tda = QuasiparticleSurface(mol, rhf, screening='tda')
+    tda = QuasiparticleSurface(mol, rhf, screening='tda', numerics=Numerics())
     assert np.isfinite(tda.total_energy(mol, pcm))
-    assert np.isfinite(DenseBSESurface(mol, scf=rhf).excitation(mol,
+    assert np.isfinite(DenseBSESurface(mol, scf=rhf, numerics=Numerics()).excitation(mol,
                                                                        pcm))
 
 
@@ -603,13 +605,13 @@ def test_a_solvated_mean_field_is_refused_wherever_a_force_is_reported():
     mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
     for solvated in solvated_pair(mol):
         reporters = (
-            lambda: DenseBSESurface(mol, scf=rhf).excitation_gradient(
+            lambda: DenseBSESurface(mol, scf=rhf, numerics=Numerics()).excitation_gradient(
                 mol, solvated),
             lambda: DenseBSESurface(mol, variant='BSE@GWtda',
-                                    scf=rhf).total_gradient(mol, solvated),
-            lambda: QuasiparticleSurface(mol, rhf, screening='tda'
+                                    scf=rhf, numerics=Numerics()).total_gradient(mol, solvated),
+            lambda: QuasiparticleSurface(mol, rhf, screening='tda', numerics=Numerics()
                                          ).total_gradient(mol, solvated),
-            lambda: QuasiparticleSurface(mol, rhf).total_gradient(mol,
+            lambda: QuasiparticleSurface(mol, rhf, numerics=Numerics()).total_gradient(mol,
                                                                   solvated),
         )
         for report in reporters:
@@ -622,7 +624,7 @@ def test_the_excitation_energy_is_the_one_the_gradient_reports():
     Omega `excitation_gradient` returns, bit for bit on the BLAS the pin files
     record (two evaluations, each its own SCF; energy class bar elsewhere)."""
     mol = h2()
-    surface = DenseBSESurface(mol, scf=rhf)
+    surface = DenseBSESurface(mol, scf=rhf, numerics=Numerics())
     assert_same(surface.excitation(mol),
                 surface.excitation_gradient(mol)[1])
 
@@ -642,7 +644,7 @@ def test_a_triplet_surface_is_its_own_derivative_and_is_not_the_singlet():
     from the singlet says kappa is actually being applied, which a gradient
     check cannot see.
     """
-    triplet = DenseBSESurface(water(), scf=rhf, spin='triplet')
+    triplet = DenseBSESurface(water(), scf=rhf, spin='triplet', numerics=Numerics())
     g_analytic, _, _ = triplet.total_gradient()
     g_fd, ratio = richardson(triplet)
     assert abs(ratio - 4.0) < FD_ORDER_TOL * 4.0, (
@@ -651,9 +653,9 @@ def test_a_triplet_surface_is_its_own_derivative_and_is_not_the_singlet():
         f'analytic vs h -> 0: {np.max(np.abs(g_analytic - g_fd)):.3e}')
 
     om_t = DenseBSESurface(water(), scf=rhf,
-                           spin='triplet').excitation_gradient()[1]
+                           spin='triplet', numerics=Numerics()).excitation_gradient()[1]
     om_s = DenseBSESurface(water(), scf=rhf,
-                           spin='singlet').excitation_gradient()[1]
+                           spin='singlet', numerics=Numerics()).excitation_gradient()[1]
     # Dropping a positive-definite bare-exchange coupling can only lower the
     # root, so the ORDERING is physics and not a tolerance.
     assert om_t < om_s, f'triplet {om_t} is not below singlet {om_s}'
@@ -665,7 +667,7 @@ def test_a_triplet_surface_is_its_own_derivative_and_is_not_the_singlet():
 def test_an_unknown_multiplicity_is_refused():
     """KAPPA has two entries; anything else is a typo, not a third spin state."""
     with pytest.raises(ValueError, match='spin'):
-        DenseBSESurface(water(), scf=rhf, spin='quintet')
+        DenseBSESurface(water(), scf=rhf, spin='quintet', numerics=Numerics())
 
 
 def df_rhf(auxbasis):
@@ -697,7 +699,7 @@ def test_a_force_on_mismatched_integrals_is_refused(case):
     energy, a well-defined functional, is still reported."""
     factory, aux = MISMATCHED[case]
     mol = water()
-    surface = DenseBSESurface(mol, scf=factory, auxbasis=aux)
+    surface = DenseBSESurface(mol, scf=factory, auxbasis=aux, numerics=Numerics())
     for force in (surface.total_gradient, surface.excitation_gradient):
         with pytest.raises(ValueError, match='not be the derivative'):
             force(mol)
@@ -711,7 +713,7 @@ def test_matched_integrals_keep_their_force(monkeypatch):
     the guard."""
     mol = water()
     surface = DenseBSESurface(mol, scf=df_rhf('cc-pvdz-ri'),
-                              auxbasis='cc-pvdz-ri')
+                              auxbasis='cc-pvdz-ri', numerics=Numerics())
     g, _, _ = surface.total_gradient(mol)
     rng = np.random.default_rng(3)
     d = rng.standard_normal((mol.natm, 3))
@@ -725,7 +727,7 @@ def test_matched_integrals_keep_their_force(monkeypatch):
     fd = (energy(+1) - energy(-1)) / (2 * h)
     assert abs(float(np.sum(g * d)) - fd) < 1e-7
 
-    exact = DenseBSESurface(mol, scf=rhf)
+    exact = DenseBSESurface(mol, scf=rhf, numerics=Numerics())
     guarded = exact.total_gradient(mol)[0]
     monkeypatch.setattr(dense_surfaces, 'refuse_mismatched_integrals',
                         lambda *a, **k: None)
@@ -746,8 +748,8 @@ def test_the_exact_tensor_surfaces_refuse_a_fitted_mean_field(cls,
 
     def build(factory):
         if cls == 'rpa':
-            return DenseRPASurface(mol, factory)
-        return QuasiparticleSurface(mol, factory, charge_change=-1)
+            return DenseRPASurface(mol, factory, numerics=Numerics())
+        return QuasiparticleSurface(mol, factory, charge_change=-1, numerics=Numerics())
 
     fitted = build(df_rhf('cc-pvdz-jkfit'))
     with pytest.raises(ValueError, match='not be the derivative'):

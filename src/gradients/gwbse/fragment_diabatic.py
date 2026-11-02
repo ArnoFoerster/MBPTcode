@@ -53,6 +53,7 @@ iterative path reproduces the dense one to 1e-8 relative on the test system.
 
 import numpy as np
 
+from src.Base.numerics.numerics import surface_numerics
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.fragments.partition import split_xy
 from src.gradients.gwbse.bse_isdf import bse_backward, bse_cache, interstate_backward
@@ -70,6 +71,7 @@ class BSEFragmentMethod:
     def __init__(self, chain):
         self.chain = chain
         self.mol0 = chain.mol0
+        self.numerics = surface_numerics(chain)
 
     def require_differentiable_environment(self):
         self.chain.require_differentiable_environment()
@@ -185,4 +187,5 @@ class BSEResponse:
     def frame_force(self, dc_o, dc_v):
         """The canonical gauge: - sum D (.) A^can, `configuration_coupling`."""
         return configuration_coupling(self.mol, self.mf, self.operator.nocc,
-                                      dc_o.T, -dc_v)
+                                      dc_o.T, -dc_v,
+                                      surface_numerics(self.chain))

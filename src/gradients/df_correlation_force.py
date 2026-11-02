@@ -139,7 +139,7 @@ def relax(mf, mol, B, gamma0, Gam, nf, Y_extra=None, numerics=None, flags=None):
     return relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
 
 
-def relax_gradient(mf, mol, YG, gamma0, nf, numerics=None, flags=None):
+def relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags=None):
     """relax from the Gamma part of the orbital gradient, YG_rp = sum_qP
     Gs2^P_pq B^P_rq (+ Y_extra), however it was assembled: the multipliers of
     the virtual-occupied and frozen-core-active pairs (module docstring),

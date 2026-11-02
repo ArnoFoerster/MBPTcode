@@ -126,7 +126,7 @@ class HFState:
         return lockstep(mean_field_skeleton_force(self.mf)), dict(dm_eff=r.dm_eff, lr=[],
                                                      flags=r.info['flags'])
 
-    def loop_response(self, h, field, numerics=None):
+    def loop_response(self, h, field, numerics):
         """(natm, 3) Tr[h dD/dR] of this mean field equilibrated in `field`
         (its last call the loop's converged cycle): the density's response
         with the continuum's at eps_static (`scf_loop_response`), its

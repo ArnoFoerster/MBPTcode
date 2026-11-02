@@ -16,6 +16,8 @@ and the relaxed densities built on it reach the finite field.
   4. a solve that cannot reach tol warns (CphfNotConverged) and flags
      'orbital_response_not_converged' inside numerical_flags.collecting (a numerical
      event is warned about, not refused).
+  5. a solve handed no Numerics is refused (no defaults stand in for the
+     run's).
 
 Run: python tests/test_cphf_residual.py
 """
@@ -26,6 +28,7 @@ import warnings
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import pytest
 from pyscf import gto, mp, scf
 from pyscf.scf import cphf as pyscf_cphf
 
@@ -95,7 +98,7 @@ def check_mp2_dipole():
     fd = (-e[2] + 8.0 * e[1] - 8.0 * e[-1] + e[-2]) / (12.0 * h)
 
     def dipole():
-        P = dmm.compute_mp2_density_matrix_ao(mf, mol, relax=True)
+        P = dmm.compute_mp2_density_matrix_ao(mf, mol, relax=True, numerics=Numerics())
         return float(np.sum((P - mf.make_rdm1()) * z))
 
     an = dipole()
@@ -153,10 +156,11 @@ def check_uhf():
     dmm.cphf_solve = spy
     try:
         # a tight tol, so the two solutions' difference is the shift's alone
-        a0, b0 = dmm.solve_cphf_relaxation_uhf(mf, na, nb, *args, tol=1e-14)
+        tight = Numerics(scf={'multiplier_tol': 1e-14, 'multiplier_max_iter': 100})
+        a0, b0 = dmm.solve_cphf_relaxation_uhf(mf, na, nb, *args, tight)
         r0 = seen['res']
         # 1.0 lies above NH2's smallest gap (0.58), so it moves the preconditioner
-        a1, b1 = dmm.solve_cphf_relaxation_uhf(mf, na, nb, *args, tol=1e-14,
+        a1, b1 = dmm.solve_cphf_relaxation_uhf(mf, na, nb, *args, tight,
                                                level_shift=1.0)
         r1 = seen['res']
     finally:
@@ -200,6 +204,15 @@ def run():
 
 def test_cphf_residual():
     assert run()
+
+
+def test_a_solve_without_numerics_is_refused():
+    """No defaults stand in for the run's Numerics: both entries refuse None."""
+    d = np.array([1.0, 2.0])
+    with pytest.raises(TypeError, match="cphf.solve_operator needs the run's Numerics"):
+        cphf.solve_operator(lambda x: d * x, np.ones(2), d, None)
+    with pytest.raises(TypeError, match="cphf.solve needs the run's Numerics"):
+        cphf.solve(lambda x: 0.0 * x, d, np.ones(2), None)
 
 
 if __name__ == '__main__':

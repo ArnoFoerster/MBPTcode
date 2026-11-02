@@ -266,11 +266,6 @@ DF_EXCHANGE_METRIC_FLOOR = 1e-12
 AMB_PROBE_TOL = 1e-6
 AMB_PROBE_SIGN_TOLS = (1e-2, 1e-3, 1e-4)
 
-# CPHF/CPKS Z-vector solve of a ground-state correlated density
-# (GWDensityMatrixSolver.solve_relaxation): its lgmres tolerance (relative to
-# max(1, |rhs|)) and iteration ceiling, src.Base.pyscf.cphf.solve.
-CPHF_MAX_CYCLE = 100
-CPHF_TOL = 1e-9
 # The static correction's relaxed density on the tighter tolerance of a
 # correlated force.
 CORRELATION_CPHF_TOL = 1e-10
@@ -974,6 +969,15 @@ MOLAR_ABSORPTION_PER_BOHR2 = ((BOHR_TO_ANGSTROM * 1e-8) ** 2 * AVOGADRO
 # the peak: 2e-7 at 20 points, 1e-5 at 8.
 FORSTER_POINTS_PER_WIDTH = 20
 FORSTER_MIN_POINTS_PER_WIDTH = 8
+# A photon-energy grid built from a vibronic model's cumulants
+# (`band_shape.vibronic_band_grid`) reaches BAND_GRID_WIDTHS standard
+# deviations (plus the Lorentzian FWHM) beyond each band's mean and resolves the
+# narrowest width by BAND_GRID_POINTS_PER_WIDTH points. A rate integral reaches
+# RATE_BAND_GRID_WIDTHS: its E^3 (radiative) or overlap weight puts weight in a
+# tail that BAND_GRID_WIDTHS leaves short by a few 1e-7 of the rate.
+BAND_GRID_WIDTHS = 8.0
+BAND_GRID_POINTS_PER_WIDTH = 20
+RATE_BAND_GRID_WIDTHS = 12.0
 # FWHM of a Gaussian per standard deviation, 2 sqrt(2 ln 2).
 GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
 # Exponent F below which a Franck-Condon density e^F times its bell integral is
@@ -1561,13 +1565,27 @@ MPI_STAGE_DOUBLES = 2 ** 24
 # by 129 eV, while K stays good to 5e-3.
 ISDF_JK_CHECK_TOL = 1e-3
 
-# Fraction of what max_memory leaves that the distributed ISDF-K SCF
+# Fraction of max_memory that the distributed ISDF-K SCF
 # (`Base.factorization.distributed_isdf_jk`) lets this rank's rows of Z take, for the two
 # operators a range-separated functional asks for; above it Z's blocks are
 # formed per K build from G = M^T V instead ('factored'). The serial ISDFJK's
-# 'auto' mode takes a third, and so does this: the SCF's own buffers, the
-# DFT grid and the fit's peak need the rest. Rank 0's decision.
+# 'auto' mode takes a third for its whole Z, and so does this: the SCF's own
+# buffers, the DFT grid and the fit's peak need the rest. Read from the budget,
+# not from what the process holds at the moment, so one input always takes one
+# mode; rank 0's decision.
 ISDF_SCF_KERNEL_MEMORY_FRACTION = 0.33
+
+# The serial ISDFJK's row block when `layout.block` is None: the Hadamard
+# argument and, factored, the rebuilt Z rows (2 x b x M doubles) take
+# ISDF_JK_BLOCK_MEMORY_FRACTION of max_memory, at least ISDF_JK_BLOCK_MIN_MB,
+# and the block has at least ISDF_JK_BLOCK_MIN_ROWS rows. Read from the budget,
+# never from what the process holds at the moment, so one input always takes
+# the same blocks and the same bits.
+ISDF_JK_BLOCK_MEMORY_FRACTION = 0.25
+
+ISDF_JK_BLOCK_MIN_MB = 200
+
+ISDF_JK_BLOCK_MIN_ROWS = 16
 
 # Auxiliary functions per slab of the metric V (or its attenuated form) that
 # the distributed ISDF-K SCF evaluates at a time to form G = M^T V: a slab is
@@ -1874,6 +1892,10 @@ QP_HAMILTONIAN_WINDOW = 0.03
 QP_SUBSPACE_TOL = 1e-13
 
 QP_SUBSPACE_MAX_ITER = 200
+
+# The Newton steps a group that stopped above QP_SUBSPACE_TOL takes once more
+# to report how far it is from self-consistency (the size of that step, Ha).
+QP_SUBSPACE_PROBE_STEPS = 1
 
 # A group of more orbitals than QP_SUBSPACE_DENSE_MAX is solved without its
 # n^2 x n^2 Jacobian: Newton's equation (1 - J) dH = residual by GMRES on the

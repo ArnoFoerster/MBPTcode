@@ -224,7 +224,7 @@ def test_the_ground_loop_response_is_its_references(loops):
                                  field.scf_continuum(), h, state.numerics)
     assert np.array_equal(state.loop_response(h, field, state.numerics), want)
     with pytest.raises(ValueError, match='reference'):
-        loops['singlet'][1].loop_response(h, field)
+        loops['singlet'][1].loop_response(h, field, state.numerics)
 
 
 @pytest.mark.parametrize('kind', ['singlet', 'triplet'])

@@ -197,8 +197,8 @@ def test_the_solvated_record_refuses_another_map(tmp_path):
         ns = argparse.Namespace(
             xyz=str(xyz), method='adc2', basis='aug-cc-pvdz',
             basis_for=list(basis_for) or None, auxbasis=None, jk_auxbasis=jk,
-            solvent=None, frozen=1, nroots=3, follow='index', saddle_check=True,
-            tol_q=1e-4, tol_energy=1e-7, xc=None, isdf_grid=None,
+            solvent=None, frozen=1, nroots=3, track='index', saddle_check=True,
+            loop_tol_q=1e-4, loop_tol_energy=1e-7, reference=None, grid_accuracy=None,
             bse_kernel=None, bse_solver=None, refreeze=None, out=str(out))
         solvated._resolve_basis(ns)
         return ns

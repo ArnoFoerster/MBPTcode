@@ -76,7 +76,7 @@ tensor whole) and the orbital response shared with the tiled route
 (`relaxed_density`).
 """
 import numpy as np
-from pyscf import lib, scf
+from pyscf import lib
 from pyscf import df as pyscf_df
 
 from src.Base.numerics.constants import DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB
@@ -519,16 +519,6 @@ def lr_potential(env, mol, C, q):
     return C.T @ U @ C
 
 
-def _gas_jk(mf):
-    """get_jk of mf's interaction without any continuum: the JK the SCF
-    Fock matrix is built from (density fitting included)."""
-    m = scf.RHF(mf.mol)
-    if getattr(mf, 'with_df', None) is not None:
-        m = m.density_fit(auxbasis=mf.with_df.auxbasis)
-        m.with_df = mf.with_df
-    return m.get_jk
-
-
 def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
                     env=None, pcm_response=False, numerics=None, flags=None):
     """Delta rho_rel (nmo, nmo), the full MO basis of mf (frozen core
@@ -565,11 +555,12 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
         zc = Xco / (eps[None, nf:nocc] - eps[:nf, None])
         G[:nf, nf:nocc] += 0.5 * zc
         G[nf:nocc, :nf] += 0.5 * zc.T
-    get_jk = _gas_jk(mf)
+    # mf's own interaction without any continuum (its JK fit included), the
+    # one kernel of the P term and of the orbital response below
+    kernel = cphf.ResponseKernel(mf)
     Co, Cv = C[:, :nocc], C[:, nocc:]
     P = C @ G @ C.T
-    vj, vk = get_jk(mol, P, hermi=1)
-    v = 4.0 * vj - 2.0 * vk
+    v = 4.0 * kernel(P)
     pcm = None
     if pcm_response:
         pcm = getattr(mf, 'with_solvent', None)
@@ -580,8 +571,6 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
 
     # the response of a rotation density Co (Cv z)^T + its transpose, from
     # the occupied half-transforms of the same fit (ResponseKernel.factored)
-    kernel = cphf.ResponseKernel(mf)
-
     def fvind(z):
         z = z.reshape(nocc_v)
         v = 2.0 * kernel.factored(Cv @ z)

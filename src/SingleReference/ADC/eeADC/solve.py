@@ -42,8 +42,9 @@ state's slow polarization frozen (vertical), or at eps_static (equilibrium);
 the LR term stays at eps_inf either way. Triplets, which have no LR term,
 take their whole response to the excitation from it.
 """
-from src.Base.numerics.constants import (EE_ADC_CONV_TOL, EE_ADC_DENSE_LIMIT,
-                                         EE_FOLD_DENSE_LIMIT, EE_RI_TILE_GB)
+from src.Base.numerics.constants import (EE_ADC_DENSE_LIMIT, EE_FOLD_DENSE_LIMIT,
+                                         EE_RI_TILE_GB)
+from src.Base.numerics.numerics import numerics_or_default
 from src.SingleReference.ADC.eeADC import ee_driver as _drv
 from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
 from src.SingleReference.ADC.eeADC import ee_state_specific
@@ -53,14 +54,14 @@ from src.SingleReference.EpsteinNesbet import validate_en_dress
 
 
 def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
-                 df=False, spin=None, matrix_free=True, conv_tol=EE_ADC_CONV_TOL,
+                 df=False, spin=None, matrix_free=True,
                  en_dress=None, frozen=0, auxbasis=None,
                  ms_sector='auto', max_subspace=None, return_parity=False,
-                 dense_limit=None, threshold=5000, fold=False,
-                 environment=None, return_fold=False, tile_gb=EE_RI_TILE_GB,
+                 threshold=5000, fold=False,
+                 environment=None, return_fold=False,
                  numerics=None, state_specific='off', ss_density=SS_DENSITY_DEFAULT,
                  spin_scaling=None, relaxed_density=False, start=None,
-                 residual_tol=None, full_check=False):
+                 full_check=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
     an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
     per root (a Davidson or fold root that did not converge also warns).
@@ -77,12 +78,21 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     (or the Ms = 0 part of a quintet, which only the doubles can form), -1 for
     an Ms = 0 triplet. It labels the roots of a spin=None solve.
 
-    dense_limit: configurations below which the supermatrix is built and
-    diagonalized instead of iterated on (default EE_ADC_DENSE_LIMIT; with
-    fold=True the singles channel's size, default EE_FOLD_DENSE_LIMIT, since a
-    dense A_eff costs one product per configuration at every Newton step).
-    Exposed so a test can force the iterative route onto a system small
-    enough to also solve densely -- which is the only way to compare the two.
+    numerics: the run's Numerics (None: the defaults), the one source of the
+    solve's settings. Its adc section: conv_tol, the eigenvalue tolerance
+    (Hartree; with fold=True the frequency tolerance); residual_tol (fold=True,
+    level 'adc2'), the roots' residual, None for
+    max(conv_tol, sqrt(conv_tol EE_FOLD_RESIDUAL_GAP)), the bar of the
+    energies alone (a density read off the roots needs it tighter,
+    `Numerics.solved_for_the_loop`); dense_limit, the configurations below
+    which the supermatrix is built and diagonalized instead of iterated on
+    (None: EE_ADC_DENSE_LIMIT; with fold=True the singles channel's size,
+    EE_FOLD_DENSE_LIMIT, since a dense A_eff costs one product per
+    configuration at every Newton step; a test sets it to force the
+    iterative route onto a system small enough to also solve densely). Its
+    layout section: tile_gb, the bound on a fold tile's working set (None:
+    EE_RI_TILE_GB), and device, 'gpu' running the folded route's doubles
+    kernel on each rank's GPU.
 
     threshold: configurations above which a DENSE solve is distributed over
     MPI ranks via ELPA, the same knob and the same backend the charged IP/EA
@@ -92,13 +102,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     fold: True solves the folded problem on density-fitted tiles (module
     docstring): Z is then the singles part of each full eigenvector,
     sqrt(T1) y, on the flat spin-orbital singles layout (2 nocc nvir, frozen
-    orbitals dropped); conv_tol is its frequency tolerance (Hartree), and the
-    roots' residual residual_tol (None: sqrt(conv_tol EE_FOLD_RESIDUAL_GAP),
-    at least conv_tol, the bar of the energies alone; a density read off the
-    roots needs it tighter, `Numerics.solved_for_the_loop`); tile_gb bounds a tile's working set; numerics the
-    run's Numerics (None: the defaults), whose layout.device 'gpu' runs the
-    folded route's doubles kernel on each rank's GPU. return_fold
-    adds the ee_fold.FoldResult (singles weights T1, steps, converged).
+    orbitals dropped). return_fold adds the ee_fold.FoldResult (singles
+    weights T1, steps, converged).
 
     environment: a continuum, or None for the one attached to mf (if any);
     see the module docstring for the convention. Restricted closed-shell
@@ -156,8 +161,14 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
         raise ValueError(f"spin={spin!r}; expected 'singlet', 'triplet' or None")
     if return_fold and not fold:
         raise ValueError('return_fold needs fold=True')
+    numerics = numerics_or_default(numerics)
+    conv_tol, residual_tol = numerics.adc.conv_tol, numerics.adc.residual_tol
+    dense_limit = numerics.adc.dense_limit
     if dense_limit is None:
         dense_limit = EE_FOLD_DENSE_LIMIT if fold else EE_ADC_DENSE_LIMIT
+    tile_gb = numerics.layout.tile_gb
+    if tile_gb is None:
+        tile_gb = EE_RI_TILE_GB
     env = _drv.reaction_field_environment(mf, mol, environment, route)
     if ss_density not in SS_DENSITIES:
         raise ValueError(f'ss_density={ss_density!r}; expected one of '

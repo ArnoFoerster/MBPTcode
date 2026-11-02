@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 from pyscf import gto
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import read_record, write_record
 from src.Base.geometry.geometry import molecule_at
 from src.gradients.gwbse.dense_surfaces import (DenseBSESurface, DenseRPASurface,
@@ -34,11 +35,11 @@ def h2():
 def test_tda_quasiparticle_surface_declares_no_rpa_ground_state(h2):
     """A G0W0-TDA surface carries E_c = 0 and must not pair with dRPA's E_0."""
     qp = QuasiparticleSurface(h2, tight_rhf, charge_change=-1,
-                              screening='tda')
+                              screening='tda', numerics=Numerics())
     with pytest.raises(ValueError, match='Tamm-Dancoff'):
         qp.physics
     with pytest.raises(ValueError, match='Tamm-Dancoff'):
-        compare_surfaces(qp, DenseRPASurface(h2))
+        compare_surfaces(qp, DenseRPASurface(h2, numerics=Numerics()))
 
 
 def test_dense_surfaces_refuse_a_mean_field_of_another_geometry(h2):
@@ -46,9 +47,9 @@ def test_dense_surfaces_refuse_a_mean_field_of_another_geometry(h2):
     moved = molecule_at(h2, h2.atom_coords() + np.array([[0, 0, 0],
                                                           [0, 0, 0.05]]))
     mf = tight_rhf(h2)
-    rpa = DenseRPASurface(h2)
-    qp = QuasiparticleSurface(h2, tight_rhf, charge_change=-1)
-    bse = DenseBSESurface(h2)
+    rpa = DenseRPASurface(h2, numerics=Numerics())
+    qp = QuasiparticleSurface(h2, tight_rhf, charge_change=-1, numerics=Numerics())
+    bse = DenseBSESurface(h2, numerics=Numerics())
     for call in (rpa.total_energy, rpa.total_gradient, qp.total_energy,
                  qp.total_gradient, bse.total_energy, bse.total_gradient,
                  bse.excitation):

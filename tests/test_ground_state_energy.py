@@ -131,7 +131,7 @@ def test_the_rpa_ground_state_is_the_dense_surfaces_own_arithmetic(water):
     e0 = ground_state_energy(GroundState('rpa', 'hf'), mf, water,
                              e_corr=e_corr)
     # the surface builds E_c^dRPA again from the same mean field
-    assert_same(e0.total, DenseRPASurface(water, rhf).total_energy(water))
+    assert_same(e0.total, DenseRPASurface(water, rhf, numerics=Numerics()).total_energy(water))
     assert_same(e0.terms['E_ref'], float(mf.e_tot))
     assert e0.terms['E_x^HF - E_xc'] == 0.0
     assert e0.terms['E_c^dRPA'] == float(e_corr)
@@ -240,13 +240,15 @@ def test_every_surface_declares_the_functional_its_mean_field_carries(water):
     surface has to say which E_0 it is on rather than leaving it to be inferred
     from the factory that built it."""
     hartree_fock = GroundState('rpa', 'hf')
-    assert DenseRPASurface(water, rhf).physics_ground_state == hartree_fock
-    assert QuasiparticleSurface(water, rhf).physics_ground_state == hartree_fock
-    assert DenseBSESurface(water, scf=rhf).physics_ground_state == hartree_fock
-    assert (DenseBSESurface(water, scf=pbe0).physics_ground_state
+    assert DenseRPASurface(water, rhf, numerics=Numerics()).physics_ground_state == hartree_fock
+    assert QuasiparticleSurface(water, rhf,
+                                numerics=Numerics()).physics_ground_state == hartree_fock
+    assert DenseBSESurface(water, scf=rhf, numerics=Numerics()).physics_ground_state == hartree_fock
+    assert (DenseBSESurface(water, scf=pbe0, numerics=Numerics()).physics_ground_state
             == GroundState('rpa', 'pbe0'))
 
-    chain = RPAGroundStateChain(water, pbe0, mf=pbe0(water), numerics=Numerics(isdf={'counts': g1(water)}))
+    chain = RPAGroundStateChain(water, pbe0, mf=pbe0(water),
+                                numerics=Numerics(isdf={'counts': g1(water)}))
     assert chain.physics_ground_state == GroundState('rpa', 'pbe0')
     composed = RPABSESurface(water, pbe0, mf=pbe0(water), ground=chain, numerics=g1_numerics(water))
     assert composed.physics_ground_state == chain.physics_ground_state
@@ -265,7 +267,7 @@ def test_refreeze_carries_the_spin_and_every_other_constructor_setting(water):
     """
     triplet = DenseBSESurface(water, 'BSE@GW', state=0, qp_orbs=[3, 4, 5],
                               filter_z=False, scf=rhf, auxbasis=None,
-                              eri_blocks=True, spin='triplet')
+                              eri_blocks=True, spin='triplet', numerics=Numerics())
     refrozen = triplet.refreeze(water)
     for setting in ('spin', 'eri_blocks', 'variant', 'state', '_qp_orbs_in',
                     'filter_z', '_scf', 'auxbasis'):
@@ -278,7 +280,7 @@ def test_refreeze_carries_the_spin_and_every_other_constructor_setting(water):
     assert_same(refrozen.total_energy(water), e_triplet)
     singlet = DenseBSESurface(water, 'BSE@GW', state=0, qp_orbs=[3, 4, 5],
                               filter_z=False, scf=rhf, auxbasis=None,
-                              eri_blocks=True, spin='singlet')
+                              eri_blocks=True, spin='singlet', numerics=Numerics())
     e_singlet = singlet.total_energy(water)
     assert e_singlet != e_triplet
     assert (e_singlet - e_triplet) * HARTREE_TO_EV > 0.1, (

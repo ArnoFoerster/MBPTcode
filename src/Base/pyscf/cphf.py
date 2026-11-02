@@ -32,9 +32,9 @@ raised (`numerical_flags.flag`: inside `numerical_flags.collecting(flags)`
 it reaches that list, and `flags` where the caller hands one), which a state
 model copies into its record (src.gradients.state_models).
 
-numerics: a `src.Base.numerics.numerics.Numerics`; its scf section's
-multiplier_tol, multiplier_max_iter and multiplier_residual_tol set every
-solve. None takes them at their defaults.
+numerics: the run's `src.Base.numerics.numerics.Numerics`, required; its
+scf section's multiplier_tol, multiplier_max_iter and
+multiplier_residual_tol set every solve. None is refused.
 
 precond: the denominators of the preconditioner, default diag. A floor on
 small gaps (sign(d) max(|d|, shift)) speeds a hard case up without changing
@@ -46,7 +46,7 @@ from pyscf import lib, scf
 
 from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_STALL_RATIO,
                                          SCF_KERNEL_AUX_BLOCK)
-from src.Base.numerics.numerics import numerics_or_default
+from src.Base.numerics.numerics import required_numerics
 from src.Base.numerical_flags import flag
 from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
 from src.Base.utils.parallel.mpi_grid import lockstep, ordered_sum
@@ -56,12 +56,12 @@ class CphfNotConverged(RuntimeWarning):
     (its last iterate returned)."""
 
 
-def solve_operator(apply, rhs, denominators, numerics=None, flags=None):
+def solve_operator(apply, rhs, denominators, numerics, flags=None):
     """(x, true residual norm, lgmres info) of apply(x) = rhs, flat vectors,
     preconditioned by division by `denominators` (module docstring). Under
     ranks a collective: every rank calls it with the same rhs, and `apply`
     is called on every rank with rank 0's vector."""
-    s = numerics_or_default(numerics).scf
+    s = required_numerics(numerics, 'cphf.solve_operator').scf
     m = np.asarray(denominators, float)
     scale = max(1.0, np.linalg.norm(rhs))
     x, info = lgmres_root_driven(
@@ -78,9 +78,10 @@ def solve_operator(apply, rhs, denominators, numerics=None, flags=None):
     return x, res, info
 
 
-def solve(coupling, diag, rhs, numerics=None, precond=None, flags=None):
+def solve(coupling, diag, rhs, numerics, precond=None, flags=None):
     """x of diag * x + coupling(x) = rhs, shaped like rhs (module docstring).
     coupling maps an array shaped like rhs to its response, either shape."""
+    required_numerics(numerics, 'cphf.solve')
     rhs = np.asarray(rhs, float)
     shape = rhs.shape
     d = np.asarray(diag, float).ravel()

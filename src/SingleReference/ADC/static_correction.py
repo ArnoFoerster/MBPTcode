@@ -14,8 +14,9 @@ from src.SingleReference.CC.pipeline import (compute_ccsd_density_matrix,
                                              compute_ccsd_density_matrix_uhf,
                                              compute_ccsdt_density_matrix)
 from src.SingleReference.DensityMatrix.density_matrix import (
-    build_dgamma_block, semicanonicalize_restricted, semicanonicalize_uhf,
-    solve_cphf_relaxation, solve_cphf_relaxation_uhf, t1_singles_blocks)
+    build_dgamma_block, relaxation_numerics, semicanonicalize_restricted,
+    semicanonicalize_uhf, solve_cphf_relaxation, solve_cphf_relaxation_uhf,
+    t1_singles_blocks)
 from src.SingleReference.DensityMatrix.generated_mpn import (
     mpn_density_pieces as mpn_gen)
 from src.SingleReference.DensityMatrix.mpn_density_driver import (
@@ -183,7 +184,7 @@ def _rotate_dgamma_to_original_basis(dgamma_semi, U_oo, U_vv, nocc):
 
 def _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore, eri_chemist=None, B_aa=None,
                         u2_denom_dress=None, amplitudes=None,
-                        laplace_ntau=MPN_DENSITY_LAPLACE_NTAU):
+                        laplace_ntau=MPN_DENSITY_LAPLACE_NTAU, numerics=None):
     """RHF-only: the MPn Delta_gamma = Delta_gamma^(2) + ... + Delta_gamma^(order)
     in the spatial MO basis (order 2, 3 or 4), the density whose G[Delta_gamma]
     is Sigma(infinity) through order+1; shared by every restricted and
@@ -196,7 +197,8 @@ def _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore, eri_chemist=None, B_
     first order, so not per order; see density_matrix.t1_singles_blocks).
     relax=True solves the CPHF/CPKS Z-vector equation for the combined ov
     block (solve_cphf_relaxation; in the semicanonical basis for KS, then
-    rotated back). Through MP2 that is the relaxed density; from MP3 on it
+    rotated back) on `numerics`, the run's (required there). Through MP2
+    that is the relaxed density; from MP3 on it
     relaxes the orbitals only (no amplitude response), which is why it misses
     the finite-field dipole (tests/test_mp3_finite_field.py); a KS reference
     with relax=True is refused from order 3.
@@ -328,7 +330,8 @@ def _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore, eri_chemist=None, B_
 
     dgamma_oo, dgamma_ov, dgamma_vv = _embed_active(oo_act, ov_act, vv_act, nocc, ncore)
     if relax:
-        dgamma_full = solve_cphf_relaxation(mf_eval, nocc, dgamma_oo, dgamma_ov, dgamma_vv)
+        dgamma_full = solve_cphf_relaxation(mf_eval, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
+                                            numerics)
     else:
         dgamma_full = build_dgamma_block(nmo, nocc, dgamma_oo, dgamma_ov, dgamma_vv)
     if ks_setup is not None:
@@ -337,14 +340,14 @@ def _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore, eri_chemist=None, B_
 
 
 def _mpn_dgamma_uhf(mf, mol, order, relax, ncore, u2_denom_dress=None, cphf_level_shift=0.0,
-                    cphf_max_cycle=None, cphf_tol=None):
+                    numerics=None):
     """UHF: (dgamma_a, dgamma_b), the MP2 (order 2) or MP2+MP3 (order 3)
     Delta_gamma per spin in the spatial MO basis, from the generated
     unrestricted pipeline (MPnDensityDriverUnrestricted); frozen core is a
     [ncore:] window per spin channel. KS references are semicanonicalized and
     get the T1 singles blocks, as in _mpn_dgamma_spatial. relax=True solves
-    the UHF CPHF/CPKS Z-vector equation (solve_cphf_relaxation_uhf;
-    cphf_level_shift/max_cycle/tol forwarded, None keeping its defaults);
+    the UHF CPHF/CPKS Z-vector equation (solve_cphf_relaxation_uhf on
+    `numerics`, the run's, with cphf_level_shift its preconditioner's floor);
     from MP3 on it relaxes the orbitals only, as on the RHF route."""
     ks_setup = _ks_semicanonical_setup_uhf(mf, mol, ncore)
     mf_eval = ks_setup[0] if ks_setup is not None else mf
@@ -380,15 +383,11 @@ def _mpn_dgamma_uhf(mf, mol, order, relax, ncore, u2_denom_dress=None, cphf_leve
     dgamma_oo_a, dgamma_ov_a, dgamma_vv_a = _embed_active(oo_a, ov_a, vv_a, nocc_a, ncore)
     dgamma_oo_b, dgamma_ov_b, dgamma_vv_b = _embed_active(oo_b, ov_b, vv_b, nocc_b, ncore)
     if relax:
-        cphf_kwargs = {'level_shift': cphf_level_shift}
-        if cphf_max_cycle is not None:
-            cphf_kwargs['max_cycle'] = cphf_max_cycle
-        if cphf_tol is not None:
-            cphf_kwargs['tol'] = cphf_tol
         dgamma_a, dgamma_b = solve_cphf_relaxation_uhf(
             mf_eval, nocc_a, nocc_b,
             dgamma_oo_a, dgamma_ov_a, dgamma_vv_a,
-            dgamma_oo_b, dgamma_ov_b, dgamma_vv_b, **cphf_kwargs)
+            dgamma_oo_b, dgamma_ov_b, dgamma_vv_b, numerics,
+            level_shift=cphf_level_shift)
     else:
         dgamma_a = build_dgamma_block(norb_a, nocc_a, dgamma_oo_a, dgamma_ov_a, dgamma_vv_a)
         dgamma_b = build_dgamma_block(norb_b, nocc_b, dgamma_oo_b, dgamma_ov_b, dgamma_vv_b)
@@ -401,7 +400,7 @@ def _mpn_dgamma_uhf(mf, mol, order, relax, ncore, u2_denom_dress=None, cphf_leve
 def build_mpn_static_correction(mf, order, mol=None, nocc=None, relax=False, ncore=0,
                                 u2_denom_dress=None, B_aa=None, amplitudes=None,
                                 restricted=False, laplace_ntau=MPN_DENSITY_LAPLACE_NTAU,
-                                cphf_level_shift=0.0, cphf_max_cycle=None, cphf_tol=None):
+                                cphf_level_shift=0.0, numerics=None):
     """The generalized-Fock 'static' correction to the ADC F block from the MPn
     1-RDM, Delta_gamma = Delta_gamma^(2) + ... + Delta_gamma^(order): F is
     linear in the density, so F[gamma_HF + Delta_gamma] = diag(eps) +
@@ -417,7 +416,10 @@ def build_mpn_static_correction(mf, order, mol=None, nocc=None, relax=False, nco
 
     ncore: frozen spatial core orbitals (both spin channels for UHF). relax,
     u2_denom_dress, amplitudes, laplace_ntau: see _mpn_dgamma_spatial;
-    cphf_*: the UHF Z-vector solve's options (_mpn_dgamma_uhf)."""
+    numerics: the run's `Numerics`, the Z-vector's, required with relax=True;
+    cphf_level_shift: the UHF Z-vector's preconditioner floor
+    (_mpn_dgamma_uhf)."""
+    numerics = relaxation_numerics(relax, numerics, 'build_mpn_static_correction')
     mol = mol if mol is not None else mf.mol
     if isinstance(mf, scf.uhf.UHF):
         if restricted:
@@ -429,8 +431,7 @@ def build_mpn_static_correction(mf, order, mol=None, nocc=None, relax=False, nco
                              "the UHF g-free route is build_mp2_static_correction_uhf_df")
         dgamma_a, dgamma_b = _mpn_dgamma_uhf(
             mf, mol, order, relax, ncore, u2_denom_dress=u2_denom_dress,
-            cphf_level_shift=cphf_level_shift, cphf_max_cycle=cphf_max_cycle,
-            cphf_tol=cphf_tol)
+            cphf_level_shift=cphf_level_shift, numerics=numerics)
         nocc_a, nocc_b = mf.nelec
         _, g_anti_spin, _ = get_uhf_spin_orbital_arrays_blockstacked(mol, mf)
         dgamma_spin = _uhf_dgamma_to_spin_blockstacked(
@@ -441,14 +442,16 @@ def build_mpn_static_correction(mf, order, mol=None, nocc=None, relax=False, nco
     if restricted and B_aa is not None:
         dgamma_spatial = _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore, B_aa=B_aa,
                                              u2_denom_dress=u2_denom_dress,
-                                             amplitudes=amplitudes, laplace_ntau=laplace_ntau)
+                                             amplitudes=amplitudes, laplace_ntau=laplace_ntau,
+                                             numerics=numerics)
         return _static_correction_from_dgamma_restricted_df(B_aa, dgamma_spatial)
     if B_aa is not None:
         raise ValueError("B_aa= is the restricted branch's DF route (restricted=True)")
     eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
     dgamma_spatial = _mpn_dgamma_spatial(mf, mol, nocc, order, relax, ncore,
                                          eri_chemist=eri_chemist, u2_denom_dress=u2_denom_dress,
-                                         amplitudes=amplitudes, laplace_ntau=laplace_ntau)
+                                         amplitudes=amplitudes, laplace_ntau=laplace_ntau,
+                                         numerics=numerics)
     if restricted:
         return _static_correction_from_dgamma_restricted(eri_chemist, dgamma_spatial)
     return _spin_orbital_static_correction(get_antisymmetrized_spin_eri(eri_chemist),
@@ -456,35 +459,36 @@ def build_mpn_static_correction(mf, order, mol=None, nocc=None, relax=False, nco
 
 
 def build_mp2_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u2_denom_dress=None,
-                                cphf_level_shift=0.0, cphf_max_cycle=None, cphf_tol=None):
+                                cphf_level_shift=0.0, numerics=None):
     """build_mpn_static_correction at order 2, spin-orbital (RHF or UHF)."""
     return build_mpn_static_correction(
         mf, 2, mol, nocc, relax=relax, ncore=ncore, u2_denom_dress=u2_denom_dress,
-        cphf_level_shift=cphf_level_shift, cphf_max_cycle=cphf_max_cycle, cphf_tol=cphf_tol)
+        cphf_level_shift=cphf_level_shift, numerics=numerics)
 
 
 def build_mp2_static_correction_restricted(mf, mol=None, nocc=None, relax=False, ncore=0, B_aa=None,
-                                           u2_denom_dress=None, amplitudes=None):
+                                           u2_denom_dress=None, amplitudes=None, numerics=None):
     """build_mpn_static_correction at order 2, restricted (RHF): the spatial J - K/2
     form, g-free with B_aa; amplitudes: the CC-ADC(3) amplitude substitution."""
     return build_mpn_static_correction(
         mf, 2, mol, nocc, relax=relax, ncore=ncore, u2_denom_dress=u2_denom_dress,
-        B_aa=B_aa, amplitudes=amplitudes, restricted=True)
+        B_aa=B_aa, amplitudes=amplitudes, restricted=True, numerics=numerics)
 
 
-def build_mp3_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u2_denom_dress=None):
+def build_mp3_static_correction(mf, mol=None, nocc=None, relax=False, ncore=0, u2_denom_dress=None,
+                                numerics=None):
     """build_mpn_static_correction at order 3, spin-orbital (RHF or UHF). relax=True
     relaxes the orbitals only (see _mpn_dgamma_spatial)."""
     return build_mpn_static_correction(mf, 3, mol, nocc, relax=relax, ncore=ncore,
-                                       u2_denom_dress=u2_denom_dress)
+                                       u2_denom_dress=u2_denom_dress, numerics=numerics)
 
 
 def build_mp3_static_correction_restricted(mf, mol=None, nocc=None, relax=False, ncore=0, B_aa=None,
-                                           u2_denom_dress=None):
+                                           u2_denom_dress=None, numerics=None):
     """build_mpn_static_correction at order 3, restricted (RHF), g-free with B_aa."""
     return build_mpn_static_correction(mf, 3, mol, nocc, relax=relax, ncore=ncore,
                                        u2_denom_dress=u2_denom_dress, B_aa=B_aa,
-                                       restricted=True)
+                                       restricted=True, numerics=numerics)
 
 
 def build_mp4_static_correction_restricted(mf, mol=None, nocc=None, ncore=0,
@@ -555,7 +559,7 @@ def _dgamma_spatial_from_ao_density_uhf(mf, dm_a_ao, dm_b_ao):
 
 
 def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress=None,
-                                       cphf_level_shift=0.0, cphf_max_cycle=None, cphf_tol=None):
+                                       cphf_level_shift=0.0, numerics=None):
     """g-FREE UHF counterpart of build_mp2_static_correction: the same
     MP2-relaxed (optionally EN-dressed) G[Delta_gamma] blockstacked
     spin-orbital correction, built entirely from the blockstacked DF factor
@@ -576,9 +580,12 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
     automatically DF when mf carries with_df). The final
     G_pq = sum_rs dgamma_rs <pr||qs> contraction is two rank<=3 B
     contractions (direct: B-weighted trace; exchange: B @ dgamma @ B per Q).
+    numerics: the run's `Numerics`, the Z-vector's, required with relax=True.
 
     Restrictions (raise): UHF only (no KS semicanonicalization), ncore=0.
     """
+    numerics = relaxation_numerics(relax, numerics,
+                                   'build_mp2_static_correction_uhf_df')
 
     if not isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("build_mp2_static_correction_uhf_df is UHF-only")
@@ -657,13 +664,9 @@ def build_mp2_static_correction_uhf_df(mf, mol, B_so, relax=True, u2_denom_dress
     ov_a, ov_b = dg_ov[:nocc_a, :nv_a], dg_ov[nocc_a:, nv_a:]
 
     if relax:
-        cphf_kwargs = {'level_shift': cphf_level_shift}
-        if cphf_max_cycle is not None:
-            cphf_kwargs['max_cycle'] = cphf_max_cycle
-        if cphf_tol is not None:
-            cphf_kwargs['tol'] = cphf_tol
         dgamma_a, dgamma_b = solve_cphf_relaxation_uhf(
-            mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b, **cphf_kwargs)
+            mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b, numerics,
+            level_shift=cphf_level_shift)
     else:
         dgamma_a = build_dgamma_block(norb_a, nocc_a, oo_a, ov_a, vv_a)
         dgamma_b = build_dgamma_block(norb_b, nocc_b, oo_b, ov_b, vv_b)
@@ -965,8 +968,8 @@ def parse_static_kind(kind):
 
 def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
                             nocc=None, ncore=0, B_aa=None, spin='auto',
-                            df=False, cphf_level_shift=0.0, cphf_max_cycle=None,
-                            cphf_tol=None, amplitudes=None):
+                            df=False, cphf_level_shift=0.0, amplitudes=None,
+                            numerics=None):
     """Sigma(infinity) static-correction dispatcher over the builders above;
     the KS double-counting correction is always added on top (zero-effect for
     plain HF references).
@@ -994,9 +997,11 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         a restricted reference) raises immediately instead of silently
         computing something else. For spin='restricted', pass B_aa instead
         (the DF hook of the restricted MP2/MP3/CCSD builders).
-    cphf_level_shift/cphf_max_cycle/cphf_tol: forwarded to the UHF CPHF/
-        Z-vector solve (relax=True only, dense or df); see
-        solve_cphf_relaxation_uhf.
+    cphf_level_shift: the UHF CPHF/Z-vector solve's preconditioner floor
+        (relaxed kinds only, dense or df); see solve_cphf_relaxation_uhf.
+    numerics: the run's `Numerics`, whose scf section sets the Z-vector
+        solve of a relaxed kind ('mp2_relaxed', 'mp3_relaxed'); required
+        there, not read by the others.
     amplitudes: foreign (CC) amplitude pool for the MP2 density functional,
         the Sigma(inf) partner of a CC-ADC(3) amplitude substitution. Restricted
         MP2 kinds only ('mp2_unrelaxed'/'mp2_relaxed'); rejected elsewhere
@@ -1040,6 +1045,7 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         raise ValueError("en_dress applies to the MP2/MP3 density kinds only "
                          "(a CC/None static has no EN hook)")
     relax = kind in ('mp2_relaxed', 'mp3_relaxed')
+    numerics = relaxation_numerics(relax, numerics, 'build_static_correction')
 
     if spin == 'restricted':
         nocc = nocc if nocc is not None else mol.nelectron // 2
@@ -1048,11 +1054,11 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         elif kind.startswith('mp2'):
             base = build_mp2_static_correction_restricted(
                 mf, mol, nocc, relax=relax, ncore=ncore, B_aa=B_aa,
-                u2_denom_dress=en_dress, amplitudes=amplitudes)
+                u2_denom_dress=en_dress, amplitudes=amplitudes, numerics=numerics)
         elif kind.startswith('mp3'):
             base = build_mp3_static_correction_restricted(
                 mf, mol, nocc, relax=relax, ncore=ncore, B_aa=B_aa,
-                u2_denom_dress=en_dress)
+                u2_denom_dress=en_dress, numerics=numerics)
         elif kind.startswith('mp4'):
             if B_aa is not None:
                 raise NotImplementedError(
@@ -1091,8 +1097,7 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         B_spin = get_uhf_spin_orbital_df_factor_blockstacked(mol, mf)
         base = build_mp2_static_correction_uhf_df(
             mf, mol, B_spin, relax=relax, u2_denom_dress=en_dress,
-            cphf_level_shift=cphf_level_shift, cphf_max_cycle=cphf_max_cycle,
-            cphf_tol=cphf_tol)
+            cphf_level_shift=cphf_level_shift, numerics=numerics)
         base = _add_ks(base, build_ks_static_correction(mf, mol))
         return _add_ks(base, build_solvent_static_correction(mf, mol))
 
@@ -1102,11 +1107,11 @@ def build_static_correction(mf, mol=None, kind='mp2_relaxed', en_dress=None,
         base = build_mp2_static_correction(mf, mol, nocc, relax=relax,
                                            ncore=ncore, u2_denom_dress=en_dress,
                                            cphf_level_shift=cphf_level_shift,
-                                           cphf_max_cycle=cphf_max_cycle,
-                                           cphf_tol=cphf_tol)
+                                           numerics=numerics)
     elif kind.startswith('mp3'):
         base = build_mp3_static_correction(mf, mol, nocc, relax=relax,
-                                           ncore=ncore, u2_denom_dress=en_dress)
+                                           ncore=ncore, u2_denom_dress=en_dress,
+                                           numerics=numerics)
     elif kind.startswith('mp4'):
         base = build_mp4_static_correction(mf, mol, nocc, ncore=ncore)
     elif kind == 'ccsd':

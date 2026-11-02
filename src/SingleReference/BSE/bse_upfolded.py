@@ -50,7 +50,6 @@ with the doubles stored as [l, d, k, c]: the OUTER particle-hole pair (l, d)
 carries the quasiparticle energies, the INNER pair (k, c) is the screening
 excitation that S acts on.
 """
-import warnings
 
 import numpy as np
 from pyscf import scf
@@ -587,10 +586,9 @@ def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
     the exact four-index ERI (False), on the dense and the matrix-free path
     alike, so the system size picks the solver and never the integrals.
 
-    e_qp: GW quasiparticle energies (Hartree), length norb. `None` falls back
-    to the mean-field eigenvalues, which is NOT GW/BSE -- it is the same
-    matrix with an uncorrelated one-particle spectrum, useful for testing the
-    algebra and nothing else. Use `qp_energies(mf)` for the real thing.
+    e_qp: GW quasiparticle energies (Hartree), length norb, required:
+    `qp_energies(mf)`. A test of the algebra alone passes the mean-field
+    eigenvalues explicitly (`mf.mo_energy`); that matrix is not GW/BSE.
 
     flags: a list that receives the solve's named numerical events
     ('upfolded_bse_complex_roots', NaN roots; davidson_nonsymmetric:
@@ -605,11 +603,11 @@ def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
     act = slice(frozen, len(eps))
     if e_qp is None:
-        warnings.warn(
-            'no GW quasiparticle energies given; falling back to mean-field '
-            'eigenvalues. That is not GW/BSE -- pass e_qp=qp_energies(mf).',
-            RuntimeWarning, stacklevel=2)
-        e_qp = eps
+        raise ValueError(
+            'solve_bse_upfolded needs the GW quasiparticle energies: pass '
+            'e_qp=qp_energies(mf). The mean-field eigenvalues in their place '
+            'are not GW/BSE; pass e_qp=mf.mo_energy explicitly to test the '
+            'algebra on them.')
     e_qp = np.asarray(e_qp)
     eps, e_qp = eps[act], e_qp[act]
     norb = len(eps)

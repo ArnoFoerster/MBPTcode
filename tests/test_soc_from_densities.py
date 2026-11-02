@@ -40,7 +40,7 @@ from src.SingleReference.ADC.eeADC import (ee_equations, ee_transition_density,
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.BSE.solve import oscillator_strengths as casida_f
 from src.properties import spin_orbit, transition_moments
-from tests.adc_common import H2CO, check
+from tests.adc_common import H2CO, check, ee_numerics
 
 etd = ee_transition_density
 PAULI = (np.array([[0, 1], [1, 0]], complex), np.array([[0, -1j], [1j, 0]]),
@@ -67,7 +67,7 @@ def spin_adapted(mf, mol, level):
     out = {}
     for spin, parity in (('singlet', 1), ('triplet', -1)):
         e, Z = solve_ee_adc(mf, level=level, spin=spin, nroots=NROOTS,
-                            conv_tol=1e-11)
+                            numerics=ee_numerics(conv_tol=1e-11))
         out[spin] = (e, Z, [etd.flat_state(Z[:, k], no, nv, level, parity)
                             for k in range(NROOTS)])
     return out, etd.reference_from_integrals(eps, V, no, level, ground=True)

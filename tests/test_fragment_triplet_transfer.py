@@ -51,7 +51,7 @@ import pytest
 from pyscf import gto
 
 from src.Base.geometry.geometry import displaced
-from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.numerics import Numerics, numerics_of
 from src.fragments import partition as fragment_partition
 from src.fragments.localization import FragmentOrbitals
 from src.fragments.partition import FragmentPartition, to_local
@@ -267,7 +267,7 @@ def test_the_coupling_refuses_what_it_cannot_take(kernel):
 
 def test_adc2_triplets_through_the_same_coupling():
     mol = gto.M(atom=DIMER, basis=BASIS, verbose=0)
-    method = ADC2FragmentMethod(mol, factory, 'triplet', AUX)
+    method = ADC2FragmentMethod(mol, factory, 'triplet', AUX, numerics=Numerics())
     mol, mf = method.mean_field()
     orbitals = FragmentOrbitals.from_mf(mf, FRAGMENTS)
     op = ADC2Operator.from_mean_field(mol, mf, 'triplet', AUX, OMEGA0_ADC2,
@@ -300,7 +300,7 @@ def tta_partitions(name):
         mf = trip.mf0
         ops = [op_s, op_t]
     else:
-        method = ADC2FragmentMethod(mol, factory, 'triplet', AUX)
+        method = ADC2FragmentMethod(mol, factory, 'triplet', AUX, numerics=Numerics())
         mol, mf = method.mean_field()
         ops = [ADC2Operator.from_mean_field(mol, mf, s, AUX, om, route='dense')
                for s, om in (('singlet', OMEGA0_SINGLET['adc2']),

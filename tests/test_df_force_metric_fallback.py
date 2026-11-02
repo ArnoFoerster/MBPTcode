@@ -18,6 +18,7 @@ import numpy as np
 from pyscf import gto, scf
 
 from src.Base.factorization.distributed_df import metric_factor
+from src.Base.numerics.numerics import Numerics
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as dcft
 from src.gradients.df_factors import mp2_factors
@@ -43,7 +44,7 @@ def _mean_field(mol):
 def _force_and_energy(coords):
     mol = _mol(coords)
     mf = _mean_field(mol)
-    force, (e2, *_) = dcf.mp2_force(mf, mol, 0, AUX)
+    force, (e2, *_) = dcf.mp2_force(mf, mol, 0, AUX, numerics=Numerics())
     return np.asarray(force), mf.e_tot + e2
 
 
@@ -74,8 +75,9 @@ def test_the_force_on_a_dependent_auxiliary_set_is_finite_and_the_energys_slope(
 def test_the_tiled_force_on_a_dependent_auxiliary_set_is_the_dense_force():
     mol = _mol(np.array([a[1] for a in ATOM]) * 1.8897261246)
     mf = _mean_field(mol)
-    dense, (e_dense, *_) = dcf.mp2_force(mf, mol, 0, AUX)
-    tiled, (e_tiled, *_) = dcft.mp2_force_tiled(mf, mol, mp2_factors, 0, AUX)
+    dense, (e_dense, *_) = dcf.mp2_force(mf, mol, 0, AUX, numerics=Numerics())
+    tiled, (e_tiled, *_) = dcft.mp2_force_tiled(mf, mol, mp2_factors, 0, AUX,
+                                                 numerics=Numerics())
     assert abs(e_tiled - e_dense) < 1e-10, e_tiled - e_dense
     assert np.abs(np.asarray(tiled) - np.asarray(dense)).max() < 1e-9, \
         np.abs(np.asarray(tiled) - np.asarray(dense)).max()

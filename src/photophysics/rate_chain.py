@@ -76,7 +76,8 @@ from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
 from src.photophysics import rates
 from src.photophysics.rate_models import RateRefused
 from src.photophysics.records import key_of
-from src.properties.duschinsky import (DuschinskyModel, DuschinskyOscillators,
+from src.properties.duschinsky import (COORDINATES, DuschinskyModel,
+                                       DuschinskyOscillators,
                                        displacement_from_gradient,
                                        displacement_from_minima,
                                        duschinsky_density, duschinsky_guard,
@@ -94,7 +95,6 @@ TRIPLET_MODELS = ('manifold', 'T1')
 DENSITIES = ('multimode', 'mlj')
 MIXINGS = ('auto', 'diabatic', 'perturbative')
 HUANG_RHYS_ROUTES = ('curvilinear', 'cartesian', 'gradient')
-DUSCHINSKY_COORDINATES = ('curvilinear', 'rectilinear')
 
 #: The gradient keys of `RateInputs`: 'S1@T1' is S1's gradient at the T1
 #: minimum, 'T1@S1' T1's at the S1 minimum.
@@ -172,8 +172,7 @@ class RateModel:
                               ('triplets', TRIPLET_MODELS),
                               ('density', DENSITIES),
                               ('mixing', MIXINGS),
-                              ('duschinsky_coordinates',
-                               DUSCHINSKY_COORDINATES),
+                              ('duschinsky_coordinates', COORDINATES),
                               ('huang_rhys_route', HUANG_RHYS_ROUTES)):
             if getattr(self, name) not in allowed:
                 raise ValueError(f'RateModel.{name} = {getattr(self, name)!r} '
@@ -385,8 +384,7 @@ class _Bath:
             return rho
         shifted = de + (self.zpe if m.zero_point else 0.0)
         if m.density == 'mlj':
-            s_sum = float(self.s_g.sum())
-            om_eff = float((self.s_g * self.omega_g).sum() / max(s_sum, 1e-30))
+            s_sum, om_eff = rates.effective_mode(self.s_g, self.omega_g)
             return np.array([rates.mlj_density(e, self.lam, s_sum, om_eff,
                                                self.temperature,
                                                RATE_MLJ_N_MAX)
@@ -442,7 +440,7 @@ def _pair_rate(at, de, average, model, omega_modes, modes, masses, rotation,
         de, v / np.sqrt(average), dv / np.sqrt(average), w, bath,
         bath.temperature)
     return k, k_c, k_h, {'v_condon_cm': v * HARTREE_TO_CM,
-                         'dv_dq_rms_cm': _rms_cm(dv) if dv.size else None,
+                         'dv_dq_rms_cm': rates.rms_cm(dv) if dv.size else None,
                          'path_gaps_meV': _path_gaps(at), **rec}, mixing
 
 
@@ -497,7 +495,7 @@ def _mixing(at, model, on_modes, omega, temperature):
                         * HARTREE_TO_EV * 1e3,
                         'ratio': r, 'sin2_second_order': r * r,
                         'sin2': mixed_weight(r),
-                        'dv_dq_rms_cm': _rms_cm(on_modes(part))}
+                        'dv_dq_rms_cm': rates.rms_cm(on_modes(part))}
     r_max = max((p['ratio'] for p in paths.values()), default=0.0)
     diabatic = (model.mixing == 'diabatic'
                 or (model.mixing == 'auto' and r_max > RATE_MIXING_RATIO_MAX))
@@ -520,11 +518,6 @@ def _mixing(at, model, on_modes, omega, temperature):
         condon *= 1.0 - s
     record['mixing']['condon_factor'] = condon
     return dv, condon, record, {p['state']: p['sin2'] for p in paths.values()}
-
-
-def _rms_cm(x):
-    """Root mean square over the modes, cm^-1."""
-    return float(np.sqrt((np.asarray(x) ** 2).mean()) * HARTREE_TO_CM)
 
 
 def _path_gaps(at):

@@ -92,7 +92,6 @@ from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  screened_layout)
-from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block,
                                               current_comm, lockstep, partition)
@@ -320,7 +319,8 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
     def _resolve_z_mode(self):
         """Rank 0's choice, the same on every rank: Z's rows held where the
         two operators a range-separated SCF asks for fit in
-        `ISDF_SCF_KERNEL_MEMORY_FRACTION` of what max_memory leaves."""
+        `ISDF_SCF_KERNEL_MEMORY_FRACTION` of max_memory (the budget, not the
+        memory free at this moment, so one input takes one mode)."""
         if self.z_mode is not None:
             return self.z_mode
         mode = self.source.z_mode
@@ -328,8 +328,8 @@ class DistributedISDFJK(InstalledWithDF, df.df.DF):
             rows = sum(t1 - t0 for t0, t1 in (self.tiles[t]
                                               for t in self.mine))
             mine = 2 * rows * len(self.coords) * 8
-            free = memory.left_mb(self.max_memory) * 1e6
-            mode = ('dense' if mine < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
+            budget = self.max_memory * 1e6
+            mode = ('dense' if mine < ISDF_SCF_KERNEL_MEMORY_FRACTION * budget
                     else 'factored')
         self.z_mode = broadcast(mode, self.comm)
         return self.z_mode

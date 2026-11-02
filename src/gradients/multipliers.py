@@ -25,7 +25,7 @@ import numpy as np
 from pyscf import lib
 
 from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
-from src.Base.numerics.numerics import numerics_or_default
+from src.Base.numerics.numerics import required_numerics
 from src.Base.pyscf import cphf
 
 
@@ -70,7 +70,7 @@ def rotation_gradient(C, fock, gamma, nocc, kernel):
     return Y
 
 
-def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
+def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics, free=None,
                               degeneracy_tol=ORBITAL_MULTIPLIER_DEGENERACY_TOL,
                               verbose=False, flags=None):
     """Solve antisym(Y_E + Y[fold(Lambda)]) = 0 for symmetric zero-diag Lambda.
@@ -81,8 +81,9 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
         the right-hand side.
     eps:   orbital energies, which set the pair basis (p < q) and the
         preconditioner 1/(2(eps_p - eps_q)).
-    numerics: the caller's `Numerics`; its `scf.multiplier_tol`,
-        `multiplier_max_iter` and `multiplier_residual_tol` set the solve.
+    numerics: the run's `Numerics`, required (None is refused); its
+        `scf.multiplier_tol`, `multiplier_max_iter` and
+        `multiplier_residual_tol` set the solve.
     free:  (norb, norb) booleans, read on p < q: the pairs solved. The others
         keep Lambda = 0 and their right-hand side is left as it is (a route
         whose Lagrangian is stationary there by construction reads it as a
@@ -102,7 +103,8 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics=None, free=None,
 
     Returns (Lambda, residual norm).
     """
-    residual_tol = numerics_or_default(numerics).scf.multiplier_residual_tol
+    residual_tol = required_numerics(
+        numerics, 'solve_orbital_multipliers').scf.multiplier_residual_tol
     eps = np.asarray(eps, float)
     norb = len(eps)
     iu = np.triu_indices(norb, k=1)

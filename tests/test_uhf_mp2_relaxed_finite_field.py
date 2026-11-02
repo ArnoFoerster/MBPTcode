@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, mp
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_block_eri,
                                             uhf_blockstacked_order)
@@ -51,7 +52,7 @@ def relaxed_mp2_dm_ao_uhf(mf, mol, relax):
     oo_a, oo_b, ov_a, ov_b, vv_a, vv_b = driver.compute_delta_gamma2()
     if relax:
         dg_a, dg_b = solve_cphf_relaxation_uhf(
-            mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b)
+            mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b, Numerics())
     else:
         dg_a = build_dgamma_block(len(eps_a), nocc_a, oo_a, ov_a, vv_a)
         dg_b = build_dgamma_block(len(eps_b), nocc_b, oo_b, ov_b, vv_b)
@@ -77,8 +78,8 @@ if __name__ == '__main__':
     perm = interleaved_to_blockstacked_perm(nocc, nocc, norb)
 
     for relax, thresh in ((False, 1e-12), (True, 1e-8)):
-        sc_r = build_mp2_static_correction(mf, mol, nocc, relax=relax)
-        sc_u = build_mp2_static_correction(mfu, mol, relax=relax)
+        sc_r = build_mp2_static_correction(mf, mol, nocc, relax=relax, numerics=Numerics())
+        sc_u = build_mp2_static_correction(mfu, mol, relax=relax, numerics=Numerics())
         diff = np.abs(sc_r[np.ix_(perm, perm)] - sc_u).max()
         ok = diff < thresh
         all_ok &= ok

@@ -4,17 +4,23 @@ continuum, written as one JSON record.
 
     python -m src.photophysics solvated --xyz mol.xyz \
         --basis cc-pvdz --auxbasis cc-pvdz-ri --jk-auxbasis cc-pvdz-jkfit \
-        --solvent toluene --out record.json
-    python -m src.photophysics solvated --method gwbse \
-        --isdf-grid G1 --xyz mol.xyz --solvent toluene --out record.json
+        --environment toluene --saddle-check 1 --out record.json
+    python -m src.photophysics solvated --method gwbse --refreeze 1 \
+        --saddle-check 1 --grid-accuracy G1 --xyz mol.xyz --basis cc-pvdz \
+        --environment toluene --out record.json
 
 from the repository root (or with it on PYTHONPATH); `main(argv)` is the
-same run from Python. The threads are the environment's (no --threads).
+same run from Python. The threads are the environment's (no --threads). The
+options this driver shares with the TADF run (`cli`: --basis, --basis-for,
+--environment, --grid-accuracy, --isdf-test-set, --pivot-points, --xc-grid,
+--refreeze, --saddle-check, --loop-tol-q, --loop-tol-energy,
+--loop-tolerance) have one name, type and meaning on both, and a required
+one has no default here either.
 
---solvent names the continuum: a solvent of pyscf's SMD table, or any medium
-by its two constants, eps=EPS_S,n2=N2 (src.environments.medium), on the cavity
---cavity names. Every state model, loop and SCF of the run reads that one
-medium.
+--environment names the continuum: a solvent of pyscf's SMD table, or any
+medium by its two constants, eps=EPS_S,n2=N2 (src.environments.medium), on
+the cavity --cavity names; 'gas' runs the gas phase alone. Every state
+model, loop and SCF of the run reads that one medium.
 
 For each medium (gas, and the solvent if given):
 
@@ -29,15 +35,15 @@ For each medium (gas, and the solvent if given):
     adiabatic       G_eq(X at its minimum) - G_eq(S0 at its minimum); dEST =
                     adiabatic S1 - adiabatic T1 (no zero-point energies)
 
-S1 and T1 are the lowest root of each spin at every geometry (--follow index,
-the adiabatic states); --follow overlap follows one root's character instead.
+S1 and T1 are the lowest root of each spin at every geometry (--track index,
+the adiabatic states); --track overlap follows one root's character instead.
 The S1 / T1 walks start START_NUDGE_BOHR off the S0 minimum (a symmetric
 start can only reach the symmetric stationary point). Every minimum (S0, S1,
-T1) is saddle-checked (--saddle-check, default on): the Hessian of G_eq from
-6N central differences of its force, and at a saddle a step along its negative
-mode and a second walk (properties.excitations.saddle_check, the check the
+T1) is saddle-checked under --saddle-check 1 (required, no default): the
+Hessian of G_eq from 6N central differences of its force, and at a saddle a
+step along its negative mode and a second walk (properties.excitations.saddle_check, the check the
 photophysics stages take); the record keeps the check. The loops of
-the walks and of the Hessian run at --tol-q / --tol-energy; with
+the walks and of the Hessian run at --loop-tol-q / --loop-tol-energy; with
 --loop-tolerance gradient-tied a walk's loop stops instead once its
 estimated force error is LOOP_FORCE_FRACTION of the walk's gradient
 (SolvatedSurface's tie, the photophysics stages' option): the first gradient
@@ -64,18 +70,19 @@ triplet has no LR term, so its numbers are the same in both arms. The arm is
 a setting of a record in a solvent (and its resume key); a record made
 before the option existed ran 'ss+lr'. The gas phase has no arm.
 
---method gwbse: G0W0-BSE on the --xc reference (scheme B in the loop,
-src.gradients.gwbse.state_model), on the --isdf-grid accuracy level (no
+--method gwbse: G0W0-BSE on the --reference mean field (scheme B in the loop,
+src.gradients.gwbse.state_model), on the --grid-accuracy level (no
 default grid), the Casida step by --bse-solver, on the Tamm-Dancoff kernel
 (--bse-kernel tda, the default for walks: a full-BSE triplet on a Hartree-Fock
 reference turns (A - B)-unstable as a walk distorts the molecule; full is a
 comparison). A GW-BSE surface is fixed by
 the chain its first evaluation builds: a walk (and its saddle check) moves
 that one model to every geometry (GWBSEState.at), and each vertical energy
-builds its own at its geometry. --follow index is the
+builds its own at its geometry. --track index is the
 chain's index (bse.track None), overlap its state following.
 
-Refreeze (--refreeze, the default; --no-refreeze switches it off): a GW-BSE
+Refreeze (--refreeze 1; --refreeze 0 switches it off; required with --method
+gwbse, no default): a GW-BSE
 S1 / T1 walk freezes the chain's conventions at its start, so each minimum
 is refrozen as the gas walks are (properties.optimize.relax(refreeze=1)):
 the surface is rebuilt at the minimum (SolvatedSurface.refreeze: a fresh
@@ -118,15 +125,22 @@ dEST_adiabatic_flags (empty when clean). A rerun walks an unconverged
 minimum again (e.g. with a larger --maxiter) and drops what was built on it.
 
 A walk interrupted part way (a job's time limit) is not lost: every accepted
-step writes the walk's geometry and optimizer Hessian to `<out>.walk.<medium>.<state>.json`,
-and a rerun starts that walk again from there, not nudged, on a surface
-built at that geometry (a GW-BSE surface freezes its conventions there, so
-the restarted walk stands on another surface than the first; the refreeze
-loop at its minimum measures and removes that, as for any walk). The
-minimum records `restarted_from` (the pass, the accepted steps and G at the
-restart geometry); the file goes once the minimum is in the record. A
-checkpoint of another calculation (settings, medium, state or start) is
-refused.
+step writes the walk's state to the store `<out>.walks/` (`store.Store.at`),
+one progress record per medium and state (`gas_S1_progress`,
+`solvent_T1_progress`, ...), and a rerun starts that walk again from its
+last accepted geometry, on its optimizer Hessian, not nudged, on a surface
+built there (`walks.restart_from`, as the photophysics stages restart a
+scheme-B walk; a GW-BSE surface freezes its conventions there, so the
+restarted walk stands on another surface than the first; the refreeze loop
+at its minimum measures and removes that, as for any walk). The minimum
+records `restarted_from` (the pass, the accepted steps and G at the restart
+geometry); the progress is set aside into `<out>.walks/finished/` once the
+minimum is in the record. Progress of another calculation (settings, medium
+or state: the record's settings, the code apart, and the state are its
+stamp) is refused (`store.StoreRefused`); progress from another start is
+walked again from this one. A checkpoint of the earlier form beside the
+record (`<out>.walk.<medium>.<state>.json`) is refused: remove it, and that
+walk starts again.
 
 A Kohn-Sham reference is integrated on --xc-grid (pyscf's grid level; omitted
 is the Numerics default, XC_GRID_LEVEL). GW-BSE reads the frozen shift
@@ -140,31 +154,33 @@ kept, warned about and flagged 'memory_budget_unknown' (the record's
 `run_flags`), since a tiled force above it is then refused.
 
 GW-BSE takes the AO-product fit, which keeps the diffuse products of an
-augmented basis, on points pivoted from the --isdf-grid level's parent grid:
+augmented basis, on points pivoted from the --grid-accuracy level's parent grid:
 --pivot-points of them, else the default count (`ao_product_fit.pivot_count`).
 The Duchemin-Blase fit on the tabulated points is --isdf-test-set
 duchemin_blase:
 
-    python -m src.photophysics solvated --method gwbse --xc lrc-wpbeh \
-        --basis aug-cc-pvdz --jk-auxbasis aug-cc-pvdz-jkfit --isdf-grid G3 \
+    python -m src.photophysics solvated --method gwbse --reference lrc-wpbeh \
+        --basis aug-cc-pvdz --jk-auxbasis aug-cc-pvdz-jkfit --grid-accuracy G3 \
         --pivot-points 3500 \
-        --xyz mol.xyz --solvent toluene --out record.json
+        --refreeze 1 --saddle-check 1 --xyz mol.xyz --environment toluene \
+        --out record.json
 
 The mean field stays density-fitted (--jk-auxbasis); only the GW-BSE factors
 are interpolated. The points are pivoted where a surface is built, so a walk
 keeps them (they move with their atoms) and a refreeze pivots again at the
 minimum.
 --distribute runs the calculation over the ranks of the launch (rank 0
-writes the record and the checkpoints, every rank holds rank 0's numbers).
+writes the record and the walks' progress, every rank holds rank 0's
+numbers).
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
 import platform
 import time
 
-import numpy as np
 from pyscf import dft, gto, lib, scf
 
 from src.SingleReference.common.active_space import frozen_core
@@ -183,17 +199,21 @@ from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, is_root
 from src.environments.reaction_field import ContinuumField, NoMedium
-from src.Base.utils.record_io import code_id, record_hash, same_code
+from src.environments.solvent_vocabulary import GAS
+from src.Base.utils.record_io import code_id, same_code
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.medium import (CAVITY_CONVENTIONS, DEFAULT_CAVITY,
                                      parse as parse_medium)
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from src.properties.excitations import (relaxation_fields,
-                                        relaxation_flags, saddle_check,
-                                        saddle_verdict)
+from src.properties.excitations import relaxation_fields, relaxation_flags
 from src.properties.optimize import derived_walk, relax, resolved_conv
 from src.gradients.solvated_surface import SolvatedSurface
+from src.Base.geometry.geometry import molecule_at
+from src.photophysics import cli
+from src.photophysics.store import Store, on_root
+from src.photophysics.walks import (checked_minimum, progress_writer,
+                                    restart_from, walk_progress)
 from src.photophysics.state_specific import (gwbse_states, vertical,
                                              walk_vs_vertical)
 
@@ -207,7 +227,7 @@ WALK_GRAD_MAX = resolved_conv(None)['opt_grad_max']
 ADC2_DEFAULTS = dict(auxbasis='cc-pvdz-ri', nroots=3, solvent_arm=SOLVENT_ARMS[0])
 #: The options of one method only, refused with the other.
 ADC2_ONLY = ('auxbasis', 'nroots', 'frozen', 'spin_scaling', 'solvent_arm')
-GWBSE_ONLY = ('xc', 'isdf_grid', 'bse_solver', 'bse_kernel', 'refreeze',
+GWBSE_ONLY = ('reference', 'grid_accuracy', 'bse_solver', 'bse_kernel', 'refreeze',
               'outside_scissor', 'residues', 'xc_grid', 'isdf_test_set',
               'pivot_points')
 #: The settings a record may lack, and the value a record that lacks one was
@@ -218,15 +238,20 @@ LATER_SETTINGS = dict(outside_scissor=None, residues=None, xc_grid=None,
 
 
 def _parse_args(argv=None):
-    """The command-line options of `argv` (omitted: the command line)."""
+    """The command-line options of `argv` (omitted: the command line); the
+    options the TADF run also takes come from its groups (`cli`: one name,
+    one type and one meaning). args.solvent is the continuum --environment
+    names, None in the gas phase; the loop's tolerances omitted are
+    PHOTOPHYSICS_LOOP_TOL_Q, PHOTOPHYSICS_LOOP_TOL_ENERGY and 'fixed'."""
+    # no abbreviations: a retired option (--solvent, --xc) is refused, not
+    # read as the one it begins (--solvent-arm, --xc-grid)
     p = argparse.ArgumentParser(prog='python -m src.photophysics solvated',
-                                description=__doc__.split('\n')[0])
+                                description=__doc__.split('\n')[0], allow_abbrev=False)
     p.add_argument('--xyz', required=True)
     p.add_argument('--method', choices=('adc2', 'gwbse'), default='adc2')
-    p.add_argument('--xc', default=None,
-                   help='gwbse: the reference (default hf, or a functional)')
-    p.add_argument('--isdf-grid', default=None,
-                   help='gwbse: the ISDF accuracy level (G1, G2, G3) or shell counts')
+    p.add_argument('--reference', default=None,
+                   help='gwbse: the mean field (default hf, or a functional)')
+    cli.add_factor_options(p, required=False)
     p.add_argument('--bse-solver', default=None, help="gwbse: the chain's Casida solver")
     p.add_argument('--bse-kernel', choices=('tda', 'full'), default=None,
                    help='gwbse: the BSE kernel (default tda: walks run on the Tamm-Dancoff '
@@ -235,35 +260,21 @@ def _parse_args(argv=None):
                    help='gwbse: the frozen shift beyond the explicit set')
     p.add_argument('--residues', default=None,
                    help="gwbse: the route of Sigma's real-axis residues")
-    p.add_argument('--isdf-test-set', choices=ISDF_TEST_SETS, default=None,
-                   help="gwbse: the products the ISDF fit is trained on (default "
-                        "ao_products; duchemin_blase, the pair set, by name)")
-    p.add_argument('--pivot-points', type=int, default=None,
-                   help="gwbse: the points pivoted from the --isdf-grid level's "
-                        'parent grid for the ao_products fit (default: '
-                        'ao_product_fit.pivot_count)')
-    p.add_argument('--xc-grid', type=int, default=None,
-                   help="pyscf's XC grid level of a Kohn-Sham reference "
-                        '(default XC_GRID_LEVEL)')
+    cli.add_xc_grid_option(p)
     p.add_argument('--distribute', action='store_true',
                    help='run over the ranks of the launch')
     p.add_argument('--max-memory', type=int, default=None,
                    help='memory budget of one rank in MB (default: its share of '
                         'the SLURM allocation, else PYSCF_MAX_MEMORY)')
-    p.add_argument('--basis', default='cc-pvdz')
-    p.add_argument('--basis-for', action='append', default=None, metavar='EL=NAME',
-                   help='another basis for one element (H=cc-pvdz) or for atoms counted '
-                        "from 1 (atoms=1-41:aug-cc-pvdz), repeatable; each atom's "
-                        'auxiliary sets then follow its own basis')
+    cli.add_basis_options(p)
     p.add_argument('--auxbasis', default=None,
                    help="adc2: default cc-pvdz-ri; with --basis-for each element's -ri")
     p.add_argument('--jk-auxbasis', default=None,
                    help="default cc-pvdz-jkfit; with --basis-for each element's -jkfit")
-    p.add_argument('--solvent', default=None,
-                   help="a name of pyscf's SMD table, or eps=EPS_S,n2=N2[,label=NAME]")
+    cli.add_environment_option(p)
     p.add_argument('--cavity', default=None, choices=sorted(CAVITY_CONVENTIONS),
                    help='the cavity convention, radius set and scale (default '
-                        'the one --solvent names, else DEFAULT_CAVITY)')
+                        'the one --environment names, else DEFAULT_CAVITY)')
     p.add_argument('--frozen', type=int, default=None,
                    help='adc2: default the core shells')
     p.add_argument('--nroots', type=int, default=None, help='adc2: default 3')
@@ -275,29 +286,27 @@ def _parse_args(argv=None):
                         "'ss+lr' the loop with the singlet's LR term")
     p.add_argument('--maxiter', type=int, default=100)
     p.add_argument('--states', nargs='+', default=['singlet', 'triplet'])
-    p.add_argument('--follow', choices=('index', 'overlap'), default='index',
+    p.add_argument('--track', choices=('index', 'overlap'), default='index',
                    help='root picking (index: adiabatic, the lowest root of each '
                         'spin; overlap: follow one state)')
     p.add_argument('--media', nargs='+', choices=('gas', 'solvent'),
                    default=['gas', 'solvent'],
-                   help='which of gas and --solvent to run (one record file each '
-                        'when they run in separate processes)')
-    p.add_argument('--saddle-check', action=argparse.BooleanOptionalAction,
-                   default=True)
-    p.add_argument('--refreeze', action=argparse.BooleanOptionalAction, default=None,
-                   help='gwbse: refreeze each S1 / T1 minimum (default on; the outer '
-                        'loop of properties.optimize.relax); ADC(2) and S0 freeze nothing')
-    p.add_argument('--tol-q', type=float, default=PHOTOPHYSICS_LOOP_TOL_Q,
-                   help='loop: largest charge change (e) at convergence')
-    p.add_argument('--tol-energy', type=float, default=PHOTOPHYSICS_LOOP_TOL_ENERGY,
-                   help='loop: change of G (Ha) at convergence')
-    p.add_argument('--loop-tolerance', choices=('fixed', 'gradient-tied'),
-                   default='fixed',
-                   help='walks: every loop to --tol-q / --tol-energy (fixed, the '
-                        'default), or stopped once its estimated force error is '
-                        "LOOP_FORCE_FRACTION of the walk's gradient")
+                   help='which of gas and the --environment continuum to run (one '
+                        'record file each when they run in separate processes)')
+    cli.add_walk_policies(p, refreeze_required=False)
+    cli.add_loop_options(p)
     p.add_argument('--out', required=True)
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    environment = cli.environment_of(args)
+    args.solvent = None if environment == GAS else environment
+    if args.loop_tol_q is None:
+        args.loop_tol_q = PHOTOPHYSICS_LOOP_TOL_Q
+    if args.loop_tol_energy is None:
+        args.loop_tol_energy = PHOTOPHYSICS_LOOP_TOL_ENERGY
+    if args.loop_tolerance is None:
+        args.loop_tolerance = 'fixed'
+    args.saddle_check = bool(args.saddle_check)
+    return args
 
 
 RESUME_KEY = ('xyz_sha256', 'basis', 'auxbasis', 'jk_auxbasis', 'solvent', 'frozen',
@@ -314,9 +323,9 @@ def _settings(args):
     return dict(xyz=os.path.abspath(args.xyz), xyz_sha256=digest, basis=_basis_setting(args),
                 auxbasis=args.auxbasis, jk_auxbasis=args.jk_auxbasis,
                 solvent=args.solvent, frozen=args.frozen, nroots=args.nroots,
-                follow=args.follow, saddle_check=args.saddle_check,
-                tol_q=args.tol_q, tol_energy=args.tol_energy, code=code_id(),
-                state_method=args.method, xc=args.xc, isdf_grid=args.isdf_grid,
+                follow=args.track, saddle_check=args.saddle_check,
+                tol_q=args.loop_tol_q, tol_energy=args.loop_tol_energy, code=code_id(),
+                state_method=args.method, xc=args.reference, isdf_grid=args.grid_accuracy,
                 bse_kernel=args.bse_kernel,
                 bse_solver=args.bse_solver, refreeze=args.refreeze,
                 **{k: getattr(args, k, LATER_SETTINGS[k]) for k in LATER_SETTINGS
@@ -343,7 +352,7 @@ def _basis_setting(args):
 
 
 def _cavity(args):
-    """The run's cavity convention: --solvent's or --cavity, else the default."""
+    """The run's cavity convention: --environment's or --cavity, else the default."""
     medium = None if args.solvent is None else parse_medium(args.solvent, getattr(args, 'cavity', None))
     return medium.cavity if medium is not None else getattr(args, 'cavity', None) or DEFAULT_CAVITY
 
@@ -351,10 +360,11 @@ def _cavity(args):
 def _start_record(args):
     """The record: the file's content if present (refused when made with
     other settings, RESUME_KEY), with the run's settings."""
-    rec, settings = {}, _settings(args)
-    if os.path.isfile(args.out):
-        with open(args.out) as fh:
-            rec = json.load(fh)
+    settings = _settings(args)
+    rec = on_root(lambda: _read_json(args.out))
+    if rec is None:
+        rec = {}
+    else:
         made = {k: rec[k] if k in rec else _older_setting(rec, k) for k in RESUME_KEY}
         differ = {k: (made[k], settings[k]) for k in RESUME_KEY
                   if made[k] != settings[k]
@@ -378,7 +388,7 @@ def _start_record(args):
                 if (getattr(args, 'solvent_arm', None) or SOLVENT_ARMS[0]) == 'ss+lr'
                 else '; no LR term (state-specific loop only)')
     what = (adc if args.method == 'adc2' else
-            f'G0W0-BSE (scheme B, ISDF {args.isdf_grid}{fit}) on {args.xc}')
+            f'G0W0-BSE (scheme B, ISDF {args.grid_accuracy}{fit}) on {args.reference}')
     medium = None if args.solvent is None else parse_medium(args.solvent, getattr(args, 'cavity', None))
     rec.update(settings, host=platform.node(),
                medium=None if medium is None else medium.record(),
@@ -388,13 +398,22 @@ def _start_record(args):
     return rec
 
 
+def _read_json(path):
+    """The JSON tree at path, or None where there is no file."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh)
+
+
 def _save(rec, out):
-    """Write the record to out atomically (rank 0 under ranks)."""
-    if not is_root():
-        return
-    with open(out + '.tmp', 'w') as fh:
-        json.dump(rec, fh, indent=1)
-    os.replace(out + '.tmp', out)
+    """Write the record to out atomically: rank 0 writes, and a failure
+    raises on every rank (`store.on_root`)."""
+    def act():
+        with open(out + '.tmp', 'w') as fh:
+            json.dump(rec, fh, indent=1)
+        os.replace(out + '.tmp', out)
+    on_root(act)
 
 
 def _make_scf(m, jk_auxbasis, xc='hf', xc_grid=None, converged=None):
@@ -420,7 +439,7 @@ def _loop_settings(args):
     tie to its gradient under --loop-tolerance gradient-tied
     (SolventNumerics.loop_force_fraction; module docstring)."""
     tied = getattr(args, 'loop_tolerance', 'fixed') == 'gradient-tied'
-    return {'loop_tol_q': args.tol_q, 'loop_tol_energy': args.tol_energy,
+    return {'loop_tol_q': args.loop_tol_q, 'loop_tol_energy': args.loop_tol_energy,
             'loop_force_fraction': LOOP_FORCE_FRACTION if tied else None}
 
 
@@ -476,7 +495,7 @@ def _check_args(args, mol0):
         try:
             parse_medium(args.solvent, getattr(args, 'cavity', None))
         except ValueError as err:
-            raise SystemExit(f'--solvent {args.solvent}: {err}') from err
+            raise SystemExit(f'--environment {args.solvent}: {err}') from err
     other = GWBSE_ONLY if args.method == 'adc2' else ADC2_ONLY
     given = [name for name in other if getattr(args, name, None) is not None]
     if given:
@@ -489,19 +508,20 @@ def _check_args(args, mol0):
         if args.frozen is None:
             args.frozen = frozen_core(mol0)
         return
-    if args.isdf_grid is None:
-        raise SystemExit('--method gwbse needs --isdf-grid (no default grid)')
-    if args.xc is None:
-        args.xc = 'hf'
-    if args.xc == 'hf' and getattr(args, 'xc_grid', None) is not None:
+    if args.grid_accuracy is None:
+        raise SystemExit('--method gwbse needs --grid-accuracy (no default grid)')
+    if args.reference is None:
+        args.reference = 'hf'
+    if args.reference == 'hf' and getattr(args, 'xc_grid', None) is not None:
         raise SystemExit('--xc-grid sets the grid of a Kohn-Sham reference; '
                          'the Hartree-Fock reference has none')
-    if args.xc != 'hf' and getattr(args, 'xc_grid', None) is None:
+    if args.reference != 'hf' and getattr(args, 'xc_grid', None) is None:
         args.xc_grid = XC_GRID_LEVEL
     if args.bse_kernel is None:
         args.bse_kernel = 'tda'
     if args.refreeze is None:
-        args.refreeze = True
+        raise SystemExit('--method gwbse needs --refreeze 0 or 1 (no default)')
+    args.refreeze = bool(args.refreeze)
 
 
 def gwbse_numerics(args, mol0):
@@ -510,10 +530,10 @@ def gwbse_numerics(args, mol0):
     points, the quasiparticle options and solver, the reference's XC grid, the loop's
     tolerances; an option not given is the Numerics default (a pivot without
     the AO-product test set is refused there)."""
-    bse = {'track': 'overlap' if args.follow == 'overlap' else None}
+    bse = {'track': 'overlap' if args.track == 'overlap' else None}
     if args.bse_solver is not None:
         bse['solver'] = args.bse_solver
-    counts = resolve_isdf_grid(args.isdf_grid, args.basis,
+    counts = resolve_isdf_grid(args.grid_accuracy, args.basis,
                                elements=tuple(sorted(set(mol0.elements))))[0]
     qp = {key: getattr(args, name) for key, name in
           (('outside_scissor', 'outside_scissor'), ('residue_route', 'residues'))
@@ -537,7 +557,7 @@ def _factories(args, medium, loop_kw):
         make_field = lambda m: ContinuumField.from_environment(continuum.screening(m))
 
     def make_scf(m):
-        return _make_scf(m, args.jk_auxbasis, args.xc or 'hf',
+        return _make_scf(m, args.jk_auxbasis, args.reference or 'hf',
                          getattr(args, 'xc_grid', None))
 
     if args.method == 'gwbse':
@@ -558,7 +578,7 @@ def _factories(args, medium, loop_kw):
                 return mp2
             lr = (field.transition_environment()
                   if kind == 'singlet' and arm == 'ss+lr' else None)
-            return ADC2State(mp2, kind, 0, args.nroots, lr, follow=args.follow)
+            return ADC2State(mp2, kind, 0, args.nroots, lr, follow=args.track)
         return build
     return make_field, make_state
 
@@ -614,61 +634,47 @@ def _walk_record(info, asked):
     return out
 
 
-def _walk_path(args, medium, key):
-    """The checkpoint file of the walk of state `key` in `medium`."""
-    return f'{args.out}.walk.{medium}.{key}.json'
+def _walk_store(args):
+    """The store of the walks' progress: the directory <out>.walks (module
+    docstring)."""
+    return Store.at(args.out + '.walks')
 
 
-def _checkpoint_key(args, kind, start):
-    """What a walk checkpoint belongs to: the record's settings (the code
-    apart, which the record itself checks), the state and the start."""
+def _progress_name(medium, key):
+    """The progress record of the walk of state `key` ('S0', 'S1', 'T1') in
+    `medium`: the gas phase's or the solvent's."""
+    return f'{"gas" if medium == "gas" else "solvent"}_{key}_progress'
+
+
+def _walk_stamp(args, kind):
+    """What a walk's progress belongs to: the record's settings (the code
+    apart, which the record itself checks) and the state; its start is
+    checked apart (`walks.walk_progress`)."""
     settings = _settings(args)
-    return record_hash(dict({k: settings[k] for k in RESUME_KEY if k != 'code'},
-                            kind=kind,
-                            start=np.round(start.atom_coords(), 10).tolist()))
+    return dict({k: settings[k] for k in RESUME_KEY if k != 'code'}, kind=kind)
 
 
-def _walk_checkpoint(path, key):
-    """`checkpoint(state)` for relax: the walk's pass, accepted steps, G,
-    geometry (Bohr) and optimizer Hessian (None where the engine keeps its
-    own) written to path by rank 0 after every accepted step."""
-    def save(state):
-        if not is_root():
-            return
-        hessian = state.get('hessian')
-        data = dict(key=key, walk_pass=int(state['pass']),
-                    accepted_steps=len(state['history']), G=float(state['energy']),
-                    coords_bohr=np.asarray(state['coords'], float).tolist(),
-                    hessian=None if hessian is None else np.asarray(hessian, float).tolist())
-        with open(path + '.tmp', 'w') as fh:
-            json.dump(data, fh)
-        os.replace(path + '.tmp', path)
-    return save
+def _set_progress_aside(store, name):
+    """Set the progress `name` aside into finished/ once its minimum is in
+    the record: a rerun that walks that minimum again starts from its
+    start."""
+    store.set_aside([n for n in store.names() if n.split('.')[0] == name],
+                    'finished')
 
 
-def _restart_point(path, key, start):
-    """(mol, Hessian, restarted_from) of the walk checkpoint at path; (start,
-    None, None) when there is none. A checkpoint of another walk is refused."""
-    if not os.path.isfile(path):
-        return start, None, None
-    with open(path) as fh:
-        data = json.load(fh)
-    if data.get('key') != key:
-        raise SystemExit(f'{path} is the checkpoint of another walk (settings, state '
-                         'or start differ): remove it or write to another --out')
-    m = start.copy()
-    m.set_geom_(np.array(data['coords_bohr'], float), unit='Bohr')
-    hessian = None if data['hessian'] is None else np.array(data['hessian'], float)
-    return m, hessian, {k: data[k] for k in ('walk_pass', 'accepted_steps', 'G')}
+def _refuse_retired_checkpoints(args):
+    """Refuse a walk checkpoint of the earlier form beside the record
+    (`<out>.walk.<medium>.<state>.json`), which this driver does not read
+    (module docstring)."""
+    old = on_root(lambda: sorted(glob.glob(glob.escape(args.out) + '.walk.*.json')))
+    if old:
+        raise SystemExit(f'{old[0]} is a walk checkpoint of an earlier form, which '
+                         f'this driver does not read (the walks keep their progress '
+                         f'in {args.out}.walks/): remove it, and that walk starts '
+                         f'again from its start')
 
 
-def _drop_checkpoint(path):
-    """Remove a walk's checkpoint once its minimum is in the record."""
-    if is_root() and os.path.isfile(path):
-        os.remove(path)
-
-
-def _minimum(args, surf, start, nudge, kind, checkpoint=None):
+def _minimum(args, surf, start, nudge, kind, progress=None):
     """(mol, the record) of a walk on surf from start, refrozen where its
     surface freezes conventions (`_refreezes`) and saddle-checked when it
     converged (`excitations.saddle_check`, the photophysics stages' check);
@@ -678,18 +684,23 @@ def _minimum(args, surf, start, nudge, kind, checkpoint=None):
     (`excitations.relaxation_flags`, `saddle_verdict`). The saddle check, its
     escape walk (refrozen as the first) and G are taken on the surface the
     last walk ran on.
-    checkpoint: the file the first walk writes after every accepted step and
-    restarts from (module docstring); None writes none."""
+    progress: (store, name) of the progress record the first walk writes
+    after every accepted step and restarts from (module docstring); None
+    keeps none."""
     t = time.time()
     refreeze = _refreezes(args, kind)
     asked = None if (args.method == 'adc2' or kind == 'S0') else refreeze
     first, restarted = {}, None
-    if checkpoint is not None:
-        key = _checkpoint_key(args, kind, start)
-        start, hessian, restarted = _restart_point(checkpoint, key, start)
-        if restarted is not None:
+    if progress is not None:
+        store, name = progress
+        stamp = _walk_stamp(args, kind)
+        first['checkpoint'] = progress_writer(store, name, stamp, start)
+        state = walk_progress(store, name, stamp, start)
+        if state is not None:
+            template = start
+            start, first['hess_init'], restarted = restart_from(
+                state, lambda coords: molecule_at(template, coords))
             nudge = 0
-        first = dict(checkpoint=_walk_checkpoint(checkpoint, key), hess_init=hessian)
 
     def walk(s, at, nudge=0, **kw):
         return relax(s, at, nudge=nudge, refreeze=refreeze,
@@ -702,9 +713,7 @@ def _minimum(args, surf, start, nudge, kind, checkpoint=None):
         out['restarted_from'] = restarted
     flags = relaxation_flags(kind, info)
     if args.saddle_check and out['converged']:
-        # the Hessian's forces at full loop tolerances (SolvatedSurface.untied)
-        untied = getattr(final, 'untied', None)
-        m, again, chk = saddle_check(final if untied is None else untied(), m, walk)
+        m, again, chk, checked = checked_minimum(final, m, walk, kind)
         first = chk['first']
         out['saddle_check'] = dict(
             status=chk['status'],
@@ -716,13 +725,12 @@ def _minimum(args, surf, start, nudge, kind, checkpoint=None):
             energy_drop=chk.get('energy_drop'),
             second_lowest_curvature=(chk['second'] or {}).get('lowest_curvature'))
         if again is None:
-            flags = dict(flags, **saddle_verdict(kind, chk))
+            flags = dict(flags, **checked)
         else:
             out['first_walk'] = dict(out)
             out.update(_walk_record(again, asked))
             final = again.get('final_surface', final)
-            flags = dict(relaxation_flags(f'{kind} escape', again),
-                         **saddle_verdict(kind, chk))
+            flags = checked
     out.update(geometry=_geom(m), G=final.total_energy(m), wall_s=time.time() - t)
     # one log for the walk, its refreezes, the Hessian's twin and an escape walk
     out['loop_log'] = getattr(final, 'loop_log', [])
@@ -776,16 +784,18 @@ def _drop_unconverged(R):
             R.pop('dEST_adiabatic_flags', None)
 
 
-def _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw):
-    """S0 minimum of one medium into R, unless the record holds it."""
+def _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw,
+                  store):
+    """S0 minimum of one medium into R, unless the record holds it; its
+    walk's progress in `store`."""
     if 'S0' not in R:
         surf = SolvatedSurface(mol0, make_field, make_state('S0'),
                                label=f'S0 {medium}', final_grad_max=WALK_GRAD_MAX,
                                **loop_kw)
-        path = _walk_path(args, medium, 'S0')
+        name = _progress_name(medium, 'S0')
         _store_minimum(rec, args.out, R, 'S0',
-                       _minimum(args, surf, mol0, 0, 'S0', checkpoint=path)[1])
-        _drop_checkpoint(path)
+                       _minimum(args, surf, mol0, 0, 'S0', progress=(store, name))[1])
+        _set_progress_aside(store, name)
 
 
 def _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw):
@@ -800,17 +810,18 @@ def _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw):
 
 
 def _excited_minimum(args, rec, X, key, kind, medium, mS0, make_field, make_state,
-                     loop_kw):
-    """Minimum of the state on its surface from the S0 minimum, unless recorded."""
+                     loop_kw, store):
+    """Minimum of the state on its surface from the S0 minimum, unless
+    recorded; its walk's progress in `store`."""
     if 'minimum' not in X:
         surf = SolvatedSurface(mS0, make_field, make_state(kind),
                                label=f'{key} {medium}', final_grad_max=WALK_GRAD_MAX,
                                make_ground=make_state('S0'), **loop_kw)
-        path = _walk_path(args, medium, key)
+        name = _progress_name(medium, key)
         _store_minimum(rec, args.out, X, 'minimum',
                        _minimum(args, surf, mS0, START_NUDGE_BOHR, kind,
-                                checkpoint=path)[1])
-        _drop_checkpoint(path)
+                                progress=(store, name))[1])
+        _set_progress_aside(store, name)
 
 
 def _emission(args, rec, R, X, kind, make_field, make_state, loop_kw):
@@ -827,7 +838,7 @@ def _emission(args, rec, R, X, kind, make_field, make_state, loop_kw):
                                            R['S0'].get('flags'))
         refrozen = X['minimum'].get('refreeze') in ('measured', 'not converged')
         X['walk_vs_vertical_G_Ha'], X['walk_vs_vertical_flag'] = walk_vs_vertical(
-            kind, X['minimum']['G'], r['G']['eq_state'], refrozen, args.tol_energy)
+            kind, X['minimum']['G'], r['G']['eq_state'], refrozen, args.loop_tol_energy)
         _save(rec, args.out)
 
 
@@ -836,14 +847,16 @@ def _run_medium(args, rec, medium, mol0, loop_kw):
     R = rec.setdefault(medium, {})
     _drop_unconverged(R)
     make_field, make_state = _factories(args, medium, loop_kw)
-    _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw)
+    store = _walk_store(args)
+    _ground_state(args, rec, R, medium, mol0, make_field, make_state, loop_kw,
+                  store)
     mS0 = _mol_of(R['S0']['geometry'], args.basis, args.max_memory)
     for kind in args.states:
         key = 'S1' if kind == 'singlet' else 'T1'
         X = R.setdefault(key, {})
         _absorption(args, rec, R, X, kind, mS0, make_field, make_state, loop_kw)
         _excited_minimum(args, rec, X, key, kind, medium, mS0, make_field,
-                         make_state, loop_kw)
+                         make_state, loop_kw, store)
         _emission(args, rec, R, X, kind, make_field, make_state, loop_kw)
     if 'S1' in R and 'T1' in R and 'adiabatic_eV' in R['S1'] and 'adiabatic_eV' in R['T1']:
         R['dEST_adiabatic_eV'] = R['S1']['adiabatic_eV'] - R['T1']['adiabatic_eV']
@@ -874,15 +887,17 @@ def main(argv=None):
         loop_kw = dict(numerics=gwbse_numerics(args, mol0))
     else:
         loop_kw = dict(numerics=adc2_numerics(args))
-    rec = _start_record(args)
-    rec.update(max_memory_mb=args.max_memory, numerics=loop_kw['numerics'].to_record(),
-               run_flags=sorted({f['flag'] for f in run_flags}))
-    media = ((['gas'] if 'gas' in args.media else [])
-             + ([args.solvent] if args.solvent and 'solvent' in args.media else []))
     comm = None
     if args.distribute:
         world, _, size = grid_comm()
         comm = None if size == 1 else world
+    with distributed(comm):
+        rec = _start_record(args)
+        _refuse_retired_checkpoints(args)
+    rec.update(max_memory_mb=args.max_memory, numerics=loop_kw['numerics'].to_record(),
+               run_flags=sorted({f['flag'] for f in run_flags}))
+    media = ((['gas'] if 'gas' in args.media else [])
+             + ([args.solvent] if args.solvent and 'solvent' in args.media else []))
     with distributed(comm):
         for medium in media:
             _run_medium(args, rec, medium, mol0, loop_kw)

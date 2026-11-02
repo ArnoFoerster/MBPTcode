@@ -258,3 +258,13 @@ def test_the_dense_solve_flags_a_dropped_root(monkeypatch):
         w, _ = B.solve_dense(None, None, None, 1, 1, nroots=2, flags=flags)
     assert [f['flag'] for f in flags] == ['upfolded_bse_dropped_roots']
     assert np.allclose(w, [1.0, 2.0])
+
+
+def test_missing_quasiparticle_energies_are_refused():
+    """The GW quasiparticle energies are an input: without them the solve is
+    refused, never run on the mean-field eigenvalues in their place."""
+    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+                verbose=0)
+    mf = scf.RHF(mol).run()
+    with pytest.raises(ValueError, match='e_qp=qp_energies'):
+        B.solve_bse_upfolded(mf, mol, nroots=2)

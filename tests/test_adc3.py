@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import (
     ADCSolver, ADCSolverUnrestricted, build_mp2_static_correction,
     ADCSolverRestricted, build_mp2_static_correction_restricted)
@@ -98,7 +99,7 @@ if __name__ == '__main__':
     solver = ADCSolverUnrestricted.from_arrays(eps_spin, g)
 
     for relax, rlabel in [(False, 'unrelaxed'), (True, 'relaxed')]:
-        dF = build_mp2_static_correction(mf, mol, nocc, relax=relax)
+        dF = build_mp2_static_correction(mf, mol, nocc, relax=relax, numerics=Numerics())
         ok = np.max(np.abs(dF - dF.T)) < 1e-8
         all_ok &= ok
         print(f"H2O/sto-3g static correction ({rlabel}) is symmetric "
@@ -136,13 +137,14 @@ if __name__ == '__main__':
     solver_r = ADCSolverRestricted.from_arrays(eps, eri_chemist)
 
     for relax, rlabel in [(False, 'unrelaxed'), (True, 'relaxed')]:
-        dF_r = build_mp2_static_correction_restricted(mf, mol, nocc, relax=relax)
+        dF_r = build_mp2_static_correction_restricted(mf, mol, nocc, relax=relax,
+                                                      numerics=Numerics())
         ok = np.max(np.abs(dF_r - dF_r.T)) < 1e-8
         all_ok &= ok
         print(f"H2O/sto-3g restricted static correction ({rlabel}) is symmetric "
               f"(max|dF-dF.T|={np.max(np.abs(dF_r - dF_r.T)):.2e}): {'OK' if ok else 'FAIL'}")
 
-        dF_so = build_mp2_static_correction(mf, mol, nocc, relax=relax)
+        dF_so = build_mp2_static_correction(mf, mol, nocc, relax=relax, numerics=Numerics())
         d_cross = np.max(np.abs(dF_r - dF_so[0::2, 0::2]))
         ok = d_cross < 1e-10
         all_ok &= ok

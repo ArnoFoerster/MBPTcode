@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
 from src.gradients.gwbse.rpa_bse_surface import RPAQPSurface
 from tests.isdf_test_grid import g1_numerics
@@ -37,7 +38,8 @@ def water():
 @pytest.fixture(scope='module')
 def surface(water):
     """One mean field and one factorization for every check below."""
-    return RPAQPSurface(water, hf_factory, state=0, mf=hf_factory(water), numerics=g1_numerics(water))
+    return RPAQPSurface(water, hf_factory, state=0, mf=hf_factory(water),
+                        numerics=g1_numerics(water))
 
 
 def test_removing_an_electron_costs_a_positive_ionization_potential(surface):
@@ -84,7 +86,7 @@ def test_the_charge_change_follows_the_dense_convention(water, surface):
         surface.state = state
         dense = QuasiparticleSurface(water, hf_factory,
                                      charge_change=charge_change,
-                                     orbital=nocc - 1 + state)
+                                     orbital=nocc - 1 + state, numerics=Numerics())
         assert surface.charge_change == dense.charge_change
         assert surface.sign == dense.sign
     surface.state = 0

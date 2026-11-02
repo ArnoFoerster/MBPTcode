@@ -26,7 +26,7 @@ from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,  # noqa: E
 from src.SingleReference.ADC.eeADC import ee_ri_fold         # noqa: E402
 from src.SingleReference.ADC.eeADC.ee_relaxed_density import core_factors  # noqa: E402
 from src.gradients import df_factors                         # noqa: E402
-from src.gradients.adc import fold_factors                   # noqa: E402
+from tests.adc_common import ground_fold                     # noqa: E402
 from tests.test_distributed_fit_mpi import Gate, bitwise     # noqa: E402
 
 AUX = 'cc-pvdz-ri'
@@ -69,8 +69,8 @@ def main(comm):
                     gate.check(bitwise([prov.core_factors(mol, mf, frozen, AUX)],
                                        [core_factors(mol, mf, frozen, AUX)]),
                                'the frozen core\'s factors are the fold\'s, bitwise')
-                    gnd = fold_factors.ground_factors(mol, mf, frozen, AUX, comm=comm,
-                                                      aux_chunk=width)
+                    gnd = ground_fold(mol, mf, frozen, AUX, comm=comm,
+                                      aux_chunk=width)
                     gate.check(same_build(gnd.f, prov.f),
                                'the fold provider\'s factors are the default provider\'s')
         gate.section('control and refusal')

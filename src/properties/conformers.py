@@ -454,13 +454,16 @@ def boltzmann_weights(energies, temperature=CONFORMER_TEMPERATURE,
     vibrational and rotational partition functions of each minimum and its
     rotational symmetry number -- is `conformer_weights.free_energy_weights`,
     which needs a Hessian per conformer; for minima a few k_B T apart those
-    are corrections of the same order as the gap itself.
+    are corrections of the same order as the gap itself. A temperature that
+    is not positive is refused.
     """
     e = np.asarray(energies, float)
     g = np.ones_like(e) if degeneracies is None else np.asarray(degeneracies,
                                                                 float)
-    w = g * np.exp(-(e - e.min()) / (BOLTZMANN_HARTREE_PER_KELVIN
-                                     * temperature))
+    kt = BOLTZMANN_HARTREE_PER_KELVIN * float(temperature)
+    if kt <= 0.0:
+        raise ValueError(f'temperature {temperature} K is not positive')
+    w = g * np.exp(-(e - e.min()) / kt)
     return w / w.sum()
 
 

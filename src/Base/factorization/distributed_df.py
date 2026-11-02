@@ -177,7 +177,8 @@ from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
                                               lockstep_mean_field, lockstep_stats,
-                                              partition, reduce_sum, replicate)
+                                              partition, reduce_max, reduce_sum,
+                                              replicate)
 from src.Base.utils.parallel.threads import blas_full_pool, blas_single_threaded
 
 #: What a distributed run leaves on `mf._distributed_timings`, on every rank.
@@ -715,16 +716,20 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         need = (stop - start) * nao_pair * 8 / 1e6
         peak = need * (1 + DF_EXCHANGE_TRANSIENT_FRACTION)
         whole = naux * nao_pair * 8 / 1e6
-        if peak > left:
+        # the slice and the free memory differ per rank: the verdict is the
+        # worst rank's, so every rank raises or none does
+        short = reduce_max(np.array([peak - left]), self.comm)[0]
+        if short > 0:
             fits = int(np.ceil(whole / left)) if left > 0 else None
             raise MemoryError(
-                f"this rank's {stop - start} of {naux} auxiliary rows are "
-                f'{need:.0f} MB, {peak:.0f} MB while the exchange that fills '
-                f'them is in flight, and {left:.0f} MB of max_memory are '
-                f'left; the whole tensor is {whole:.0f} MB and {fits} ranks '
-                'or more would hold it in core. This route keeps its slice in '
-                'core by construction and will not spill it to disk, which is '
-                'the cost it exists to remove.')
+                f'one rank is {short:.0f} MB short of max_memory for its slice '
+                f"of the fitted tensor. This rank's {stop - start} of {naux} "
+                f'auxiliary rows are {need:.0f} MB, {peak:.0f} MB while the '
+                f'exchange that fills them is in flight, and {left:.0f} MB of '
+                f'max_memory are left here; the whole tensor is {whole:.0f} MB '
+                f'and {fits} ranks or more would hold it in core. This route '
+                'keeps its slice in core by construction and will not spill it '
+                'to disk, which is the cost it exists to remove.')
         # pyscf's J/K loops block by min(blockdim, free memory): a block of
         # this many rows keeps their buffers under DF_JK_BLOCK_GB
         self.blockdim = exchange_block_rows(nao)

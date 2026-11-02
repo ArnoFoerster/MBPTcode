@@ -38,7 +38,7 @@ from src.Base.numerics.constants import (EXTERNAL_HESSIAN_GEOMETRY_TOL_BOHR,
                                          PHOTOPHYSICS_LOOP_TOL_ENERGY,
                                          PHOTOPHYSICS_LOOP_TOL_Q)
 from src.Base.declaration import QPStates
-from src.photophysics import stages
+from src.photophysics import stages, walks
 from src.photophysics.declaration import (DeclarationRefused,
                                           ExternalHessian, UiscModel)
 from src.photophysics.records import StageRefused
@@ -435,7 +435,7 @@ def test_the_saddle_check_takes_its_forces_on_untied_loops(tmp_path, monkeypatch
     def saddle_check(final, mol, walk, verbose=False, cache_dir=None):
         seen['final'] = final
         raise RuntimeError('stop')
-    monkeypatch.setattr(stages, 'saddle_check', saddle_check)
+    monkeypatch.setattr(walks, 'saddle_check', saddle_check)
     with pytest.raises(RuntimeError, match='stop'):
         run.saddle_checked('s1', run.mol_in, {'converged': True}, None, surface, 0.0)
     final = seen['final']

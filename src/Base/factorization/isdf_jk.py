@@ -77,6 +77,9 @@ from pyscf.lib import logger
 from src.Base.factorization.test_sets import is_ao_products, replicated_fit
 from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
+                                         ISDF_JK_BLOCK_MEMORY_FRACTION,
+                                         ISDF_JK_BLOCK_MIN_MB,
+                                         ISDF_JK_BLOCK_MIN_ROWS,
                                          ISDF_JK_CHECK_TOL,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION)
 from src.Base.geometry.geometry import elements_of
@@ -89,7 +92,6 @@ from src.Base.factorization.separable_ri import (aux_metric_sqrt,
                                                  resolve_isdf_grid)
 from src.Base.geometry.body_frame import BodyFrame
 from src.Base.factorization.separable_ri import atomic_frames
-from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.factorization.separable_ri import points_on_frames
 from src.Base.factorization.ao_product_fit import placed, pivoted_points
@@ -600,13 +602,15 @@ class ISDFJK(df.df.DF):
         return self.frozen_frames
 
     def _resolve_z_mode(self):
+        """'dense' where Z takes less than ISDF_SCF_KERNEL_MEMORY_FRACTION of
+        max_memory, else 'factored' (z_mode 'auto'). The budget, not the
+        memory free at this moment: the two modes are different arithmetic,
+        so one input must take one mode in every run."""
         if self.z_mode != 'auto':
             return self.z_mode
         nk = self.nk
-        free = memory.left_mb(self.max_memory) * 1e6
-        # Dense Z plus one row block plus the (nk, nao) buffers; a third of the
-        # remaining memory is the budget, so an SCF still has room to breathe.
-        return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
+        budget = self.max_memory * 1e6
+        return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * budget
                 else 'factored')
 
     def _zrows(self, omega):
@@ -624,8 +628,6 @@ class ISDFJK(df.df.DF):
         with self.mol.with_range_coulomb(om), self.auxmol.with_range_coulomb(om):
             V = self.auxmol.intor('int2c2e', aosym='s1')
 
-        # Resolved once: it reads the process's memory, which the dense branch
-        # then changes, so asking twice can report a mode that was not used.
         mode = self._resolve_z_mode()
         if mode == 'dense':
             zr = _ZRows(Z=M.T @ (V @ M))
@@ -637,14 +639,18 @@ class ISDFJK(df.df.DF):
         return zr
 
     def _block(self):
+        """Rows per block of the J/K builds: `layout.block`, else sized from
+        max_memory (ISDF_JK_BLOCK_MEMORY_FRACTION), never from the memory free
+        at this moment, since the block edge moves the sums' last bits."""
         if self.block:
             return self.block
         nk, nao = self.X.shape
-        free = max(memory.left_mb(self.max_memory) * 1e6, 2e8)
+        budget = max(ISDF_JK_BLOCK_MEMORY_FRACTION * self.max_memory,
+                     ISDF_JK_BLOCK_MIN_MB) * 1e6
         # A row block costs b*nk (the Hadamard argument) and, in factored mode,
         # b*nk again for the rebuilt Z rows.
-        b = int(0.25 * free / (2 * nk * 8))
-        return int(np.clip(b, 16, nk))
+        b = int(budget / (2 * nk * 8))
+        return int(np.clip(b, ISDF_JK_BLOCK_MIN_ROWS, nk))
 
     def probe_densities(self):
         """Densities to test the interpolation against, cheapest first.

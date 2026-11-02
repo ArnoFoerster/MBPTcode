@@ -51,12 +51,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as rd
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import (FD_STEP_DENSITY, H2CO, five_point, JKFIT, SCF_GRAD_TIGHT,
+from tests.adc_common import (ee_numerics, FD_STEP_DENSITY, H2CO, five_point, JKFIT, SCF_GRAD_TIGHT,
                               SCF_MAX_CYCLE, WATER_C2V, check, converge_newton)
 from tests.pins import RECORDING_BLAS, matches
 
@@ -99,7 +100,7 @@ def analytic(mol, mf, spin, level, frozen, env=None, pcm_response=False,
         pc.Xvv = np.zeros_like(pc.Xvv)
     Bc = rd.core_factors(mol, mf, frozen) if frozen else None
     D = rd.relaxed_density(pc, op, mf, mol, frozen, t1, Bc=Bc, env=env,
-                           pcm_response=pcm_response)
+                           pcm_response=pcm_response, numerics=Numerics())
     C = np.asarray(mf.mo_coeff)
     return C @ D @ C.T
 
@@ -273,7 +274,7 @@ def check_driver():
     ok = True
     mol = gto.M(atom=H2CO, basis='cc-pvdz', verbose=0)
     env, sol = _toluene(mol)
-    kw = dict(level='adc2', nroots=1, frozen=2, conv_tol=1e-9, fold=True,
+    kw = dict(level='adc2', nroots=1, frozen=2, numerics=ee_numerics(conv_tol=1e-9), fold=True,
               environment=env, return_fold=True, state_specific='vertical')
     for spin in ('singlet', 'triplet'):
         e, _, res = solve_ee_adc(sol, spin=spin, ss_density='relaxed', **kw)
@@ -321,7 +322,7 @@ def check_ranks():
             o = ee_ri_fold.RIFoldADC2(f, spin, reaction_field=rf, tile_gb=1e-9,
                                       threads=1, comm=comm)
             p = rd.tiled_pieces(o, y, w, tile_gb=1e-9)
-            D = rd.relaxed_density(p, o, sol, mol, 1, t1, Bc=Bc, env=env)
+            D = rd.relaxed_density(p, o, sol, mol, 1, t1, Bc=Bc, env=env, numerics=Numerics())
             return [p.g_oo, p.g_vv, p.GL, p.Goo, p.Xvv, D]
 
         ser = run(None)

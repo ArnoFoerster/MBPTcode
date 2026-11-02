@@ -90,13 +90,13 @@ def _y_fold_lambda(Lam, F_mo, eri_mo, nocc):
     return Y
 
 
-def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, numerics=None,
+def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, numerics,
                       verbose=False):
     """Solve antisym(Y_E + Y[fold(Lambda)]) = 0 for symmetric zero-diag Lambda.
 
     The dense route's entry to `solve_orbital_multipliers`: the matvec is the
-    closed-form `_y_fold_lambda` built from the four-index MO integral tensor.
-    Returns (Lambda, res_norm).
+    closed-form `_y_fold_lambda` built from the four-index MO integral tensor;
+    numerics the run's `Numerics`, required. Returns (Lambda, res_norm).
     """
     return solve_orbital_multipliers(
         lambda Lam: _y_fold_lambda(Lam, F_mo, eri_mo, nocc),
@@ -165,7 +165,7 @@ def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
 # ---------------------------------------------------------------------------
 
 def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
-                                    verbose=False, numerics=None):
+                                    verbose=False, *, numerics):
     """dL_X/dR with the Fock partial taken on the REFERENCE'S OWN Fock.
 
     `fold_fock` writes F_pq = h_pq + sum_k [2(pq|kk) - (pk|qk)], which is the
@@ -220,7 +220,7 @@ def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
 
 
 def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
-                          verbose=False, numerics=None):
+                          verbose=False, *, numerics):
     """dL_X/dR for several targets sharing one skeleton-derivative sweep.
 
     target_list: list of (gammaF, Gamma4_E) MO-partial pairs, optionally
@@ -234,8 +234,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
              consistent when eri_mo is the RI four-index tensor from the SAME
              auxiliary basis (`SingleReference.common.eri_blocks.df_eri_mo`) -- differentiating a
              fitted energy with exact derivative integrals is not a gradient.
-    numerics: the run's `Numerics`, whose scf section sets the multipliers'
-             solve (`multipliers`); None takes its defaults.
+    numerics: the run's `Numerics`, required, whose scf section sets the
+             multipliers' solve (`multipliers`).
 
     A Kohn-Sham reference is routed to `kohn_sham_correlation_gradients`: the
     fold below is the Hartree-Fock Fock and differentiates the wrong one-body
@@ -302,7 +302,7 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
 
 
 def correlation_gradient(mol, mf, gammaF, Gamma4_E, eri_mo=None, auxmol=None,
-                         verbose=False, numerics=None):
+                         verbose=False, *, numerics):
     """Single-target wrapper around correlation_gradients."""
     Gs, diags = correlation_gradients(mol, mf, [(gammaF, Gamma4_E)],
                                       eri_mo=eri_mo, auxmol=auxmol,

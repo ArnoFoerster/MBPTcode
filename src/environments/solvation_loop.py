@@ -486,13 +486,15 @@ def force(state, field, result, flags=None):
     return lockstep(np.array(F), check=True)
 
 
-def force_neq(state, ground, field, result, ground_result, flags=None):
+def force_neq(state, ground, field, result, ground_result, flags=None,
+              numerics=None):
     """dG_neq(X | S0)/dR (natm, 3) on a loop `result` of the state in the
     slow charges of the ground state's equilibrium loop `ground_result`
     (`slow_charges` of its relaxed density), both at this geometry (module
     docstring). ground.loop_response(h, field, numerics) -> (natm, 3)
     Tr[h dD_0/dR] of the ground state's loop, its Z-vector solved on the
-    state model's Numerics (`loop_numerics`); flags as for `force`."""
+    loop's Numerics (`loop_numerics`: `numerics`, else the state model's);
+    flags as for `force`."""
     for r in (result, ground_result):
         if not np.isfinite(r.energy):
             return np.full((state.mol.natm, 3), np.nan)
@@ -517,7 +519,7 @@ def force_neq(state, ground, field, result, ground_result, flags=None):
          - field.response_force(lam, v0, 'fast')
          + field.charge_force(d0, mu)
          + ground.loop_response(field.operator(mu)[0], field,
-                                loop_numerics(state, None)))
+                                loop_numerics(state, numerics)))
     for w, rho_t in info.get('lr', ()):
         F = F + w * field.transition_force(rho_t)
     return lockstep(np.array(F), check=True)

@@ -48,6 +48,7 @@ import numpy as np
 
 from src.Base.environment_seam import NoEnvironment
 from src.Base.numerics.constants import ADC2_FRAGMENT_DENSE_BLOCK, ADC2_FRAGMENT_PAIR_RANK_CUT
+from src.Base.numerics.numerics import required_numerics
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.Base.utils.timing import stage
 from src.SingleReference.ADC.eeADC import ee_ri_fold
@@ -57,8 +58,6 @@ from src.gradients.adc.ee_gradient import adc2_pieces
 from src.gradients.orbital_coupling import symmetric_gauge_coupling
 from src.gradients.reference_mean_field import ReferenceMeanField
 
-#: The singles channels of the folded operator.
-SPINS = ('singlet', 'triplet')
 #: The operator's routes: 'fold' applies the folded operator matrix-free
 #: (blocks of the partition up to FRAGMENT_MATRIX_FREE_DENSE_MAX rows formed
 #: by its action), 'dense' forms K(Omega_0) whole (n_ov folded products).
@@ -82,7 +81,7 @@ class ADC2Operator:
 
     @property
     def spin(self):
-        """The channel, 'singlet' or 'triplet' (SPINS)."""
+        """The channel, 'singlet' or 'triplet' (ee_ri_fold.SPINS)."""
         return self.fold.spin
 
     @property
@@ -124,8 +123,8 @@ class ADC2Operator:
         """The operator of `spin` at Omega_0 = `omega` on the DF-RHF `mf`,
         the doubles fitted in `auxbasis`; route 'auto' (= 'fold'), 'dense'
         or 'fold' (ROUTES)."""
-        if spin not in SPINS:
-            raise ValueError(f'spin must be one of {SPINS}, got {spin!r}')
+        if spin not in ee_ri_fold.SPINS:
+            raise ValueError(f'spin must be one of {ee_ri_fold.SPINS}, got {spin!r}')
         if route not in ROUTES:
             raise ValueError(f'route must be one of {ROUTES}, got {route!r}')
         if omega is None:
@@ -156,18 +155,20 @@ class ADC2FragmentMethod(ReferenceMeanField):
     closed-shell DF-RHF reference: `scf_factory(mol)` returns the mean field
     (density-fitted, as the correlation force's Fock skeleton is its JK
     fit's), `spin` the channel, `auxbasis` the fit of the doubles and of the
-    correlation force (named: the two must be one fit). One SCF per geometry
-    (`ReferenceMeanField`), in the gas phase."""
+    correlation force (named: the two must be one fit), `numerics` the run's
+    `Numerics` (the correlation force's Z-vector), required. One SCF per
+    geometry (`ReferenceMeanField`), in the gas phase."""
 
     def __init__(self, mol, scf_factory, spin='singlet', auxbasis=None,
-                 mf=None):
-        if spin not in SPINS:
-            raise ValueError(f'spin must be one of {SPINS}, got {spin!r}')
+                 mf=None, *, numerics):
+        if spin not in ee_ri_fold.SPINS:
+            raise ValueError(f'spin must be one of {ee_ri_fold.SPINS}, got {spin!r}')
         if auxbasis is None:
             raise ValueError('name the auxiliary basis of the doubles: the '
                              'fold and the correlation force must fit in one')
         self.mol0, self.scf_factory = mol, scf_factory
         self.spin, self.auxbasis = spin, auxbasis
+        self.numerics = required_numerics(numerics, 'ADC2FragmentMethod')
         self.nocc = mol.nelectron // 2
         self.environment = NoEnvironment()
         self.timer = None
@@ -185,7 +186,7 @@ class ADC2FragmentMethod(ReferenceMeanField):
         """(ADC2Operator at omega0, ADC2Response) at one geometry."""
         op = ADC2Operator.from_mean_field(mol, mf, self.spin, self.auxbasis,
                                           omega0, route)
-        return op, ADC2Response(op, mol, mf, self.auxbasis)
+        return op, ADC2Response(op, mol, mf, self.auxbasis, self.numerics)
 
     def ground_energy(self, mf):
         """E_HF + E_MP2 in the doubles' fit: the ground state ADC(2)
@@ -195,19 +196,20 @@ class ADC2FragmentMethod(ReferenceMeanField):
 
     def ground_gradient(self, mf):
         """dE/dR of E_HF + E_MP2 (`df_correlation_force.mp2_force`)."""
-        return dcf.mp2_force(mf, mf.mol, 0, self.auxbasis)[0]
+        return dcf.mp2_force(mf, mf.mol, 0, self.auxbasis,
+                             numerics=self.numerics)[0]
 
     def refreeze(self, mol, mf=None):
         return ADC2FragmentMethod(mol, self.scf_factory, self.spin,
-                                  self.auxbasis, mf=mf)
+                                  self.auxbasis, mf=mf, numerics=self.numerics)
 
 
 class ADC2Response:
     """The `SinglesResponse` of one ADC2Operator (module docstring)."""
 
-    def __init__(self, operator, mol, mf, auxbasis):
+    def __init__(self, operator, mol, mf, auxbasis, numerics):
         self.operator, self.mol, self.mf = operator, mol, mf
-        self.auxbasis = auxbasis
+        self.auxbasis, self.numerics = auxbasis, numerics
         # {name: detail} of the last pair_force's Z-vector events
         self.flags = {}
 
@@ -247,7 +249,8 @@ class ADC2Response:
         ri = dcf.RIFactors(self.mol, self.mf, self.auxbasis)
         events = []
         force, _, _ = dcf.correlation_force(self.mol, self.mf, ri, gamma, Gam,
-                                            0, flags=events)
+                                            0, numerics=self.numerics,
+                                            flags=events)
         self.flags = {e['flag']: {'message': e['message']} for e in events}
         return force
 

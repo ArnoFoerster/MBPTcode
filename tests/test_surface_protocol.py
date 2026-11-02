@@ -221,19 +221,21 @@ def direct_surfaces(mol, hf, ks):
             SurfacePhysics(ks_pbe0, Excitation('triplet', root=2,
                                                kernel='bse-tda'))),
         'RPABSESurface': (
-            RPABSESurface(mol, rhf_tight, mf=hf, state=0, spin='singlet', numerics=g1_numerics(mol)),
+            RPABSESurface(mol, rhf_tight, mf=hf, state=0, spin='singlet',
+                          numerics=g1_numerics(mol)),
             SurfacePhysics(rpa_hf, Excitation('singlet', root=1))),
         'RPAQPSurface': (
             RPAQPSurface(mol, rhf_tight, mf=hf, state=0, numerics=g1_numerics(mol)),
             SurfacePhysics(rpa_hf, ChargedExcitation(homo, -1))),
         'DenseRPASurface': (
-            DenseRPASurface(mol, rhf_tight),
+            DenseRPASurface(mol, rhf_tight, numerics=Numerics()),
             SurfacePhysics(rpa_hf, None)),
         'DenseBSESurface': (
-            DenseBSESurface(mol, scf=rhf_tight),
+            DenseBSESurface(mol, scf=rhf_tight, numerics=Numerics()),
             SurfacePhysics(rpa_hf, Excitation('singlet', root=1))),
         'QuasiparticleSurface': (
-            QuasiparticleSurface(mol, rhf_tight, charge_change=-1, orbital=homo),
+            QuasiparticleSurface(mol, rhf_tight, charge_change=-1, orbital=homo,
+                                 numerics=Numerics()),
             SurfacePhysics(rpa_hf, ChargedExcitation(homo, -1))),
     }
 

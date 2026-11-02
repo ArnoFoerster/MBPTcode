@@ -68,7 +68,7 @@ def sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
     return out
 
 
-def z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics=None):
+def z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics):
     """(natm, 3) sum_pq w_f_pq dF_pq + sum_pq w_s_pq dS_pq, FIXED MO basis.
 
     Both derivatives are what a displaced geometry gives with the reference
@@ -84,7 +84,7 @@ def z_vector_contraction(mol, mf, nocc, w_f, w_s, numerics=None):
     The occupied-occupied rotation never enters: its antisymmetric part cancels
     out of the density derivative, leaving dD dependent on the
     occupied-virtual block and on dS_oo alone. numerics: the run's `Numerics`
-    (the Z-vector's solve); None takes its defaults.
+    (the Z-vector's solve), required.
     """
     c = np.asarray(mf.mo_coeff, float)
     eps = np.asarray(mf.mo_energy, float)
@@ -122,7 +122,7 @@ def _pair_matrix(block, nocc, norb):
     return out + out.T
 
 
-def configuration_coupling(mol, mf, nocc, goo, gvv, numerics=None):
+def configuration_coupling(mol, mf, nocc, goo, gvv, numerics):
     """(natm, 3) the configuration term between two EXCITED states.
 
     Writing A = A^sym + kappa, the canonical condition gives, for p != q inside
@@ -145,6 +145,7 @@ def configuration_coupling(mol, mf, nocc, goo, gvv, numerics=None):
     A pair inside ORBITAL_MULTIPLIER_DEGENERACY_TOL has no canonical rotation:
     it is dropped when gamma vanishes on it (by symmetry) and refused when it
     does not, as `multipliers` refuses such a pair's right-hand side.
+    numerics: the run's `Numerics` (the one Z-vector's solve), required.
     """
     c = np.asarray(mf.mo_coeff, float)
     eps = np.asarray(mf.mo_energy, float)
@@ -188,14 +189,15 @@ def symmetric_gauge_coupling(mol, mf, nocc, goo, gvv):
     return sigma_contraction(mol, c, gam, True)
 
 
-def ov_coupling(mol, mf, nocc, w, numerics=None):
+def ov_coupling(mol, mf, nocc, w, numerics):
     """(natm, 3) sum_ia W_ia A_ia, A_ia = <phi_i | d phi_a / dR>, canonical.
 
     The occupied-virtual block of the derivative overlap, which is the
     coupled-perturbed rotation: `ground_state_coupling` is this with
     W = sqrt(2) (X - Y), and the localization response of
     `fragment_diabatic` reaches it with the occupied-virtual weight of the
-    local orbitals' motion. One Z-vector for any W.
+    local orbitals' motion. One Z-vector for any W, solved on `numerics`,
+    the run's.
     """
     w = np.asarray(w, float).reshape(nocc, -1)
     eps = np.asarray(mf.mo_energy, float)

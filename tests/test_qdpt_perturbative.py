@@ -51,8 +51,13 @@ def check_pyscf_fci_and_openfermion_agree():
     e_fci_ground = run_pipeline(solver='pyscf_fci', **kw)
     repeat_ok = abs(e_fci_ground[0] - e_fci[0]) < 1e-12
 
-    e_ed = run_pipeline(solver='openfermion', **kw)
+    e_ed = run_pipeline(solver='openfermion', nroots=None, **kw)
     dim_ok = len(e_ed) == 9  # C(3, 2)^2 determinants at Sz = 0
+    # one contract: every backend returns the lowest nroots states
+    e_ed2 = run_pipeline(solver='openfermion', nroots=2, **kw)
+    nroots_ok = (nroots_ok and len(run_pipeline(solver='openfermion', **kw)) == 1
+                 and len(e_ed2) == 2
+                 and np.abs(e_ed2.real - e_fci).max() < 1e-10)
     d = abs(e_ed[0].real - e_fci[0])
     cross_ok = d < 1e-10  # both solve the Hermitian part of the same g_eff
 
@@ -87,8 +92,7 @@ def check_two_body_backends_refuse_what_they_cannot_carry():
     broken[2][0, 2, 0, 2] += 1e-3                     # an alpha-alpha element alone
     broken[2][2, 0, 2, 0] += 1e-3
     try:
-        solve('pyscf_fci', broken, space['n_orbs'], space['n_elec_active'],
-              space['act_idx'], space['act_occ_idx'], space['act_vir_idx'])
+        solve('pyscf_fci', broken, space['n_orbs'], space['n_elec_active'])
         not_adapted = False
     except ValueError:
         not_adapted = True
@@ -160,8 +164,7 @@ def check_unavailable_solvers_refuse_cleanly():
     ok = True
     for name in ('pyhast', 'pdaggerq', 'ccsd', 'CCSDT', 'pyscf-fci'):
         try:
-            solve(name, g_eff, space['n_orbs'], space['n_elec_active'],
-                 space['act_idx'], space['act_occ_idx'], space['act_vir_idx'])
+            solve(name, g_eff, space['n_orbs'], space['n_elec_active'])
             ok = False
         except ValueError:
             pass

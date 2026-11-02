@@ -636,6 +636,16 @@ def numerics_or_default(numerics):
     return Numerics() if numerics is None else numerics
 
 
+def required_numerics(numerics, where):
+    """`numerics`, refused where None: `where` reads its settings off the
+    run's one `Numerics`, and a solve on defaults the run did not declare
+    would disagree with the identity it stamps."""
+    if numerics is None:
+        raise TypeError(f"{where} needs the run's Numerics; there are no "
+                        f"defaults to fall back on")
+    return numerics
+
+
 #: The keywords of the ISDF forward (`space_time.separable_factors`, the BSE
 #: and QP drivers built on it) and the `Numerics` field each one names.
 ISDF_REQUEST_FIELDS = {k: FLAT_FIELDS[k] for k in (

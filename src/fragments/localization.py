@@ -47,6 +47,7 @@ from scipy.sparse.linalg import LinearOperator, minres
 from src.Base.numerics.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_TOL_GRAD,
                                          FRAGMENT_PM_POLISH_MAX,
                                          LOCALIZED_ASSIGNMENT_FLOOR)
+from src.Base.numerical_flags import flag
 from src.Base.pyscf.pyscf_interface import fock_mo, occupied_count
 from src.Base.utils.linear_algebra.krylov import root_driven_solve
 
@@ -144,6 +145,11 @@ def _localize(mol, orbitals, pops, start=None, conv_tol=FRAGMENT_PM_CONV_TOL):
     return u, grad
 
 
+class LocalizationStepNotConverged(RuntimeWarning):
+    """A Pipek-Mezey Newton step whose MINRES solve stopped short (its last
+    iterate taken as the step)."""
+
+
 def _newton_polish(pm, c_loc, tol=FRAGMENT_PM_CONV_TOL_GRAD, maxiter=8):
     """Newton steps on the PM functional from a converged `c_loc`.
 
@@ -168,7 +174,15 @@ def _newton_polish(pm, c_loc, tol=FRAGMENT_PM_CONV_TOL_GRAD, maxiter=8):
             x = np.linalg.lstsq(0.5 * (h + h.T), -g, rcond=1e-12)[0]
         else:
             op = LinearOperator((npar, npar), matvec=h_op, dtype=float)
-            x = minres(op, -g, rtol=1e-6, maxiter=500)[0]
+            x, info = minres(op, -g, rtol=1e-6, maxiter=500)
+            if info != 0:
+                # the step is MINRES's last iterate; the Newton goes on, and
+                # the stationarity it ends at is reported (`pm_gradient`)
+                flag('fragment_localization_step_not_converged',
+                     f'the MINRES solve of a Pipek-Mezey Newton step ended '
+                     f'with info={info} on {npar} rotation parameters; its '
+                     f'last iterate is taken as the step',
+                     LocalizationStepNotConverged)
         c_loc = c_loc @ pm.extract_rotation(x)
     return c_loc
 

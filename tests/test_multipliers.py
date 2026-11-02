@@ -242,7 +242,7 @@ def test_the_dense_route_reproduces_its_old_solver(dense_case):
     """The four-index matvec through the shared solver, to a few ulp."""
     Y_E, F_mo, eri, nocc, eps = dense_case
     lam_ref, res_ref = _reference_solve_multipliers(Y_E, F_mo, eri, nocc, eps)
-    lam_new, res_new = solve_multipliers(Y_E, F_mo, eri, nocc, eps)
+    lam_new, res_new = solve_multipliers(Y_E, F_mo, eri, nocc, eps, numerics=Numerics())
     assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6          # there is a multiplier to compare
@@ -252,7 +252,7 @@ def test_the_cubic_route_reproduces_its_old_solver(cubic_case):
     """`fock_partial_Y` through the shared solver, to a few ulp."""
     mf, Y_E, nocc = cubic_case
     lam_ref, res_ref = _reference_solve_lambda(mf, Y_E, nocc)
-    lam_new, res_new = solve_lambda(mf, Y_E, nocc)
+    lam_new, res_new = solve_lambda(mf, Y_E, nocc, numerics=Numerics())
     assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6
@@ -280,7 +280,7 @@ def test_a_degenerate_pair_is_projected_out_when_its_gradient_vanishes():
                     [-0.3, 0.6, 0.0, 0.15],
                     [0.5, -0.1, 0.9, 0.0]])
     assert Y_E[0, 1] == Y_E[1, 0]                 # the degenerate pair carries none
-    Lam, res = solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps)
+    Lam, res = solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps, numerics=Numerics())
     assert Lam[0, 1] == 0.0                       # projected out, not guessed
     assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
     # every pair the equation DOES determine is stationary
@@ -301,7 +301,7 @@ def test_a_degenerate_pair_carrying_gradient_refuses():
                     [0.5, -0.1, 0.9, 0.0]])
     assert Y_E[0, 1] != Y_E[1, 0]
     with pytest.raises(RuntimeError, match='degenerate orbital pair'):
-        solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps)
+        solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps, numerics=Numerics())
 
 
 def test_an_operator_blind_to_one_pair_is_caught_by_the_residual():
@@ -391,11 +391,11 @@ def test_a_solve_on_its_round_off_floor_ends_below_the_residual_bar():
     floored = _floored_matvec(eps, 1e-10)
     flags = []
     with collecting(flags):
-        Lam, res = solve_orbital_multipliers(floored, Y_E, eps, flags=flags)
+        Lam, res = solve_orbital_multipliers(floored, Y_E, eps, flags=flags, numerics=Numerics())
     assert flags == []
     assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
     assert floored.calls < 200, floored.calls
     exact = _floored_matvec(eps, 0.0)
-    Lam_ref, res_ref = solve_orbital_multipliers(exact, Y_E, eps)
+    Lam_ref, res_ref = solve_orbital_multipliers(exact, Y_E, eps, numerics=Numerics())
     assert res_ref < ORBITAL_MULTIPLIER_TOL * max(1.0, np.linalg.norm(Y_E))
     assert np.abs(Lam - Lam_ref).max() < 1e-8

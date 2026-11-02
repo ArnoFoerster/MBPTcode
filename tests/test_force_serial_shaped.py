@@ -74,7 +74,7 @@ from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
                                          FIT_REALIZATION_FORCE_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
-from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep_mean_field
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.gwbse.dense_surfaces import DenseRPASurface
@@ -392,7 +392,7 @@ def race_rank(comm):
     # unfitted, the integrals of the dense route's exact (pq|rs): its force
     # is refused on a density-fitted mean field (the orbital response would
     # be built from other integrals than the SCF's)
-    g, e, _ = DenseRPASurface(mol, exact_scf).total_gradient(here)
+    g, e, _ = DenseRPASurface(mol, exact_scf, numerics=Numerics()).total_gradient(here)
     out['dense dRPA force'] = np.asarray(g)
     out['dense dRPA energy'] = np.atleast_1d(e)
     return out

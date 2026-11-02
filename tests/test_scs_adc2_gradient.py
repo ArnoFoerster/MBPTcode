@@ -45,7 +45,7 @@ from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import (ATOMS, AUX, FD_STEP_DENSITY, NF, SCF_GRAD_TILED,
+from tests.adc_common import (ee_numerics, ATOMS, AUX, FD_STEP_DENSITY, NF, SCF_GRAD_TILED,
                               SCF_TOL_TIGHT, check, df_rhf, five_point, make_scf_tight,
                               molecule)
 from tests.pins import RECORDING_BLAS, matches
@@ -92,8 +92,8 @@ def check_unscaled_limit():
     mf = scf_tight(mol)
     for spin in (None,) + SPINS:
         kw = dict(frozen=NF, auxbasis=AUX, ground=spin is None)
-        F0, i0 = eg.adc2_force(mf, mol, spin, **kw)
-        F1, i1 = eg.adc2_force(mf, mol, spin, spin_scaling=(1.0, 1.0), **kw)
+        F0, i0 = eg.adc2_force(mf, mol, spin, **kw, numerics=Numerics())
+        F1, i1 = eg.adc2_force(mf, mol, spin, spin_scaling=(1.0, 1.0), **kw, numerics=Numerics())
         same = (np.array_equal(F0, F1) and np.array_equal(i0['dm_corr'], i1['dm_corr'])
                 and i0['energy'] == i1['energy'])
         ok &= check(same, f'dense {spin or "S0"}: (1, 1) is ADC(2) bit for bit',
@@ -103,8 +103,9 @@ def check_unscaled_limit():
     mf.kernel()
     for spin in SPINS:
         kw = dict(frozen=NF, auxbasis=AUX, aux_chunk=AUX_CHUNK, **TILED)
-        F0, i0 = eg.adc2_force_tiled(mf, mol, spin, **kw)
-        F1, i1 = eg.adc2_force_tiled(mf, mol, spin, spin_scaling=(1.0, 1.0), **kw)
+        F0, i0 = eg.adc2_force_tiled(mf, mol, spin, **kw, numerics=Numerics())
+        F1, i1 = eg.adc2_force_tiled(mf, mol, spin, spin_scaling=(1.0, 1.0), **kw,
+                                     numerics=Numerics())
         same = np.array_equal(F0, F1) and np.array_equal(i0['dm_corr'], i1['dm_corr'])
         ok &= check(same, f'tiled {spin}: (1, 1) is ADC(2) bit for bit',
                     f'max |dF| {float(np.max(np.abs(F0 - F1))):.0e}')
@@ -120,7 +121,7 @@ def check_energies_and_state_models():
     forces = {}
     for k, spin in enumerate(SPINS + (None,)):
         F, info = eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX,
-                                ground=spin is None, spin_scaling='scs')
+                                ground=spin is None, spin_scaling='scs', numerics=Numerics())
         forces[spin] = F
         d = abs(info['energy'] - ref[k])
         ok &= check(d < 1e-10 and info['asymmetry'] < 1e-8,
@@ -151,7 +152,7 @@ def check_finite_differences():
     mf = scf_tight(mol)
     dm0 = mf.make_rdm1()
     analytic = [eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX,
-                              ground=spin is None, spin_scaling='scs')[0]
+                              ground=spin is None, spin_scaling='scs', numerics=Numerics())[0]
                 for spin in SPINS + (None,)]
     fd = np.zeros((3, mol.natm, 3))
     for a in range(mol.natm):
@@ -180,8 +181,10 @@ def check_tiled():
         op, _, out = eg.solve_root(mol, mf, spin, 3, NF, AUX, tile_gb=1e-9,
                                    aux_chunk=AUX_CHUNK, scaling=SCS)
         rt = eg._pick(out, 0, None)[1]
-        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, NF, AUX, op, rt, scaling=SCS)
-        Ft, (_, _, gt, _, _, _) = eg.tiled_force(mf, mol, op, NF, AUX, rt, **TILED)
+        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, NF, AUX, op, rt, scaling=SCS,
+                                                 numerics=Numerics())
+        Ft, (_, _, gt, _, _, _) = eg.tiled_force(mf, mol, op, NF, AUX, rt, **TILED,
+                                                 numerics=Numerics())
         e, eD = float(np.max(np.abs(Fd - Ft))), float(np.max(np.abs(gd - gt)))
         ok &= check(e < 1e-10 and eD < 1e-10, f'SCS {spin}: tiled force = dense',
                     f'force {e:.1e} Ha/Bohr, relaxed density {eD:.1e}, max |F| '
@@ -190,7 +193,7 @@ def check_tiled():
     def triplet(comm):
         F, info = eg.adc2_force_tiled(mf, mol, 'triplet', frozen=NF, auxbasis=AUX,
                                       comm=comm, aux_chunk=AUX_CHUNK,
-                                      spin_scaling='scs', **TILED)
+                                      spin_scaling='scs', **TILED, numerics=Numerics())
         return [F, info['dm_corr'], np.array([info['omega']])]
 
     ser = triplet(None)
@@ -215,7 +218,7 @@ def check_field_derivatives():
     C = np.asarray(mf.mo_coeff)
     for spin in SPINS:
         _, _, res = solve_ee_adc(mf, mol, level='adc2', spin=spin, nroots=3, fold=True,
-                                 frozen=NF, auxbasis=AUX, conv_tol=1e-12,
+                                 frozen=NF, auxbasis=AUX, numerics=ee_numerics(conv_tol=1e-12),
                                  return_fold=True, spin_scaling='scs',
                                  relaxed_density=True)
         an = float(np.sum((C @ res.delta_density_relaxed[0] @ C.T) * mu))
@@ -223,7 +226,7 @@ def check_field_derivatives():
                                               spin)[1], FD_STEP_DENSITY)
         ok &= check(abs(an - fd) < 1e-8, f'SCS {spin}: Tr(rho_rel mu_z) is d omega / d field',
                     f'{an:+.10f} vs {fd:+.10f}, {fd - an:+.1e}')
-    e2, gam = dcf.mp2_density(mf, mol, NF, AUX, scaling=SCS)
+    e2, gam = dcf.mp2_density(mf, mol, NF, AUX, scaling=SCS, numerics=Numerics())
     an = float(np.sum((C @ gam @ C.T) * mu))
 
     def e_scs(lam):
@@ -242,7 +245,7 @@ def check_refusal():
     op, _, out = eg.solve_root(mol, mf, 'singlet', 3, NF, AUX, scaling=SCS)
     rt = eg._pick(out, 0, None)[1]
     try:
-        eg.dense_force(mf, mol, NF, AUX, op, rt)
+        eg.dense_force(mf, mol, NF, AUX, op, rt, numerics=Numerics())
         msg = ''
     except ValueError as err:
         msg = str(err)

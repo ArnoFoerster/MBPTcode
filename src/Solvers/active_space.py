@@ -25,6 +25,9 @@ Any other name is refused (`SOLVERS`).
 Every backend but 'openfermion' goes through the ActiveSpaceSolver
 interface of active_space_solver.py.
 """
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 
 from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL, DMRG_BOND_DIM,
@@ -34,9 +37,6 @@ from src.Solvers.active_space_solver import (Block2DMRGSolver,
                                              ExactDiagonalizationSolver,
                                              PyscfFCISolver)
 from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
-
-#: The backends `solve` dispatches to; any other name is refused.
-SOLVERS = ('openfermion', 'pyscf_fci', 'dmrg', 'ccsdt', 'ccsdtq')
 
 #: The coupled-cluster backends and their excitation order.
 CC_ORDERS = {'ccsdt': 3, 'ccsdtq': 4}
@@ -107,64 +107,98 @@ def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
     return h1_spatial, eri_spatial, norb, (nocca, noccb)
 
 
-def solve(solver, g_eff, n_spin_orbs, n_elec_active, act_idx, act_occ_idx,
-         act_vir_idx, symmetrize=True, spin_free=False, nroots=1,
-         dmrg_bond_dim=DMRG_BOND_DIM, dmrg_n_sweeps=DMRG_N_SWEEPS):
-    """
-    Unified solver interface for downfolded effective Hamiltonians.
+@dataclass(frozen=True)
+class _Request:
+    """One `solve` call, as every backend reads it."""
+    g_eff: dict
+    n_spin_orbs: int
+    n_elec_active: int
+    spin_free: bool
+    symmetrize: bool
+    nroots: Optional[int]
+    dmrg_bond_dim: int
+    dmrg_n_sweeps: int
 
+    def spatial(self, solver):
+        return _spatial_active_hamiltonian(
+            self.g_eff, self.n_spin_orbs, self.n_elec_active, self.spin_free,
+            self.symmetrize, solver)
+
+
+def _pyscf_fci(r):
+    h1, eri, norb, nelec = r.spatial('pyscf_fci')
+    # spin=None: every state at this Sz, the space direct_spin1 spans here
+    return r.g_eff.get(0, 0.0) + PyscfFCISolver().roots(
+        h1, eri, norb, nelec, nroots=r.nroots, spin=None)[0]
+
+
+def _dmrg(r):
+    h1, eri, norb, nelec = r.spatial('dmrg')
+    nocca, noccb = nelec
+    # spin = n_alpha - n_beta: the lowest total S consistent with this Sz
+    # (an SU2 target is a total spin, unlike pyscf_fci's spin=None).
+    return r.g_eff.get(0, 0.0) + Block2DMRGSolver(
+        bond_dim=r.dmrg_bond_dim, n_sweeps=r.dmrg_n_sweeps).roots(
+        h1, eri, norb, nelec, nroots=r.nroots, spin=nocca - noccb)[0]
+
+
+def _coupled_cluster(name):
+    def run(r):
+        h1, eri, norb, nelec = r.spatial(name)
+        return r.g_eff.get(0, 0.0) + CoupledClusterSolver(
+            order=CC_ORDERS[name]).roots(h1, eri, norb, nelec,
+                                         nroots=r.nroots, spin=None)[0]
+    return run
+
+
+def _exact(r):
+    g_eff, n_spin_orbs = r.g_eff, r.n_spin_orbs
+    if r.spin_free:
+        g_eff = spatial_to_spin_orbitals(g_eff, n_spin_orbs)
+        n_spin_orbs = 2 * n_spin_orbs
+    # the whole determinant-basis spectrum, a three-body vertex carried and
+    # the constant inside the matrix; the lowest nroots of it
+    energies = ExactDiagonalizationSolver(symmetrize=r.symmetrize).spectrum(
+        g_eff, n_spin_orbs, r.n_elec_active)[0]
+    return energies if r.nroots is None else energies[:r.nroots]
+
+
+#: The backends `solve` dispatches to, by name; any other name is refused.
+SOLVERS = {'openfermion': _exact, 'pyscf_fci': _pyscf_fci, 'dmrg': _dmrg,
+           'ccsdt': _coupled_cluster('ccsdt'),
+           'ccsdtq': _coupled_cluster('ccsdtq')}
+
+
+def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
+          spin_free=False, nroots=1, dmrg_bond_dim=DMRG_BOND_DIM,
+          dmrg_n_sweeps=DMRG_N_SWEEPS):
+    """
+    The lowest `nroots` energies of a downfolded effective Hamiltonian g_eff,
+    ascending, its constant g_eff[0] included: the same contract for every
+    backend (`SOLVERS`).
+
+    n_spin_orbs: the active orbitals g_eff is written on (spin orbitals, or
+    spatial orbitals when spin_free); n_elec_active: the active electrons.
     symmetrize: solve the Hermitian part of g_eff. With symmetrize=False the
     determinant-basis solver returns the (complex) spectrum of g_eff as it is,
     and 'pyscf_fci' / 'dmrg' / 'ccsdt' / 'ccsdtq' refuse a non-Hermitian g_eff.
     Those take a one- and two-body Hamiltonian only: a non-zero three-body
     vertex is an error, never dropped (build with max_vertex=2, or use
     'openfermion').
-    nroots: how many states the eigenvalue backends return; the
-    coupled-cluster backends return one: the lowest singlet when the active
-    electrons are paired (RHF reference), else the lowest state of spin
-    (n_alpha - n_beta) / 2 (UHF reference). 'pyscf_fci' returns the lowest
-    states at this Sz of any spin, so where a triplet lies lowest the two
-    differ by design.
+    nroots: how many states to return (None: every state the backend can
+    reach, the whole determinant spectrum for 'openfermion'). The
+    coupled-cluster backends produce one and refuse more: the lowest singlet
+    when the active electrons are paired (RHF reference), else the lowest
+    state of spin (n_alpha - n_beta) / 2 (UHF reference). 'pyscf_fci' and
+    'openfermion' return the lowest states at this Sz of any spin, so where a
+    triplet lies lowest they and the coupled-cluster backends differ by
+    design.
     dmrg_bond_dim, dmrg_n_sweeps: Block2DMRGSolver knobs, used only when
     solver='dmrg'.
     """
     if solver not in SOLVERS:
         raise ValueError(f"solver={solver!r} is not a backend of this driver; "
-                         f"choose one of {SOLVERS}.")
-
-    if spin_free and solver == 'openfermion':
-        # Map spatial to spin-orbitals, then use the standard spin-orbital solvers.
-        n_spatial_orbs = n_spin_orbs
-        g_eff = spatial_to_spin_orbitals(g_eff, n_spatial_orbs)
-        n_spin_orbs = 2 * n_spatial_orbs
-
-    if solver == 'pyscf_fci':
-        h1_spatial, eri_spatial, norb, nelec = _spatial_active_hamiltonian(
-            g_eff, n_spin_orbs, n_elec_active, spin_free, symmetrize, solver)
-        # spin=None: every state at this Sz, the space direct_spin1 spans here
-        e_act = PyscfFCISolver().roots(h1_spatial, eri_spatial, norb, nelec,
-                                       nroots=nroots, spin=None)[0]
-        return g_eff.get(0, 0.0) + e_act
-
-    elif solver == 'dmrg':
-        h1_spatial, eri_spatial, norb, nelec = _spatial_active_hamiltonian(
-            g_eff, n_spin_orbs, n_elec_active, spin_free, symmetrize, solver)
-        nocca, noccb = nelec
-        # spin = n_alpha - n_beta: the lowest total S consistent with this Sz
-        # (an SU2 target is a total spin, unlike pyscf_fci's spin=None).
-        e_act, _ = Block2DMRGSolver(bond_dim=dmrg_bond_dim,
-                                    n_sweeps=dmrg_n_sweeps).roots(
-            h1_spatial, eri_spatial, norb, nelec, nroots=nroots,
-            spin=nocca - noccb)
-        return g_eff.get(0, 0.0) + e_act
-
-    elif solver in CC_ORDERS:
-        h1_spatial, eri_spatial, norb, nelec = _spatial_active_hamiltonian(
-            g_eff, n_spin_orbs, n_elec_active, spin_free, symmetrize, solver)
-        e_act, _ = CoupledClusterSolver(order=CC_ORDERS[solver]).roots(
-            h1_spatial, eri_spatial, norb, nelec, nroots=nroots, spin=None)
-        return g_eff.get(0, 0.0) + e_act
-
-    else:                                   # 'openfermion'
-        return ExactDiagonalizationSolver(symmetrize=symmetrize).spectrum(
-            g_eff, n_spin_orbs, n_elec_active)[0]
+                         f"choose one of {tuple(SOLVERS)}.")
+    return SOLVERS[solver](_Request(g_eff, n_spin_orbs, n_elec_active,
+                                    spin_free, symmetrize, nroots,
+                                    dmrg_bond_dim, dmrg_n_sweeps))

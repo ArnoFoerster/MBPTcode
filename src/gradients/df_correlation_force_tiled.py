@@ -6,8 +6,8 @@ derivative-integral tensor fits whole.
 
 The factor provider. The force reads the RI factors of the correlation fit
 (B = X J, X = L^-1, V = L L^T) through one object, which the method hands
-over (`gradients.df_factors.mp2_factors` for MP2, `gradients.adc.fold_factors`
-for an ADC(2) state): `f` the factors
+over (`gradients.df_factors.mp2_factors` for MP2, `DFFactors.of_fold` of the
+fold for an ADC(2) state): `f` the factors
 (`L`, `LT`, `BooP`, `bvv(chunk, p0, p1)`, `eo`, `ev`, `naux`), `no` and `nv`,
 `comm`, the auxiliary `chunks` with this rank's `my_chunks`, their `owners`
 and `chunk_ranges`, `ints(k0, k1)` the (ia|jb) of an occupied tile, and

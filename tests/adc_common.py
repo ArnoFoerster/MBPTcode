@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, scf
 
-from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import BOHR_TO_ANGSTROM, EE_RI_TILE_GB
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_integrals,
                                             get_orbital_energies)
@@ -167,3 +167,23 @@ def water_df():
     mf.conv_tol = 1e-12
     mf.run()
     return mf
+
+
+def ground_fold(mol, mf, frozen, auxbasis, tile_gb=EE_RI_TILE_GB, comm=None,
+                aux_chunk=None):
+    """The folded operator without a root (the ADC(1) setup): its factors,
+    tiles and chunks as the tiled force's provider
+    (`df_factors.DFFactors.of_fold`) give the MP2 force the bits of its
+    default provider (`gradients.df_factors.mp2_factors`)."""
+    from src.SingleReference.ADC.eeADC import ee_ri_fold
+    f = ee_ri_fold.bare_factors(mol, mf, frozen=frozen, auxbasis=auxbasis, comm=comm,
+                                aux_chunk=aux_chunk)
+    return ee_ri_fold.RIFoldADC2(f, 'singlet', level='adc1', tile_gb=tile_gb,
+                                 comm=comm, aux_chunk=aux_chunk)
+
+
+def ee_numerics(tile_gb=None, **adc):
+    """The Numerics of an excitation-energy ADC solve (`solve_ee_adc`): the
+    adc section's conv_tol, residual_tol and dense_limit as given, tile_gb
+    into the layout section; the rest at their defaults."""
+    return Numerics(adc=adc, layout={'tile_gb': tile_gb})

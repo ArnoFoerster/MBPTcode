@@ -1,14 +1,15 @@
 """The RI factors of a correlation fit on a closed-shell mean field, as the
-factor provider the tiled correlation force reads
-(`df_correlation_force_tiled`, module docstring): the default of the tiled MP2
-force.
+one factor provider the tiled correlation force reads
+(`df_correlation_force_tiled`, module docstring): `DFFactors.build` for the
+tiled MP2 force (its default, `mp2_factors`), `DFFactors.of_fold` for an
+ADC(2) state's force on the fold that solved it.
 
 The factors are the folded ADC(2) operator's own, made by one function
 (`ee_ri_fold.bare_factors`): B^P_ia and B^P_ij whole and auxiliary-major (one
 copy per node, `NodeShared`), B^P_ab only in the auxiliary chunks this rank
 owns (`ee_ri_fold.aux_chunks`). The occupied tiles' integrals and the frozen
-core's factors are made as the fold makes them too (`gradients.adc.fold_factors`),
-so either provider gives the force the same bits.
+core's factors are made here for both, so either gives the force the same
+bits.
 
 The correlation fit is named: `build` refuses auxbasis None, which in
 `bare_factors` means the mean field's own JK fit. The tiled force refuses it
@@ -48,6 +49,12 @@ class DFFactors:
         size = 1 if comm is None else comm.Get_size()
         chunks, owners = ee_ri_fold.aux_chunks(f.naux, f.nv, size, aux_chunk)
         return cls(f, comm, chunks, owners)
+
+    @classmethod
+    def of_fold(cls, op):
+        """The provider of the folded operator `op`'s own factors, chunks and
+        communicator (`ee_ri_fold.RIFoldADC2`)."""
+        return cls(op.f, op.comm, op.chunks, op.owners)
 
     def ints(self, k0, k1):
         """(kc|ld) for k in the occupied rows k0..k1-1, (k1 - k0, nv, no, nv)."""

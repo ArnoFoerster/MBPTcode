@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.cphf import ResponseKernel
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients import df_correlation_force as dcf
@@ -136,7 +137,8 @@ def test_force_zvector_on_every_rank():
     dcf.relax_gradient = counted
     try:
         run_simulated(lambda comm: eg.adc2_force_tiled(
-            mf, mol, 'singlet', frozen=NF, auxbasis=AUX, comm=comm, tile_gb=1e-9)[0], 2)
+            mf, mol, 'singlet', frozen=NF, auxbasis=AUX, comm=comm, tile_gb=1e-9,
+            numerics=Numerics())[0], 2)
     finally:
         dcf.relax_gradient = fn
     assert sorted(seen) == [0, 1], seen

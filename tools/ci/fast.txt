@@ -103,6 +103,7 @@ pytest test_hessian_checkpoint_stamp.py
 pytest test_hybrid_basis.py
 pytest test_imaginary_axis_gw_dft.py
 pytest test_imports.py
+pytest test_import_has_no_side_effects.py
 pytest test_inside_scissor_static_term.py
 pytest test_isdf_block_action_rows.py
 pytest test_isdf_fit_timings.py
@@ -110,6 +111,7 @@ pytest test_isdf_fit_two_realizations.py
 pytest test_isdf_force_hook.py
 pytest test_isdf_grid_keywords.py
 pytest test_isdf_jk_gradient_guard.py
+pytest test_isdf_jk_memory_independent.py
 pytest test_isdf_one_grid_call.py
 pytest test_isdf_pcm_force.py
 pytest test_isdf_refuses_cartesian.py
@@ -515,6 +517,7 @@ script test_bse2_static_kernel.py
 pytest test_qp_hamiltonian_group_span.py
 pytest test_qp_hamiltonian_large_group.py
 pytest test_qp_group_lockstep.py
+pytest test_qb_and_localization_flags.py
 pytest test_duschinsky_guard.py
 pytest test_curvilinear_duschinsky.py
 pytest test_duschinsky_soft_modes.py

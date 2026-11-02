@@ -91,6 +91,5 @@ def run_pipeline(max_pt_order=2, max_vertex=3, symmetrize=True, mol=None,
         spin_free=spin_free, active_space=active_space)
 
     return solve(solver, g_eff, space['n_orbs'], space['n_elec_active'],
-                 space['act_idx'], space['act_occ_idx'], space['act_vir_idx'],
                  symmetrize=symmetrize, spin_free=spin_free, nroots=nroots,
                  dmrg_bond_dim=dmrg_bond_dim, dmrg_n_sweeps=dmrg_n_sweeps)

@@ -2,12 +2,6 @@
 # Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
 # Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).
 # See that module's docstring for the equations/conventions.
-# allow numpy built with MKL to consume more threads for tensordot -- but only
-# if the caller hasn't already pinned the thread count (same convention as
-# amplitudes.py's generalized-pipeline counterpart)
-import os
-os.environ.setdefault("MKL_NUM_THREADS", "{}".format(os.cpu_count() - 1))
-
 import numpy as np
 from src.SingleReference.CC.cached_einsum import einsum
 

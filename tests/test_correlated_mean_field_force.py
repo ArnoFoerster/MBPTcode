@@ -65,11 +65,11 @@ def test_correlated_forces_never_run_pyscfs_whole_gradient(monkeypatch):
     mol, mf = water()
     refuse_pyscf_kernel(monkeypatch)
     with distributed(None):
-        dense = dcf.mp2_force(mf, mol, NF, AUX)[0]
+        dense = dcf.mp2_force(mf, mol, NF, AUX, numerics=Numerics())[0]
     tiled = tcf.mp2_force_tiled(mf, mol, df_factors.mp2_factors, NF, AUX,
-                                **TILED)[0]
+                                **TILED, numerics=Numerics())[0]
     singlet = eg.adc2_force_tiled(mf, mol, 'singlet', frozen=NF, auxbasis=AUX,
-                                  aux_chunk=20, **TILED)[0]
+                                  aux_chunk=20, **TILED, numerics=Numerics())[0]
     assert np.abs(dense - tiled).max() < 1e-10
     assert np.isfinite(singlet).all()
 
@@ -119,7 +119,7 @@ def test_mean_field_addend_is_the_same_bits_at_every_rank_count(monkeypatch):
 
     def run(comm):
         return tcf.mp2_force_tiled(mf, mol, df_factors.mp2_factors, NF, AUX,
-                                   comm=comm, **TILED)[0]
+                                   comm=comm, **TILED, numerics=Numerics())[0]
     run(None)
     for size in (2, 3):
         run_simulated(run, size)

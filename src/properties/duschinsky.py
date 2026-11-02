@@ -113,7 +113,7 @@ from src.properties.franck_condon import (envelope_time, real_axis_density,
 from src.properties.curvilinear import (curvilinear_displacement,
                                         curvilinear_duschinsky)
 from src.properties.optimize import cartesian_hessian
-from src.properties.vibronic import align_to, normal_modes
+from src.properties.vibronic import align_to, normal_modes, project_coupling
 
 #: Largest disagreement (radians) between the phase increment of det N1 N2
 #: over one step of the time grid and its trapezoid estimate from
@@ -480,13 +480,12 @@ def displacement_from_gradient(sg, se, j, mol_g, mol_e, gradient, state):
     are turned into the mode sets' frame first (`minima_in_frame`).
     """
     _, rot_g, _, rot_e = minima_in_frame(sg, mol_g, mol_e)
-    w = np.repeat(sg.masses, 3) ** -0.5
     if state == 'excited':
         g = np.asarray(gradient, float) @ rot_g
-        return (se.modes.T @ (g.ravel() * w)) / se.omega ** 2
+        return project_coupling(g, se.modes, sg.masses) / se.omega ** 2
     if state == 'ground':
         g = np.asarray(gradient, float) @ rot_e
-        return -j @ ((sg.modes.T @ (g.ravel() * w)) / sg.omega ** 2)
+        return -j @ (project_coupling(g, sg.modes, sg.masses) / sg.omega ** 2)
     raise ValueError(f"state is 'excited' or 'ground', got {state!r}")
 
 

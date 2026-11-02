@@ -495,8 +495,10 @@ def build_excited_chain(row, setup):
 
 
 def build_dense_rpa(row, setup):
-    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings."""
-    return row.cls(setup.mol, setup.scf_factory), {}
+    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings
+    but the orbital-response solve of its force (`numerics_read_by`)."""
+    return row.cls(setup.mol, setup.scf_factory,
+                   numerics=numerics_read_by(row, setup.numerics)), {}
 
 
 def build_dense_bse(row, setup):
@@ -517,7 +519,8 @@ def build_dense_bse(row, setup):
         kw['auxbasis'] = setup.numerics.isdf.auxbasis
     surface = row.cls(setup.mol, variant, setup.excitation.root - 1,
                       qp_orbs=setup.qp_explicit, filter_z=False,
-                      scf=setup.scf_factory, spin=setup.excitation.spin, **kw)
+                      scf=setup.scf_factory, spin=setup.excitation.spin,
+                      numerics=numerics_read_by(row, setup.numerics), **kw)
     return surface, {}
 
 
@@ -531,7 +534,8 @@ def build_dense_qp(row, setup):
             "'space-time', 'isdf').")
     surface = row.cls(setup.mol, setup.scf_factory,
                       charge_change=setup.excitation.charge_change,
-                      screening='rpa', orbital=setup.excitation.orbital)
+                      screening='rpa', orbital=setup.excitation.orbital,
+                      numerics=numerics_read_by(row, setup.numerics))
     return surface, {}
 
 

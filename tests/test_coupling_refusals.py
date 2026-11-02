@@ -8,15 +8,22 @@
 - The configuration term has no canonical rotation for a degenerate orbital
   pair: gamma on such a pair is refused, as `multipliers` refuses its
   right-hand side.
+- The configuration term's Z-vector is solved on the evaluation's own
+  `Numerics`: one whose multiplier_max_iter stops it short warns
+  CphfNotConverged and flags 'orbital_response_not_converged', and a
+  coupling with no `Numerics` at all is refused.
 
 Stub chains and evaluations for the first two (each refusal fires before any
-electronic structure), water/cc-pVDZ DF-RHF for the third.
+electronic structure), water/cc-pVDZ DF-RHF for the last two.
 """
 import numpy as np
 import pytest
 from pyscf import gto
 
+from src.Base import numerical_flags
 from src.Base.numerics.constants import COUPLING_GAP_MIN
+from src.Base.numerics.numerics import Numerics
+from src.Base.pyscf.cphf import CphfNotConverged
 from src.gradients.gwbse.state_following import CasidaSolution
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling,
@@ -122,6 +129,41 @@ def test_density_on_a_degenerate_orbital_pair_is_refused(water):
         gvv = np.zeros((nvir, nvir))
         gvv[0, 1] = gvv[1, 0] = 0.3
         with pytest.raises(RuntimeError, match='degenerate orbital pair'):
-            configuration_coupling(mol, mf, nocc, goo, gvv)
+            configuration_coupling(mol, mf, nocc, goo, gvv, Numerics())
     finally:
         mf.mo_energy = held
+
+
+class WaterEvaluation(StubEvaluation):
+    """Two singlet roots of random amplitudes on water's mean field, held
+    with `numerics`."""
+
+    def __init__(self, mol, mf, numerics):
+        nocc = mol.nelectron // 2
+        n_ov = nocc * (len(mf.mo_energy) - nocc)
+        rng = np.random.default_rng(7)
+        x, y = rng.standard_normal((2, n_ov, 2))
+        super().__init__(0.2)
+        self.spectrum = {'singlet': (np.array([0.3, 0.5]), x, 0.1 * y)}
+        self.interstate = {(S0, S1): (np.zeros((mol.natm, 3)), {})}
+        self.mol, self.mf, self.numerics = mol, mf, numerics
+
+
+def test_the_coupling_solves_its_z_vector_on_the_evaluations_numerics(water):
+    mol, mf = water
+    short = Numerics(scf={'multiplier_max_iter': 1})
+    flags = []
+    with pytest.warns(CphfNotConverged), numerical_flags.collecting(flags):
+        d, _ = evaluated_coupling(WaterEvaluation(mol, mf, short), S0, S1)
+    assert [f['flag'] for f in flags] == ['orbital_response_not_converged']
+    assert np.isfinite(d).all()
+    flags = []
+    with numerical_flags.collecting(flags):
+        evaluated_coupling(WaterEvaluation(mol, mf, Numerics()), S0, S1)
+    assert flags == []
+
+
+def test_a_coupling_without_numerics_is_refused(water):
+    mol, mf = water
+    with pytest.raises(TypeError, match="needs the run's Numerics"):
+        evaluated_coupling(WaterEvaluation(mol, mf, None), S0, S1)

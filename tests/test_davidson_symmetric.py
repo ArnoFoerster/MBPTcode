@@ -27,6 +27,7 @@ from pyscf import gto, scf
 from src.Solvers.davidson import overlap_pick, solve_symmetric
 from src.SingleReference.ADC import ADCSolver
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+from tests.adc_common import ee_numerics
 
 H2O = 'O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471'
 
@@ -136,7 +137,7 @@ def check_ee_matrix_free_matches_dense():
             warnings.simplefilter('always')
             e_dense, _ = solve_ee_adc(mf, mol, nroots=4, matrix_free=False, **kw)
             e_iter, _ = solve_ee_adc(mf, mol, nroots=4, matrix_free=True,
-                                     dense_limit=0, conv_tol=1e-8, **kw)
+                                     numerics=ee_numerics(dense_limit=0, conv_tol=1e-8), **kw)
         stalled = [r for r in rec if issubclass(r.category, RuntimeWarning)]
         d = np.max(np.abs(np.asarray(e_dense) - np.asarray(e_iter)))
         ok = d < tol and not stalled

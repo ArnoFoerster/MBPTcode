@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import ADCSolverRestricted
 from src.SingleReference.ADC.static_correction import (
     build_static_correction,
@@ -81,8 +82,9 @@ def main():
 
     # --- 3. build_mp2/mp3_static_correction_restricted(B_aa=...), unrelaxed + relaxed ---
     for relax in (False, True):
-        dense2 = build_mp2_static_correction_restricted(mf, relax=relax)
-        df2 = build_mp2_static_correction_restricted(mf, relax=relax, B_aa=dfi_exact.B_aa)
+        dense2 = build_mp2_static_correction_restricted(mf, relax=relax, numerics=Numerics())
+        df2 = build_mp2_static_correction_restricted(mf, relax=relax, B_aa=dfi_exact.B_aa,
+                                                     numerics=Numerics())
         diff = np.max(np.abs(dense2 - df2))
         ok = diff < 1e-9
         all_ok &= ok

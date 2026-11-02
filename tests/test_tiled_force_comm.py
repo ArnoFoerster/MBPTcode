@@ -45,7 +45,7 @@ def test_the_mean_field_addend_runs_over_the_factors_ranks(monkeypatch):
     def run(comm):
         with distributed(None):
             return tcf.mp2_force_tiled(mf, mol, df_factors.mp2_factors, NF, AUX,
-                                       comm=comm, **TILED)[0]
+                                       comm=comm, **TILED, numerics=Numerics())[0]
     out = run_simulated(run, 2)
     assert seen == [2, 2], seen
     np.testing.assert_array_equal(out[0], out[1])

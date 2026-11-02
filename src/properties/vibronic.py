@@ -19,6 +19,7 @@ from src.Base.geometry.body_frame import centred, kabsch_rotation
 from src.Base.numerics.constants import AMU_TO_ME, HARTREE_TO_CM, HARTREE_TO_EV
 from src.Base.declaration import PhysicsMismatch
 from src.Base.geometry.geometry import molecule_at
+from src.environments.pcm_derivatives import require_pyscf_pcm_hessian_fits
 from src.gradients.isdf_mean_field import refuse_isdf_jk_gradient
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
                                         stamp_of)
@@ -59,6 +60,7 @@ def normal_modes(mf, mol=None, hess=None, project=True, isotope_avg=True):
         # softest modes, which carry the largest Huang-Rhys factors, are the
         # ones that suffer most.
         refuse_isdf_jk_gradient(mf, 'the analytic Hessian')
+        require_pyscf_pcm_hessian_fits(mf)
         hess = mf.Hessian().kernel()
     n = mol.natm
     h = cartesian_hessian(hess, n)

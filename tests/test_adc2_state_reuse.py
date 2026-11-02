@@ -36,7 +36,7 @@ from src.gradients.state_models import HFState, MP2State
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC import ee_ri_fold
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import ATOMS, AUX, NF, ROOT_CONV_TOL, check, make_scf_loop, molecule
+from tests.adc_common import ATOMS, AUX, NF, ROOT_CONV_TOL, check, make_scf_loop, molecule, ee_numerics
 
 MOL = molecule(ATOMS)
 
@@ -103,8 +103,8 @@ def check_one_density(spin):
     mf = model.mp2.mf
     _, _, res = solve_ee_adc(mf, MOL, level='adc2', spin=spin, nroots=3, fold=True,
                              frozen=NF, auxbasis=AUX, environment=model.lr_environment,
-                             conv_tol=ROOT_CONV_TOL, return_fold=True,
-                             tile_gb=model.tile_gb, relaxed_density=True)
+                             numerics=ee_numerics(conv_tol=ROOT_CONV_TOL, tile_gb=model.tile_gb), return_fold=True,
+                             relaxed_density=True)
     C = np.asarray(mf.mo_coeff)
     k = r.info['index']
     d_all = C @ np.asarray(res.delta_density_relaxed[k]) @ C.T

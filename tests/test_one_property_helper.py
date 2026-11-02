@@ -105,7 +105,7 @@ def test_one_evaluated_coupling(monkeypatch):
     """Both entry points read one function; either ordering of the stored pair
     serves, antisymmetric; the gap is the evaluation's own."""
     monkeypatch.setattr(dc, 'configuration_coupling',
-                        lambda mol, mf, nocc, goo, gvv: np.full((3, 3), 0.5))
+                        lambda mol, mf, nocc, goo, gvv, numerics: np.full((3, 3), 0.5))
     monkeypatch.setattr(dc, 'occupied_count', lambda mf: 2)
     ev = Evaluation()
     s0, s1 = ('singlet', 0), ('singlet', 1)

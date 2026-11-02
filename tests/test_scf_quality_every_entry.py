@@ -67,7 +67,7 @@ def loose_evaluation(case):
     chain, mol, loose = case
     good = StateManifold(chain, states=(S0, S1)).evaluate(
         mol, couplings=((S0, S1),))
-    ev = StateEvaluation(mol, loose)
+    ev = StateEvaluation(mol, loose, good.numerics)
     for name in ('energy', 'omega', 'root', 'target', 'interstate',
                  'spectrum'):
         setattr(ev, name, getattr(good, name))

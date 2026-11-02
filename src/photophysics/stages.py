@@ -213,11 +213,11 @@ from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
                                       refreeze_summary, walk_fields)
+from src.photophysics.walks import checked_minimum, restart_from, walk_progress
 from src.gradients.gwbse.diagnostics import qp_bookkeeping
 from src.properties.duschinsky import read_orca_hessian
 from src.properties.excitations import (grid_record, relaxation_fields,
-                                        relaxation_flags, saddle_check,
-                                        saddle_verdict, surface_of)
+                                        relaxation_flags, surface_of)
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
                                     require_hessian_counts,
                                     translation_residual)
@@ -665,12 +665,9 @@ class Run:
         start = np.array(mol.atom_coords(), float)
         nudge, restarted = p.nudge_bohr, None
         if d.scheme_b and resume is not None and resume.get('surface') is None:
-            restarted = {'walk_pass': int(resume['pass']),
-                         'accepted_steps': len(resume['history']),
-                         'G': float(resume['energy'])}
-            mol = self.molecule_at(np.asarray(resume['coords'], float))
-            if resume.get('hessian') is not None:
-                given['hess_init'] = np.asarray(resume['hessian'], float)
+            mol, hessian, restarted = restart_from(resume, self.molecule_at)
+            if hessian is not None:
+                given['hess_init'] = hessian
             nudge, resume = 0.0, None
         if stage is not None and p.engine != 'cartesian':
             workdir = self.store.workdir(f'geometric_{stage}')
@@ -704,17 +701,9 @@ class Run:
 
     def progress(self, stage, start):
         """The walk state '<stage>_progress' holds for a walk from `start` on
-        this declaration, or None. Another stamp refuses the run; a walk
-        from another start is walked again and its progress overwritten."""
+        this declaration, or None (`walks.walk_progress`)."""
         name = f'{stage}_progress'
-        if not self.store.has(name):
-            return None
-        held = self.read(name)
-        if not np.array_equal(held['start_bohr'], start.atom_coords()):
-            log(f'WARNING {name} is a walk from another start; walking again '
-                f'from this one')
-            return None
-        return held['state']
+        return walk_progress(self.store, name, self.stamp(name), start)
 
     def restored(self, record):
         """The relaxed states' surface rebuilt from its record
@@ -807,10 +796,8 @@ class Run:
             log(f'{stage}: {name} Hessian at the new minimum')
             return moved, dict(again, final_surface=last)
 
-        # the Hessian's forces at full loop tolerances (SolvatedSurface.untied)
-        untied = getattr(final, 'untied', None)
-        moved, again, record = saddle_check(
-            final if untied is None else untied(), mol, walk, verbose=self.store.root_rank,
+        moved, again, record, flags = checked_minimum(
+            final, mol, walk, stage, verbose=self.store.root_rank,
             cache_dir=self.store.workdir(f'hess_{stage}'))
         first = record['first']
         log(f'{stage}: {name} lowest internal curvature '
@@ -818,7 +805,7 @@ class Run:
             f'{first["tolerance"]:.1e}): {record["status"]}', t0)
         if again is None:
             info = dict(info, numerical_flags=dict(
-                info.get('numerical_flags') or {}, **saddle_verdict(stage, record)))
+                info.get('numerical_flags') or {}, **flags))
             return mol, info, root, final, record
         again.pop('final_surface', None)
         record['saddle_walk'] = walk_fields(info)
@@ -827,9 +814,7 @@ class Run:
             f'{record.get("energy_drop", float("nan")) * HARTREE_TO_MEV:.2f}'
             f' meV below it')
         # the policy: refuse inputs, warn numerics
-        again['numerical_flags'] = dict(
-            relaxation_flags(f'{stage} escape', again),
-            **saddle_verdict(stage, record))
+        again['numerical_flags'] = flags
         return moved, again, walked_['root'], walked_['final'], record
 
     def analytic_df_hessian(self):
@@ -851,6 +836,8 @@ class Run:
         def build():
             factory = self.mean_field_factory(twin)
             mf = chain.solvated(self.env, factory)(self.mol0)
+            from src.environments.pcm_derivatives import require_pyscf_pcm_hessian_fits
+            require_pyscf_pcm_hessian_fits(mf)
             return np.asarray(mf.Hessian().kernel())
         comm, root = current_comm(), is_root()
         with distributed(None):

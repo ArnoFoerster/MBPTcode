@@ -49,6 +49,7 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.linalg import LinearOperator
 
+from src.Base.numerics.constants import FLOAT64_PER_GB
 from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.common.eri_blocks import g_slice
 from src.SingleReference.ADC import adc_r_faddeev as FR
@@ -203,7 +204,7 @@ def _particle_ladder(B_aa, eri_chemist, nocc, t, mem_gb=2.0):
                          optimize=True)
     Bvv = B_aa[:, v, v]
     naux = Bvv.shape[0]
-    step = max(1, min(naux, int(mem_gb * 1.25e8 / max(t.size, 1))))
+    step = max(1, min(naux, int(mem_gb * FLOAT64_PER_GB / max(t.size, 1))))
     out = np.zeros_like(t)
     for q in range(0, naux, step):
         Bc = Bvv[q:q + step]

@@ -41,7 +41,6 @@ from src.Base.numerics.constants import (DF_FORCE_AUX_CHUNK, DF_FORCE_BLOCK_GB,
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
 from src.gradients import df_factors
-from src.gradients.adc import fold_factors
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.common.df_amplitudes import spin_scaling_factors
@@ -260,7 +259,7 @@ def tiled_force(mf, mol, op, frozen, auxbasis, root=None, env=None,
             pc = erd.tiled_pieces(op, y, omega, tile_gb)
             Y_extra, rho_t = _lr_terms(pc, env, mol, C, frozen, nocc, nmo, t1)
             return d.plus(t1, pc), Y_extra, rho_t
-    F, (e2, gam, asym, rho_t) = tcf.force(mf, mol, fold_factors.FoldFactors(op), frozen,
+    F, (e2, gam, asym, rho_t) = tcf.force(mf, mol, df_factors.DFFactors.of_fold(op), frozen,
                                           auxbasis, excited, tile_gb, block_gb, width,
                                           numerics, flags, op.scs)
     return F, _record(e2, gam, asym, root, rho_t)

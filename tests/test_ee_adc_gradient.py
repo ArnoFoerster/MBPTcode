@@ -37,6 +37,7 @@ from pyscf import df as pyscf_df
 from pyscf import lib, scf
 from pyscf.mp import dfmp2_native
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.gradients.adc import ee_gradient as eg
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
@@ -73,7 +74,8 @@ def pyscf_mp2_relaxed(mf, frozen, auxbasis):
         free = np.zeros((nmo, nmo), bool)
         free[:nocc, nocc:] = True
         Lam, _ = solve_orbital_multipliers(
-            lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_E, eps, free=free)
+            lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_E, eps, free=free,
+            numerics=Numerics())
         return 2.0 * Lam[nocc:, :nocc]
     with lib.temporary_env(dfmp2_native, solve_cphf_rhf=cphf):
         rdm1 = mp.make_rdm1(relaxed=True)
@@ -166,7 +168,8 @@ def check_densities_and_symmetry():
     mol = molecule(ATOMS)
     mf = scf_tight(mol)
     C = mf.mo_coeff
-    g0, info0 = eg.adc2_force(mf, mol, None, frozen=NF, auxbasis=AUX, ground=True)
+    g0, info0 = eg.adc2_force(mf, mol, None, frozen=NF, auxbasis=AUX, ground=True,
+                              numerics=Numerics())
     ok &= check(info0['asymmetry'] < 1e-8, 'MP2: the Lagrangian is stationary',
                 f"max |Y - Y^T| {info0['asymmetry']:.1e}")
     _, D2 = pyscf_mp2_relaxed(mf, NF, AUX)
@@ -174,7 +177,7 @@ def check_densities_and_symmetry():
     ok &= check(d < 1e-8, 'MP2: relaxed density = pyscf DF-MP2 (refined CPHF)',
                 f'{d:.1e}')
     for spin in ('singlet', 'triplet'):
-        g1, info = eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX)
+        g1, info = eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX, numerics=Numerics())
         ok &= check(info['asymmetry'] < 1e-8, f'{spin}: the Lagrangian is '
                     'stationary', f"max |Y - Y^T| {info['asymmetry']:.1e}")
         f = ee_ri_fold.bare_factors(mol, mf, frozen=NF, auxbasis=AUX)
@@ -183,7 +186,8 @@ def check_densities_and_symmetry():
                                  tol_omega=1e-12, tol_residual=1e-11)
         pc = erd.dense_pieces(erd.dense_inputs(op), r.y[:, 0], r.omega[0], spin)
         Bc = erd.core_factors(mol, mf, NF, AUX)
-        Drd = C @ erd.relaxed_density(pc, op, mf, mol, NF, r.t1[0], Bc=Bc) @ C.T
+        Drd = C @ erd.relaxed_density(pc, op, mf, mol, NF, r.t1[0], Bc=Bc,
+                                      numerics=Numerics()) @ C.T
         d = float(np.max(np.abs((info['dm_corr'] - info0['dm_corr']) - Drd)))
         ok &= check(d < 1e-8, f"{spin}: the engine's omega density = "
                     "ee_relaxed_density's", f'{d:.1e}')
@@ -194,9 +198,11 @@ def check_forces():
     ok = True
     mol = molecule(ATOMS)
     mf = scf_tight(mol)
-    analytic = [eg.adc2_force(mf, mol, None, frozen=NF, auxbasis=AUX, ground=True)[0]]
+    analytic = [eg.adc2_force(mf, mol, None, frozen=NF, auxbasis=AUX, ground=True,
+                              numerics=Numerics())[0]]
     for spin in ('singlet', 'triplet'):
-        analytic.append(eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX)[0])
+        analytic.append(eg.adc2_force(mf, mol, spin, frozen=NF, auxbasis=AUX,
+                                      numerics=Numerics())[0])
     fd = np.zeros((3, mol.natm, 3))
     for a in range(mol.natm):
         for x in range(3):
@@ -231,7 +237,7 @@ def check_plain_rhf():
     ok = check(abs(analytic - fd) < 1e-7,
                'plain RHF: relaxed MP2 density = finite-field derivative',
                f'{abs(analytic - fd):.1e} (dipole {analytic:.6f})')
-    for route, force in (('dense', lambda: dcf.mp2_force(mf, mol, NF, AUX)),
+    for route, force in (('dense', lambda: dcf.mp2_force(mf, mol, NF, AUX, numerics=Numerics())),
                          ('tiled', lambda: tcf.prepare(mf, mol, NF, AUX, False))):
         try:
             force()

@@ -26,15 +26,6 @@ Measured together on nv=24/no=8, 10 threads: triples_residual 36.6s -> 5.1s,
 and thread scaling (1 -> 10 threads) went from 1.08x to 3.13x.
 """
 
-# allow numpy built with MKL to consume more threads for tensordot -- but only
-# if the caller hasn't already pinned the thread count (the test_all_21_* sweep
-# workers deliberately run single-threaded). NB this only bites if it runs
-# before MKL initializes its own thread pool; when a caller has already
-# imported and used numpy, set MKL_NUM_THREADS in the environment (or the
-# submit script) instead of relying on this line.
-import os
-os.environ.setdefault("MKL_NUM_THREADS", "{}".format(max(1, (os.cpu_count() or 2) - 1)))
-
 import numpy as np
 
 from .cached_einsum import einsum

@@ -107,15 +107,15 @@ def fock_partial_Y(mf, gamma, nocc, environment=True):
                              response_kernel(mf, environment=environment))
 
 
-def solve_lambda(mf, Y_E, nocc, numerics=None, verbose=False,
+def solve_lambda(mf, Y_E, nocc, numerics, verbose=False,
                  environment=True, flags=None):
     """Symmetric zero-diagonal Lambda with antisym(Y_E + Y[Lambda]) = 0.
 
     The cubic route's entry to `solve_orbital_multipliers`: the matvec is
     `fock_partial_Y` -- a Coulomb and an exchange build -- instead of the
     four-index tensor, and the orbital energies come from the mean field.
-    numerics: the caller's `Numerics` (the solve's tolerances); flags: a list
-    a solve left short appends its flag to (`multipliers`).
+    numerics: the run's `Numerics` (the solve's tolerances), required;
+    flags: a list a solve left short appends its flag to (`multipliers`).
     """
     return solve_orbital_multipliers(
         lambda Lam: fock_partial_Y(mf, Lam, nocc, environment=environment),
@@ -259,8 +259,8 @@ def held_skeletons(mf, pending):
     return grad
 
 
-def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False,
-                       numerics=None, pending=None, multiplier=None):
+def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False, *,
+                       numerics, pending=None, multiplier=None):
     """(natm, 3) of sum_pq gamma_pq dF_pq/dR, with no norb^4 tensor anywhere.
 
     The dense engine's Lagrangian, rebuilt on Coulomb/exchange builds. Fold the
@@ -298,8 +298,8 @@ def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False,
                      'multiplier_res': res}
 
 
-def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False,
-                       numerics=None):
+def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False, *,
+                       numerics):
     """The orbital-relaxed density of a target, gamma + Lambda in the MO basis
     of `mf`: d target / d h = Tr[C (gamma + Lambda) C^T h] for any one-electron
     perturbation h, from the same Fock partial and orbital-rotation gradient
@@ -318,8 +318,8 @@ def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False,
     return gamma + solved.lam, solved.res
 
 
-def relaxed_multiplier(mf, eps_bar, nocc, Y_extra=None, environment=False,
-                       numerics=None):
+def relaxed_multiplier(mf, eps_bar, nocc, Y_extra=None, environment=False, *,
+                       numerics):
     """(gamma, `SolvedMultiplier`) of `relaxed_density_mo`: the MO Fock
     partial and the multiplier solved for it, whose sum is the relaxed
     density."""

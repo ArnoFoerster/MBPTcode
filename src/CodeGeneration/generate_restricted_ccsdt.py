@@ -349,20 +349,11 @@ def generate_energy():
     return [func]
 
 
-MKL_THREADING_PREAMBLE = (
-    "# allow numpy built with MKL to consume more threads for tensordot -- but only\n"
-    "# if the caller hasn't already pinned the thread count (same convention as\n"
-    "# amplitudes.py's generalized-pipeline counterpart)\n"
-    "import os\n"
-    "os.environ.setdefault(\"MKL_NUM_THREADS\", \"{}\".format(os.cpu_count() - 1))\n\n"
-)
-
-
-def _write(fname, funcs, *notes, mkl_threading=False):
+def _write(fname, funcs, *notes):
     write_module(os.path.join(OUT_DIR, fname), funcs,
                  generated_header('generate_restricted_ccsdt.py', *notes,
                                   "See that module's docstring for the equations/conventions."),
-                 imports=(MKL_THREADING_PREAMBLE if mkl_threading else '') + EINSUM_IMPORTS,
+                 imports=EINSUM_IMPORTS,
                  package_init=True)
 
 
@@ -388,12 +379,11 @@ def generate():
 
     t_funcs = generate_energy() + generate_t_residuals()
     _write('amplitudes_restricted.py', t_funcs,
-           'Restricted (spin-blocked) CCSDT energy and T-residuals.', mkl_threading=True)
+           'Restricted (spin-blocked) CCSDT energy and T-residuals.')
 
     l_funcs = generate_lambda_residuals()
     _write('lambda_residual_restricted.py', l_funcs,
-           'Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).',
-           mkl_threading=True)
+           'Restricted (spin-blocked) Lambda-CCSDT residuals (Lambda1/Lambda2/Lambda3).')
 
     d_funcs = generate_density()
     _write('d1_blocks_restricted.py', d_funcs,

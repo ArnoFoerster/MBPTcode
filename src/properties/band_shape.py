@@ -40,7 +40,9 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
+from src.Base.numerics.constants import (BAND_GRID_POINTS_PER_WIDTH,
+                                         BAND_GRID_WIDTHS,
+                                         BOLTZMANN_HARTREE_PER_KELVIN,
                                          GAUSSIAN_FWHM_PER_SIGMA,
                                          HARTREE_WAVELENGTH_NM)
 from src.properties.franck_condon import TRAPEZOID, fc_weighted_dos
@@ -90,31 +92,17 @@ def peak(x, y):
 
 
 def band_grid(s_k, omega_k, e00, temperature, *, gaussian_fwhm,
-              lorentzian_fwhm, n_widths=8.0, points_per_width=20):
-    """Uniform energy grid covering both bands, in Hartree.
-
-    Spans E00 -+ (lambda + n_widths w) with w the band's standard deviation
-    plus the Lorentzian FWHM, and resolves the narrowest of the band, the
-    Gaussian and the Lorentzian widths by `points_per_width` points.
-    """
-    s_k, omega_k = np.asarray(s_k, float), np.asarray(omega_k, float)
-    sigma_g = float(gaussian_fwhm) / GAUSSIAN_FWHM_PER_SIGMA
-    sigma_band = np.hypot(gaussian_limit_fwhm(s_k, omega_k, temperature)
-                          / GAUSSIAN_FWHM_PER_SIGMA, sigma_g)
-    widths = [w for w in (sigma_band, sigma_g, 0.5 * float(lorentzian_fwhm))
-              if w > 0.0]
-    if not widths:
-        raise ValueError('the band has no width: no displacement and no '
-                         'broadening')
-    half_span = (float((s_k * omega_k).sum())
-                 + n_widths * (sigma_band + float(lorentzian_fwhm)))
-    lo = float(e00) - half_span
-    if lo <= 0.0:
-        raise ValueError(f'the band reaches zero photon energy (E00 = {e00:.4g} '
-                         f'Ha, half span {half_span:.4g} Ha); pass a grid')
-    n = int(np.ceil((float(e00) + half_span - lo) * points_per_width
-                    / min(widths))) + 1
-    return np.linspace(lo, float(e00) + half_span, n)
+              lorentzian_fwhm, n_widths=BAND_GRID_WIDTHS,
+              points_per_width=BAND_GRID_POINTS_PER_WIDTH):
+    """Uniform energy grid covering both bands of the displaced oscillator
+    s_k, omega_k, in Hartree: `vibronic_band_grid` of
+    `DisplacedOscillators(s_k, omega_k)`, E00 -+ (lambda + n_widths w) with w
+    the band's standard deviation plus the Lorentzian FWHM."""
+    return vibronic_band_grid(DisplacedOscillators(s_k, omega_k), e00,
+                              temperature, gaussian_fwhm=gaussian_fwhm,
+                              lorentzian_fwhm=lorentzian_fwhm,
+                              n_widths=n_widths,
+                              points_per_width=points_per_width)
 
 
 @runtime_checkable
@@ -159,23 +147,38 @@ class DisplacedOscillators:
                 float((self.s_k * self.omega_k ** 2 * coth).sum()))
 
 
+def band_reach(model, e00, temperature, direction, sigma_g, lorentzian_fwhm,
+               n_widths):
+    """(lower end, upper end, sigma) of `model`'s band in `direction`
+    ('absorption' or 'emission') at the adiabatic energy e00, Hartree: its
+    mean energy transfer added (absorption) or taken off (emission), and
+    n_widths of its standard deviation sigma (the band's with the Gaussian
+    broadening sigma_g) plus the Lorentzian FWHM on either side."""
+    mean, var = model.cumulants(temperature, direction)
+    sign = 1.0 if direction == 'absorption' else -1.0
+    sig = float(np.sqrt(max(var, 0.0) + sigma_g ** 2))
+    reach = n_widths * (sig + float(lorentzian_fwhm))
+    centre = float(e00) + sign * mean
+    return centre - reach, centre + reach, sig
+
+
 def vibronic_band_grid(model, e00, temperature, *, gaussian_fwhm,
-                       lorentzian_fwhm, n_widths=8.0, points_per_width=20):
+                       lorentzian_fwhm, n_widths=BAND_GRID_WIDTHS,
+                       points_per_width=BAND_GRID_POINTS_PER_WIDTH):
     """Uniform photon-energy grid covering both bands of `model`, Hartree.
 
-    `band_grid` for any `VibronicModel`: absorption centred at E00 + its mean
-    energy transfer, emission at E00 - its own, each n_widths standard
-    deviations (plus the Lorentzian FWHM) wide, resolved by points_per_width
-    points across the narrowest of the band, the Gaussian and the Lorentzian.
+    Both bands of any `VibronicModel` (`band_reach`): absorption centred at
+    E00 + its mean energy transfer, emission at E00 - its own, each n_widths
+    standard deviations (plus the Lorentzian FWHM) wide, resolved by
+    points_per_width points across the narrowest of the band, the Gaussian and
+    the Lorentzian.
     """
     sigma_g = float(gaussian_fwhm) / GAUSSIAN_FWHM_PER_SIGMA
     ends, widths = [], [sigma_g, 0.5 * float(lorentzian_fwhm)]
-    for direction, sign in (('absorption', 1.0), ('emission', -1.0)):
-        mean, var = model.cumulants(temperature, direction)
-        sig = float(np.sqrt(max(var, 0.0) + sigma_g ** 2))
-        reach = n_widths * (sig + float(lorentzian_fwhm))
-        ends += [float(e00) + sign * mean - reach,
-                 float(e00) + sign * mean + reach]
+    for direction in ('absorption', 'emission'):
+        lo, hi, sig = band_reach(model, e00, temperature, direction, sigma_g,
+                                 lorentzian_fwhm, n_widths)
+        ends += [lo, hi]
         widths.append(sig)
     widths = [w for w in widths if w > 0.0]
     if not widths:

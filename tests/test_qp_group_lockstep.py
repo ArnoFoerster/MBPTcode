@@ -90,3 +90,45 @@ def test_a_capped_gmres_is_flagged_and_keeps_its_iterate(monkeypatch, ranks):
         assert np.all(np.isfinite(h))
         assert np.array_equal(h, out[0][0])
         assert {f['flag'] for f in flags} == {'qp_subspace_gmres_not_converged'}
+
+
+def test_a_small_group_takes_rank_zero_verdict(monkeypatch):
+    """A group of at most QP_SUBSPACE_DENSE_MAX orbitals is solved on each
+    rank's own arithmetic. Here rank 1's Newton ends one ulp away and above
+    the tolerance while rank 0's converges: every rank must carry rank 0's H
+    and verdict, so no rank alone warns, logs or takes one more step."""
+    from src.gradients.gwbse import qp_set
+
+    n = 3
+    e0 = np.diag([-0.5, -0.45, -0.4])
+    amp = np.zeros((2, n, n))
+    d = np.array([-2.0, 2.0])
+    seed = e0.copy()
+    solve = qp_set.subspace_hamiltonian
+
+    def rank_one_stops_short(e0, amp, d, seed, **kw):
+        h, it, ok = solve(e0, amp, d, seed, **kw)
+        if current_comm().Get_rank() == 1:
+            return np.nextafter(h, np.inf), it + 1, False
+        return h, it, ok
+    monkeypatch.setattr(qp_set, 'subspace_hamiltonian', rank_one_stops_short)
+
+    class View:
+        def group_seed(self, group):
+            return seed
+
+    class Chain:
+        resolved = View()
+
+    def one(comm):
+        unconverged = []
+        owner = qp_set.QuasiparticleSet.__new__(qp_set.QuasiparticleSet)
+        owner.chain = Chain()
+        owner._unconverged_group = lambda *args: unconverged.append(args[0])
+        h, it = owner._group_newton((0, 1, 2), e0, amp, d, np.diag(e0))
+        return h, it, unconverged
+
+    out = run_simulated(one, 2)
+    for h, it, unconverged in out:
+        assert np.array_equal(h, out[0][0]) and it == out[0][1]
+        assert unconverged == []

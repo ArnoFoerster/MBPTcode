@@ -118,16 +118,6 @@ def test_a_reviving_fast_mode_does_not_end_the_time_grid():
         assert rho == pytest.approx(ref, rel=1e-8)
 
 
-def test_band_grid_of_the_displaced_model_is_band_grid():
-    from src.properties.band_shape import band_grid
-    kw = dict(gaussian_fwhm=0.03 * EV, lorentzian_fwhm=0.01 * EV)
-    a = band_grid(S_MODES, MODES, 3.0 * EV, 300.0, **kw)
-    b = vibronic_band_grid(DisplacedOscillators(S_MODES, MODES), 3.0 * EV,
-                           300.0, **kw)
-    assert a[0] == pytest.approx(b[0], rel=1e-12)
-    assert a[-1] == pytest.approx(b[-1], rel=1e-12)
-
-
 # ------------------------------------------------- brute force: two modes
 def hermite_functions(q, omega, nmax):
     """psi_n(q), n < nmax, of a unit-mass oscillator of frequency omega."""

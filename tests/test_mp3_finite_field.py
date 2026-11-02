@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.DensityMatrix.density_matrix import (compute_mp2_density_matrix_ao, compute_mp3_density_matrix_ao)
 from tests.mpn_density_oracle import (MP3DensityMatrixSolver)
 from src.Base.pyscf.pyscf_interface import (
@@ -87,7 +88,7 @@ if __name__ == '__main__':
     mu_mp2_numeric = -(e2_p - e2_m) / (2 * h)
     mu_mp3_numeric = -(e3_p - e3_m) / (2 * h)
 
-    dm_mp2_relaxed = compute_mp2_density_matrix_ao(mf0, mol, relax=True)
+    dm_mp2_relaxed = compute_mp2_density_matrix_ao(mf0, mol, relax=True, numerics=Numerics())
     mu_mp2_analytic = -np.einsum('pq,qp->', dm_mp2_relaxed, ao_dip_z)
     diff = abs(mu_mp2_analytic - mu_mp2_numeric)
     ok = diff < 1e-5
@@ -103,7 +104,7 @@ if __name__ == '__main__':
     # rather than a defect in the Z-vector solve. The bound below is loose on
     # purpose: it catches a gross regression without asserting a sum rule the
     # method does not satisfy.
-    dm_mp3_relaxed = compute_mp3_density_matrix_ao(mf0, mol, relax=True)
+    dm_mp3_relaxed = compute_mp3_density_matrix_ao(mf0, mol, relax=True, numerics=Numerics())
     mu_mp3_analytic = -np.einsum('pq,qp->', dm_mp3_relaxed, ao_dip_z)
     diff = abs(mu_mp3_analytic - mu_mp3_numeric)
     ok = diff < 1e-2

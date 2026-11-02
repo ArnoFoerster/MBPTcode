@@ -35,8 +35,8 @@ it again and flags it again instead of restoring a result without its warning.
 
 RANKS. Rank 0 reads, compares and writes (a write goes through a temporary
 file and `os.replace`); its verdict, then its arrays, reach every rank through
-`lockstep`, so every rank skips or runs the same solve. The directory need only
-exist on rank 0.
+`lockstep`, so every rank skips or runs the same solve. A write that fails on
+rank 0 raises on every rank. The directory need only exist on rank 0.
 """
 import hashlib
 import json
@@ -45,7 +45,7 @@ import os
 import numpy as np
 
 from src.Base.numerics import constants
-from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, lockstep
 
 VERSION = 1
 
@@ -151,20 +151,33 @@ class PartitionCheckpoint:
                             > constants.FRAGMENT_CHECKPOINT_MATCH_TOL * scale):
                         return None
                 return {n[4:]: f[n] for n in f.files if n.startswith('out_')}
-        except (OSError, ValueError, KeyError):
-            return None     # a torn or foreign file is a miss, not an error
+        except Exception:
+            # a torn or foreign file is a miss, not an error: a truncated .npz
+            # raises BadZipFile, EOFError or a zlib error as well as OSError,
+            # ValueError and KeyError, and the other ranks wait for this verdict
+            return None
 
     def _key(self, extra):
         return json.loads(json.dumps({**self.key, **extra}, sort_keys=True))
 
     def save(self, stage, extra=None, **arrays):
-        """Write `stage`'s arrays (rank 0 only)."""
-        if not _is_root():
-            return
-        os.makedirs(self.directory, exist_ok=True)
-        path = self._path(stage)
-        tmp = f'{path}.tmp{os.getpid()}.npz'
-        np.savez(tmp, key=json.dumps(self._key(extra or {}), sort_keys=True),
-                 **{f'fp_{n}': a for n, a in self.fingerprint.items()},
-                 **{f'out_{n}': np.asarray(a) for n, a in arrays.items()})
-        os.replace(tmp, path)
+        """Write `stage`'s arrays on rank 0. A collective: every rank calls it,
+        and a failed write raises on every rank."""
+        failure = None
+        if _is_root():
+            try:
+                os.makedirs(self.directory, exist_ok=True)
+                path = self._path(stage)
+                tmp = f'{path}.tmp{os.getpid()}.npz'
+                np.savez(tmp,
+                         key=json.dumps(self._key(extra or {}), sort_keys=True),
+                         **{f'fp_{n}': a for n, a in self.fingerprint.items()},
+                         **{f'out_{n}': np.asarray(a)
+                            for n, a in arrays.items()})
+                os.replace(tmp, path)
+            except Exception as err:    # the others wait for this verdict
+                failure = f'{type(err).__name__}: {err}'
+        failure = broadcast(failure, current_comm())
+        if failure is not None:
+            raise RuntimeError(f'fragment checkpoint {stage!r} not written on '
+                               f'rank 0: {failure}')
