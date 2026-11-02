@@ -602,7 +602,10 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     nocc: number of doubly occupied orbitals.
     skip_scf: stop after the first Dyson step (see Returns).
     grid_kind: only 'IR' is implemented.
-    save_file: if given, (w_real, A) is written there as CSV.
+    save_file: if given, (w_real, A, mu) is written there as CSV, and the
+        converged density (dm_ao, gamma_mo), mo_coeff, F_mo, mu, E_gm, E_c,
+        e_hf and method to save_file + '.h5' (pyscf chkfile, key 'scgw',
+        with mol).
     method: 'ISDF' (separable factors) or 'RI' (plain RI three-index
         tensor, needs `auxbasis`); see `calc_new_sigma`.
     kwargs: `factors` (precomputed output of `separable_factors`) or
@@ -858,8 +861,9 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
 
     # Nothing from the cycle is needed on the real axis; free it before the
-    # (large) real-frequency arrays are allocated.
-    del h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
+    # (large) real-frequency arrays are allocated. gamma is kept (nmo^2) for
+    # the save below.
+    del h_mo, X_mo, D, diis, G, grid_b, sigma_in, F_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
@@ -895,6 +899,17 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
 
     if save_file is not None:
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
+
+        # The converged density next to the CSV, read back with
+        # lib.chkfile.load(save_file + '.h5', 'scgw') and load_mol. gamma is
+        # per spin in the MO basis of mf, so the total AO density is
+        # 2 C gamma C^T.
+        lib.chkfile.save(save_file + '.h5', 'scgw', {
+            'dm_ao': 2.0 * mf.mo_coeff @ gamma @ mf.mo_coeff.T,
+            'gamma_mo': gamma, 'mo_coeff': mf.mo_coeff, 'F_mo': F,
+            'mu': mu, 'E_gm': E_gm, 'E_c': E_c, 'e_hf': mf.e_tot,
+            'method': method})
+        lib.chkfile.save_mol(mol, save_file + '.h5')
 
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # height threshold is set as a minimum weight rather than a fixed number.
