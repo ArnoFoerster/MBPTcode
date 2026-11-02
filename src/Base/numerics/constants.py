@@ -1211,6 +1211,58 @@ CONFORMER_SCREEN_CONV = {k: CONFORMER_SCREEN_LOOSENING * v
                          for k, v in GEOM_OPT_CONV.items()}
 # Temperature (Kelvin) the conformer populations are reported at.
 CONFORMER_TEMPERATURE = 300.0
+# Weisfeiler-Lehman refinement rounds behind the symmetry-aware RMSD. Three
+# rounds separate atoms that differ within three bonds, which is what tells a
+# CH2 from a CH3 and one ring substitution pattern from another; more rounds
+# only ever split classes further, so a missed automorphism costs a duplicate
+# conformer and never a wrong merge.
+COLOUR_REFINEMENT_ROUNDS = 3
+# Torsion change between a ground-state conformer and the excited minimum it
+# relaxes to, degrees, above which the pair is a twisted-ICT pair: a
+# carbazole-triazine dihedral goes from 50-60 in S0 towards 90 in a TICT
+# state, and a planar-to-twisted switch moves by more.
+CONFORMER_TWIST_TOL = 25.0
+# Geometric tolerance (Bohr) of the point-group detection behind the
+# rotational symmetry number: a relaxed minimum is symmetric to the
+# optimizer's residual, a few 1e-3 Bohr, not to pyscf's default 1e-5.
+CONFORMER_SYMMETRY_TOL = 0.05
+# A molecule whose smallest principal moment of inertia is below this fraction
+# of its largest is treated as linear by `conformer_weights.log_moments`, whose
+# rotational term is then ln I of the two equal moments.
+CONFORMER_LINEAR_INERTIA_RATIO = 1e-6
+
+# Ring and inversion conformer starts (`properties.ring_conformers`).
+# Total puckering amplitude Q of a start, Angstrom: cyclohexane's chair has
+# 0.63, cyclopentane 0.43, a dihydroacridine's fold ~0.3.
+RING_PUCKER_AMPLITUDE = 0.5
+# Phases (degrees) of the starts of every puckering mode m < N/2. Off the
+# symmetric values on purpose: a boat (phase 0 of a six-ring) is a saddle
+# between two twist-boats, and a start exactly on it keeps its C2v symmetry
+# all the way down (cyclohexane HF/STO-3G: the boat start stays a boat, 0.30
+# eV up, the 15-degree one reaches the twist-boat, 0.26 eV up).
+RING_PUCKER_PHASES = (15.0, 75.0)
+# Rings of these sizes are searched; larger rings are macrocycles, whose
+# conformers no single puckering mode describes.
+RING_SIZES = (4, 5, 6, 7, 8)
+# Height of a three-coordinate centre above the plane of its neighbours,
+# Angstrom, below which it counts as planar and has no inversion: ammonia
+# stands 0.38 out of its plane, trimethylamine 0.45, an amide nitrogen < 0.1.
+INVERSION_MIN_HEIGHT = 0.15
+# A ring bond counts as single (the ring can pucker about it) above this
+# fraction of the summed covalent radii (pyscf's table, C 0.73 A): benzene's
+# C-C is 0.95, pyridine's C-N 0.93, pyrrole's 0.95, thiophene's C-S 0.96 and
+# carbazole's C-N 0.965, against 1.05 for a C-C single bond, 1.03 for an
+# ether C-O and 0.98-0.99 for phenoxazine's C-O and C-N (a furan's 0.98
+# passes too and costs two starts that relax back to planar).
+RING_SINGLE_BOND_RATIO = 0.97
+
+# Restrained torsion scans (`properties.torsion_scan`).
+# Force constant of the torsional restraint of a scan point, Hartree/rad^2:
+# 2 Hartree/rad^2 holds a dihedral whose surface pulls with 1 kcal/mol/deg
+# (0.091 Ha/rad) to within 3 degrees; a scan point reports its residual.
+TORSION_RESTRAINT_K = 2.0
+# Halvings of one scan increment before the scan stops.
+SCAN_MAX_HALVINGS = 3
 
 # The ISDF interpolation grid `gradients.gwbse.surface_factory.potential_energy_surface`
 # asks for when the caller names none: the level of ISDF_GRID_ACCURACY
@@ -2225,6 +2277,21 @@ EE_FOLD_BLOCK_LINDEP = 1e-10
 # Newton/bisection on a model root: steps, and the relative step that ends it
 EE_FOLD_MODEL_ROOT_MAX_ITER = 100
 EE_FOLD_MODEL_ROOT_STEP = 1e-15
+
+# Herzberg-Teller dipole derivatives (`properties.herzberg_teller`).
+# Dimensionless normal-coordinate step of the central difference of the
+# transition dipole: Q_k = q_k sqrt(omega_k), so 0.05 is a twentieth of the
+# zero-point amplitude 1/sqrt(2) of every mode alike.
+HT_FD_STEP = 0.05
+# Floor, relative to the largest |mu| at the stencil, below which the
+# even/odd test of `dipole_derivative` does not judge a mode: a mode along
+# which the dipole does not change at all has nothing to get wrong.
+HT_PHASE_FLOOR = 1e-6
+# Hartree. Reference roots this close to the followed one are matched with
+# it as one subspace by `PhaseTrackedDipole`: over an HT_FD_STEP displacement
+# two roots closer than ~27 meV can exchange character, and only their span
+# is the same at both geometries.
+HT_DEGENERACY_WINDOW = 1e-3
 
 # The Franck-Condon rows (multimode Condon and Herzberg-Teller) share one
 # density built from the S1-T1 displacement, whose harmonic reorganization is

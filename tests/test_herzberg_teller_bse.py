@@ -25,6 +25,7 @@ from pyscf import dft, gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.Base.numerics.constants import HT_FD_STEP
 from src.Base.numerics.numerics import Numerics
 from src.SingleReference.BSE.solve import solve_bse
 from src.properties import herzberg_teller
@@ -172,7 +173,7 @@ def test_bse_dipole_derivative_is_phase_and_step_stable(formaldehyde):
             'ground')
         assert np.array_equal(flipped.dmu_dq, clean.dmu_dq)
     half = dipole_derivative(PhaseTrackedDipole(solve, mol, root), state,
-                             'ground', step=0.5 * herzberg_teller.HT_FD_STEP)
+                             'ground', step=0.5 * HT_FD_STEP)
     assert np.abs(half.dmu_dq - clean.dmu_dq).max() < STEP_TOL * scale
     # the same flips without the tracking: the slope is another number
     flips = flipping(solve, 1, mol)

@@ -50,32 +50,10 @@ from collections import deque
 import numpy as np
 from pyscf.data import radii
 
-from src.Base.numerics.constants import BOHR_TO_ANGSTROM
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, INVERSION_MIN_HEIGHT, RING_PUCKER_AMPLITUDE,
+                                         RING_PUCKER_PHASES, RING_SINGLE_BOND_RATIO, RING_SIZES)
 from src.properties.conformers import molecular_graph
 
-#: Total puckering amplitude Q of a start, Angstrom: cyclohexane's chair has
-#: 0.63, cyclopentane 0.43, a dihydroacridine's fold ~0.3.
-RING_PUCKER_AMPLITUDE = 0.5
-#: Phases (degrees) of the starts of every puckering mode m < N/2. Off the
-#: symmetric values on purpose: a boat (phase 0 of a six-ring) is a saddle
-#: between two twist-boats, and a start exactly on it keeps its C2v symmetry
-#: all the way down (cyclohexane HF/STO-3G: the boat start stays a boat, 0.30
-#: eV up, the 15-degree one reaches the twist-boat, 0.26 eV up).
-RING_PUCKER_PHASES = (15.0, 75.0)
-#: Rings of these sizes are searched; larger rings are macrocycles, whose
-#: conformers no single puckering mode describes.
-RING_SIZES = (4, 5, 6, 7, 8)
-#: Height of a three-coordinate centre above the plane of its neighbours,
-#: Angstrom, below which it counts as planar and has no inversion: ammonia
-#: stands 0.38 out of its plane, trimethylamine 0.45, an amide nitrogen < 0.1.
-INVERSION_MIN_HEIGHT = 0.15
-#: A ring bond counts as single (the ring can pucker about it) above this
-#: fraction of the summed covalent radii (pyscf's table, C 0.73 A): benzene's
-#: C-C is 0.95, pyridine's C-N 0.93, pyrrole's 0.95, thiophene's C-S 0.96 and
-#: carbazole's C-N 0.965, against 1.05 for a C-C single bond, 1.03 for an
-#: ether C-O and 0.98-0.99 for phenoxazine's C-O and C-N (a furan's 0.98
-#: passes too and costs two starts that relax back to planar).
-RING_SINGLE_BOND_RATIO = 0.97
 #: Elements that invert as pyramidal three-coordinate centres.
 INVERSION_ELEMENTS = (7, 15, 33)
 

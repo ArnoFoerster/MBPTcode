@@ -33,18 +33,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from src.Base.geometry.geometry import molecule_at
+from src.Base.numerics.constants import SCAN_MAX_HALVINGS, TORSION_RESTRAINT_K
 from src.Base.step_failed import StepFailed
 from src.gradients.surface import PotentialEnergySurface
 from src.properties.conformers import dihedral, rotate_torsion
 from src.properties.curvilinear import wilson_b
 from src.properties.optimize import relax
 
-#: Force constant of the torsional restraint, Hartree/rad^2: 1 Hartree/rad^2
-#: holds a dihedral whose surface pulls with 1 kcal/mol/deg (0.096 Ha/rad) to
-#: within 5 degrees; a scan point reports its residual.
-TORSION_RESTRAINT_K = 2.0
-#: Halvings of one scan increment before the scan stops.
-SCAN_MAX_HALVINGS = 3
 
 
 def wrapped(delta_deg):

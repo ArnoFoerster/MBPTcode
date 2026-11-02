@@ -23,7 +23,8 @@ from pyscf import gto, scf
 from src.Base.geometry.geometry import molecule_at
 from src.Base.numerics.constants import (BOHR_TO_ANGSTROM,
                                          BOLTZMANN_HARTREE_PER_KELVIN,
-                                         HARTREE_TO_CM, HARTREE_TO_EV)
+                                         HARTREE_TO_CM, HARTREE_TO_EV,
+                                         RING_PUCKER_AMPLITUDE)
 from src.gradients.gwbse.state_following import RootFollowingLost
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.surface import PotentialEnergySurface
@@ -37,8 +38,7 @@ from src.properties.conformers import (Conformer, Torsion, boltzmann_weights,
                                        mirror_degeneracy, rotatable_bonds,
                                        search_conformers, torsion_starts)
 from src.properties.duschinsky import CartesianHessian
-from src.properties.ring_conformers import (RING_PUCKER_AMPLITUDE,
-                                            cremer_pople, flexible_rings,
+from src.properties.ring_conformers import (cremer_pople, flexible_rings,
                                             inversion_centres,
                                             inversion_starts, pucker_profile,
                                             puckered, puckering_starts,

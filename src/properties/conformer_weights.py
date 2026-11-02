@@ -29,15 +29,13 @@ from pyscf import symm
 
 from src.Base.numerics.constants import (AMU_TO_ME,
                                          BOLTZMANN_HARTREE_PER_KELVIN,
+                                         CONFORMER_LINEAR_INERTIA_RATIO,
                                          CONFORMER_RMSD_TOL,
+                                         CONFORMER_SYMMETRY_TOL,
                                          CONFORMER_TEMPERATURE)
 from src.properties.conformers import boltzmann_weights, mirror_degeneracy
 from src.properties.duschinsky import harmonic_state
 
-#: Geometric tolerance (Bohr) of the point-group detection behind the
-#: rotational symmetry number: a relaxed minimum is symmetric to the
-#: optimizer's residual, a few 1e-3 Bohr, not to pyscf's default 1e-5.
-SYMMETRY_TOLERANCE = 0.05
 #: Rotational symmetry number of each axial point group family; n is the
 #: order of the principal axis (`symmetry_number`).
 _SIGMA_FIXED = {'C1': 1, 'Ci': 1, 'Cs': 1, 'Coov': 1, 'Dooh': 2, 'T': 12,
@@ -47,12 +45,12 @@ _SIGMA_FIXED = {'C1': 1, 'Ci': 1, 'Cs': 1, 'Coov': 1, 'Dooh': 2, 'T': 12,
 def symmetry_number(mol):
     """(sigma, point group): the number of proper rotations that map `mol`
     onto itself, from its point group (pyscf's detection, all atoms,
-    SYMMETRY_TOLERANCE Bohr): n for C_n, C_nv, C_nh, n/2 for S_n, and 2n for
+    CONFORMER_SYMMETRY_TOL Bohr): n for C_n, C_nv, C_nh, n/2 for S_n, and 2n for
     D_n, D_nd, D_nh."""
     atoms = [(mol.atom_symbol(i), mol.atom_coord(i)) for i in range(mol.natm)]
     old = symm.geom.TOLERANCE
     try:
-        symm.geom.TOLERANCE = SYMMETRY_TOLERANCE
+        symm.geom.TOLERANCE = CONFORMER_SYMMETRY_TOL
         group = symm.detect_symm(atoms)[0]
     finally:
         symm.geom.TOLERANCE = old
@@ -83,7 +81,7 @@ def log_moments(mol):
     x = x - (m[:, None] * x).sum(0) / m.sum()
     inertia = (m * (x ** 2).sum(1)).sum() * np.eye(3) - (m[:, None] * x).T @ x
     ev = np.linalg.eigvalsh(inertia)
-    if ev[0] < 1e-6 * ev[-1]:
+    if ev[0] < CONFORMER_LINEAR_INERTIA_RATIO * ev[-1]:
         return float(np.log(ev[-1]))
     return float(0.5 * np.log(ev).sum())
 

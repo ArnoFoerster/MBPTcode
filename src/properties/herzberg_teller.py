@@ -48,24 +48,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.Base.numerics.constants import ROOT_FOLLOW_WEIGHT_MIN
+from src.Base.numerics.constants import (HT_DEGENERACY_WINDOW, HT_FD_STEP, HT_PHASE_FLOOR,
+                                         ROOT_FOLLOW_WEIGHT_MIN)
 from src.gradients.state_identity import transported_overlap
 from src.properties.duschinsky import log_correlation
 from src.properties.vibronic import displace_along_mode
 
-#: Dimensionless normal-coordinate step of the central difference of the
-#: transition dipole: Q_k = q_k sqrt(omega_k), so 0.05 is a twentieth of the
-#: zero-point amplitude 1/sqrt(2) of every mode alike.
-HT_FD_STEP = 0.05
-#: Floor, relative to the largest |mu| at the stencil, below which the
-#: even/odd test of `dipole_derivative` does not judge a mode: a mode along
-#: which the dipole does not change at all has nothing to get wrong.
-HT_PHASE_FLOOR = 1e-6
-#: Hartree. Reference roots this close to the followed one are matched with
-#: it as one subspace by `PhaseTrackedDipole`: over an HT_FD_STEP displacement
-#: two roots closer than ~27 meV can exchange character, and only their span
-#: is the same at both geometries.
-HT_DEGENERACY_WINDOW = 1e-3
 
 REFERENCES = ('ground', 'excited')
 

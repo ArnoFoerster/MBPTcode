@@ -44,6 +44,7 @@ import numpy as np
 from pyscf.data import radii
 
 from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, BOLTZMANN_HARTREE_PER_KELVIN,
+                                         COLOUR_REFINEMENT_ROUNDS, CONFORMER_TWIST_TOL,
                                          CONFORMER_BOND_SCALE, CONFORMER_ENERGY_TOL,
                                          CONFORMER_MAX_AUTOMORPHISMS,
                                          CONFORMER_MAX_STARTS, CONFORMER_RMSD_TOL,
@@ -56,17 +57,6 @@ from src.Base.geometry.geometry import molecule_at
 from src.Base.step_failed import StepFailed
 from src.properties.optimize import relax
 
-# Weisfeiler-Lehman refinement rounds behind the symmetry-aware RMSD. Three
-# rounds separate atoms that differ within three bonds, which is what tells a
-# CH2 from a CH3 and one ring substitution pattern from another; more rounds
-# only ever split classes further, so a missed automorphism costs a duplicate
-# conformer and never a wrong merge.
-COLOUR_REFINEMENT_ROUNDS = 3
-#: Torsion change between a ground-state conformer and the excited minimum it
-#: relaxes to, degrees, above which the pair is a twisted-ICT pair: a
-#: carbazole-triazine dihedral goes from 50-60 in S0 towards 90 in a TICT
-#: state, and a planar-to-twisted switch moves by more.
-CONFORMER_TWIST_TOL = 25.0
 
 
 @dataclass
