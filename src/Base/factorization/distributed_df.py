@@ -171,6 +171,7 @@ from pyscf.lib import logger
 
 from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION, DF_JK_BLOCK_GB,
                                          DF_JK_BLOCK_ROWS_MAX, XC_BLOCK_MAX_MB)
+from src.Base.environment_seam import attach_cavity_comm, detach_cavity_comm
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
@@ -1276,7 +1277,7 @@ def _lock_solvent(mf, comm, timings):
     Their cost is the surface potential, (nao, nao, n_surf) three-centre
     integrals, which is not small on a large molecule. Every rank enters both
     calls here at the same point, so the block attaches `comm` to the
-    continuum as `_cavity_comm`: a continuum that splits its surface points
+    continuum (`attach_cavity_comm`): a continuum that splits its surface points
     over ranks (`environments.pcm_factorization.tile_cavity`) reads it, and
     any other ignores it.
 
@@ -1293,7 +1294,7 @@ def _lock_solvent(mf, comm, timings):
         saved.append((name, solvent.__dict__.get(name)))
         setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
                                             timings))
-    solvent._cavity_comm = comm
+    attach_cavity_comm(solvent, comm)
     _RANK_LOCKED.add(solvent)
     return solvent, saved
 
@@ -1304,7 +1305,7 @@ def _unlock_solvent(locked):
         return
     solvent, saved = locked
     _restore_methods(solvent, saved)
-    solvent.__dict__.pop('_cavity_comm', None)
+    detach_cavity_comm(solvent)
     _RANK_LOCKED.discard(solvent)
 
 

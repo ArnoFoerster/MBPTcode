@@ -26,8 +26,8 @@ integrals with k sized by `max_memory` alone, so a large memory share puts the
 whole (nao, nao, n_surf) array in one block: 16 GB for a 62-atom emitter in
 aug-cc-pVDZ, on every rank, in every SCF cycle. `tile_cavity` gives the PCM
 object versions of both on `cavity_blocks` tiles instead. Where the SCF runs
-over ranks, `distributed_fock` attaches its communicator as `_cavity_comm` for
-as long as it locks the continuum; each rank then evaluates only a contiguous
+over ranks, `distributed_fock` attaches its communicator (`attach_cavity_comm`)
+for as long as it locks the continuum; each rank then evaluates only a contiguous
 range of the tiles, so it holds one tile at a time and the integrals cost
 about 1 / n of a cycle. The tiles depend on the cavity and the basis alone
 (ISDF_TILE_GB, libcint's index bound; a cavity past one tile is cut into at
@@ -42,6 +42,7 @@ import scipy.linalg
 from pyscf import df as pyscf_df
 from pyscf import gto
 
+from src.Base.environment_seam import cavity_comm
 from src.Base.numerics.constants import ISDF_TILE_GB, PCM_CAVITY_MIN_TILES
 from src.Base.utils.parallel.mpi_grid import contiguous_block, ordered_sum, reduce_sum
 from src.environments.pcm_derivatives import cavity_blocks
@@ -119,7 +120,7 @@ def _cavity_share(self, nao):
     are summed over (None: all of them, here)."""
     ngrids = self.surface['grid_coords'].shape[0]
     tiles = list(enumerate(cavity_tiles(nao, ngrids)))
-    comm = getattr(self, '_cavity_comm', None)
+    comm = cavity_comm(self)
     if comm is None or comm.Get_size() == 1:
         return tiles, None
     start, stop = contiguous_block(len(tiles), comm.Get_rank(), comm.Get_size())

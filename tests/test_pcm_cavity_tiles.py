@@ -33,6 +33,7 @@ from pyscf import solvent as pyscf_solvent
 from pyscf.df import incore
 from pyscf.solvent.pcm import PCM
 
+from src.Base.environment_seam import attach_cavity_comm, cavity_comm
 from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_TILE_GB, PCM_CAVITY_MIN_TILES,
                                          RANK_SPLIT_ENERGY_TOL, SCF_DIFFERENTIABLE_CONV_TOL,
@@ -107,7 +108,7 @@ def test_tiles_fit_libcint_at_emitter_size(size):
     for rank in range(size):
         cavity = type('Cavity', (), {})()
         cavity.surface = {'grid_coords': np.zeros((ngrids, 3))}
-        cavity._cavity_comm = _Ranks(rank, size)
+        attach_cavity_comm(cavity, _Ranks(rank, size))
         tiles, _ = _cavity_share(cavity, nao)
         for _, (p0, p1) in tiles:
             assert nao * nao * (p1 - p0) <= LIBCINT_BLOCK_LIMIT
@@ -166,7 +167,7 @@ def test_ranks_evaluate_their_tiles(size, monkeypatch):
 
     def one_rank(comm):
         pcm = factorize_once(continuum(water()))
-        pcm._cavity_comm = comm
+        attach_cavity_comm(pcm, comm)
         return threading.current_thread().name, pcm._get_v(dms), pcm._get_vmat(q)
 
     out = run_simulated(one_rank, size)
@@ -202,7 +203,7 @@ def test_scf_over_ranks_evaluates_the_cavity_once(monkeypatch):
         mf = solvated_mean_field(water())
         distributed_mean_field(mf)
         return (threading.current_thread().name, mf.e_tot, mf.converged,
-                '_cavity_comm' in vars(mf.with_solvent))
+                cavity_comm(mf.with_solvent) is not None)
 
     out = run_simulated(one_rank, size)
     shares = []

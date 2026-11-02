@@ -2,7 +2,8 @@
 is (`Environment`, structural), the gas phase (`NoEnvironment`), and where a
 route finds the environment of a calculation -- on its mean field
 (`attach_environment`, `environment_of`, `attached_environment`,
-`resolve_environment`).
+`resolve_environment`) -- and the ranks a continuum may split its cavity over
+while a distributed build holds it (`attach_cavity_comm`, `cavity_comm`).
 
 It sits in Base because the integral getters of the pySCF interface read the
 environment a mean field carries; the media themselves (continuum, point
@@ -219,3 +220,28 @@ def resolve_environment(environment=None, mf=None):
     if mf is not None:
         return environment_of(mf)
     return NoEnvironment()
+
+
+#: The attribute a continuum carries its cavity communicator under, set and
+#: read only through `attach_cavity_comm`, `detach_cavity_comm` and
+#: `cavity_comm`.
+_CAVITY_COMM = '_cavity_comm'
+
+
+def attach_cavity_comm(continuum, comm):
+    """Let `continuum` split its surface points over the ranks of `comm`: a
+    distributed build that has every rank enter the continuum's calls at the
+    same point attaches its communicator for as long as it holds them
+    (`detach_cavity_comm`). A continuum that cannot split ignores it."""
+    setattr(continuum, _CAVITY_COMM, comm)
+
+
+def detach_cavity_comm(continuum):
+    """Take back what `attach_cavity_comm` attached (nothing if none)."""
+    vars(continuum).pop(_CAVITY_COMM, None)
+
+
+def cavity_comm(continuum):
+    """The communicator attached to `continuum` (`attach_cavity_comm`), or
+    None: its calls run replicated."""
+    return vars(continuum).get(_CAVITY_COMM)
