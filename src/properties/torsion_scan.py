@@ -48,12 +48,11 @@ def wrapped(delta_deg):
 
 
 def dihedral_gradient(coords, tor):
-    """d phi / dx (natm, 3) in rad/Bohr for `conformers.dihedral`'s
-    convention (the analytic B-matrix row of `curvilinear`, whose dihedral
-    runs the other way)."""
+    """d phi / dx (natm, 3) in rad/Bohr of `conformers.dihedral`: the
+    analytic B-matrix row of `curvilinear`'s dihedral, which is the same
+    angle with the IUPAC sign, negated."""
     x = np.asarray(coords, float)
-    row = wilson_b(x, ([], [], [(tor.i, tor.j, tor.k, tor.l)]))[0]
-    return -row.reshape(-1, 3)
+    return -wilson_b(x, ([], [], [(tor.i, tor.j, tor.k, tor.l)]))[0].reshape(-1, 3)
 
 
 class TorsionRestrained(PotentialEnergySurface):

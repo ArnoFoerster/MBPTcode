@@ -217,20 +217,26 @@ def rotatable_bonds(mol, adj=None, scale=CONFORMER_BOND_SCALE,
 # torsion geometry
 # ---------------------------------------------------------------------------
 
-def dihedral(coords, i, j, k, l):
-    """The i-j-k-l dihedral in degrees: anti is +-180, syn is 0.
+def dihedral_frame(x, i, j, k, l):
+    """F, G, H and the plane normals A = F x G, B = H x G of i-j-k-l
+    (Blondel and Karplus, J. Comput. Chem. 17, 1132 (1996))."""
+    f, g, h = x[i] - x[j], x[j] - x[k], x[l] - x[k]
+    return f, g, h, np.cross(f, g), np.cross(h, g)
 
-    The signed angle between the projections of j->i and k->l on the plane
-    normal to j->k.
-    """
-    crd = np.asarray(coords)
-    b0 = crd[i] - crd[j]
-    b1 = crd[k] - crd[j]
-    b2 = crd[l] - crd[k]
-    b1 = b1 / np.linalg.norm(b1)
-    v = b0 - (b0 @ b1) * b1
-    w = b2 - (b2 @ b1) * b1
-    return float(-np.degrees(np.arctan2(np.cross(b1, v) @ w, v @ w)))
+
+def dihedral_radians(coords, i, j, k, l):
+    """The signed i-j-k-l dihedral in radians, in (-pi, pi]: anti is pi, syn
+    is 0, and the sign is IUPAC's (positive when, looking along j->k, the
+    bond k-l is turned clockwise from i-j)."""
+    _, g, _, a, b = dihedral_frame(np.asarray(coords, float), i, j, k, l)
+    return float(np.arctan2(np.cross(b, a) @ g / np.linalg.norm(g), a @ b))
+
+
+def dihedral(coords, i, j, k, l):
+    """The i-j-k-l dihedral in degrees as the conformer search counts it:
+    anti is +-180, syn is 0, and the sign is the opposite of IUPAC's
+    (`dihedral_radians`), the sense `rotate_torsion` advances."""
+    return float(-np.degrees(dihedral_radians(coords, i, j, k, l)))
 
 
 def torsion_values(mol_or_coords, torsions):

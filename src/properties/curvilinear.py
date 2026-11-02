@@ -48,7 +48,7 @@ import numpy as np
 
 from src.Base.numerics.constants import (CURVILINEAR_LINEAR_ANGLE_DEG,
                                          CURVILINEAR_PINV_RCOND)
-from src.properties.conformers import molecular_graph
+from src.properties.conformers import dihedral_frame, dihedral_radians, molecular_graph
 from src.properties.vibronic import huang_rhys_of
 
 
@@ -80,13 +80,6 @@ def _angle(a, b, c):
     return float(np.arccos(np.clip(cos, -1.0, 1.0)))
 
 
-def _dihedral_frame(x, i, j, k, l):
-    """F, G, H and the plane normals A = F x G, B = H x G of i-j-k-l
-    (Blondel and Karplus, J. Comput. Chem. 17, 1132 (1996))."""
-    f, g, h = x[i] - x[j], x[j] - x[k], x[l] - x[k]
-    return f, g, h, np.cross(f, g), np.cross(h, g)
-
-
 def values(coords, prims):
     """Every primitive at `coords` (natm, 3) Bohr: lengths in Bohr, angles and
     dihedrals in radians."""
@@ -94,9 +87,7 @@ def values(coords, prims):
     bonds, angles, dihedrals = prims
     out = [np.linalg.norm(x[i] - x[j]) for i, j in bonds]
     out += [_angle(x[i], x[j], x[k]) for i, j, k in angles]
-    for q in dihedrals:
-        _, g, _, a, b = _dihedral_frame(x, *q)
-        out.append(np.arctan2(np.cross(b, a) @ g / np.linalg.norm(g), a @ b))
+    out += [dihedral_radians(x, *q) for q in dihedrals]
     return np.array(out)
 
 
@@ -132,7 +123,7 @@ def wilson_b(coords, prims):
         di, dk = (cos * u - v) / (lu * sin), (cos * v - u) / (lv * sin)
         row([(i, di), (k, dk), (j, -di - dk)])
     for i, j, k, l in dihedrals:
-        f, g, h, a, b = _dihedral_frame(x, i, j, k, l)
+        f, g, h, a, b = dihedral_frame(x, i, j, k, l)
         lg, a2, b2 = np.linalg.norm(g), a @ a, b @ b
         di, dl = -lg / a2 * a, lg / b2 * b
         cross = (f @ g) / (a2 * lg) * a - (h @ g) / (b2 * lg) * b
