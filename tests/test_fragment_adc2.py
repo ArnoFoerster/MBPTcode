@@ -50,10 +50,11 @@ from pyscf import gto, scf
 
 from src.fragments import partition as fragment_partition
 from src.fragments.localization import FragmentOrbitals
-from src.fragments.partition import FeshbachOracle, FragmentPartition
+from src.fragments.partition import FragmentPartition
 from src.gradients.adc.ee_gradient import adc2_force, solve_root
 from src.gradients.adc.fragment_adc2 import ADC2FragmentMethod, ADC2Operator
 from src.gradients.fragment_diabatic import DiabaticGradient
+from tests.feshbach_oracle import FeshbachOracle
 from tests.fragment_diabatic_fd import derivative_ladder
 from tests.test_fragment_diabatic import DIMER, FRAGMENTS, SITES, random_direction
 

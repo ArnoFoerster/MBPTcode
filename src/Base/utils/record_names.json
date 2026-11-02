@@ -100,7 +100,6 @@
  "src.gradients.excited_state:FirstPoint": "src.gradients.surface_identity:FirstPoint",
  "src.gradients.excited_state:HandedOverPoint": "src.gradients.gwbse.excited_state:HandedOverPoint",
  "src.gradients.fragment_bse:BSEOperator": "src.gradients.gwbse.fragment_bse:BSEOperator",
- "src.gradients.fragment_bse:FeshbachOracle": "src.fragments.partition:FeshbachOracle",
  "src.gradients.fragment_bse:FragmentCanonical": "src.fragments.partition:FragmentCanonical",
  "src.gradients.fragment_bse:FragmentPartition": "src.fragments.partition:FragmentPartition",
  "src.gradients.gwbse_state_model:GWBSEState": "src.gradients.gwbse.state_model:GWBSEState",

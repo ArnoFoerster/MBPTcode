@@ -41,8 +41,7 @@ from pyscf import df as pyscf_df
 from pyscf import gto
 
 from src.Base.basis.basis_map import (atom_basis_names, atom_elements,
-                                      basis_label, molecule_basis,
-                                      parse_basis_for)
+                                      molecule_basis, parse_basis_for)
 from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
 from src.Base.factorization.separable_ri import (grid_identity, resolve_isdf_grid,
                                                  validated_levels)
@@ -94,7 +93,6 @@ def test_the_map_is_canonical():
                           {(1,): 'aug-cc-pvdz'}), 'labelled already')):
         with pytest.raises(ValueError, match=match):
             molecule_basis(*args)
-    assert basis_label(HYBRID) == 'H=cc-pvdz,O=aug-cc-pvdz'
 
 
 def test_each_element_pairs_its_own_auxiliary_sets():

@@ -89,13 +89,14 @@ from src.fragments import partition as fragment_partition
 from src.gradients.fragment_diabatic import DiabaticGradient, DiabaticSurface
 from src.gradients.gwbse.fragment_diabatic import BSEFragmentMethod
 from src.Base.geometry.geometry import displaced
+from tests.feshbach_oracle import FeshbachOracle
 from tests.fragment_diabatic_fd import (derivative_ladder, diabatic_derivative,
                                      linear_vibronic_coupling)
 from tests.isdf_test_grid import g1
 from src.gradients.gwbse.bse_isdf import bse_solve
 from src.gradients.gwbse.fragment_bse import BSEOperator
 from src.fragments.checkpoint import PartitionCheckpoint
-from src.fragments.partition import FeshbachOracle, FragmentPartition, to_local
+from src.fragments.partition import FragmentPartition, to_local
 from src.Base.numerics.numerics import numerics_of
 
 ETHYLENE = [('C', (0, 0, 0.667)), ('C', (0, 0, -0.667)),

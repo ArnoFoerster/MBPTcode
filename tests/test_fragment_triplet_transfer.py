@@ -54,7 +54,7 @@ from src.Base.geometry.geometry import displaced
 from src.Base.numerics.numerics import numerics_of
 from src.fragments import partition as fragment_partition
 from src.fragments.localization import FragmentOrbitals
-from src.fragments.partition import FeshbachOracle, FragmentPartition, to_local
+from src.fragments.partition import FragmentPartition, to_local
 from src.fragments.transfer import dexter_coupling, fold_diabats, site_coupling
 from src.fragments.tta_coupling import tta_coupling, triplet_pair_elements
 from src.gradients.adc.fragment_adc2 import ADC2FragmentMethod, ADC2Operator
@@ -63,6 +63,7 @@ from src.gradients.gwbse.bse_isdf import bse_solve
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.fragment_bse import BSEOperator
 from src.gradients.gwbse.fragment_diabatic import BSEFragmentMethod
+from tests.feshbach_oracle import FeshbachOracle
 from tests.fragment_diabatic_fd import diabatic_matrix
 from tests.isdf_test_grid import g1
 from tests.test_fragment_diabatic import (AUX, BASIS, BOTH_CT, DIMER,

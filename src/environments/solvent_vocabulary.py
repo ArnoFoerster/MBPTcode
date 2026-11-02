@@ -5,8 +5,7 @@ Three vocabularies are spelled here once, so that their readers cannot drift:
 the density a state-specific term is taken of, the scheme an environment is
 built in, and the scheme a run declares. A run's scheme names a way of
 solvating every state of it; the environment's scheme is the way one
-excitation reaches its state-specific solvation, which a run's scheme maps to
-(`SCHEME_CONSTRUCTION`).
+excitation reaches its state-specific solvation.
 """
 
 #: The medium-free setting a run can declare.
@@ -55,7 +54,3 @@ SCHEME_B = {'scheme-b-eq': 'equilibrium', 'scheme-b-noneq': 'nonequilibrium',
 
 #: The scheme-B arms without the singlets' linear-response term.
 SCHEME_B_BARE = ('scheme-b-eq-bare', 'scheme-b-noneq-bare')
-
-#: The environment's scheme a run's scheme builds.
-SCHEME_CONSTRUCTION = {'scheme-a': 'duchemin',
-                       **{name: 'classical-ss' for name in SCHEME_B}}

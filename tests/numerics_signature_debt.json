@@ -482,7 +482,6 @@
   "tol"
  ],
  "src/fragments/partition.py::_guard_lowest": [
-  "max_cycle",
   "tol"
  ],
  "src/properties/hessian.py::require_hessian_counts": [
@@ -562,9 +561,6 @@
   "tol"
  ],
  "src/fragments/partition.py::_q_lowest": [
-  "tol"
- ],
- "src/fragments/partition.py::root": [
   "tol"
  ],
  "src/gradients/fragment_diabatic.py::solve": [

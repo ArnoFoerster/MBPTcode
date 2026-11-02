@@ -305,8 +305,6 @@ def test_one_vocabulary_for_every_solvation_entry_point():
     assert declaration.SOLVENT_SCHEMES is V.SOLVENT_SCHEMES
     assert cli.SOLVENT_SCHEMES is V.SOLVENT_SCHEMES
     assert declaration.GAS is V.GAS is medium.GAS is cli.GAS
-    assert set(V.SCHEME_CONSTRUCTION.values()) == set(V.CONSTRUCTION_SCHEMES)
-    assert set(V.SCHEME_CONSTRUCTION) == set(V.SOLVENT_SCHEMES) - {V.GAS}
     assert (inspect.signature(environment.solvent_scheme)
             .parameters['scheme'].default is inspect.Parameter.empty)
     with pytest.raises(TypeError):

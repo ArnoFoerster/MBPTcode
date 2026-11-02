@@ -154,11 +154,3 @@ def atom_basis_names(atom, basis):
     keys a per-atom basis on where it keeps the geometry apart from its
     labels."""
     return [element_basis_name(basis, item.split()[0]) for item in atom_items(atom)]
-
-
-def basis_label(basis):
-    """A one-line name of a basis for a message or a table: the name, or
-    'key=name,...' sorted by key."""
-    if isinstance(basis, dict):
-        return ','.join(f'{el}={basis[el]}' for el in sorted(basis))
-    return str(basis)

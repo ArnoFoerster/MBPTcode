@@ -77,8 +77,7 @@ def test_fragment_classes_named_by_their_first_modules_load():
     record that names them as the first tree did reads back as those."""
     from src.fragments import partition
     from src.gradients import fragment_diabatic
-    for name, module in (('FeshbachOracle', partition),
-                         ('FragmentCanonical', partition),
+    for name, module in (('FragmentCanonical', partition),
                          ('FragmentPartition', partition),
                          ('DiabaticGradient', fragment_diabatic),
                          ('DiabaticSurface', fragment_diabatic)):

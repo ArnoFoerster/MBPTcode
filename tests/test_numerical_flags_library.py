@@ -241,19 +241,6 @@ def test_a_short_resolvent_solve_keeps_its_iterate_and_is_flagged():
     assert flags['resolvent_not_converged']['columns'] == 1
 
 
-def test_a_short_feshbach_root_is_flagged():
-    """The dense oracle's Newton stopped by its cap keeps its last iterate,
-    warns and flags; it returned silently."""
-    rng = np.random.default_rng(3)
-    k = rng.normal(size=(6, 6))
-    k = k @ k.T + 6.0 * np.eye(6)
-    oracle = partition.FeshbachOracle(k, np.eye(6)[:, :2])
-    flags = {}
-    with pytest.warns(RuntimeWarning, match='Feshbach root'):
-        om, c, z = oracle.root(float(np.diag(k)[0]), maxiter=1, flags=flags)
-    assert flags['feshbach_root_not_converged']['omega'] == om
-
-
 def test_a_followed_root_hands_its_branch_to_the_caller():
     out = {}
     w, z = bracketed_root(np.array([0.1, 0.1]), np.array([-1.0, 1.0]), 0.0,
