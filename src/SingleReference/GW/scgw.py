@@ -54,6 +54,36 @@ MAX_BISECT_ITER = 100
 # Real axis
 PADE_EVAL_CHUNK = 16        # real frequencies per Sigma(w) / G(w) evaluation in trace_Greal_from_pade
 
+# RI (build_B_ri, calc_new_sigma_ri)
+RI_BLOCK_MB = 256           # size of one (block, nmo, nmo) slab of B; a few slabs are alive at once
+
+def ri_blocks(naux, nmo, block_size=None):
+    """Slices that split the auxiliary index 0..naux into consecutive blocks
+    of block_size, by default as many P as fit one (block, nmo, nmo) slab of
+    RI_BLOCK_MB."""
+    if block_size is None:
+        block_size = max(1, int(RI_BLOCK_MB * 2**20 // (8 * nmo * nmo)))
+    return [slice(p0, min(p0 + block_size, naux)) for p0 in range(0, naux, block_size)]
+
+
+def build_B_ri(mol, mo_coeff, auxbasis, block_size=None):
+    """RI three-index tensor in the MO basis,
+        B[P,p,q] = sum_mn L[P,mn] C[m,p] C[n,q],  (pq|rs) = sum_P B[P,p,q] B[P,r,s],
+    with L the Cholesky factors of the AO integrals in `auxbasis`.
+
+    L comes packed (lower triangle of mn). It is unpacked and transformed one
+    block of P at a time into a preallocated B, so the unpacked AO tensor
+    (naux, nao, nao) is never stored whole. Peak: B, plus L (about half of B)
+    until return, plus a few blocks.
+    """
+    Lpq = df.incore.cholesky_eri(mol, auxbasis=auxbasis)
+    naux, nmo = Lpq.shape[0], mo_coeff.shape[1]
+    B = np.empty((naux, nmo, nmo))
+    for blk in ri_blocks(naux, nmo, block_size):
+        L = lib.unpack_tril(Lpq[blk])
+        B[blk] = np.matmul(mo_coeff.T @ L, mo_coeff)
+    return B
+
 def density_matrix_ir(G, grid_f):
     """Density matrix from G: gamma = -G(tau = beta).
 
@@ -448,7 +478,7 @@ def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
     G_greater_f = G_even_f + G_odd_f
     return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, sigma_new
 
-def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False):
+def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega), with
     the Coulomb interaction in plain RI instead of the ISDF/THC factors.
 
@@ -462,11 +492,16 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False):
     so chi and W are in the same auxiliary basis as with ISDF. Cost per tau
     point is O(naux nmo^3 + naux^2 nmo^2).
 
+    Both products are summed over blocks of P (`ri_blocks`), so besides B
+    only a few (block, nmo, nmo) slabs are alive, never a second B-sized
+    array. The blocking does not change the flop count.
+
     G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
     B: (naux, nmo, nmo) RI three-index tensor in the MO basis, already
         contracted with the Coulomb metric, (pq|rs) = sum_P B[P,p,q] B[P,r,s].
     return_all: also return the intermediates; otherwise only sigma_new is
         returned.
+    block_size: P per block; default from RI_BLOCK_MB.
 
     Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new),
     as `calc_new_sigma_isdf`.
@@ -484,13 +519,17 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False):
 
     # chi(tau): M_P = G_lesser^T B_P G_greater, then pi_PQ = sum_qs M_P[q,s] B_Q[q,s]
     # (lesser = even - odd, greater = even + odd, as in calc_new_sigma_isdf).
+    # Each block of P fills its own rows pi[blk, :], so M is only ever one
+    # block.
     B_flat = B.reshape(naux, nmo * nmo)
+    blocks = ri_blocks(naux, nmo, block_size)
     pi_aux = np.empty((len(grid_b.tau_points), naux, naux))
     for t in range(len(grid_b.tau_points)):
         G_lesser = G_even_b[t] - G_odd_b[t]
         G_greater = G_even_b[t] + G_odd_b[t]
-        M = np.matmul(G_lesser.T @ B, G_greater)
-        pi_aux[t] = M.reshape(naux, nmo * nmo) @ B_flat.T
+        for blk in blocks:
+            M = np.matmul(G_lesser.T @ B[blk], G_greater)
+            pi_aux[t, blk] = M.reshape(-1, nmo * nmo) @ B_flat.T
     del G_even_b, G_odd_b, M
     chi_omega = 2.0 * np.tensordot(grid_b.cosft_wt, pi_aux, axes=(1, 0))
     del pi_aux
@@ -516,16 +555,17 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False):
     # Sigma(tau): V_P = sum_Q (W - I)[P,Q] B_Q, then
     #     even = sum_P B_P G_even V_P,  odd = sum_P B_P G_odd V_P,
     # the RI form of 2 X^T [(X G X^T) * Z] X; the prefactor -0.5 is the same
-    # as in calc_new_sigma_isdf. The sum over P and r is one (nmo, naux*nmo)
-    # x (naux*nmo, nmo) product.
-    B_left = np.ascontiguousarray(B.transpose(1, 0, 2)).reshape(nmo, naux * nmo)
-    even = np.empty((len(grid_f.tau_points), nmo, nmo))
-    odd = np.empty_like(even)
+    # as in calc_new_sigma_isdf. The sum over P is split into blocks: each
+    # block needs only its own V_P (rows blk of W - I against all of B) and
+    # adds sum_{P in blk, r} B[P,p,r] (G V_P)[r,q] to even[t] / odd[t].
+    even = np.zeros((len(grid_f.tau_points), nmo, nmo))
+    odd = np.zeros_like(even)
     for t in range(len(grid_f.tau_points)):
-        V = np.tensordot(Wt_tau_f[t], B, axes=(1, 0))
-        even[t] = B_left @ np.matmul(G_even_f[t], V).reshape(naux * nmo, nmo)
-        odd[t] = B_left @ np.matmul(G_odd_f[t], V).reshape(naux * nmo, nmo)
-    del V, B_left, Wt_tau_f
+        for blk in blocks:
+            V = (Wt_tau_f[t, blk] @ B_flat).reshape(-1, nmo, nmo)
+            even[t] += np.tensordot(B[blk], np.matmul(G_even_f[t], V), axes=([0, 2], [0, 1]))
+            odd[t] += np.tensordot(B[blk], np.matmul(G_odd_f[t], V), axes=([0, 2], [0, 1]))
+    del V, Wt_tau_f
 
     sigma_new = -(np.tensordot(grid_f.cosft_wt, even, axes=(1, 0))
                   + 1j * np.tensordot(grid_f.sinft_wt, odd, axes=(1, 0)))
@@ -690,14 +730,11 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
                                     else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis'),
                                                         grid_accuracy=kwargs.get('grid_accuracy',
                                                                                     SURFACE_GRID_ACCURACY)))
-        Lpq = None
         B = None
     elif method == 'RI':
         if kwargs.get('auxbasis') is None:
             raise ValueError("If method == 'RI' auxbasis must be specified")
-        Lpq = df.incore.cholesky_eri(mol, auxbasis=kwargs.get('auxbasis'))
-        B = lib.unpack_tril(Lpq)
-        B = np.einsum('Pmn,mp,nq->Ppq', B, mf.mo_coeff, mf.mo_coeff, optimize=True)
+        B = build_B_ri(mol, mf.mo_coeff, kwargs.get('auxbasis'))
 
         X_mo = None
         D = None
@@ -863,7 +900,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     # Nothing from the cycle is needed on the real axis; free it before the
     # (large) real-frequency arrays are allocated. gamma is kept (nmo^2) for
     # the save below.
-    del h_mo, X_mo, D, diis, G, grid_b, sigma_in, F_in
+    del h_mo, X_mo, D, B, diis, G, grid_b, sigma_in, F_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
