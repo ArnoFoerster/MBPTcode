@@ -6,8 +6,11 @@ Water (bent, non-symmetric), cc-pVDZ, Hartree-Fock in IEF-PCM toluene, a
 random symmetric gamma; the cavity cut into blocks of 20 points
 (`cavity_blocks`) so there are several:
 
-  1. over two and three simulated ranks the skeleton is the serial one bit
-     for bit on every rank;
+  1. over two and three simulated ranks the skeleton is the serial one on
+     every rank: bit for bit under the recording BLAS, to CROSS_PATH_RTOL
+     under any other, where the ranks' own mean fields (each simulated rank
+     solves its SCF in its own thread) round differently from the serial
+     solve in their last bits;
   2. the ranks together evaluate each block's three-centre integrals once,
      as the serial run does, not once per rank.
 
@@ -26,6 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__),
 import src.environments.pcm_derivatives as pcm_derivatives
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.mean_field_response import reaction_field_skeleton
+from tests.pins import CROSS_PATH_RTOL, RECORDING_BLAS, blas_identity
 
 ATOMS = 'O 0.0 0.05 0.1173; H 0.02 0.7572 -0.4692; H 0.0 -0.7672 -0.4592'
 #: cavity points per block, so that the cavity is several blocks
@@ -82,6 +86,8 @@ def test_the_ranks_share_the_cavity_blocks(counted, ranks):
         mf = mean_field()
         return reaction_field_skeleton(mf, gamma(mf.mo_coeff.shape[1]))
     out = run_simulated(one, ranks)
+    exact = RECORDING_BLAS == blas_identity()
+    bar = 0.0 if exact else CROSS_PATH_RTOL * np.abs(serial).max()
     for g in out:
-        assert np.array_equal(g, serial), np.abs(g - serial).max()
+        assert np.abs(g - serial).max() <= bar, (np.abs(g - serial).max(), bar)
     assert sum(counted.values()) == once, (sum(counted.values()), once)
