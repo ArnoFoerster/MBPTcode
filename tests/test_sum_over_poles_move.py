@@ -8,7 +8,12 @@ gate here is a few ulp (`same`), not a method tolerance, and the reference each 
 compares against is a verbatim copy of the original code: recomputing it
 through the production module would gate nothing.
 
-The quasiparticle root of `qp_energy_sop` is the one piece NOT kept as the
+The auxiliary-pole fit is not kept as the original code either: production
+eliminates the amplitudes before the least squares, so its reference is the
+full least squares, on blocks of full numerical rank where the two give one
+answer, to REDUCED_FIT_REL_BAR rather than a few ulp.
+
+The quasiparticle root of `qp_energy_sop` is the other piece NOT kept as the
 original code: the original's seeded Newton is replaced by the one root
 finder of `Solvers.qp_equation`,
 which brackets every root between the poles and keeps the largest Z. Both
@@ -36,6 +41,10 @@ What breaks each gate:
     -0.530410948641 Ha against the -0.518042446697 Ha of the equation it was
     supposed to solve, 1.2e-02 Ha apart -- which is also what makes the
     comparison against the pointwise scan a real check and not an identity.
+  * one direction of the range of K left out of the vector fit's
+    projection: on the exact model the poles move by 2.3 relative against
+    the full least squares
+    (`test_the_fit_is_the_full_least_squares_where_that_is_well_conditioned`).
   * the import gate cannot be broken from inside production -- importing
     anything of `src.gradients` there is circular and dies at import time --
     so its sensitivity is a positive control inside the same test: the
@@ -102,28 +111,34 @@ def _old_initial_poles(n_poles, gap, e_max):
     return np.logspace(np.log10(gap), np.log10(e_max), int(n_poles))
 
 
-def _old_fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None):
-    wc = np.asarray(wc, float)
+def _full_fit_poles(wc, nu_points, poles, n_iter=5, stride=1, bounds=None,
+                    merge_tol=prod.SOP_POLE_MERGE_TOL, ranks=None):
+    """Vector fitting with the full least squares: every column's amplitudes
+    a_j and the weight b in one (n_col nfreq) x (n_col + 1) M block, solved by
+    lstsq. Production eliminates the a_j first; where this block has full
+    numerical rank the two give one b. ranks: a list that receives
+    (rank, columns, condition number) of each pass's block."""
     om = np.asarray(poles, float).copy()
-    n_poles = om.size
-    lo, hi = bounds if bounds is not None else (om[0], om[-1])
+    lo, hi = bounds
     u_s = -np.asarray(nu_points, float) ** 2
-    cols = range(0, wc.shape[1], max(int(stride), 1))
-    f_cols = [wc[:, q] for q in cols]
-    n_col = len(f_cols)
-    for _ in range(int(n_iter)):
+    f = np.asarray(wc, float)[:, ::stride].T
+    n_col, n_freq = f.shape
+    for _ in range(n_iter):
+        om = prod.merge_poles(om, merge_tol)
+        m = om.size
         kern = 1.0 / (u_s[:, None] - (om ** 2)[None, :])
-        block = np.zeros((len(u_s) * n_col, n_col * n_poles + n_poles))
-        rhs = np.concatenate(f_cols)
-        for j, f in enumerate(f_cols):
-            rows = slice(j * len(u_s), (j + 1) * len(u_s))
-            block[rows, j * n_poles:(j + 1) * n_poles] = kern
-            block[rows, -n_poles:] = -f[:, None] * kern
-        x, *_ = np.linalg.lstsq(block, rhs, rcond=None)
+        block = np.zeros((n_freq * n_col, (n_col + 1) * m))
+        for j in range(n_col):
+            rows = slice(j * n_freq, (j + 1) * n_freq)
+            block[rows, j * m:(j + 1) * m] = kern
+            block[rows, -m:] = -f[j][:, None] * kern
+        x, _, rank, sv = np.linalg.lstsq(block, f.reshape(-1), rcond=None)
+        if ranks is not None:
+            ranks.append((rank, block.shape[1], sv[0] / sv[-1]))
         zeros = np.linalg.eigvals(np.diag(om ** 2)
-                                  - np.ones((n_poles, 1)) @ x[-n_poles:][None, :])
+                                  - np.ones((m, 1)) @ x[-m:][None, :])
         om = np.sqrt(np.sort(np.clip(np.real(zeros), lo ** 2, hi ** 2)))
-    return om
+    return prod.merge_poles(om, merge_tol)
 
 
 def _old_denominators(omega, poles, eps, nocc):
@@ -259,8 +274,51 @@ def test_the_constants_kept_their_values():
                                      SOP_N_POLES, SOP_FIT_STRIDE)
 
 
-def test_the_fit_is_the_old_fit_on_the_model():
-    """Exact-model screening: poles, basis, pseudoinverse, amplitudes."""
+#: Relative distance allowed between the reduced fit's poles and the full
+#: least squares' where that block has full numerical rank (condition number
+#: below FULL_BLOCK_COND_MAX). The two solve one problem by different
+#: factorizations, so they part by about the condition number times the
+#: rounding: measured 7e-15 to 9e-13 on the cases below (conditions 1e5 to
+#: 2e7). A projection that misses part of the range of K moves the poles by
+#: 1e-3 and more.
+REDUCED_FIT_REL_BAR = 1e-10
+FULL_BLOCK_COND_MAX = 1e8
+
+
+def model_cases():
+    """(name, wc, M, bounds) of the well-conditioned fits: the exact
+    three-pole model, and screenings of 4 to 6 poles fitted by 3 and 4."""
+    nu, _ = model_grid()
+    yield 'exact model', model_wc(nu), 3, (0.05, 20.0)
+    rng = np.random.default_rng(7)
+    for n_true in (4, 5, 6):
+        true = np.sort(rng.uniform(0.5, 4.0, n_true))
+        wc = _old_pole_basis(nu, true) @ rng.uniform(0.01, 0.1, (n_true, 8))
+        for m in (3, 4):
+            yield f'{n_true} poles by {m}', wc, m, (0.3, 6.0)
+
+
+def test_the_fit_is_the_full_least_squares_where_that_is_well_conditioned():
+    """The reduced fit against the full one, on blocks of full rank.
+
+    On water's screening the full block is NOT of full rank (46 of 48 columns
+    at a condition of 1e14): lstsq's cut drops two directions and its b does
+    not minimize the residual, so the two fits part there by design."""
+    nu, _ = model_grid()
+    for name, wc, m, bounds in model_cases():
+        start = prod.initial_poles(m, 0.3, 6.0)
+        ranks = []
+        full = _full_fit_poles(wc, nu, start, bounds=bounds, ranks=ranks)
+        assert all(r == n and c < FULL_BLOCK_COND_MAX for r, n, c in ranks), (
+            name, ranks)
+        got = prod.fit_poles(wc, nu, start, bounds=bounds)
+        assert got.shape == full.shape, (name, got, full)
+        rel = np.abs(got - full).max() / np.abs(full).max()
+        assert rel < REDUCED_FIT_REL_BAR, (name, rel)
+
+
+def test_the_basis_is_the_old_basis_on_the_model():
+    """Exact-model screening: basis, pseudoinverse, amplitudes."""
     nu, _ = model_grid()
     wc = model_wc(nu)
     start = prod.initial_poles(3, 0.3, 6.0)
@@ -270,12 +328,12 @@ def test_the_fit_is_the_old_fit_on_the_model():
          _old_pole_pseudoinverse(nu, POLES), 'pseudoinverse')
     same(prod.pole_amplitudes(wc, POLES, nu),
          _old_pole_amplitudes(wc, POLES, nu), 'amplitudes')
-    same(prod.fit_poles(wc, nu, start, bounds=(0.05, 20.0)),
-         _old_fit_poles(wc, nu, start, bounds=(0.05, 20.0)), 'fit')
 
 
-def test_the_fit_is_the_old_fit_on_water(water):
-    """The vector fitting and its entry point, where the fit is not exact."""
+def test_the_entry_point_is_the_fit_on_water(water):
+    """The entry point's poles are the merged fit and its amplitudes the old
+    map of them, where the fit is not exact (the fit itself is gated against
+    the full least squares on the model cases)."""
     eps, nocc, b, c_ov, nu, _ = water
     d = ov_energies(eps, nocc)
     gap, top = float(d.min()), float(d.max())
@@ -283,12 +341,6 @@ def test_the_fit_is_the_old_fit_on_water(water):
     same(start, _old_initial_poles(SOP_N_POLES, gap, top), 'initial poles')
     for p in states(nocc):
         wc = wc_explicit(b[:, p, :], c_ov, d, nu)
-        # the reference relocation is production's with coalesced poles kept
-        # (merge_tol=None); the entry point merges them (SOP_POLE_MERGE_TOL)
-        same(prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                            bounds=(gap, top), merge_tol=None),
-             _old_fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
-                            bounds=(gap, top)), ('fit', p))
         poles, amp = prod.sop_from_wc(wc, nu, eps, nocc)
         merged = prod.fit_poles(wc, nu, start, stride=SOP_FIT_STRIDE,
                                 bounds=(gap, top))
