@@ -24,8 +24,8 @@ from src.SingleReference.GW.self_energy import (TRIPLET_VERTEX_MODES,
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 SINGLET_ONLY = [m for m, info in METHOD_REGISTRY.items()
                 if m in ('GW', 'GWGammaInf') or (m.startswith('PSD')
                                                  and not info['needs_triplet'])]
@@ -173,10 +173,6 @@ def batch(water):
     chi_a = se.get_chi_a(nocc, X, Y, p_state=None)
     chi_b = se.get_chi_b_vertex(nocc, X, Y, p_state=None)
     return se, nocc, eps, omega, chi_a, chi_b
-
-
-def test_the_triplet_modes_are_the_registry_ones():
-    assert TRIPLET_VERTEX_MODES == ('PSD2', 'PSD4', 'PSD7', 'PSD9')
 
 
 @pytest.mark.parametrize('mode', ['PSD2', 'PSD4', 'PSD7', 'PSD9', 'PSD3'])

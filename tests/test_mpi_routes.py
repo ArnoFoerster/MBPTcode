@@ -158,7 +158,7 @@ Checks (path; standard):
     nothing reachable from it holding the grid whole beside a factor's or
     the fit's width, its rows the row fit's own at this rank's tiles
     (exact); the row fit's own adjoint in the nuclear assembly against the
-    whole adjoint, which refits the same estimator with `fit_M_stable`
+    whole adjoint, which refits the same estimator with `fit_M`
     (stated, FIT_REALIZATION_FORCE_TOL), and each assembly traced line by
     line in every frame under
     src/: no array of the grid by a factor's, the fit's or the test set's
@@ -276,6 +276,7 @@ from tests.reduction_bounds import reduced_sum_verdict
 from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
 warnings.simplefilter('ignore')
 
@@ -298,7 +299,6 @@ SOP_ANCHOR_K = 5
 #: Fixed ulp draws the anchor takes the largest response over: one draw alone
 #: spans 3.9e-12 to 5.9e-11 on the adjoints.
 SOP_ANCHOR_SEEDS = 3
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: The package whose frames the assembly scan traces.
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
     __file__))), 'src') + os.sep
@@ -1743,7 +1743,7 @@ def row_fit_chain_routes(gate, mol):
     `fit='rows'` builds each rank's rows with `separable_ri.fit_rows`, so no
     rank forms the fit whole; it is another realization of the whole fit's
     estimator (`fit_M_streaming` on the frozen layout, every product pair in
-    the Gram matrix), and so is the whole assembly's `fit_M_stable`: both
+    the Gram matrix), and so is the whole assembly's `fit_M`: both
     forces are gated at FIT_REALIZATION_FORCE_TOL, the resolution of the
     fit's Gram solve. A different estimator on either side (the Gram matrix
     over the screened pairs alone, say, on a molecule whose screen drops
@@ -1804,7 +1804,7 @@ def row_fit_chain_routes(gate, mol):
     nrows = len(rows)
     del arrays, rows
     # the nuclear assembly: the row fit's adjoint in its tiles against the
-    # whole adjoint, which refits the estimator with fit_M_stable
+    # whole adjoint, which refits the estimator with fit_M
     whole_asm = [(FactorChain, 'row_fit_branches', whole_row_fit_branches),
                  (factor_chain, 'orbital_rotation_rows', gathered_rotation)]
     g_asm = swapped(gate, whole_asm, lambda: force(**rows_kw)[1])

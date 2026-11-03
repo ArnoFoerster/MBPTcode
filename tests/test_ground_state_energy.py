@@ -43,9 +43,10 @@ from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: The working directory a fresh interpreter needs for `import src...`.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

@@ -24,8 +24,7 @@ ADC2_METHODS = ('adc2', 'scs-adc2')
 #: Why an SCS-ADC(2) minimum carries no spin-orbit coupling.
 SCS_SOC_REFUSAL = ('SCS is not well-defined for spin-orbit coupling: spin-component scaling breaks '
                    'spin-rotation symmetry and splits the sublevels of a triplet (Ms = +-1 against Ms = 0, '
-                   'SingleReference.ADC.eeADC.ee_ri_flip; 0.38 eV for the T1 of '
-                   '4-(dimethylamino)benzonitrile in aug-cc-pVDZ), so SCS-ADC(2) gives energies and '
+                   'SingleReference.ADC.eeADC.ee_ri_flip), so SCS-ADC(2) gives energies and '
                    'geometries only; take the spin-orbit couplings from ADC(2)')
 
 

@@ -23,13 +23,14 @@ import numpy as np
 from pyscf import gto, scf, tdscf
 
 from src.properties import characters                              # noqa: E402
+from tests.molecules import WATER_ROUNDED_LOW
 
 
 def _water_sto3g_tda():
     """Water/STO-3G/RHF, the four lowest TDA singlets: the smallest case with
     a nontrivial (C2v) point group and more than one irrep among the roots.
     """
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='sto-3g', symmetry=True, verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12

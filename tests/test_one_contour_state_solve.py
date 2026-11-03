@@ -29,6 +29,7 @@ from src.SingleReference.GW.space_time import separable_factors
 import src.gradients.gwbse.qp_space_time as qst
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 EPS = np.array([-0.95, -0.62, -0.48, 0.12, 0.31, 0.77])
 NOCC = 3
@@ -54,7 +55,7 @@ def test_one_static_term():
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol = 1e-12

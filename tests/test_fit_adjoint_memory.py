@@ -57,11 +57,11 @@ from src.gradients.isdf_derivatives import (dfactor_adjoint_gauges,
                                             whole_fit_adjoint_gb)
 from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 BASIS = 'cc-pvdz'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: The molecules the whole-form gates run on.
 CAP_MOLECULES = {
     'water': WATER,

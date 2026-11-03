@@ -31,7 +31,7 @@ every rank returns the whole product.
 import numpy as np
 
 from src.Base.utils.parallel.mpi_grid import contiguous_block, current_comm, reduce_sum
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.common.eri_blocks import b_block
 from src.SingleReference.common.mp_amplitudes import chunk_ranges, occ_chunk
 

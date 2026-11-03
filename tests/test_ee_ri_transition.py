@@ -16,7 +16,7 @@ many tiles. Checks:
      ulp.
   4. refusals: an ADC(1) operator, roots of operators on other factors, a
      pair naming a root not given.
-  5. a pass (ee_ri_density.Pass) over 2 and 3 simulated ranks sums its tiles
+  5. a pass (ee_ri_tiles.Pass) over 2 and 3 simulated ranks sums its tiles
      to the serial bits, and no rank receives another rank's addends.
 
 Run: python tests/test_ee_ri_transition.py
@@ -32,7 +32,7 @@ import numpy as np
 
 from src.Base.numerics.constants import ADC2_SPIN_SCALING
 from src.Base.utils.parallel.simulated_comm import SimulatedComm, run_simulated
-from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_density, ee_ri_fold
+from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold, ee_ri_tiles
 from src.SingleReference.ADC.eeADC import ee_ri_transition as ert
 from src.SingleReference.ADC.eeADC import ee_transition_density as etd
 from tests.adc_common import AUX, WATER_ORIGIN, check, rhf_df
@@ -163,7 +163,7 @@ def check_pass():
         log = None if comm is None else _GatherLog(comm)
         ranks = 1 if comm is None else comm.Get_size()
         rank = 0 if comm is None else comm.Get_rank()
-        acc = ee_ri_density.Pass(SimpleNamespace(comm=log), shapes)
+        acc = ee_ri_tiles.Pass(SimpleNamespace(comm=log), shapes)
         for t in range(ntiles):
             if t % ranks == rank:
                 acc.add(t, adds[t])

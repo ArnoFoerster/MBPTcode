@@ -25,7 +25,8 @@ from src.photophysics.chain import chain_spec
 from src.photophysics.cli import parser
 from tests.isdf_test_grid import g1_numerics
 from tests.photophysics_cases import declaration
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+from tests.molecules import WATER
+H2O = WATER
 
 
 @pytest.fixture(scope='module')

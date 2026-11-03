@@ -27,8 +27,8 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.self_energy import SelfEnergySolver, TRIPLET_VERTEX_MODES
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def check(ok, label, detail=''):

@@ -37,7 +37,7 @@ __all__ = [
     'generated_header', 'write_source', 'write_module', 'module_subdir', 'write_adc_module',
     'shape_expr', 'amp_leaves', 'signed_terms', 'term_has_factor', 'pq_terms']
 
-EINSUM_IMPORTS = "import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n"
+EINSUM_IMPORTS = "import numpy as np\nfrom src.Base.utils.cached_einsum import einsum\n"
 # Laplace-fused modules build their minimax grid in the function body.
 LAPLACE_IMPORTS = EINSUM_IMPORTS + "from src.Base.utils.grids.grids import minimax_time_grid\n"
 

@@ -87,6 +87,7 @@ from tests.test_isdf_fit_ranks import FIT_TOL
 from tests.test_simulated_ranks import NFREQ, NTAU, REL, SIGMA_REL, close
 from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_kw
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 SIZES = [2, 3, 8]
 #: Rank sizes with a rank 2 to perturb.
@@ -97,7 +98,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

@@ -5,14 +5,14 @@ Lagrangian before the multiplier solve (`qp_xc_correction_Y`, the shape of
 `mean_field_response.fock_partial_Y`), and its skeleton with the coefficients
 held fixed (`qp_xc_correction_skeleton`). On Hartree-Fock both derivatives
 vanish. The operator is the one the quasiparticle solve adds
-(`qp_solve.mean_field_static_operator`).
+(`mean_field_operators.mean_field_static_operator`).
 """
 import numpy as np
 
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.factorization.isdf_jk import ISDFJK
 from src.Base.pyscf.pyscf_interface import response_kernel
-from src.SingleReference.GW.qp_solve import mean_field_static_operator
+from src.SingleReference.common.mean_field_operators import mean_field_static_operator
 from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels, xc_hybrid_coeff
 from src.gradients.isdf_derivatives import (isdf_fock_partial_exchange,
                                             require_fitted_coulomb)

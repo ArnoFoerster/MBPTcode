@@ -87,8 +87,8 @@ from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator, singlet_pairs,
                                                       spin_weights, tile_amplitude_fock,
                                                       triplet_pairs)
-from src.SingleReference.ADC.eeADC.ee_ri_density import (Pass, oo_contract, tile_ranges,
-                                                     vv_contract)
+from src.SingleReference.ADC.eeADC.ee_ri_tiles import (Pass, oo_contract, tile_ranges,
+                                                   vv_contract)
 # symmetrize is also read from here (df_correlation_force_tiled: erd.symmetrize)
 from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
@@ -132,40 +132,6 @@ def dense_inputs(op):
     L = f.LT.transpose(1, 2, 0)
     return (np.array(f.eo), np.array(f.ev), np.ascontiguousarray(L),
             np.ascontiguousarray(f.Boo), np.ascontiguousarray(Bvv))
-
-
-def dense_phi(inp, y, omega, spin, level='adc2', rf=None, scaling=None):
-    """Phi = y^T A_eff(omega) y from whole tensors (module docstring); rf a
-    TransitionReactionField or None; scaling (c_os, c_ss) of SCS-ADC(2) or
-    None."""
-    eo, ev, L, Boo, Bvv = inp
-    no, nv = eo.size, ev.size
-    y = np.asarray(y, float).reshape(no, nv)
-    singlet = spin == 'singlet'
-    phi = float(np.sum(y * y * (ev[None, :] - eo[:, None])))
-    c = np.einsum('iaP,ia->P', L, y)
-    ex = np.einsum('ia,ijP,abP,jb->', y, Boo, Bvv, y)
-    phi += (2.0 * c @ c - ex) if singlet else -ex
-    if rf is not None and singlet:
-        q = rf.V.T @ y.ravel()
-        phi += 2.0 * q @ (rf.Q @ q)
-    if level == 'adc1':
-        return phi
-    I = np.einsum('iaP,jbP->iajb', L, L)
-    D = doubles_denominator(eo, ev)
-    tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
-    x_oo = 0.5 * np.einsum('kdic,kdjc->ij', I, tau)
-    x_vv = 0.5 * np.einsum('kalc,kblc->ab', I, tau)
-    xo, xv = x_oo + x_oo.T, x_vv + x_vv.T
-    if singlet:
-        K, T = 2.0 * I - I.transpose(PAIR), tau
-    else:
-        K, T = -I.transpose(PAIR), triplet_pairs(I, I.transpose(PAIR), scaling) / D
-    Ky = np.einsum('iakc,kc->ia', K, y)
-    Ty = np.einsum('iakc,kc->ia', T, y)
-    phi += float(np.sum(y * (xo @ y + y @ xv)) - np.sum(Ky * Ty))
-    R, H, _ = _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling)
-    return phi + float(np.sum(R * H))
 
 
 def _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling=None):

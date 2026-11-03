@@ -27,8 +27,9 @@ from src.environments.pcm_derivatives import (LIBCINT_BLOCK_LIMIT, PYSCF_PCM_MAX
                                               solvation_gradient)
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER_ROUNDED
 
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: cavity points per block once the limit is lowered
 POINTS = 7
 

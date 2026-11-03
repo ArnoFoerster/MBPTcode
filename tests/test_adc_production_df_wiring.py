@@ -39,6 +39,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri, get_two_electron_integrals_chemist, DFIntegrals,
 )
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 pytestmark = requires_runtime(4)
 
@@ -100,7 +101,7 @@ def main():
           f"(max diff={diff:.2e}): {'OK' if ok else 'FAIL'}")
 
     # --- 4. the df= flag wiring on the unified solver ---
-    mol2 = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g', verbose=0)
+    mol2 = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g', verbose=0)
     mf_dense = scf.RHF(mol2).run()
     homo_index = mol2.nelectron // 2 - 1
     mf_df = scf.RHF(mol2).density_fit(auxbasis='cc-pvdz-jkfit').run()

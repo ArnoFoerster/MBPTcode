@@ -498,7 +498,7 @@ def exchange_skeleton_tiles(mol):
     return shell_runs(mol.ao_loc_nr(), SKELETON_EXCHANGE_TILE)
 
 
-def exchange_skeleton_by_atoms(mol, g_ao, D, omega, weight, comm=None):
+def exchange_skeleton_tiled(mol, g_ao, D, omega, weight, comm=None):
     """(natm, 3) of weight * d/dR of one four-centre exchange channel
     (`mean_field_response.exchange_channel_skeleton`): both densities through
     one direct pass (`derivative_exchange_rows`) under the attenuation

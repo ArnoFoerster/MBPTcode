@@ -36,6 +36,7 @@ import pytest
 
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.SingleReference.GW import auxiliary_bosons as prod
+from tests.molecules import WATER_ROUNDED
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -169,7 +170,7 @@ def test_a_real_molecule_agrees_on_the_physical_output():
     from pyscf import gto, scf
     from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
     from src.Base.orbital_spaces import get_occ_virt_indices
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)

@@ -47,8 +47,8 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests.blas_bar import PIN_FILE, assert_same
 from tests.pins import RECORDING_BLAS, blas_identity, matches, recorded_blas
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 #: Grid points per ISDF tile: water's 444 points in 7 tiles.
 TILE = 64

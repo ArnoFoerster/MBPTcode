@@ -61,6 +61,8 @@ src/Base/                      the foundation
                                solvers, the distributed ELPA eigensolve
     utils/parallel/            the MPI region (mpi_grid.py), thread pools,
                                memory budgets
+    utils/record_compat.py     every rule for reading a record an earlier
+                               form of the code wrote
     utils/record_io.py         JSON records and checkpoints, the code id a
                                record carries
     utils/timing.py            wall-clock seconds of a named stage,

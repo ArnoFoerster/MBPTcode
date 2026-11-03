@@ -17,7 +17,7 @@ ntau to the exact amplitude.
 import numpy as np
 
 from src.Base.utils.grids.grids import minimax_time_grid
-from src.SingleReference.CC.cached_einsum import FactorizedOperand
+from src.Base.utils.cached_einsum import FactorizedOperand
 
 
 def denominator_grid(eps_occ, eps_vir, rank, ntau):

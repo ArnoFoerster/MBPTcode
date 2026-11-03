@@ -561,11 +561,13 @@ def _rotations(sg, s1, t1):
     return {'S1': rot_s, 'T1': rot_t}
 
 
-def rate_chain(inputs, model, temperature, shared=None):
+def rate_chain(inputs, model, temperature, gaps, shared=None):
     """ISC and RISC of one method on the declared `RateModel`, s^-1.
 
-    inputs: the method's `RateInputs`. shared: the reference `RateInputs`
-    (GW-BSE's) whose coupling soc='shared' reads; None otherwise.
+    inputs: the method's `RateInputs`. gaps: the declared gap rule of the
+    state manifold (`rates.ManifoldGaps`, `rate_models.manifold_gaps`), no
+    default. shared: the reference `RateInputs` (GW-BSE's) whose coupling
+    soc='shared' reads; None otherwise.
 
     The S1 <-> T1 bath is one Duschinsky model, T1 the 'ground' state and
     S1 the 'excited' one: ISC is its emission direction, RISC its absorption.
@@ -663,7 +665,7 @@ def rate_chain(inputs, model, temperature, shared=None):
             else (initial.reservoir, initial.emitter, e_t1, e_s1))
         man = rates.manifold_crossings(
             levels, first, second, e_first, e_second, bath, temperature,
-            average, k, rates.ManifoldGaps('stacked', None))
+            average, k, gaps)
         out[name] = {'dE_eV': de * HARTREE_TO_EV,
                      'lambda_solvent_eV': (None if lam_solv is None
                                            else lam_solv * HARTREE_TO_EV),
@@ -751,12 +753,13 @@ def _kinetics(s1, k_isc, k_risc):
     return {'k_r': k_r, 'pl': rates.photoluminescence(k_r, k_isc, k_risc)}
 
 
-def ablation_ladder(inputs, full, temperature, shared):
+def ablation_ladder(inputs, full, temperature, gaps, shared):
     """[{'step', 'model', 'table' or 'refused'}] down `ABLATION_LADDER`
     from the model `full`, each rung removing one more ingredient; the
     assumed-lambda rungs both stand on the 'mlj' one, and the quantum soft
     mode and rectilinear Duschinsky rungs on 't1_only' (the next rung keeps
-    the classical block and the curvilinear J). `shared` is the
+    the classical block and the curvilinear J), every rung on the gap rule
+    `gaps` (`rate_chain`). `shared` is the
     reference `RateInputs` of the shared-coupling rung (the method's own
     for the reference method itself). A rung the inputs cannot carry, or
     whose switches do not make a `RateModel` (the 'mlj' rung of a model with
@@ -775,7 +778,7 @@ def ablation_ladder(inputs, full, temperature, shared):
             continue
         try:
             out.append({'step': step, 'model': fields,
-                        'table': rate_chain(inputs, model, temperature,
+                        'table': rate_chain(inputs, model, temperature, gaps,
                                             shared=shared)})
         except RateRefused as why:
             out.append({'step': step, 'model': fields, 'refused': str(why)})

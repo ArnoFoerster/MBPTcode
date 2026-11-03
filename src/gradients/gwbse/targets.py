@@ -7,6 +7,7 @@ correctness). Index map for boson pairs: I = i * nvirt + (a - nocc).
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, cg
 
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import (QB_Z_DEGENERATE_REL, QB_Z_MAX_ITER,
                                          QB_Z_PRECONDITIONER_FLOOR, QB_Z_RESIDUAL_REL,
                                          QB_Z_SOLVE_TOL)
@@ -198,7 +199,7 @@ def solve_Z(qb, t_grad, tol=QB_Z_SOLVE_TOL, verbose=False, flags=None):
              f'{res:.3e}; its last iterate is returned',
              QuasiBosonZNotConverged, into=flags)
     Z = V @ (0.5 * (z.reshape(n, n) + z.reshape(n, n).T)) @ V.T
-    if verbose:
+    if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
         print(f"    [Z] res={res:.3e} |Z|={np.abs(Z).max():.3e}")
     return 0.5 * (Z + Z.T)
 

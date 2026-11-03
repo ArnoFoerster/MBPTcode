@@ -66,12 +66,10 @@ from tests.archive_radii import install_current_radii
 from src.Base.factorization import distributed_df
 from src.Base.utils.parallel import memory
 from src.Base.numerics.constants import COMPOSED_GRAD_K
-from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF,
-                                                   DistributedNumInt, distributed_df_jk,
-                                                   distributed_df_storage,
-                                                   distributed_handles,
-                                                   distributed_mean_field,
-                                                   distributed_numint)
+from src.Base.factorization.df_distribution import distributed_handles
+from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF, DistributedNumInt,
+                                                   distributed_df_jk, distributed_df_storage,
+                                                   distributed_mean_field, distributed_numint)
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.utils.parallel.mpi_grid import (
     contiguous_block, current_comm, distributed, lockstep_stats)
@@ -79,6 +77,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
 from tests.isdf_test_grid import g1
 from tests.pins import THREAD_CAPS
+from tests.molecules import WATER
 
 SIZES = [2, 3]
 #: The widest world the gates run: more ranks than water's density fit has
@@ -107,7 +106,6 @@ PERTURBATION = 1e-6
 #: enough into the iteration that DIIS holds several vectors, so a rank that
 #: kept its own density would extrapolate another Fock matrix from there on.
 PERTURBED_BUILD = 4
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
 CASES = [('water', WATER, 'cc-pvdz', None),

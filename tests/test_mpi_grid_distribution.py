@@ -38,6 +38,7 @@ from tests.test_sliced_factors import (rank_partials, reassociation_bar,
                                        scatter_shapes)
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
 comm, rank, size = grid_comm()
 
@@ -203,7 +204,7 @@ st.polarizability_projected_sweep, st.owned_frequency_blocks = sweep, blocks
 all_ok &= check(dets == {'nonpositive_det': [BAD]},
                 'every rank names the frequency one rank owns', str(dets))
 
-mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+mol = gto.M(atom=WATER,
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri'); mf.kernel()
 nocc = mol.nelectron // 2

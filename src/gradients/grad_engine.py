@@ -31,6 +31,7 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf import grad as _pyscf_grad  # registers mf.Gradients()
 
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import DERIV_BLOCK_BYTES
 from src.SingleReference.common.eri_blocks import MOEriBlocks
 from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
@@ -277,7 +278,7 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
                                      numerics=numerics, verbose=verbose)
         Y_tot = Y_E + _y_fold_lambda(Lam, F_mo, eri_mo, nocc)
         stat = np.abs(Y_tot - Y_tot.T).max()
-        if verbose:
+        if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
             print(f"    [stationarity] |antisym Y_tot| = {stat:.3e}")
         # dL under dC = C X: X_up coefficient Y_tot,up + M_pu + M_up = 0 with
         # M symmetric and antisym(Y_tot) = 0 enforced => M = -Y_tot/2.

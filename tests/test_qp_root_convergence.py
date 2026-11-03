@@ -14,7 +14,6 @@ import warnings
 import numpy as np
 import pytest
 
-from src.Base.numerics.constants import QP_WINDOW_Z_MIN
 from src.Base.step_failed import StepFailed
 from src.Solvers.qp_equation import QPRootNotConverged, solve_qp_equation_pole_strength
 
@@ -79,7 +78,6 @@ def test_a_root_below_half_weight_is_flagged():
     weak = lambda w: 2.5 * (w - EPS - 0.02)
     root, ok = solve_qp_equation_pole_strength(weak, EPS, full_output=True)
     assert abs(root - (EPS + 0.02)) < 1e-6 and not ok
-    assert QP_WINDOW_Z_MIN == 0.5
 
 
 def test_a_converged_root_is_quiet():

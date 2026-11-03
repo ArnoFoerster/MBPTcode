@@ -22,8 +22,9 @@ from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.LinearResponse.block_actions import df_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 BASIS, AUXBASIS, XC = 'cc-pvdz', 'cc-pvdz-jkfit', 'pbe0'
 #: Ha. Two associations of one contraction.
 ROUNDOFF = 1e-11

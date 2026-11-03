@@ -21,8 +21,8 @@ from src.Base.numerics.numerics import Numerics
 from src.Base.geometry.geometry import molecule_at
 from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface, tight_rhf
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: Bohr along the stretch: a far probe, then a geometry near the reference
 FAR, NEAR = 0.6, -0.02
 INNER_VALENCE = 1

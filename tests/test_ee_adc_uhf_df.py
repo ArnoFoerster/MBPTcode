@@ -11,6 +11,8 @@ radical whose degenerate singly-occupied shell broke the MP denominators
 once, so it is deliberately kept in), plus a closed shell driven through the
 unrestricted path as a degenerate case.
 """
+import itertools
+
 import numpy as np
 import pytest
 from pyscf import gto, scf
@@ -21,6 +23,7 @@ from src.SingleReference.ADC.eeADC import (ee_driver, ee_utils, ee_u_dense_full,
 from src.SingleReference.ADC.eeADC import ee_u_r_sigma_df as u
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Base.numerics.constants import HARTREE_TO_EV
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 LEVELS = ('adc1', 'adc2', 'adc2x', 'adc3')
 
@@ -29,8 +32,33 @@ CASES = {
     'nh2': ('N 0 0 0; H 0 1.0 0.3; H 0 -1.0 0.3', 1, 'sto-3g'),
     'ch3': ('C 0 0 0; H 0 1.08 0; H 0.935 -0.54 0; H -0.935 -0.54 0',
             1, 'sto-3g'),
-    'h2o': ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', 0, 'sto-3g'),
+    'h2o': (WATER_AT_ORIGIN_COARSE, 0, 'sto-3g'),
 }
+
+
+def _axis_index_blockstacked(family, spin, no_a, no_b, nv_a, nv_b):
+    """Positions of one spin within an already-sliced BLOCK-STACKED axis.
+
+    ee_driver.spin_orbital_arrays lays a UHF reference out as
+    [occ_a, occ_b, virt_a, virt_b], so within the occupied segment alpha runs
+    first and beta follows -- contiguous ranges, not the interleaving an RHF
+    reference gives."""
+    n_a, n_b = (no_a, no_b) if family == 'o' else (nv_a, nv_b)
+    return np.arange(n_a) if spin == 0 else n_a + np.arange(n_b)
+
+
+def from_spin_orbital_uhf(T, families, no_a, no_b, nv_a, nv_b, tol=0.0):
+    """Slice a BLOCK-STACKED spin-orbital tensor block into spatial spin
+    blocks -- the unrestricted counterpart of from_spin_orbital, and the
+    oracle the unrestricted DF integral blocks are checked against."""
+    out = {}
+    for assign in itertools.product((0, 1), repeat=len(families)):
+        sl = [_axis_index_blockstacked(f, s, no_a, no_b, nv_a, nv_b)
+              for f, s in zip(families, assign)]
+        blk = T[np.ix_(*sl)]
+        if blk.size and np.abs(blk).max() > tol:
+            out[''.join('ab'[s] for s in assign)] = blk
+    return sb.SB(out)
 
 
 def _reference(name):
@@ -85,7 +113,7 @@ def test_integral_blocks_match_spin_orbital(name):
     got = u.g_blocks_df_uhf(dfi.B_aa, dfi.B_bb, no_a, no_b, norb_a, norb_b)
     ref = ee_utils.g_blocks(g, nocc, len(eps))
     for fam in ('oooo', 'ooov', 'oovv', 'ovov', 'ovvv'):
-        oracle = sb.from_spin_orbital_uhf(ref[fam], fam, no_a, no_b,
+        oracle = from_spin_orbital_uhf(ref[fam], fam, no_a, no_b,
                                           nv_a, nv_b)
         for key in set(oracle.keys()) | set(got[fam].keys()):
             A, Bk = oracle.get(key), got[fam].get(key)

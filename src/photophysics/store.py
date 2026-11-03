@@ -45,7 +45,7 @@ import pickle
 import platform
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
-from src.Base.numerics.numerics import without_retired
+from src.Base.utils.record_compat import retired_dropped
 from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, is_root, n_ranks
 from src.Base.utils.parallel.threads import blas_libraries
@@ -70,27 +70,14 @@ def provenance():
             'written': datetime.datetime.now().isoformat(timespec='seconds')}
 
 
-def _without_retired_scf(tree):
-    """`tree` with every scf section in it (a stage's, and the Hessian
-    stage's inside a later stage's stamp) read through `without_retired`."""
-    out = {}
-    for key, value in tree.items():
-        if key == 'scf' and isinstance(value, dict):
-            value = without_retired({'scf': value})['scf']
-        elif isinstance(value, dict):
-            value = _without_retired_scf(value)
-        out[key] = value
-    return out
-
-
 def stamp_as_read(stamp):
     """The held `stamp` as the current code writes it: the retired fields
-    (`numerics.IDENTITY_RETIRED`) at the values they always held left out
+    (`record_compat.NUMERICS_RETIRED`) at the values they always held left out
     and its identity hashed again; a retired field at another value refuses.
     A stamp that names no retired field is returned as it is."""
     bare = {k: v for k, v in stamp.items() if k != 'identity'}
     try:
-        now = _without_retired_scf(bare)
+        now = retired_dropped(bare)
     except ValueError as exc:
         raise StoreRefused(str(exc)) from exc
     if now == bare:

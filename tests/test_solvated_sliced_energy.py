@@ -62,8 +62,8 @@ from src.SingleReference.GW.space_time import (separable_factors,
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 SOLVENT = 'toluene'
 TILE = 64

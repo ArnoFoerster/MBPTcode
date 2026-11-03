@@ -122,7 +122,7 @@ def golden_rule(coupling, rho_fc):
 
 
 def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
-                               temperature, n_max=50):
+                               temperature, n_max):
     """Marcus-Levich-Jortner rate in s^-1.
 
         rho_FC = sum_n e^-S S^n / n! (4 pi lambda_M k_B T)^-1/2
@@ -149,13 +149,14 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         both: S = sum_k S_k over the high-frequency modes and
         omega_eff = sum_k S_k omega_k / sum_k S_k, their Huang-Rhys-weighted
         first moment.
-    n_max: quanta retained in the Poisson sum.
+    n_max: quanta retained in the Poisson sum (the rate chain's
+        RATE_MLJ_N_MAX); too few to hold the Poisson weight are refused.
     """
     return golden_rule(coupling, mlj_density(delta_e, lambda_m, s_eff,
                                              omega_eff, temperature, n_max))
 
 
-def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max=50):
+def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max):
     """rho_FC of `marcus_levich_jortner_rate`, Hartree^-1: the Poisson sum
     over quanta of the effective mode, each a classical Marcus line of
     width lambda_m (same arguments and sign convention)."""

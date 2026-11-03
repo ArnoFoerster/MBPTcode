@@ -35,6 +35,7 @@ def vert(tmp_path, *extra):
 
 def test_energies_skip_the_spin_orbit_pass(tmp_path, monkeypatch):
     full = vert(tmp_path / 'all', '--r0', 'input', '--qp-states', 'admitted')
+    assert full['solvation'] == 'gas'   # R0's medium, as the s1 and t1 records say
     monkeypatch.setattr(stages, 'spin_orbit_couplings',
                         refusing('the spin-orbit pass ran'))
     monkeypatch.setattr(stages, 'analytic_coupling',

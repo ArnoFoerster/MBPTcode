@@ -143,7 +143,7 @@ if __name__ == '__main__':
     print(f'   largest frame change between adjacent theta (step '
           f'{thetas[1] - thetas[0]:.4f} rad):')
     print(f'     reference rule (generic refs) {new_jump:.2e}   continuous')
-    print(f'     retired rule (odd moment)     {old_jump:.2e}   '
+    print(f'     odd-moment rule               {old_jump:.2e}   '
           f'{"= a sign flip" if old_jump > 1.0 else ""}')
     print(f'   {"OK" if ok2 else "FAIL"}')
 
@@ -214,7 +214,7 @@ if __name__ == '__main__':
     #    where e_a depends on `fixed` only via the sign-invariant
     #    (ref.fixed)*fixed). So an SCF checkpoint converged under one
     #    convention stays consistent with a fit built under the other.
-    print('\n5. retired and reference conventions give the SAME grid as a set:')
+    print('\n5. odd-moment and reference conventions give the SAME grid as a set:')
     ok5, worst_same = True, 0.0
     for theta in (0.0, 0.05, -0.05):
         mol = _water(theta)

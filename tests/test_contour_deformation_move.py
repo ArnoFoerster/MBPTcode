@@ -64,6 +64,7 @@ from src.gradients.gwbse import qp_space_time as qst
 from src.gradients.rpa import space_time_adjoint as sta
 from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 # --------------------------------------------------------- the reference code
 # Verbatim reference implementations: a gate that recomputed the reference
@@ -223,7 +224,7 @@ def water():
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
     from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)
@@ -264,7 +265,7 @@ def test_the_gradient_side_holds_no_second_copy():
 def test_frequency_factor_reproduces_the_old_formulas():
     """The dedup onto one function has to be a rounding-for-rounding copy (to
     a few ulp: the old formula is evaluated again)."""
-    rng = np.random.default_rng(20250918)
+    rng = np.random.default_rng(18)
     d = rng.uniform(0.05, 3.0, size=37)
     for w in (0.0, 1e-13, 0.017, 0.31, 2.5, -0.44):
         f, dfd, dfw = frequency_factor(d, w, True, slopes=True)
@@ -289,7 +290,7 @@ def test_the_rpa_frequency_factor_is_untouched():
     static limit, and eta = 0 is a/(a^2+0) - b/(b^2+0), which differs from
     1/a - 1/b in the last bits (5.7e-14 on these pair energies).
     """
-    rng = np.random.default_rng(20250918)
+    rng = np.random.default_rng(18)
     d = rng.uniform(0.05, 3.0, size=37)
     for eta in (0.0, 1e-3, 0.05):
         lr = type('LR', (), {'eta': eta})()

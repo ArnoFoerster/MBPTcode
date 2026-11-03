@@ -47,8 +47,9 @@ from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
 from src.Base.utils.parallel.mpi_grid import distributed, reduce_sum
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests.pins import assert_same
+from tests.molecules import WATER_DISTORTED
 
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 BASIS = 'cc-pvdz'
 N = 40
 ATOL = 1e-12

@@ -12,11 +12,12 @@ from pyscf import dft, gto, scf
 
 from src.gradients.mean_field_response import require_no_range_separation
 from src.Base.pyscf.pyscf_interface import rsh_split, xc_hybrid_coeff
+from tests.molecules import WATER_CS
 
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='sto-3g',
+    return gto.M(atom=WATER_CS, basis='sto-3g',
                  verbose=0)
 
 

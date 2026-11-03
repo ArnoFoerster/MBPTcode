@@ -200,7 +200,8 @@ from src.Base.utils.parallel.memory import allocation_max_memory_mb
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, is_root
 from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_vocabulary import GAS
-from src.Base.utils.record_io import code_id, same_code
+from src.Base.utils.record_compat import SOLVATED_ABSENT, same_code, solvated_absent
+from src.Base.utils.record_io import code_id
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.medium import (CAVITY_CONVENTIONS, DEFAULT_CAVITY,
                                      parse as parse_medium)
@@ -209,7 +210,7 @@ from src.gradients.adc.ee_state_model import ADC2State
 from src.properties.excitations import relaxation_fields, relaxation_flags
 from src.properties.optimize import derived_walk, relax, resolved_conv
 from src.gradients.solvated_surface import SolvatedSurface
-from src.Base.geometry.geometry import molecule_at
+from src.Base.geometry.geometry import elements_of, molecule_at
 from src.photophysics import cli
 from src.photophysics.store import Store, on_root
 from src.photophysics.walks import (checked_minimum, progress_writer,
@@ -230,11 +231,6 @@ ADC2_ONLY = ('auxbasis', 'nroots', 'frozen', 'spin_scaling', 'solvent_arm')
 GWBSE_ONLY = ('reference', 'grid_accuracy', 'bse_solver', 'bse_kernel', 'refreeze',
               'outside_scissor', 'residues', 'xc_grid', 'isdf_test_set',
               'pivot_points')
-#: The settings a record may lack, and the value a record that lacks one was
-#: made with.
-LATER_SETTINGS = dict(outside_scissor=None, residues=None, xc_grid=None,
-                      isdf_test_set=None, pivot_points=None, cavity=DEFAULT_CAVITY,
-                      spin_scaling=None, solvent_arm=None, loop_tolerance='fixed')
 
 
 def _parse_args(argv=None):
@@ -312,7 +308,7 @@ def _parse_args(argv=None):
 RESUME_KEY = ('xyz_sha256', 'basis', 'auxbasis', 'jk_auxbasis', 'solvent', 'frozen',
               'nroots', 'follow', 'saddle_check', 'tol_q', 'tol_energy', 'code',
               'state_method', 'xc', 'isdf_grid', 'bse_solver', 'bse_kernel',
-              'refreeze') + tuple(LATER_SETTINGS)
+              'refreeze') + tuple(SOLVATED_ABSENT)
 
 
 def _settings(args):
@@ -328,18 +324,10 @@ def _settings(args):
                 state_method=args.method, xc=args.reference, isdf_grid=args.grid_accuracy,
                 bse_kernel=args.bse_kernel,
                 bse_solver=args.bse_solver, refreeze=args.refreeze,
-                **{k: getattr(args, k, LATER_SETTINGS[k]) for k in LATER_SETTINGS
+                **{k: getattr(args, k, SOLVATED_ABSENT[k]) for k in SOLVATED_ABSENT
                    if k not in ('cavity', 'solvent_arm')},
                 cavity=_cavity(args),
                 solvent_arm=None if args.solvent is None else getattr(args, 'solvent_arm', None))
-
-
-def _older_setting(rec, key):
-    """The value of a later setting `key` that a record lacking it was made
-    with: an ADC(2) record in a solvent ran the singlet with its LR term."""
-    if key == 'solvent_arm' and rec.get('state_method') == 'adc2' and rec.get('solvent'):
-        return 'ss+lr'
-    return LATER_SETTINGS.get(key, '<absent>')
 
 
 def _basis_setting(args):
@@ -365,7 +353,7 @@ def _start_record(args):
     if rec is None:
         rec = {}
     else:
-        made = {k: rec[k] if k in rec else _older_setting(rec, k) for k in RESUME_KEY}
+        made = {k: rec[k] if k in rec else solvated_absent(rec, k) for k in RESUME_KEY}
         differ = {k: (made[k], settings[k]) for k in RESUME_KEY
                   if made[k] != settings[k]
                   and not (k == 'code' and same_code(made[k], settings[k]))}
@@ -416,20 +404,16 @@ def _save(rec, out):
     on_root(act)
 
 
-def _make_scf(m, jk_auxbasis, xc='hf', xc_grid=None, converged=None):
+def _make_scf(m, jk_auxbasis, converged, xc='hf', xc_grid=None):
     """The density-fitted RHF (or RKS of xc on pyscf's XC grid level xc_grid)
-    of m, converged as `converged` (a Numerics' scf section: conv_tol,
-    conv_tol_grad, max_cycle; the ADC(2) route's, adc2_numerics) or, without
-    one, tightly (1e-12, orbital gradient 1e-10, 200 cycles)."""
+    of m, converged as `converged`, the scf section of the run's Numerics
+    (conv_tol, conv_tol_grad, max_cycle), the one the record states."""
     mf = (scf.RHF(m) if xc == 'hf' else dft.RKS(m, xc=xc)).density_fit(
         auxbasis=jk_auxbasis)
     if xc != 'hf':
         mf.grids.level = xc_grid
-    if converged is None:
-        mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-12, 1e-10, 200
-    else:
-        mf.conv_tol, mf.conv_tol_grad = converged.conv_tol, converged.conv_tol_grad
-        mf.max_cycle = converged.max_cycle
+    mf.conv_tol, mf.conv_tol_grad = converged.conv_tol, converged.conv_tol_grad
+    mf.max_cycle = converged.max_cycle
     mf.verbose = 0
     return mf
 
@@ -525,16 +509,18 @@ def _check_args(args, mol0):
 
 
 def gwbse_numerics(args, mol0):
-    """The one Numerics of a GW-BSE run: the chain's grid (refused here when
-    the radii table lacks an element) and its fit's test set and pivoted
+    """The one Numerics of a GW-BSE run: the chain's grid (refused here,
+    before the first walk, when the radii table lacks a row for an element,
+    or an atom of its own basis, on the factors' paired -ri set) and its fit's test set and pivoted
     points, the quasiparticle options and solver, the reference's XC grid, the loop's
     tolerances; an option not given is the Numerics default (a pivot without
     the AO-product test set is refused there)."""
     bse = {'track': 'overlap' if args.track == 'overlap' else None}
     if args.bse_solver is not None:
         bse['solver'] = args.bse_solver
-    counts = resolve_isdf_grid(args.grid_accuracy, args.basis,
-                               elements=tuple(sorted(set(mol0.elements))))[0]
+    counts = resolve_isdf_grid(args.grid_accuracy, mol0.basis,
+                               elements=elements_of(mol0),
+                               auxbasis=paired_auxbasis(mol0.basis))[0]
     qp = {key: getattr(args, name) for key, name in
           (('outside_scissor', 'outside_scissor'), ('residue_route', 'residues'))
           if getattr(args, name, None) is not None}
@@ -557,15 +543,15 @@ def _factories(args, medium, loop_kw):
         make_field = lambda m: ContinuumField.from_environment(continuum.screening(m))
 
     def make_scf(m):
-        return _make_scf(m, args.jk_auxbasis, args.reference or 'hf',
-                         getattr(args, 'xc_grid', None))
+        return _make_scf(m, args.jk_auxbasis, loop_kw['numerics'].scf,
+                         args.reference or 'hf', getattr(args, 'xc_grid', None))
 
     if args.method == 'gwbse':
         return make_field, gwbse_states(make_scf, loop_kw['numerics'],
                                         args.bse_kernel == 'tda')
 
     def make_adc2_scf(m):
-        return _make_scf(m, args.jk_auxbasis, converged=loop_kw['numerics'].scf)
+        return _make_scf(m, args.jk_auxbasis, loop_kw['numerics'].scf)
 
     arm = getattr(args, 'solvent_arm', None) or SOLVENT_ARMS[0]
 

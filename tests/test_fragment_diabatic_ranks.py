@@ -106,7 +106,7 @@ from src.fragments import localization as fragment_localization
 from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.factorization.distributed_df import distributed_handles
+from src.Base.factorization.df_distribution import distributed_handles
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,

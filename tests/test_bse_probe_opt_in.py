@@ -21,8 +21,9 @@ from src.SingleReference.BSE.solve import solve_bse
 from src.SingleReference.LinearResponse.davidson import CasidaBreakdown
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from tests.isdf_test_grid import g1, g1_kw
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 BASIS, AUXBASIS, XC = 'cc-pvdz', 'cc-pvdz-ri', 'pbe0'
 NROOTS = 3
 #: Ha. The probe reads the roots' action only, so it cannot move them.

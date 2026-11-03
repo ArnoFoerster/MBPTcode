@@ -35,8 +35,9 @@ from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 from pyscf.solvent.pcm import PCM
 
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import ordered_sum, partition
-from src.Base.numerics.constants import (BYTES_PER_GB, INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
+from src.Base.numerics.constants import (INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
                                  PCM_DM_CACHE_TOL, PCM_FORCE_DENSITY_SYMMETRY_TOL)
 
 PI = np.pi
@@ -86,8 +87,7 @@ def cavity_blocks(nao, ngrids, comp=3, budget_gb=PCM_CAVITY_BLOCK_GB):
         raise ValueError(
             f'one cavity point already needs {per_point} integrals, past the '
             f'{LIBCINT_BLOCK_LIMIT} libcint can index in one block')
-    by_memory = int(budget_gb * BYTES_PER_GB / (8.0 * per_point))
-    nk = max(1, min(by_index, by_memory))
+    nk = fits(budget_gb, 8.0 * per_point, cap=by_index)
     return [(k0, min(k0 + nk, ngrids)) for k0 in range(0, ngrids, nk)]
 
 

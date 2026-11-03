@@ -74,7 +74,7 @@ import numpy as np
 
 from src.Base.numerics.constants import KAPPA
 from src.Base.numerics.numerics import Stamped, surface_numerics
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.gradients.surface_identity import FirstPoint
 from src.gradients.gwbse.derivative_coupling import evaluated_coupling

@@ -65,9 +65,10 @@ from tests.blas_bar import same, same_solution  # noqa: E402
 from tests.pins import assert_same_tree  # noqa: E402
 from tests.isdf_test_grid import g1, g1_numerics  # noqa: E402
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: One hydrogen 0.03 A along y: the second geometry of the dense cases.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'
 #: The ISDF-K mean field's grid level and memory (tests/test_one_fit_adjoint.py's).

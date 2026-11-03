@@ -82,6 +82,7 @@ from pyscf import dft, gto, scf
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import qp_solve
+from src.SingleReference.common import mean_field_operators
 from src.SingleReference.GW.evGW import shifted_mean_field
 from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              static_exchange_matrix,
@@ -91,8 +92,8 @@ from src.SingleReference.GW.space_time import (separable_factors,
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: Both references the routes serve: on Hartree-Fock the static term is zero by
 #: construction and on a hybrid it is the whole DFT starting-point correction,
 #: and only the second one pays for the DFT grid.
@@ -311,7 +312,7 @@ def test_one_operator_serves_the_term_and_its_orbital_responses(xc):
         own = -0.5 * mf.get_k(mol, dm) - (mf.get_veff(mol, dm)
                                           - mf.get_j(mol, dm))
     weights = np.linspace(0.1, 1.0, mo.shape[1])
-    qp_solve._STATIC_OPERATORS.clear()
+    mean_field_operators._STATIC_OPERATORS.clear()
     calls, get_k = [], mf.get_k
     mf.get_k = lambda *a, **k: calls.append(1) or get_k(*a, **k)
     matrix = static_exchange_mean_field_matrix(mf, mol)

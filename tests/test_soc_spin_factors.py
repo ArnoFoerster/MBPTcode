@@ -36,6 +36,7 @@ from src.properties.spin_orbit import (coupling, ground_state_element,
                                        soc_operator_mo)
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 
 # The PAULI matrices. h_SO's alpha^2/4 is the prefactor of sigma, not of the
@@ -145,7 +146,7 @@ def normalized_vectors(rng, nocc, nvir, count=2):
 @pytest.fixture(scope='module')
 def water():
     """(mol, mf, h_mo, nocc). Oxygen carries the whole coupling at this size."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12

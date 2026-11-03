@@ -194,10 +194,11 @@ from src.Base.numerics.constants import (CONTINUATION_ROUTE,
 from src.Base.declaration import Excitation
 from src.environments.environment import equilibrium_environment
 from src.Base.geometry.geometry import elements_of, molecule_at
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.pyscf.scf_convergence import WarmStart
 from src.Base.factorization.separable_ri import (frame_turning_record, resolve_isdf_grid,
                                                  shell_tuple)
+from src.Base.utils.record_compat import stamp_unless
 from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,
                                               is_root, mpi_map, n_ranks)
 from src.SingleReference.GW.qp_selection import AdaptivePartition
@@ -243,12 +244,10 @@ CHECKED_STAGES = ('vert', 's1', 't1')
 # ----------------------------------------------------------------- stamps
 def scf_stamp(numerics):
     """The scf section a stamp holds: its record, the mean field's own fit
-    (test_set, pivot_points) left out where undeclared: a stamp without
-    them is a run that declared neither."""
+    (test_set, pivot_points) left out where undeclared (`stamp_unless`)."""
     record = numerics.to_record()['scf']
     for name in ('test_set', 'pivot_points'):
-        if record.get(name) is None:
-            record.pop(name, None)
+        stamp_unless(record, name, record.get(name))
     return record
 
 
@@ -270,15 +269,12 @@ class Stamps:
                   'mean_field': mean_field,
                   'scf': scf_stamp(n),
                   'span': span}
-        if d.policies.r0 != 'walk':
-            # stamped only where R0 is not walked: a stamp without r0 is a
-            # walked run
-            ground['r0'] = d.policies.r0
-        if d.scheme_b:
-            # stamped under scheme B only: a stamp without it is a gas or
-            # scheme-A run, which the environment already tells apart
-            ground['solvent_scheme'] = {'scheme': d.solvent_scheme,
-                                        'loop': n.to_record()['solvent']}
+        # each stamped only away from what its absence means
+        # (record_compat.STAGE_STAMP_ABSENT)
+        stamp_unless(ground, 'r0', d.policies.r0)
+        stamp_unless(ground, 'solvent_scheme',
+                     {'scheme': d.solvent_scheme,
+                      'loop': n.to_record()['solvent']} if d.scheme_b else None)
         hess = dict(ground, hessian=d.policies.hessian)
         if d.policies.hessian == 'external':
             hess['external_hessian'] = d.policies.external_hessian.sha256
@@ -292,9 +288,7 @@ class Stamps:
                         # and place their points on R0's frames
                         fd_hessian={'pair_layout': 'reference',
                                     'frames': REFERENCE_FRAMES})
-        # the property set, stamped where it is not every property alone
-        partial = ({} if d.policies.properties == 'all'
-                   else {'properties': d.policies.properties})
+        partial = stamp_unless({}, 'properties', d.policies.properties)
         vert = dict(ground, numerics=n.identity(), **partial,
                     factors=chain.grid_content(n.isdf.level, mol),
                     kernel=d.kernel, ground=d.ground,
@@ -1212,7 +1206,7 @@ def vertical(run, walks_next=False):
               'qp_partition': (None if run.partition is None
                                else run.partition.as_record()),
               'factor_layout': chain.factor_layout(man),
-              'method': GW_BSE, 'kernel': d.kernel}
+              'method': GW_BSE, 'kernel': d.kernel, 'solvation': d.solvation}
     run.write('vert', record)
     report_properties('vert (R0)', props)
     log('vert done', t0)

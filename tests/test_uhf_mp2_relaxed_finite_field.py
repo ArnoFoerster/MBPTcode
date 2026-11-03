@@ -18,6 +18,7 @@ from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
     MPnDensityDriverUnrestricted)
 from src.SingleReference.DensityMatrix.density_matrix import (
     solve_cphf_relaxation_uhf, build_dgamma_block)
+from tests.molecules import WATER_AT_ORIGIN
 
 
 def interleaved_to_blockstacked_perm(nocc_a, nocc_b, norb):
@@ -67,7 +68,7 @@ if __name__ == '__main__':
     all_ok = True
 
     # --- 1. Closed-shell reduction: UHF branch must reproduce the RHF branch
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12

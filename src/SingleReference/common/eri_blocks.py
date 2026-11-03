@@ -43,7 +43,7 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf import df as pyscf_df
 from src.Base.utils.threaded_copies import ascontiguous_threaded
-from src.SingleReference.CC.cached_einsum import einsum as cached_einsum
+from src.Base.utils.cached_einsum import einsum as cached_einsum
 
 
 class MOEriBlocks:
@@ -77,7 +77,7 @@ class MOEriBlocks:
 
     @classmethod
     def from_dense(cls, eri_mo, nocc):
-        """Slice a full (pq|rs). Bitwise what the route used to index itself."""
+        """Slice a full (pq|rs), bitwise the blocks the dense route indexes."""
         eri_mo = np.asarray(eri_mo)
         norb = eri_mo.shape[0]
         occ, virt = slice(0, nocc), slice(nocc, norb)

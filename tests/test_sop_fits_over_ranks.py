@@ -33,6 +33,7 @@ import src.gradients.gwbse.qp_space_time as qp_space_time
 from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 
 def same(got, want, label, unit='Ha', quantity='root'):
@@ -49,7 +50,7 @@ SIZES = [2, 3]
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

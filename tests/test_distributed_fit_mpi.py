@@ -67,8 +67,8 @@ from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
 from tests.isdf_test_grid import g1, duchemin_blase
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 #: Water's 444 points in 7 tiles: 2 and 3 ranks each own several, and hand
 #: panels and solved blocks to each other.

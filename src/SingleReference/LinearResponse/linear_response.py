@@ -1,12 +1,13 @@
-import warnings
 
 import numpy as np
+from src.Base.numerical_flags import flag
 from src.Base.orbital_spaces import ov_energies, ov_factor
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (BSE2_GPU_BLOCK_GB, CASIDA_NORM_TOL,
                                          DEFAULT_BROADENING_ETA)
 from src.Base.numerics.numerics import numerics_or_default
-from src.Base.pyscf.pyscf_interface import occupied_count, spin_index
+from src.Base.pyscf.pyscf_interface import spin_index
+from src.Base.orbital_spaces import occupied_count
 from src.SingleReference.LinearResponse import imaginary_frequency
 
 try:
@@ -738,10 +739,11 @@ def static_second_order_kernel_df(eps, coeff_df, W_aux, nocc, eta=0.0, blksize=8
         return x / (x * x + eta * eta)
 
     if eps[virt].min() <= 0.0 or eps[occ].max() >= 0.0:
-        warnings.warn('a ladder denominator of the second-order kernel changes sign '
+        flag('ladder_denominator_sign_change',
+             'a ladder denominator of the second-order kernel changes sign '
                       f'(lowest virtual {eps[virt].min():.4f} Ha, highest occupied '
                       f'{eps[occ].max():.4f} Ha): eq 72 measures energies from the '
-                      'chemical potential, so shift eps or set eta', stacklevel=2)
+             'chemical potential, so shift eps or set eta', RuntimeWarning)
     try:
         L = np.linalg.cholesky(0.5 * (W_aux + W_aux.T))
     except np.linalg.LinAlgError:

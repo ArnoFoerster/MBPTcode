@@ -85,10 +85,10 @@ from src.Base.factorization.test_sets import is_ao_products, row_fit
 from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION,
                                          ISDF_SCF_METRIC_SLAB)
-from src.Base.factorization.distributed_df import (InstalledWithDF, add_count,
-                                                   lockstep_density,
-                                                   reduce_parts, add_seconds,
-                                                   distributed_handles)
+from src.Base.factorization.df_distribution import (InstalledWithDF, add_count,
+                                                    lockstep_density,
+                                                    reduce_parts, add_seconds,
+                                                    distributed_handles)
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.factorization.separable_ri import (FitTiles, ao_values, fit_settings,
                                                  screened_layout)

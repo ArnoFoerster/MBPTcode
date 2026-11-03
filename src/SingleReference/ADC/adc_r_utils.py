@@ -6,7 +6,7 @@ import math
 from collections import namedtuple
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.common.eri_blocks import b_block, g_slice_df
 from src.SingleReference.ADC.adc_utils import (
     g_diag_df, b_chunk_einsum)

@@ -10,7 +10,7 @@ from pyscf import scf as pyscf_scf
 from src.Base.factorization.distributed_df import share_distributed
 from src.Base.factorization.isdf_jk import ISDFJK
 from src.Base.pyscf.dispersion import refuse_dispersion_under_rpa
-from src.SingleReference.GW.qp_solve import mean_field_static_operator
+from src.SingleReference.common.mean_field_operators import mean_field_static_operator
 from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 
@@ -62,7 +62,7 @@ def exx_double_counting_Y(mf, nocc):
 
     One term, where `qp_xc_correction_Y` needs two. The functional derivative of
     this energy with respect to the density is the operator
-    `qp_solve.mean_field_static_operator` builds, dE/dD = Sigma_x - v_xc, and an energy
+    `mean_field_operators.mean_field_static_operator` builds, dE/dD = Sigma_x - v_xc, and an energy
     does not depend on the coefficients through the states as <p|O[D]|p>
     does.
 

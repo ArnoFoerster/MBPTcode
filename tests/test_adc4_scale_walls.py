@@ -52,10 +52,11 @@ from src.SingleReference.ADC.cross_block_decoupling import delta_u_rows_k1
 from src.SingleReference.ADC.sigma_driver import (restricted_dyson_operator,
                                                   solve_dyson_adc_downfolded)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER
 
 pytestmark = requires_runtime(4)
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 LIH = 'Li 0 0 0; H 0 0 1.595'
 ULP = 8
 AMP_ULP = 64      # two dense-g builds differing only in how B.B is summed differ by 8-15 ulp

@@ -41,7 +41,6 @@ a core or inner-valence state fails it permanently, as it does for the Laplace
 residue route, and a fitted pole set that has crowded onto the evaluation point
 fails `pole_clearance` instead.
 """
-import warnings
 
 import numpy as np
 import scipy.linalg
@@ -316,7 +315,7 @@ def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True, out=None):
         if not ok:
             if out is not None:
                 out['compression_excluded'] = reach
-            warnings.warn(
+            flag('sop_compression_excluded',
                 f'omega = {omega:.4f} sweeps a pole {reach:.2f} gaps '
                 f'away, so Eq. (27) excludes this state from '
                 f'the compression: the individual poles of W matter there and '
@@ -326,7 +325,7 @@ def sigma_sop(omega, amplitudes, poles, eps, nocc, check=True, out=None):
         if clear < SOP_CLEARANCE_MIN:
             if out is not None:
                 out['resonant'] = float(clear)
-            warnings.warn(
+            flag('sop_resonant',
                 f'the pole model is resonant at omega = {omega:.4f}: its '
                 f'closest denominator is {clear:.2g} of the lowest auxiliary '
                 f'pole.', RuntimeWarning, stacklevel=2)

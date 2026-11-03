@@ -37,6 +37,7 @@ from pyscf import gto
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM, ENVIRONMENT_CACHE_SIZE
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.rpa.factor_chain import FactorChain
+from tests.molecules import WATER_ROUNDED
 
 
 class Holder:
@@ -51,7 +52,7 @@ class Holder:
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    return gto.M(atom=WATER_ROUNDED,
                  basis='sto-3g', verbose=0)
 
 
@@ -131,7 +132,7 @@ def test_a_non_pinning_environment_needs_the_content_key():
             self._environment_cache.popitem(last=False)
         return hit
 
-    base = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    base = gto.M(atom=WATER_ROUNDED,
                  basis='sto-3g', verbose=0)
 
     def stale_hits(impl):

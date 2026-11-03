@@ -75,9 +75,9 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 
 from tests.test_proj_rows import LIMIT
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 SIZES = [2, 3, 8]
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 NROOTS = 3
 

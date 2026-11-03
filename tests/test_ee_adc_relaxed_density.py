@@ -62,6 +62,40 @@ from tests.adc_common import (ee_numerics, FD_STEP_DENSITY, H2CO, five_point, JK
 from tests.pins import RECORDING_BLAS, matches
 
 
+def dense_phi(inp, y, omega, spin, level='adc2', rf=None, scaling=None):
+    """Phi = y^T A_eff(omega) y from whole tensors (module docstring); rf a
+    TransitionReactionField or None; scaling (c_os, c_ss) of SCS-ADC(2) or
+    None."""
+    eo, ev, L, Boo, Bvv = inp
+    no, nv = eo.size, ev.size
+    y = np.asarray(y, float).reshape(no, nv)
+    singlet = spin == 'singlet'
+    phi = float(np.sum(y * y * (ev[None, :] - eo[:, None])))
+    c = np.einsum('iaP,ia->P', L, y)
+    ex = np.einsum('ia,ijP,abP,jb->', y, Boo, Bvv, y)
+    phi += (2.0 * c @ c - ex) if singlet else -ex
+    if rf is not None and singlet:
+        q = rf.V.T @ y.ravel()
+        phi += 2.0 * q @ (rf.Q @ q)
+    if level == 'adc1':
+        return phi
+    I = np.einsum('iaP,jbP->iajb', L, L)
+    D = rd.doubles_denominator(eo, ev)
+    tau = rd.singlet_pairs(I, I.transpose(rd.PAIR), scaling) / D
+    x_oo = 0.5 * np.einsum('kdic,kdjc->ij', I, tau)
+    x_vv = 0.5 * np.einsum('kalc,kblc->ab', I, tau)
+    xo, xv = x_oo + x_oo.T, x_vv + x_vv.T
+    if singlet:
+        K, T = 2.0 * I - I.transpose(rd.PAIR), tau
+    else:
+        K, T = -I.transpose(rd.PAIR), rd.triplet_pairs(I, I.transpose(rd.PAIR), scaling) / D
+    Ky = np.einsum('iakc,kc->ia', K, y)
+    Ty = np.einsum('iakc,kc->ia', T, y)
+    phi += float(np.sum(y * (xo @ y + y @ xv)) - np.sum(Ky * Ty))
+    R, H, _ = rd._dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling)
+    return phi + float(np.sum(R * H))
+
+
 def gas_scf(mol, h1=None, dm0=None):
     mf = scf.RHF(mol).density_fit(auxbasis=JKFIT)
     if h1 is not None:
@@ -114,7 +148,7 @@ def check_phi():
     for level in ('adc1', 'adc2'):
         for spin in ('singlet', 'triplet'):
             op, w, y, _, rf = root(mol, mf, spin, level, env=env)
-            phi = rd.dense_phi(rd.dense_inputs(op), y, w, spin, level, rf)
+            phi = dense_phi(rd.dense_inputs(op), y, w, spin, level, rf)
             Ay = op.apply(y[:, None], None if level == 'adc1' else np.array([w]))[0]
             d = abs(phi - y @ Ay[:, 0])
             ok &= check(d < 1e-12, f'{level} {spin}: dense Phi is y^T A_eff y',
@@ -139,7 +173,7 @@ def check_derivatives():
             def at(s):
                 arrs = [a.copy() for a in inp]
                 arrs[k][idx] += s
-                return rd.dense_phi(tuple(arrs), y, w, spin)
+                return dense_phi(tuple(arrs), y, w, spin)
             return (at(h) - at(-h)) / (2.0 * h)
 
         Gvv = np.einsum('ka,kbP->abP', pc.y, pc.Xvv.reshape(no, nv, -1))

@@ -28,12 +28,13 @@ from src.gradients.gwbse.dense_surfaces import kohn_sham_gradient_correction
 from src.gradients.rpa.exchange_double_counting import exx_double_counting_skeleton
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_CS
 
 #: Fragments in van der Waals contact, which is the case dispersion decides.
 ETHANE = ('C 0 0 0; C 0 0 1.53; H 0 1.02 -0.36; H 0.88 -0.51 -0.36; '
           'H -0.88 -0.51 -0.36; H 0 -1.02 1.89; H 0.88 0.51 1.89; '
           'H -0.88 0.51 1.89')
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 #: C1, so that no symmetry zeroes a component a missing term would show in.
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
 #: The dRPA force gate's step pair, in Bohr: the finer step's h^2 error, 3.6e-8

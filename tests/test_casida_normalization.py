@@ -24,6 +24,7 @@ from src.Base.numerics.constants import CASIDA_NORM_TOL
 from src.SingleReference.BSE.solve import oscillator_strengths
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization, from_pyscf)
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -33,7 +34,7 @@ def check(ok, label, detail=''):
 
 def build():
     """(mol, mf, td) with pySCF's own TDHF roots to convert and compare against."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12

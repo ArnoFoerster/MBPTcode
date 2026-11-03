@@ -8,8 +8,9 @@ import pytest
 from pyscf import gto
 
 from src.Base.factorization.separable_ri import ao_values
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 POINTS = np.array([[0.0, 0.0, 0.0], [0.3, -0.2, 0.5]])
 
 

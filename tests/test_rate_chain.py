@@ -111,7 +111,7 @@ def hessian(mol, omega, seed, source, near=None, like=None):
 
 def displaced(mol, hess, dq):
     """`mol` moved by the mass-weighted displacement dq on `hess`'s modes."""
-    sg = mode_sets(hess, hess)[0]
+    sg = mode_sets(hess, hess, 'rectilinear')[0]
     dx = (sg.modes @ dq) * np.repeat(sg.masses, 3) ** -0.5
     return molecule_at(mol, mol.atom_coords() + dx.reshape(-1, 3))
 
@@ -195,14 +195,16 @@ def build(mol, *, splits=SPLITS, socme=SOCME, dv_scale=1.0, same=False,
 
 
 FULL = RateModel.full('curvilinear', 0.0)
+#: the gap rule of every table here
+STACKED = rates.ManifoldGaps('stacked', None)
 
 
 # ------------------------------------------------------------------- switches
 def test_shared_coupling_twice_the_size_is_four_times_the_rate(mol):
     own = build(mol)
     shared = build(mol, socme=2.0 * SOCME, dv_scale=2.0, method='gw-bse')
-    a = rate_chain(own, FULL, T)
-    b = rate_chain(own, replace(FULL, soc='shared'), T, shared=shared)
+    a = rate_chain(own, FULL, T, STACKED)
+    b = rate_chain(own, replace(FULL, soc='shared'), T, STACKED, shared=shared)
     assert b['coupling_from'] == 'gw-bse'
     for side in ('ISC', 'RISC'):
         assert b[side]['k_pair'] / a[side]['k_pair'] == pytest.approx(
@@ -214,8 +216,8 @@ def test_shared_coupling_twice_the_size_is_four_times_the_rate(mol):
 def test_condon_removes_exactly_the_herzberg_teller_part(mol):
     inp = build(mol)
     pert = replace(FULL, mixing='perturbative')
-    full = rate_chain(inp, pert, T)
-    condon = rate_chain(inp, replace(pert, coupling='condon'), T)
+    full = rate_chain(inp, pert, T, STACKED)
+    condon = rate_chain(inp, replace(pert, coupling='condon'), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert full[side]['k_ht'] > 0.0
         assert condon[side]['k_pair'] == full[side]['k_condon']
@@ -223,10 +225,25 @@ def test_condon_removes_exactly_the_herzberg_teller_part(mol):
         assert full[side]['k_pair'] > condon[side]['k_pair']
 
 
+def test_the_table_reads_the_declared_gap_rule(mol, monkeypatch):
+    """Both directions' manifolds stand on the gap rule the caller declares,
+    not on one the chain picks."""
+    seen = []
+    plain = rates.manifold_crossings
+
+    def spy(*args):
+        seen.append(args[-1])
+        return plain(*args)
+    monkeypatch.setattr(rates, 'manifold_crossings', spy)
+    gaps = rates.ManifoldGaps('stacked', None)
+    rate_chain(build(mol), FULL, T, gaps)
+    assert len(seen) == 2 and all(g is gaps for g in seen)
+
+
 def test_a_reachable_t2_with_its_coupling_raises_risc(mol):
     inp = build(mol)
-    man = rate_chain(inp, FULL, T)
-    one = rate_chain(inp, replace(FULL, triplets='T1'), T)
+    man = rate_chain(inp, FULL, T, STACKED)
+    one = rate_chain(inp, replace(FULL, triplets='T1'), T, STACKED)
     assert one['RISC']['k_eff'] == one['RISC']['k_pair']
     assert set(man['RISC']['manifold']['populations']) == {'T1', 'T2'}
     pairs = {p['pair'] for p in man['RISC']['manifold']['pairs']}
@@ -239,8 +256,8 @@ def test_a_reachable_t2_with_its_coupling_raises_risc(mol):
 
 def test_duschinsky_and_frequency_change_move_the_rate(mol):
     inp = build(mol)
-    on = rate_chain(inp, FULL, T)
-    off = rate_chain(inp, replace(FULL, duschinsky=False), T)
+    on = rate_chain(inp, FULL, T, STACKED)
+    off = rate_chain(inp, replace(FULL, duschinsky=False), T, STACKED)
     for side in ('ISC', 'RISC'):
         ratio = on[side]['k_pair'] / off[side]['k_pair']
         assert abs(ratio - 1.0) > 1e-2
@@ -252,7 +269,7 @@ def test_zero_point_off_is_the_density_at_the_shifted_gap(mol):
     that much higher, to rounding."""
     inp = build(mol)
     m = replace(FULL, duschinsky=False, coupling='condon', triplets='T1')
-    on = rate_chain(inp, m, T)
+    on = rate_chain(inp, m, T, STACKED)
     zpe = on['zero_point_shift_eV'] * EV            # ZPE_S1 - ZPE_T1
     assert abs(zpe) > 1e-3 * EV
     lifted = replace(inp, s1=replace(inp.s1, energy={
@@ -260,22 +277,22 @@ def test_zero_point_off_is_the_density_at_the_shifted_gap(mol):
         for k, v in inp.s1.energy.items()}), t1=replace(inp.t1, energy={
             k: v + (zpe if k[0] == 'S' else 0.0)
             for k, v in inp.t1.energy.items()}))
-    off = rate_chain(lifted, replace(m, zero_point=False), T)
+    off = rate_chain(lifted, replace(m, zero_point=False), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert off[side]['k_pair'] == pytest.approx(on[side]['k_pair'],
                                                     rel=1e-9)
     # with Duschinsky the phase does it: the switch moves the rate
-    d_on = rate_chain(inp, replace(m, duschinsky=True), T)
-    d_off = rate_chain(inp, replace(m, duschinsky=True, zero_point=False), T)
+    d_on = rate_chain(inp, replace(m, duschinsky=True), T, STACKED)
+    d_off = rate_chain(inp, replace(m, duschinsky=True, zero_point=False), T, STACKED)
     assert abs(d_on['RISC']['k_pair'] / d_off['RISC']['k_pair'] - 1) > 1e-2
 
 
 def test_assumed_lambda_equal_to_the_computed_one_changes_nothing(mol):
     inp = build(mol)
-    a = rate_chain(inp, FULL, T)
+    a = rate_chain(inp, FULL, T, STACKED)
     b = rate_chain(inp, replace(FULL, classical_lambda=LAM_SOLV
-                                * HARTREE_TO_EV), T)
-    c = rate_chain(inp, replace(FULL, classical_lambda=0.2), T)
+                                * HARTREE_TO_EV), T, STACKED)
+    c = rate_chain(inp, replace(FULL, classical_lambda=0.2), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert b[side]['k_eff'] == pytest.approx(a[side]['k_eff'], rel=1e-9)
         assert abs(c[side]['k_eff'] / a[side]['k_eff'] - 1.0) > 1e-2
@@ -284,7 +301,7 @@ def test_assumed_lambda_equal_to_the_computed_one_changes_nothing(mol):
 
 def test_the_ladder_records_every_switch(mol):
     inp = build(mol)
-    ladder = ablation_ladder(inp, FULL, T, shared=inp)
+    ladder = ablation_ladder(inp, FULL, T, STACKED, shared=inp)
     assert [r['step'] for r in ladder] == [s for s, _ in ABLATION_LADDER]
     assert all('table' in r for r in ladder), [r.get('refused')
                                               for r in ladder]
@@ -303,8 +320,8 @@ def test_the_ladder_records_every_switch(mol):
 # --------------------------------------------------------------------- limits
 def test_no_derivative_is_the_condon_model_bitwise(mol):
     inp = build(mol, dv_scale=0.0)
-    a = rate_chain(inp, FULL, T)
-    b = rate_chain(inp, replace(FULL, coupling='condon'), T)
+    a = rate_chain(inp, FULL, T, STACKED)
+    b = rate_chain(inp, replace(FULL, coupling='condon'), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert a[side]['k_pair'] == b[side]['k_pair']
         assert a[side]['k_eff'] == b[side]['k_eff']
@@ -312,15 +329,15 @@ def test_no_derivative_is_the_condon_model_bitwise(mol):
 
 def test_out_of_reach_states_leave_the_t1_pair_bitwise(mol):
     inp = build(mol, splits=FAR)
-    a = rate_chain(inp, FULL, T)
-    b = rate_chain(inp, replace(FULL, triplets='T1'), T)
+    a = rate_chain(inp, FULL, T, STACKED)
+    b = rate_chain(inp, replace(FULL, triplets='T1'), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert a[side]['k_eff'] == b[side]['k_eff'] == a[side]['k_pair']
 
 
 def test_the_last_rung_is_the_marcus_levich_jortner_rate_bitwise(mol):
     inp = build(mol)
-    ladder = ablation_ladder(inp, FULL, T, shared=inp)
+    ladder = ablation_ladder(inp, FULL, T, STACKED, shared=inp)
     last = ladder[-1]['table']
     sg = mode_sets(inp.hessians['T1'], inp.hessians['S1'], 'curvilinear')
     lam = 0.2 * EV
@@ -349,8 +366,8 @@ def test_the_last_rung_is_the_marcus_levich_jortner_rate_bitwise(mol):
 def test_one_hessian_makes_duschinsky_the_displaced_oscillator(mol):
     inp = build(mol, same=True)
     m = replace(FULL, coupling='condon', triplets='T1')
-    a = rate_chain(inp, m, T)
-    b = rate_chain(inp, replace(m, duschinsky=False), T)
+    a = rate_chain(inp, m, T, STACKED)
+    b = rate_chain(inp, replace(m, duschinsky=False), T, STACKED)
     assert abs(a['zero_point_shift_eV']) < 1e-12
     for side in ('ISC', 'RISC'):
         assert a[side]['k_pair'] == pytest.approx(b[side]['k_pair'],
@@ -366,8 +383,8 @@ def test_one_high_mode_makes_multimode_the_mlj_density(mol):
     inp = build(mol, same=True, dq=dq)
     m = replace(FULL, coupling='condon', triplets='T1', duschinsky=False,
                 zero_point=False)
-    a = rate_chain(inp, m, T)
-    b = rate_chain(inp, replace(m, density='mlj'), T)
+    a = rate_chain(inp, m, T, STACKED)
+    b = rate_chain(inp, replace(m, density='mlj'), T, STACKED)
     for side in ('ISC', 'RISC'):
         assert a[side]['k_pair'] == pytest.approx(b[side]['k_pair'],
                                                   rel=1e-5)
@@ -377,8 +394,8 @@ def test_gradient_route_equals_the_cartesian_route_when_harmonic(mol):
     """The S1 gradient at the T1 minimum of a harmonic S1 surface gives the
     straight-line displacement; the curvilinear one is another measure."""
     inp = build(mol, rotate_s1=True)
-    cart = rate_chain(inp, replace(FULL, huang_rhys_route='cartesian'), T)
-    grad = rate_chain(inp, replace(FULL, huang_rhys_route='gradient'), T)
+    cart = rate_chain(inp, replace(FULL, huang_rhys_route='cartesian'), T, STACKED)
+    grad = rate_chain(inp, replace(FULL, huang_rhys_route='gradient'), T, STACKED)
     assert grad['gradient_from'] == 'S1@T1'
     s = cart['huang_rhys_sum']
     assert s['gradient'] == pytest.approx(s['cartesian'], rel=1e-8)
@@ -389,8 +406,8 @@ def test_gradient_route_equals_the_cartesian_route_when_harmonic(mol):
 
 
 def test_a_rotated_s1_minimum_gives_the_same_rates(mol):
-    a = rate_chain(build(mol), FULL, T)
-    b = rate_chain(build(mol, rotate_s1=True), FULL, T)
+    a = rate_chain(build(mol), FULL, T, STACKED)
+    b = rate_chain(build(mol, rotate_s1=True), FULL, T, STACKED)
     for side in ('ISC', 'RISC'):
         assert b[side]['k_eff'] == pytest.approx(a[side]['k_eff'], rel=1e-8)
 
@@ -419,7 +436,7 @@ def test_minima_of_another_method_run_through_the_same_chain(mol):
     for scale in (1.0, 2.0):
         inp = replace(base, s1=adc2('S1', base.s1, scale),
                       t1=adc2('T1', base.t1, scale))
-        out[scale] = rate_chain(inp, replace(FULL, triplets='T1'), T)
+        out[scale] = rate_chain(inp, replace(FULL, triplets='T1'), T, STACKED)
     assert out[1.0]['method'] == 'adc2'
     for side in ('ISC', 'RISC'):
         assert out[2.0][side]['k_condon'] == out[1.0][side]['k_condon']
@@ -437,16 +454,16 @@ def test_an_unresolved_duschinsky_density_is_flagged(mol):
         for k, v in m.energy.items()})
         for where, m in (('s1', inp.s1), ('t1', inp.t1))})
     with pytest.warns(FCDensityAtRoundoff):
-        out = rate_chain(far, replace(FULL, triplets='T1'), T)
+        out = rate_chain(far, replace(FULL, triplets='T1'), T, STACKED)
     assert out['numerical_flags'] == ['fc_density_at_roundoff']
-    assert rate_chain(inp, FULL, T)['numerical_flags'] == []
+    assert rate_chain(inp, FULL, T, STACKED)['numerical_flags'] == []
 
 
 def test_kinetics_with_a_dipole(mol):
     inp = build(mol)
     dip = np.array([[0.3, 0.0, 0.1], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
     inp = replace(inp, s1=replace(inp.s1, dipole=dip))
-    out = rate_chain(inp, FULL, T)
+    out = rate_chain(inp, FULL, T, STACKED)
     assert out['k_r'] > 0.0
     # a yield of one to rounding: MKL lands 3e-14 above it
     assert 0.0 < out['pl']['phi_total'] <= 1.0 + 1e-12
@@ -480,8 +497,8 @@ def test_weak_coupling_is_the_perturbative_rate(mol):
     dev = {}
     for scale in (1e-3, 1e-2):
         inp = build(mol, dv_scale=scale)
-        d = rate_chain(inp, replace(FULL, mixing='diabatic'), T)
-        p = rate_chain(inp, replace(FULL, mixing='perturbative'), T)
+        d = rate_chain(inp, replace(FULL, mixing='diabatic'), T, STACKED)
+        p = rate_chain(inp, replace(FULL, mixing='perturbative'), T, STACKED)
         r = d['ISC']['mixing']['paths']['T2']['ratio']
         assert p['ISC']['mixing']['model'] == 'perturbative'
         assert d['ISC']['mixing']['model'] == 'diabatic'
@@ -494,8 +511,8 @@ def test_weak_coupling_is_the_perturbative_rate(mol):
 
 def test_auto_switches_at_the_stated_ratio(mol):
     from src.Base.numerics.constants import RATE_MIXING_RATIO_MAX
-    weak = rate_chain(build(mol, dv_scale=1e-3), FULL, T)
-    strong = rate_chain(build(mol, dv_scale=10.0), FULL, T)
+    weak = rate_chain(build(mol, dv_scale=1e-3), FULL, T, STACKED)
+    strong = rate_chain(build(mol, dv_scale=10.0), FULL, T, STACKED)
     for side in ('ISC', 'RISC'):
         rec = weak[side]['mixing']
         assert rec['model'] == 'perturbative'
@@ -515,7 +532,7 @@ def test_a_closing_gap_saturates_the_diabatic_rate(mol):
     for scale in (100.0, 1000.0):
         inp = build(mol, dv_scale=scale)
         k[scale] = {m: rate_chain(inp, replace(FULL, mixing=m,
-                                               triplets='T1'), T)['ISC']
+                                               triplets='T1'), T, STACKED)['ISC']
                     for m in ('perturbative', 'diabatic')}
     grow = k[1000.0]['perturbative']['k_pair'] / k[100.0]['perturbative'][
         'k_pair']
@@ -534,7 +551,7 @@ def test_the_mixed_manifold_keeps_the_coupling(mol):
     """Diabatic, the T2 channel of ISC carries (1 - s) |V(S1,T2)|^2 +
     s |V(S1,T1)|^2: coupling moves between the pair, none is created."""
     inp = build(mol, dv_scale=10.0)
-    out = rate_chain(inp, replace(FULL, mixing='diabatic'), T)['ISC']
+    out = rate_chain(inp, replace(FULL, mixing='diabatic'), T, STACKED)['ISC']
     s = out['mixing']['paths']['T2']['sin2']
     pair = {p['pair']: p for p in out['manifold']['pairs']}
     v11, v12 = SOCME[1, 0] * HARTREE_TO_CM, SOCME[1, 1] * HARTREE_TO_CM
@@ -568,25 +585,25 @@ def test_refusals(mol):
     with pytest.raises(ValueError, match="'computed' or a positive"):
         replace(FULL, classical_lambda=0.0)
     with pytest.raises(RateRefused, match='reference RateInputs'):
-        rate_chain(inp, replace(FULL, soc='shared'), T)
+        rate_chain(inp, replace(FULL, soc='shared'), T, STACKED)
     with pytest.raises(RateRefused, match='gradient route needs'):
         rate_chain(build(mol, gradients=False),
-                   replace(FULL, huang_rhys_route='gradient'), T)
+                   replace(FULL, huang_rhys_route='gradient'), T, STACKED)
     with pytest.raises(RateRefused, match='no derivative'):
         rate_chain(replace(inp, s1=replace(inp.s1, soc_dv_cart=None)),
-                   FULL, T)
+                   FULL, T, STACKED)
     gas = build(mol, solvent=False)
     with pytest.raises(RateRefused, match='needs a width'):
-        rate_chain(gas, FULL, T)
+        rate_chain(gas, FULL, T, STACKED)
     assert rate_chain(gas, replace(FULL, gaussian_sigma_ev=0.02),
-                      T)['ISC']['k_eff'] > 0.0
+                      T, STACKED)['ISC']['k_eff'] > 0.0
     with pytest.raises(RateRefused, match='MLJ density needs a positive'):
-        rate_chain(gas, replace(FULL, duschinsky=False, density='mlj'), T)
+        rate_chain(gas, replace(FULL, duschinsky=False, density='mlj'), T, STACKED)
     bare = RateInputs(s1=inp.s1, t1=inp.t1, hessians=inp.hessians,
                       gradients={}, solvent={})
     with pytest.raises(RateRefused, match='no solvent energies'):
-        rate_chain(bare, FULL, T)
-    assumed = rate_chain(bare, replace(FULL, classical_lambda=0.1), T)
+        rate_chain(bare, FULL, T, STACKED)
+    assumed = rate_chain(bare, replace(FULL, classical_lambda=0.1), T, STACKED)
     assert assumed['RISC']['lambda_solvent_eV'] is None
     with pytest.raises(RateRefused, match='both'):
         RateInputs(s1=inp.s1, t1=inp.t1, hessians=inp.hessians,

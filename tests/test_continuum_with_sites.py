@@ -44,8 +44,9 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 #: a second water 4 A out, beyond the sites' 3.4 A clearance from the solute
 SHELL = [('O', (0, 0, 4.0)), ('H', (0, 0.757, 4.586)), ('H', (0, -0.757, 4.586))]
 #: one polarizable site per shell molecule, at its oxygen: water's alpha

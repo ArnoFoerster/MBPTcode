@@ -79,10 +79,11 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.numerics.constants import (BYTES_PER_GB, DEFAULT_TAU_TARGET,
+from src.Base.numerics.constants import (DEFAULT_TAU_TARGET,
                                          ISDF_SQUARE_TILE_ROWS, ISDF_TILE_GB)
 from src.Base.numerical_flags import flag
 from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
                                               contiguous_block, current_comm,
                                               exchange_rows, ordered_chain_sum,
@@ -414,7 +415,7 @@ class ProjRows:
 def tile_rows(M, tile_memory_gb, per_row_bytes):
     """Grid rows per tile so that `per_row_bytes` x rows fits in
     tile_memory_gb: at least one row, at most all M of them."""
-    return max(1, min(M, int(tile_memory_gb * BYTES_PER_GB / max(per_row_bytes, 1))))
+    return fits(tile_memory_gb, per_row_bytes, cap=M)
 
 
 def square_tile_rows(rows):
@@ -736,7 +737,7 @@ def frequency_blocks(nfreq, naux, tile_gb, live):
     """(k0, k1) ranges over the frequency axis such that `live` (naux, naux)
     arrays per frequency fit in tile_gb. The one knob for both the M-row tiles
     and the frequency blocks: a working-set budget, not a count."""
-    nb = max(1, min(nfreq, int(tile_gb * BYTES_PER_GB / max(live * naux * naux * 8, 1))))
+    nb = fits(tile_gb, live * naux * naux * 8, cap=nfreq)
     return [(k0, min(k0 + nb, nfreq)) for k0 in range(0, nfreq, nb)]
 
 

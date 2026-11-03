@@ -123,8 +123,8 @@ def test_no_mode_below_the_cutoff_is_bitwise_the_quantum_bath():
     cutoff changes nothing, bit for bit."""
     mol = gto.M(atom=trc.GEO, basis='sto-3g', verbose=0)
     inp = trc.build(mol)
-    a = rate_chain(inp, trc.FULL, T)
-    b = rate_chain(inp, replace(trc.FULL, classical_below_cm=0.0), T)
+    a = rate_chain(inp, trc.FULL, T, trc.STACKED)
+    b = rate_chain(inp, replace(trc.FULL, classical_below_cm=0.0), T, trc.STACKED)
     assert trc.FULL.classical_below_cm == DUSCHINSKY_CLASSICAL_BELOW_CM
     assert a['soft_modes'] is None
     for side in ('ISC', 'RISC'):
@@ -185,7 +185,7 @@ def test_dmabn_rate_chain_runs_the_full_model(dmabn):
     inp = dmabn_inputs(hs, ht, e_s1, e_t1, gap=0.2 * EV)
     full = replace(RateModel.full('curvilinear', 0.0), coupling='condon',
                    triplets='T1')
-    out = rate_chain(inp, full, T)
+    out = rate_chain(inp, full, T, trc.STACKED)
     assert out['soft_modes']['omega_ground_cm'] == pytest.approx(
         [9.8, 33.4, 53.2], abs=0.05)
     for side in ('ISC', 'RISC'):

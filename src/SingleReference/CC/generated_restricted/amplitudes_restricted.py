@@ -3,7 +3,7 @@
 # Restricted (spin-blocked) CCSDT energy and T-residuals.
 # See that module's docstring for the equations/conventions.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 
 def cc_energy_restricted(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, f_aa, f_bb, g_aaaa, g_abab, g_bbbb, o, v):

@@ -24,7 +24,7 @@ import scipy.signal
 import resource
 
 from pyscf.data.elements import chemcore
-from src.SingleReference.CC.diis import DIIS
+from src.Solvers.diis import DIIS
 from src.Base.numerics.constants import SURFACE_GRID_ACCURACY
 from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid)
@@ -723,7 +723,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
 
     eps_F = np.linalg.eigvalsh(F)
 
-    # These settings should be put in the documentation
+    # the spectral function's window and range (kwargs A_window, A_range)
     A_window = kwargs.get('A_window') or 0.5
     A_range = kwargs.get('A_range') or [eps_F[chemcore(mol)] - A_window , 2 * mu - eps_F[chemcore(mol)] + A_window]
 

@@ -2,7 +2,7 @@
 # g_aaaa/g_abab/g_bbbb, never forming a norb^4-scale integral block.
 # Do not edit by hand.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 from src.Base.utils.grids.grids import minimax_time_grid
 
 

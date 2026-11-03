@@ -43,8 +43,9 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from tests.pins import assert_same
 from tests.reference_scf import rhf_conv_1e12
+from tests.molecules import WATER_ROUNDED
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+WATER = WATER_ROUNDED
 BASIS = 'cc-pvdz'
 #: Bohr and Bohr^3, outside the QM density (7.2 Bohr from the nearest nucleus)
 SITES = np.array([[0.0, 0.0, 9.0], [5.0, 2.0, -6.0], [-5.0, -6.0, 2.0]])

@@ -33,7 +33,7 @@ from src.Base.factorization.isdf_jk import ISDFJK
 from src.environments.pcm_derivatives import reaction_field_fock_skeleton
 from src.Base.pyscf.pyscf_interface import fock_mo, response_kernel
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
-from src.gradients.skeleton_tiles import (exchange_skeleton_by_atoms, fitted_fock_skeleton,
+from src.gradients.skeleton_tiles import (exchange_skeleton_tiled, fitted_fock_skeleton,
                                          xc_grid_skeleton)
 from src.gradients.isdf_derivatives import (isdf_fock_partial_exchange,
                                             require_fitted_coulomb)
@@ -251,7 +251,7 @@ def held_skeletons(mf, pending):
     grad = 0.0
     for (kind, omega), (g_ao, D) in pending.take_skeletons().items():
         if kind == 'exchange':
-            grad = grad + exchange_skeleton_by_atoms(mf.mol, g_ao, D, omega,
+            grad = grad + exchange_skeleton_tiled(mf.mol, g_ao, D, omega,
                                                      1.0)
         else:
             grad = grad + xc_grid_skeleton(mf.mol, mf.grids, mf._numint,
@@ -346,7 +346,7 @@ def exchange_channel_skeleton(mf, g_ao, D, omega, weight, pending=None):
     skeleton is wrong there at any threshold. Four-centre derivative integrals
     have no metric and no such failure.
 
-    `skeleton_tiles.exchange_skeleton_by_atoms` takes both densities through
+    `skeleton_tiles.exchange_skeleton_tiled` takes both densities through
     one direct pass of pyscf's derivative exchange (`pyscf.grad.rhf.get_jk`'s
     K, not `mf.Gradients()`, which on a fitted mean field returns the fitted
     derivative J/K), its rows in fixed shell tiles dealt over the ranks of
@@ -359,7 +359,7 @@ def exchange_channel_skeleton(mf, g_ao, D, omega, weight, pending=None):
     if pending is not None and pending.open:
         pending.hold_skeleton(('exchange', float(omega)), weight * g_ao, D)
         return np.zeros((mf.mol.natm, 3))
-    return exchange_skeleton_by_atoms(mf.mol, g_ao, D, omega, weight)
+    return exchange_skeleton_tiled(mf.mol, g_ao, D, omega, weight)
 
 
 def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),

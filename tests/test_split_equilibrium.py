@@ -31,8 +31,9 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.characters import ct_character, roots
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight
+from tests.molecules import WATER_CS
 
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 ETHYLENE = ('C 0.0000 0.0000 0.6695; C 0.0000 0.0000 -0.6695; '
             'H 0.0000 0.9289 1.2321; H 0.0000 -0.9289 1.2321; '
             'H 0.0000 0.9289 -1.2321; H 0.0000 -0.9289 -1.2321')

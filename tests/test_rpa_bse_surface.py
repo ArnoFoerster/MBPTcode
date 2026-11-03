@@ -23,9 +23,10 @@ from src.gradients.rpa.exchange_double_counting import exx_double_counting_Y, ex
 from src.SingleReference.LinearResponse.rpa_energy import exx_double_counting
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 def hf_factory(mol):

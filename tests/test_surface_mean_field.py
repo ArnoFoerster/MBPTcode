@@ -34,9 +34,10 @@ from src.gradients.surface import (FiniteDifferenceGradient,
                                    surface_mean_field)
 from src.properties.vibronic import energy_at, relax_state
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Water: eps at the optical frequency and the static one.
 EPS, EPS_STATIC = 1.78, 78.39
 

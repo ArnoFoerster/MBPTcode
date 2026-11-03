@@ -36,13 +36,14 @@ from src.SingleReference.BSE.solve import solve_bse
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 #: The extra diffuse shells (first exponent, ratio, count) and the canonical
 #: cut of the unrepresented reference, as in test_isdf_near_null_orbitals.
 EXTRA = (0.03, 1.15, 4)
 REFERENCE_CUT = 1e-8
 COUNTS = {'A1': 24, 'A2': 15, 'A3': 9, 'B1': 3}
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 
 
 def _basis(element):

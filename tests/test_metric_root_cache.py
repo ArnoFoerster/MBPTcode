@@ -19,8 +19,9 @@ import src.Base.factorization.separable_ri as separable_ri
 from src.Base.numerics.constants import AUX_METRIC_ROOT_FLOOR
 from src.Base.factorization.separable_ri import aux_metric_sqrt, metric_eigensystem
 from src.gradients.isdf_adjoint_pieces import sqrtm_adjoint
+from tests.molecules import WATER_AT_ORIGIN
 
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 
 
 class Kernel:

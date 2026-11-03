@@ -64,6 +64,7 @@ never the arithmetic pyscf does.
 import contextlib
 import contextvars
 import os
+import sys
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -82,10 +83,10 @@ except ImportError:                      # soft dependency: every routine no-ops
 #: that owns the pool (`pool_is_ours`) ever fills it.
 _TAKEN = threading.local()
 
-#: The executors `row_map` runs on, one per (process, thread count), made on
-#: first use and kept: a pass calls it several times per shell block.
-_ROW_POOLS = {}
-_ROW_POOLS_LOCK = threading.Lock()
+#: The process's executors (`pool`), one per (process, purpose, thread count),
+#: made on first use and kept: a pass calls them several times per block.
+_POOLS = {}
+_POOLS_LOCK = threading.Lock()
 
 #: `openmp_threads`' count per process, read once by the main thread.
 _OPENMP_THREADS = {}
@@ -237,17 +238,28 @@ def row_map(fn, n, threads):
     if parts == 1:
         return [fn(*ranges[0])]
     context = contextvars.copy_context()
-    return list(_row_pool(int(threads)).map(
+    return list(pool(int(threads)).map(
         lambda r: context.copy().run(fn, *r), ranges))
 
 
-def _row_pool(threads):
-    """This process's executor of `threads` workers, made once."""
-    key = (os.getpid(), threads)
-    with _ROW_POOLS_LOCK:
-        if key not in _ROW_POOLS:
-            _ROW_POOLS[key] = ThreadPoolExecutor(threads)
-        return _ROW_POOLS[key]
+def pool(workers, purpose='rows'):
+    """This process's executor of `workers` threads for `purpose`, made once.
+    Executors of different purposes are distinct, so a task running on one may
+    wait on another and never on its own: 'rows' is `row_map`'s, 'stream' the
+    ADC slab streams', 'accumulate' the CC antisymmetrizer's and 'copies' the
+    threaded einsum copies'."""
+    key = (os.getpid(), purpose, int(workers))
+    with _POOLS_LOCK:
+        if key not in _POOLS:
+            _POOLS[key] = ThreadPoolExecutor(int(workers))
+        return _POOLS[key]
+
+
+def budget():
+    """This process's thread budget: OMP_NUM_THREADS, else the CPUs in this
+    thread's affinity mask (`resolve_workers` with no work-item cap). Every
+    pool here is sized from it."""
+    return resolve_workers(None, sys.maxsize)
 
 
 def _positive_int_env(name):

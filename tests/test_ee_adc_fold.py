@@ -183,9 +183,10 @@ from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df, ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from tests.adc_common import check, ee_numerics
 from tests.pins import same_bar
+from tests.molecules import WATER_AT_ORIGIN
 
 HARTREE_TO_EV = 27.211386245988
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 
 
 def water_df(basis='cc-pvdz'):
@@ -1625,11 +1626,12 @@ def check_threaded_elementwise():
                  'quotient': (sb.ew(np.true_divide, a, d), a / d),
                  'broadcast, left to NumPy': (sb.ew(np.multiply, a, d[0]), a * d[0])}
         pid = os.getpid()
-        before = {k for k in th._ROW_POOLS if k[0] == pid}
+        before = {k for k in th._POOLS if k[0] == pid and k[1] == 'rows'}
         sb.ew(np.add, a.reshape(2, -1), 1.0)
         sb.ew(np.add, rng.standard_normal((3, 400000)), 1.0)
         sb.ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
-        pools = {k[1] for k in th._ROW_POOLS if k[0] == pid} - {k[1] for k in before}
+        pools = ({k[2] for k in th._POOLS if k[0] == pid and k[1] == 'rows'}
+                 - {k[2] for k in before})
     finally:
         if keep is None:
             del os.environ['OMP_NUM_THREADS']

@@ -71,7 +71,8 @@ from src.Base.environment_seam import environment_of
 from src.Base.numerics.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+from tests.molecules import WATER_ROUNDED_LOW
+WATER = WATER_ROUNDED_LOW
 
 
 def check(ok, label, detail=''):

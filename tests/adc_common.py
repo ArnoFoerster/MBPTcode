@@ -8,14 +8,15 @@ from src.Base.numerics.constants import BOHR_TO_ANGSTROM, EE_RI_TILE_GB
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_spin_integrals,
                                             get_orbital_energies)
+from tests.molecules import WATER, WATER_AT_ORIGIN, WATER_ROUNDED_LOW
 
 #: Water, bent and non-symmetric so that every nuclear coordinate moves (Angstrom).
 ATOMS = [('O', (0.02, -0.01, 0.1173)), ('H', (0.0, 0.7672, -0.4592)),
          ('H', (0.03, -0.7472, -0.4792))]
 #: Water C2v, Angstrom, as an atom string: the 0.1173 / 0.7572 / -0.4692 geometry.
-WATER_C2V = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+WATER_C2V = WATER
 #: Water C2v, Angstrom, as an atom string: oxygen at the origin.
-WATER_ORIGIN = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER_ORIGIN = WATER_AT_ORIGIN
 #: Formaldehyde, Angstrom, as an atom string.
 H2CO = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.587; H 0 -0.94 -0.587'
 
@@ -161,7 +162,7 @@ def alpha_to_class_index(cfg, sector, cols, nocc):
 @pytest.fixture(scope='module')
 def water_df():
     """DF-RHF water in cc-pVDZ (cc-pvdz-ri), the starting point of the DF routes."""
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol = 1e-12

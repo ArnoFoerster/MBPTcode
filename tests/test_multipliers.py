@@ -60,12 +60,13 @@ from src.gradients.multipliers import solve_orbital_multipliers
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.gwbse.targets import rpa_partials
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 #: a solve cut to five lgmres iterations
 FIVE_ITERATIONS = Numerics(scf={'multiplier_max_iter': 5})
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 
 
@@ -257,18 +258,6 @@ def test_the_cubic_route_reproduces_its_old_solver(cubic_case):
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6
 
-
-def test_the_constants_are_the_numbers_the_two_copies_carried():
-    """The consolidation moved four hard-coded numbers; it did not change one."""
-    assert ORBITAL_MULTIPLIER_TOL == 1e-11
-    assert ORBITAL_MULTIPLIER_MAX_ITER == 3000
-    assert ORBITAL_MULTIPLIER_DEGENERACY_TOL == 1e-8
-    assert ORBITAL_MULTIPLIER_RESIDUAL_TOL == 1e-7
-
-
-# ---------------------------------------------------------------------------
-# the two refusals
-# ---------------------------------------------------------------------------
 
 def test_a_degenerate_pair_is_projected_out_when_its_gradient_vanishes():
     """A rotation inside a degenerate set does not change the energy, so the

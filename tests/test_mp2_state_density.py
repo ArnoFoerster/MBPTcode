@@ -27,6 +27,7 @@ from pyscf.scf import hf as scf_hf
 from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from tests.adc_common import ATOMS, AUX, NF, five_point, make_scf_loop, molecule
+from tests.molecules import WATER
 
 #: Drops the four overlap eigenvalues of water/aug-cc-pVDZ below it.
 LINDEP = 3e-2
@@ -81,7 +82,7 @@ def lindep_scf(mol):
 
 def test_dropped_combinations():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='aug-cc-pvdz', verbose=0)
     model = MP2State(HFState(mol, lindep_scf), 1, 'aug-cc-pvdz-ri', force_route='tiled',
                      numerics=Numerics())

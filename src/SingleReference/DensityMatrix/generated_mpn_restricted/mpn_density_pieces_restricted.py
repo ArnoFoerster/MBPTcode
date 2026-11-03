@@ -3,7 +3,7 @@
 # Restricted (spin-blocked) MPn amplitude-numerator, overlap and density cross-term
 # pieces of the order-generic pdaggerq recursion (generate_mpn_density.py).
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 
 def t2_1_aaaa_numerator(g_aaaa, g_abab, g_bbbb, d_aa, o, v, nv, no):

@@ -42,7 +42,7 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.sum_over_poles import sigma_sop
 from src.SingleReference.LinearResponse.davidson import _davidson_counters
 from src.SingleReference.LinearResponse.davidson_shared import guess_indices
-from src.Solvers.davidson import diagonal_seeds
+from src.Solvers.davidson import diagonal_seeds, solve_symmetric
 from src.Solvers.qp_equation import bracketed_root
 
 
@@ -74,14 +74,30 @@ def test_a_truncated_davidson_seed_is_a_named_flag():
     assert [f['flag'] for f in block] == ['davidson_guess_truncated'] * 2
 
 
+def test_unconverged_davidson_roots_are_a_named_flag():
+    """The symmetric Davidson out of cycles raises 'davidson_not_converged'
+    into the enclosing `collecting` block and keeps its roots."""
+    rng = np.random.default_rng(7)
+    a = rng.standard_normal((60, 60))
+    a = a + a.T + np.diag(np.arange(60.0))
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning, match='unconverged'):
+        e, X, conv = solve_symmetric(lambda x: a @ x, np.diag(a), nroots=3,
+                                     max_cycle=2, complete_lowest=False)
+    assert not conv.all() and e.shape == (3,)
+    assert [f['flag'] for f in block] == ['davidson_not_converged']
+
+
 def test_sigma_sop_names_an_excluded_state():
     eps = np.array([-10.0, -0.5, 0.3, 1.0])
     poles = np.array([0.8, 1.5])
     amplitudes = np.full((2, 4), 0.01)
-    out = {}
-    with pytest.warns(RuntimeWarning, match='excludes this state'):
+    out, block = {}, []
+    with collecting(block), pytest.warns(RuntimeWarning,
+                                         match='excludes this state'):
         value = sigma_sop(-9.9, amplitudes, poles, eps, 2, out=out)
     assert out['compression_excluded'] > 1.0
+    assert 'sop_compression_excluded' in [f['flag'] for f in block]
     assert value == sigma_sop(-9.9, amplitudes, poles, eps, 2, check=False)
 
 
@@ -162,9 +178,12 @@ def test_a_spin_contaminated_reference_is_flagged(monkeypatch):
     # the test is about the contamination flag, so the analysis is stood in
     monkeypatch.setattr(pyscf_interface.scf_stability, 'uhf_internal',
                         lambda mf, return_status, verbose: (None, True))
-    with pytest.warns(RuntimeWarning, match='spin-contaminated'):
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning,
+                                         match='spin-contaminated'):
         out = pyscf_interface.unrestricted_reference_diagnostics(mf, 'test')
     assert out['spin_contaminated'] is True
+    assert [f['flag'] for f in block] == ['uhf_spin_contaminated']
     assert mf.reference_diagnostics is out
 
 
@@ -176,9 +195,11 @@ def test_an_ill_conditioned_ir_fit_is_kept_on_the_basis(monkeypatch):
     b.fit_matsubara(n, values)
     assert b.last_fit['ill_conditioned'] is False
     monkeypatch.setattr(matsubara, '_COND_WARN', 0.0)
-    with pytest.warns(RuntimeWarning, match='conditioned at'):
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning, match='conditioned at'):
         b.fit_matsubara(n, values)
     assert b.last_fit['ill_conditioned'] is True
+    assert [f['flag'] for f in block] == ['matsubara_fit_ill_conditioned']
     assert b.last_fit['condition'] > 1.0
 
 

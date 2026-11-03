@@ -71,12 +71,13 @@ from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
 MOLECULES = {
     'formaldehyde': 'C 0 0 -0.5296; O 0 0 0.6763; H 0 0.9339 -1.1088; '
                     'H 0 -0.9339 -1.1088',
-    'water': 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'}
+    'water': WATER_ROUNDED}
 #: The window set per molecule: the core and the highest virtuals in it sit
 #: outside the pole model's reach, so it holds inside-scissor states, and
 #: the rest of the spectrum is outside it.

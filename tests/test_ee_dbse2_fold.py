@@ -94,8 +94,9 @@ from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_equations, ee_fol
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, static_screened_coulomb_aux, static_second_order_kernel_df)
+from tests.molecules import WATER_AT_ORIGIN
 
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 # the two lowest roots (Ha) of check 2's pieces on sets=('eq71',), singles='eq62+eq59',
 # gw_like_uniform's energies, solver newton at tol_omega 1e-12
 M0_ROOTS = {

@@ -20,8 +20,9 @@ from src.photophysics import rate_models
 from src.photophysics.minimum import from_gw_bse_record
 from src.photophysics import rates
 from tests.photophysics_cases import gw_bse_props, unit_modes
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 
 
 def table(offset):

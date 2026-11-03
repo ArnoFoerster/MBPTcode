@@ -41,7 +41,7 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
 from src.environments.environment import environment_label
 from src.Base.environment_seam import NoEnvironment, resolve_environment
 from src.Base.geometry.geometry import elements_of
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.Base.utils.parallel.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states

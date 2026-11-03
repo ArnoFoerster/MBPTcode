@@ -1,7 +1,6 @@
 """pyscf adapters: MO-basis integrals (four-index and density-fitted, with an
 attached environment's dressing), spin-orbital embeddings, the orbital
 response kernel and checks on the reference."""
-import warnings
 import weakref
 
 import numpy as np
@@ -9,6 +8,7 @@ from pyscf import scf, ao2mo, lib
 from pyscf import df as pyscf_df
 from pyscf.scf import stability as scf_stability
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import environment_of
@@ -177,12 +177,12 @@ def unrestricted_reference_diagnostics(mf, who):
            'spin_contaminated': bool(s2 - exact
                                      > UHF_SPIN_CONTAMINATION_WARN)}
     if out['spin_contaminated']:
-        warnings.warn(
+        flag('uhf_spin_contaminated',
             f'{who}: the unrestricted reference is spin-contaminated, <S^2> = '
             f'{s2:.4f} against S(S+1) = {exact:.4f}; its quasiparticle energies '
             f'describe a mixture of spin states.', RuntimeWarning, stacklevel=3)
     if not stable:
-        warnings.warn(
+        flag('uhf_reference_unstable',
             f'{who}: the unrestricted reference is internally UNSTABLE -- a '
             f'lower UHF solution exists (pyscf.scf.stability.uhf_internal); '
             f'the quasiparticle energies start from a saddle point.',
@@ -227,11 +227,6 @@ def require_closed_shell_or_unrestricted(mf, who, mol=None):
             f'orbitals doubly occupied and the rest empty -- or an unrestricted '
             f'one; this one has spin {mol.spin} and {off} occupations off that '
             f'pattern. Run an open shell as UHF/UKS.')
-
-
-def occupied_count(mf):
-    """The closed-shell occupied count of the mean field `mf`."""
-    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
 
 
 def get_orbital_energies(mf, representation='spatial'):

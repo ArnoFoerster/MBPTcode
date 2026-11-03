@@ -46,8 +46,9 @@ from src.environments.polarizable_sites import (calibrated_site_alphas,
                                                 sites_for_molecule)
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
+from tests.molecules import WATER_ROUNDED
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+WATER = WATER_ROUNDED
 BASIS = 'cc-pvdz'
 #: Bohr between the two oxygens of the dimer: far enough that the monomers
 #: barely perturb one another, which is the papers' own non-overlap assumption.

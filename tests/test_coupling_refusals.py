@@ -30,6 +30,7 @@ from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      configuration_coupling,
                                                      evaluated_coupling)
 from tests.reference_scf import rhf_df_jkfit
+from tests.molecules import WATER
 
 S0, S1 = ('singlet', 0), ('singlet', 1)
 
@@ -111,7 +112,7 @@ def test_degenerate_roots_are_refused_off_an_evaluation():
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     return mol, rhf_df_jkfit(mol)
 

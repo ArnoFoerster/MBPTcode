@@ -35,13 +35,14 @@ from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
 from src.Base.numerics.constants import HARTREE_TO_EV, QP_WINDOW_Z_MIN
 from tests.adc_common import water_df  # noqa: F401  (fixture)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_ROUNDED_LOW
 
 pytestmark = requires_runtime(4)
 
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12          # fov noise leaks straight into T1^(2)

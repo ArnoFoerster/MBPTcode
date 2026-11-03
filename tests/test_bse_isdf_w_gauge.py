@@ -19,8 +19,8 @@ from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module')

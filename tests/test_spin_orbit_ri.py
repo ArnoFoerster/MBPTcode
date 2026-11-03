@@ -33,6 +33,7 @@ from src.Base.pyscf.spin_orbit_mean_field import (_soc_jk, _soc_jk_ri,
                                                  mean_field_term)
 from src.properties.spin_orbit import (SOC_PREFACTOR, socme_table,
                                        x2c_one_electron)
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 CH2O = 'O 0 0 0; C 0 0 1.205; H 0 0.94 1.79; H 0 -0.94 1.79'
 HARTREE_TO_CM = 219474.6313705
@@ -118,7 +119,7 @@ def test_the_fitting_basis_belongs_to_ri_somf_alone(ch2o):
     with pytest.raises(ValueError, match='fitting basis'):
         Numerics(properties={'soc_two_electron': 'somf',
                              'soc_auxbasis': 'aug-cc-pvdz-jkfit'})
-    bare = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='pc-1',
+    bare = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='pc-1',
                  verbose=0)
     with pytest.raises(ValueError, match='soc_auxbasis'):
         mean_field_term(bare, np.eye(bare.nao_nr()), 'ri-somf')

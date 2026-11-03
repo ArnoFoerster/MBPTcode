@@ -103,7 +103,7 @@ import numpy as np
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df as _df
-from src.SingleReference.ADC.eeADC import ee_ri_density as _rd
+from src.SingleReference.ADC.eeADC import ee_ri_tiles as _rd
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_utils
 
@@ -332,7 +332,7 @@ def flat_state(v, no, nv, level='adc2', parity=None):
 def fold_state(op, y, omega, t1):
     """(u1, u2) spin-blocked of one root of the folded operator `op`
     (ee_ri_fold.RIFoldADC2): the singles sqrt(t1) y and the doubles rebuilt
-    from them (ee_ri_density.root_doubles), together the unit full
+    from them (ee_ri_tiles.root_doubles), together the unit full
     eigenvector, in the paper scaling; a spin-component scaled operator's
     doubles carry sqrt(c) of their pair class (module docstring). The
     doubles are held whole: the route of molecules whose o^2 v^2 fits in

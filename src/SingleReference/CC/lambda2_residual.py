@@ -4,7 +4,7 @@
 # why it is transposed before use.
 import numpy as np
 
-from .cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 from .parallel_accum import pacc
 
 

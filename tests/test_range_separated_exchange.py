@@ -36,8 +36,9 @@ from src.Base.pyscf.pyscf_interface import exchange_channels, rsh_split, xc_hybr
 from src.gradients.isdf_mean_field import (isdf_mean_field_gradient,
                                            require_isdf_gradient_support)
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_CS
 
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 #: Displacement for the finite differences below, in Bohr.
 STEP = 1e-4
 

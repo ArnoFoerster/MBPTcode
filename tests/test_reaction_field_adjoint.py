@@ -26,6 +26,7 @@ from src.gradients.gwbse.reaction_field_adjoint import (
     reaction_field_backward, reaction_field_shift)
 from src.SingleReference.LinearResponse.space_time import static_screening_grid
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 STEP = 1e-4
@@ -34,7 +35,7 @@ STEP = 1e-4
 @pytest.fixture(scope='module')
 def setup():
     """The two factorizations of one molecule: X is shared, D is not."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=BASIS, verbose=0)
     nocc = mol.nelectron // 2
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis=AUXBASIS)

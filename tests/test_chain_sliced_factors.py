@@ -93,10 +93,11 @@ from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 SIZES = [2, 3, 8]
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: One hydrogen 0.03 A along y: a geometry the chain fits and differentiates
 #: on its own, away from the reference's cached rows.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'

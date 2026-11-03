@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from src.Base.utils import threaded_copies as tc
-from src.SingleReference.CC import cached_einsum as ce
+from src.Base.utils import cached_einsum as ce
 
 
 @pytest.fixture

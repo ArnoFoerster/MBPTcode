@@ -127,13 +127,14 @@ from pyscf.solvent.smd import solvent_db
 
 from src.Base.basis.ri_fallback import auxbasis_for, element_basis_name, pure_element
 from src.Base.geometry.geometry import elements_of
-from src.Base.numerics.constants import (BYTES_PER_GB, BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
+from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, HARTREE_TO_EV, ISDF_TILE_GB,
                                          COSMO_RADII_ANGSTROM, PCM_LEBEDEV_ORDER,
                                          SOLVENT_PLASMON_EV,
                                          SOLVENT_RI_PROBE_ORBITALS,
                                          SOLVENT_RI_RESIDUAL_MAX)
 from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.environment_seam import attach_environment
+from src.Base.utils.parallel.memory import fits
 from src.environments.pcm_derivatives import (bound_pyscf_pcm_blocks, by_atom,
                                               cavity_blocks,
                                               solver_bilinear_gradient)
@@ -581,7 +582,7 @@ class SolventScreening:
         held per block.
         """
         per = 8.0 * nbasis * nbasis * max(live, 1)
-        nk = max(1, int(budget_gb * BYTES_PER_GB / per))
+        nk = fits(budget_gb, per)
         return [(k0, min(k0 + nk, self.ngrids))
                 for k0 in range(0, self.ngrids, nk)]
 
@@ -793,7 +794,7 @@ class SolventScreening:
         pair = np.empty((npair, auxmol.nao_nr()))
         ao_loc = auxmol.ao_loc_nr()
         per = 8.0 * mol.nao_nr() ** 2
-        step = max(1, int(budget_gb * BYTES_PER_GB / per)
+        step = max(1, fits(budget_gb, per, least=0)
                    * auxmol.nbas // max(auxmol.nao_nr(), 1))
         for s0 in range(0, auxmol.nbas, step):
             s1 = min(s0 + step, auxmol.nbas)

@@ -51,8 +51,9 @@ from src.properties.excitations import SurfaceSpec, calc_vertical_excitation
 from tests.adc_common import five_point
 from tests.isdf_test_grid import g1
 from tests.test_split_equilibrium import grid_terms
+from tests.molecules import WATER_ROUNDED
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+WATER = WATER_ROUNDED
 #: Field step (a.u.) of the five-point finite field.
 FIELD_STEP = 2e-4
 #: Tr[drho z] against the finite field, a.u.: the five-point truncation at

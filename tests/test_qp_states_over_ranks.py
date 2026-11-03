@@ -64,6 +64,7 @@ from src.SingleReference.LinearResponse.linear_response import \
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 SIZES = [2, 3]
 #: More ranks than states: the surplus ranks own an empty block.
@@ -77,13 +78,12 @@ ROOT_REL = 1e-11
 #: The explicit roots of an adaptive set over ranks against serial, Ha: the
 #: tau sweep's reduction re-associates, the roots' Newton does not.
 ADAPTIVE_ROOT_TOL = 1e-10
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

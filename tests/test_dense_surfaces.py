@@ -46,6 +46,7 @@ from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.surface import (FiniteDifferenceGradient,
                                    PotentialEnergySurface)
+from tests.molecules import WATER
 
 #: A two-point central difference has an O(h^2) truncation error, so comparing
 #: at ONE step size cannot tell a correct gradient from one that is wrong by
@@ -137,7 +138,7 @@ def h2():
 def water():
     """Three atoms, so the gradient has directions the diatomics cannot test:
     a bond length alone never exercises the off-axis components."""
-    return gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    return gto.M(atom=WATER,
                  basis='sto-3g', verbose=0)
 
 

@@ -116,7 +116,7 @@ pytest test_isdf_one_grid_call.py
 pytest test_isdf_pcm_force.py
 pytest test_isdf_refuses_cartesian.py
 pytest test_isdf_rows_census.py
-pytest test_legacy_defaults_and_aliases.py
+pytest test_chain_defaults_and_keys.py
 pytest test_matsubara_ir.py
 pytest test_metallic_grid_wiring_quick.py
 pytest test_metric_root_cache.py
@@ -191,6 +191,7 @@ pytest test_range_separated_refusal.py
 pytest test_reaction_field.py
 pytest test_reaction_field_adjoint.py
 pytest test_reaction_field_skeleton_ranks.py
+pytest test_record_compat.py
 pytest test_record_names_map.py
 pytest test_refactor_baseline.py
 pytest test_refreeze_carries_settings.py
@@ -377,7 +378,7 @@ pytest test_refreeze_keeps_the_numerics.py
 pytest test_refreeze_start_fails_loudly.py
 pytest test_refrozen_walk_trust.py
 pytest test_relax_keywords.py
-pytest test_retired_modes.py
+pytest test_refused_qp_modes.py
 pytest test_root_following_commit.py
 pytest test_root_following_displaced_core.py
 pytest test_root_following_refusal.py

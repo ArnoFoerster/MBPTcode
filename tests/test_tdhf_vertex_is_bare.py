@@ -21,8 +21,8 @@ from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.Solvers.qp_equation import solve_qp_equation_pole_strength
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def check(ok, label, detail=''):

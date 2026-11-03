@@ -26,7 +26,7 @@ def test_a_gas_ladder_with_a_width_refuses_the_mlj_rungs_and_goes_on():
     mol = gto.M(atom=trc.GEO, basis='sto-3g', verbose=0)
     inp = trc.build(mol, solvent=False)
     full = replace(trc.FULL, gaussian_sigma_ev=0.02)
-    ladder = ablation_ladder(inp, full, trc.T, shared=inp)
+    ladder = ablation_ladder(inp, full, trc.T, trc.STACKED, shared=inp)
     assert [r['step'] for r in ladder] == [s for s, _ in ABLATION_LADDER]
     refused = {r['step']: r['refused'] for r in ladder if 'refused' in r}
     mlj = {s for s, _ in ABLATION_LADDER
@@ -49,7 +49,7 @@ def test_a_curvilinear_j_outside_its_bar_refuses_its_rungs(monkeypatch):
     mol = gto.M(atom=trc.GEO, basis='sto-3g', verbose=0)
     inp = trc.build(mol)
     monkeypatch.setattr(dm, 'DUSCHINSKY_CURVILINEAR_SV_MIN', 0.999)
-    ladder = ablation_ladder(inp, trc.FULL, trc.T, shared=inp)
+    ladder = ablation_ladder(inp, trc.FULL, trc.T, trc.STACKED, shared=inp)
     by_step = {r['step']: r for r in ladder}
     assert 'table' in by_step['rectilinear_duschinsky']
     for step, r in by_step.items():

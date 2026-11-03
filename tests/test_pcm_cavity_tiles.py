@@ -43,8 +43,9 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.environments import pcm_factorization
 from src.environments.pcm_derivatives import LIBCINT_BLOCK_LIMIT, owned_blocks
 from src.environments.pcm_factorization import _cavity_share, cavity_tiles, factorize_once
+from tests.molecules import WATER_DISTORTED
 
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 
 #: Surface points per tile where a gate lowers the budget.
 PER_TILE = 7

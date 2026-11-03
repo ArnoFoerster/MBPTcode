@@ -24,6 +24,7 @@ not cover (a symmetry the caller has to adapt to) and is refused.
 import numpy as np
 from pyscf import lib
 
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
 from src.Base.numerics.numerics import required_numerics
 from src.Base.pyscf import cphf
@@ -133,6 +134,6 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics, free=None,
     # rank 0 iterates under ranks: the matvec's Fock builds are collectives
     x, res, info = cphf.solve_operator(pair_matvec, rhs, denominators,
                                        numerics, flags)
-    if verbose:
+    if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
         print(f"    [multipliers] n={rhs.size} info={info} |res|={res:.3e}")
     return vec_to_sym(np.where(fixed, 0.0, x), norb, iu), res

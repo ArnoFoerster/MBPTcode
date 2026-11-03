@@ -26,6 +26,7 @@ from pyscf import gto, scf
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_antisymmetrized_spin_eri
 from src.SingleReference.ADC.second_order import sigma2, sigma2_poles
 from src.SingleReference.GW.self_energy import SelfEnergySolver
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -34,7 +35,7 @@ def check(ok, label, detail=''):
 
 
 def build():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-12

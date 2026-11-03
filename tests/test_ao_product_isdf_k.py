@@ -47,8 +47,9 @@ from src.gradients.rpa.factor_chain import FrozenFactorization
 from tests.test_body_fixed_frames import (ENERGY_TOL, RIGID_TOL, five_point,
                                           moved, rigid_part, rotation, water)
 from tests.pins import isdf_gradient_bar
+from tests.molecules import WATER_C1
 
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
+H2O_C1 = WATER_C1
 HCHO_C1 = ('C 0 0.02 -0.5296; O 0.01 0 0.6763; H 0 0.9339 -1.1088; '
            'H 0.03 -0.9339 -1.1188')
 FD_STEP = 1e-3

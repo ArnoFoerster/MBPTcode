@@ -65,12 +65,13 @@ from src.gradients.gwbse import dense_surfaces, qp_space_time
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.qp_set import QuasiparticleSet
 from tests.pins import assert_same, assert_same_tree
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: The chain's own degeneracy tolerance; `resolve_qp_states` has no default.
 DEGENERACY_TOL = 1e-4
 
 MOLS = {
-    'water': 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    'water': WATER_ROUNDED_LOW,
     'methane': ('C 0 0 0; H 0.6276 0.6276 0.6276; H -0.6276 -0.6276 0.6276; '
                 'H -0.6276 0.6276 -0.6276; H 0.6276 -0.6276 -0.6276'),
 }

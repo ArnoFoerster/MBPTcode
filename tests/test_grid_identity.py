@@ -18,9 +18,9 @@ from src.Base.declaration import GroundState, QPStates
 from src.Base.numerics.numerics import numerics_of
 from src.Base.factorization.separable_ri import grid_identity, refuse_other_grid
 from src.properties.excitations import SurfaceSpec, grid_record
+from tests.molecules import WATER
 
 BASIS = 'cc-pvdz'
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def old_g3():

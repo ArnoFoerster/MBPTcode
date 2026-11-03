@@ -440,7 +440,7 @@ def vibronic_analysis(surface, state, mol_gs, mf_gs, hess=None, top=8,
     return out
 
 
-def promoting_mode_couplings(mol0, omega, modes, masses, soc_at, i, j, dq=0.1):
+def promoting_mode_couplings(mol0, omega, modes, masses, soc_at, i, j, dq):
     """|dV_ij/dq_k| in Hartree, every real ground-state mode, Herzberg-Teller.
 
     The correction Samanta, Kim, Coropceanu and Bredas, J. Am. Chem. Soc.
@@ -453,7 +453,8 @@ def promoting_mode_couplings(mol0, omega, modes, masses, soc_at, i, j, dq=0.1):
     returns, so this function owns no electronic-structure route and works
     on any of them; `i`, `j` index that table (i = 0 is the ground state
     row). `omega`, `modes`, `masses` are `normal_modes`'s, and
-    `displace_along_mode` reads the dimensionless step `dq`.
+    `displace_along_mode` reads the dimensionless step `dq` (the UISC
+    protocol's is UISC_DQ).
 
     |V| is differenced through V^2 (`slope_from_squares`): a central
     difference of the modulus is zero for a Condon-forbidden pair.

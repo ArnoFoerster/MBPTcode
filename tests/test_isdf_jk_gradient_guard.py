@@ -28,8 +28,9 @@ from src.gradients.isdf_mean_field import refuse_isdf_jk_gradient
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_CS
 
-ATOM = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+ATOM = WATER_CS
 #: Angstrom. The disagreement is CONSTANT in h, so any step shows it; this one
 #: is small enough that the difference's own truncation error, which falls as
 #: h^2, is three orders below it and the two forces can be told apart.

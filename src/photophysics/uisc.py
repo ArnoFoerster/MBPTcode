@@ -57,7 +57,7 @@ from typing import NamedTuple
 import numpy as np
 
 from src.Base.numerics.constants import HARTREE_TO_CM, HARTREE_TO_EV
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.photophysics import rate_models
 from src.photophysics.declaration import UiscModel
 from src.photophysics.minimum import GroundModes

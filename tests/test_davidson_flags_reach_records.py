@@ -23,8 +23,9 @@ from src.SingleReference.BSE.solve import solve_bse
 from src.photophysics import df_check
 from src.properties import spin_orbit
 from tests.photophysics_cases import run_of
+from tests.molecules import WATER_CS
 
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 STUCK = {'davidson_not_converged': {'roots': [1], 'residuals': [1e-3],
                                     'verdict': 'unconverged'}}
 

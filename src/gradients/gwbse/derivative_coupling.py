@@ -52,13 +52,11 @@ excited-excited.
 """
 import numpy as np
 
-from src.Base.numerics.constants import COUPLING_GAP_MIN, NUCLEAR_FD_STEP
+from src.Base.numerics.constants import COUPLING_GAP_MIN
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
                                         surface_numerics)
-from src.Base.pyscf.pyscf_interface import occupied_count
-from src.Base.geometry.geometry import displaced
+from src.Base.orbital_spaces import occupied_count
 from src.gradients.orbital_coupling import configuration_coupling, ov_coupling
-from src.gradients.state_identity import mo_overlap
 from src.Base.numerics.constants import GROUND_SPIN_FACTOR
 
 
@@ -79,30 +77,6 @@ def state_to_state_density(nocc, xm, ym, xn, yn):
     x_n = np.asarray(xn, float).reshape(nocc, -1)
     y_n = np.asarray(yn, float).reshape(nocc, -1)
     return (x_m @ x_n.T - y_m @ y_n.T, x_m.T @ x_n - y_m.T @ y_n)
-
-
-def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
-                                 step=NUCLEAR_FD_STEP):
-    """A_pq = <phi_p | d phi_q / dR> for the CANONICAL orbitals, by difference.
-
-    Mean fields only -- no GW and no BSE. A test gate, not on the production
-    path: this is the independent check that `configuration_coupling`'s
-    Z-vector reproduces,
-    and it is also the cheapest way to SEE the gauge.
-
-    Each displaced solve returns its orbitals up to a sign, which is fixed by
-    making the diagonal of the overlap positive; a within-block ROTATION needs
-    no fixing, because it is exactly the canonical gauge this term carries.
-    """
-    crd = np.asarray(mol.atom_coords())
-    out = []
-    for sign in (-1.0, 1.0):
-        delta = np.zeros_like(crd)
-        delta[atom, axis] = sign * step
-        md = displaced(mol, delta, crd)
-        t = mo_overlap(mol, mf.mo_coeff, md, scf_factory(md).mo_coeff)
-        out.append(t * np.sign(np.diag(t))[None, :])
-    return (out[1] - out[0]) / (2 * step)
 
 
 def ground_state_coupling(mol, mf, nocc, xn, yn, numerics):

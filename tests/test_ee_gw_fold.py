@@ -65,8 +65,9 @@ from src.Base.numerics.constants import (EE_GW_LAPLACE_TARGET, EE_GW_SLAB_BLOCKS
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_fold, ee_gw_pieces, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
+from tests.molecules import WATER_AT_ORIGIN
 
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 
 
 def check(ok, label, detail=''):

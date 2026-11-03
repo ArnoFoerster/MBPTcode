@@ -53,6 +53,7 @@ from pyscf import dft
 from src.environments import solvation_loop as sl
 from src.Base.numerics.constants import HARTREE_TO_MEV
 from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_compat import SOLVATED_ABSENT
 from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
@@ -63,7 +64,8 @@ from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, FollowingWarn
 from src.gradients.adc.ee_state_model import ADC2State
 from src.photophysics import solvated
 from tests.adc_common import (ADC_NUMERICS, ATOMS, AUX, NF, SOLVATION_TIGHT, SOLVATION_TIGHT_LOOP,
-                              df_rhf, make_scf_loop, molecule)
+                              WATER_C2V, df_rhf, make_scf_loop, molecule)
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 def toluene(mol):
@@ -564,6 +566,44 @@ def test_driver_kohn_sham_reference_on_the_xc_grid(tmp_path):
         mod._check_args(_args(tmp_path, xc_grid=4), None)
 
 
+def test_driver_gwbse_mean_field_converges_as_its_numerics(tmp_path):
+    """The GW-BSE mean field converges as the scf section of the run's
+    Numerics, the one the record states."""
+    mod = driver()
+    args = _args(tmp_path, **GWBSE_ARGS)
+    mod._check_args(args, None)
+    num = Numerics(scf={'conv_tol': 1e-9, 'conv_tol_grad': 1e-9, 'max_cycle': 77})
+    _, make_state = mod._factories(args, 'gas', dict(numerics=num))
+    s0 = make_state('S0')(molecule(ATOMS), NoMedium(molecule(ATOMS)))
+    mf = s0.make_scf(molecule(ATOMS))
+    assert (mf.conv_tol, mf.conv_tol_grad, mf.max_cycle) == (1e-9, 1e-9, 77)
+
+
+def test_driver_gwbse_grid_is_looked_up_as_the_factors_ask(tmp_path, monkeypatch):
+    """The grid is looked up before the first walk under the keys and the -ri
+    set the factors ask for: an atom of its own basis by its label."""
+    from src.Base.basis.basis_map import molecule_basis
+    from src.Base.basis.ri_fallback import paired_auxbasis
+    from src.Base.geometry.geometry import elements_of
+    mod = driver()
+    from pyscf import gto
+    atom, basis = molecule_basis(WATER_C2V, 'cc-pvdz', None, {(1,): 'aug-cc-pvdz'})
+    mol = gto.M(atom=atom, basis=basis, verbose=0)
+    args = _args(tmp_path, **GWBSE_ARGS, basis=basis)
+    mod._check_args(args, mol)
+    asked = {}
+
+    def lookup(level, basis, elements=(), auxbasis=None):
+        asked.update(basis=basis, elements=elements, auxbasis=auxbasis)
+        raise KeyError('grid does not exist')
+    monkeypatch.setattr(mod, 'resolve_isdf_grid', lookup)
+    with pytest.raises(KeyError, match='grid does not exist'):
+        mod.gwbse_numerics(args, mol)
+    assert asked == dict(basis=mol.basis, elements=elements_of(mol),
+                         auxbasis=paired_auxbasis(mol.basis))
+    assert any('@' in key for key in asked['elements'])
+
+
 def test_driver_gwbse_numerics_carry_the_qp_options(tmp_path):
     """The outside scissor, the residue route and the XC grid reach the one
     Numerics; omitted, each is the Numerics default."""
@@ -618,7 +658,7 @@ def test_an_older_record_resumes_without_the_later_settings(tmp_path):
         args = _args(tmp_path, **GWBSE_ARGS, reference=xc, out=str(tmp_path / f'{xc}.json'))
         mod._check_args(args, None)
         rec = mod._start_record(args)
-        for key in mod.LATER_SETTINGS:
+        for key in SOLVATED_ABSENT:
             rec.pop(key)
         mod._save(rec, args.out)
         if refused:
@@ -679,7 +719,7 @@ def test_ee_adc_refuses_an_equilibrium_mode_continuum():
     the static response 'vertical': refused, not unwrapped."""
     from pyscf import gto, scf
     from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
                 verbose=0)
     env = SolventScreening(mol, eps=1.78, eps_static=78.0, equilibrium=True)
     mf = scf.RHF(mol).run()

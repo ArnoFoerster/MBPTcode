@@ -31,8 +31,9 @@ from src.environments.solvent_screening import (attach_solvent_screening,
                                                 detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 AUX = 'cc-pvdz-jkfit'
 METHODS = ['GW', 'GWGammaInf', 'PSD1']
 #: moved - Eq. (18), eV: round-off; Z x Eq. (18) misses by 50-100 meV here

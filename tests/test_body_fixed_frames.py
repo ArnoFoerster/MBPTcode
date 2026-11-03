@@ -49,10 +49,11 @@ from src.properties.optimize import translation_rotation_basis
 from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same, isdf_gradient_bar
+from tests.molecules import WATER_C1
 
 BASIS = 'cc-pvdz'
 #: Water with no symmetry, so no component of a force vanishes by symmetry.
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
+H2O_C1 = WATER_C1
 KEYS = (('singlet', 0), ('triplet', 0))
 AXIS, DEGREES = (1.0, 2.0, 3.0), 25.0
 SHIFT = np.array([0.3, -0.2, 0.4])

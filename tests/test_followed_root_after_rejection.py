@@ -15,6 +15,7 @@ from pyscf import gto
 
 from src.properties.optimize import optimize
 from src.gradients.surface import followed_root
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 class Crossing:
     """A walked state whose root changes off the start and whose energy rises
@@ -36,7 +37,7 @@ class Crossing:
 
 
 def water():
-    return gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59',
+    return gto.M(atom=WATER_AT_ORIGIN_COARSE,
                  basis='sto-3g', verbose=0)
 
 

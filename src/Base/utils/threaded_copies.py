@@ -11,9 +11,11 @@ every caller until switched on; the DF ADC operators switch it on
 (threaded_transposes_default).
 """
 import math
-import os
 
 import numpy as np
+
+from src.Base.numerics.constants import THREADED_COPY_MAX_THREADS
+from src.Base.utils.parallel.threads import budget, pool
 
 _COPY_POOL = None
 _COPY_THREADS = 1
@@ -74,21 +76,20 @@ def threaded_tensordot(a, b, axes):
 
 def use_threaded_transposes(n_threads=None, min_elements=None):
     """Switch the einsum below to threaded operand copies (n_threads: default the
-    OMP_NUM_THREADS count, at most 32; min_elements: the smallest operand copied on
-    the pool, default 2^18); n_threads=1 switches it off. Copies below about 2^18
-    elements gain nothing from the pool, and more than 32 copy threads gain nothing
-    over 32."""
+    process's thread budget (`threads.budget`), at most THREADED_COPY_MAX_THREADS;
+    min_elements: the smallest operand copied on the pool, default 2^18);
+    n_threads=1 switches it off. Copies below about 2^18 elements gain nothing
+    from the pool."""
     global _COPY_POOL, _COPY_THREADS, _COPY_MIN_ELEMENTS, _COPY_CHOSEN
     _COPY_CHOSEN = True
     if min_elements is not None:
         _COPY_MIN_ELEMENTS = int(min_elements)
     if n_threads is None:
-        n_threads = min(32, int(os.environ.get('OMP_NUM_THREADS') or os.cpu_count() or 1))
+        n_threads = min(THREADED_COPY_MAX_THREADS, budget())
     if n_threads <= 1:
         _COPY_POOL, _COPY_THREADS = None, 1
         return
-    from concurrent.futures import ThreadPoolExecutor
-    _COPY_POOL, _COPY_THREADS = ThreadPoolExecutor(n_threads), n_threads
+    _COPY_POOL, _COPY_THREADS = pool(n_threads, 'copies'), n_threads
 
 
 def threaded_transposes_default():

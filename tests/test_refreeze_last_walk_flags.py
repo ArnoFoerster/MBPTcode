@@ -25,6 +25,7 @@ from pyscf import gto
 from src.Base.numerics.constants import REFREEZE_TOL_MEV
 from src.properties.excitations import relaxation_fields
 from src.properties.optimize import refreeze_pass
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 class Rebuilt:
     """A surface whose refreeze hands back another one; nothing is evaluated."""
@@ -45,7 +46,7 @@ def walk_record(converged, status, cycles, residual, energy, n3,
 
 @pytest.fixture
 def water():
-    return gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59',
+    return gto.M(atom=WATER_AT_ORIGIN_COARSE,
                  basis='sto-3g', verbose=0)
 
 

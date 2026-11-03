@@ -44,13 +44,12 @@ the swap-in step below runs the torch adjoints through that same assembly.
 `gate_factors.py` (pyscf, production) writes the factors, the frozen
 conventions and the captured production adjoints to an `.npz`
 (`frozen.py`); `torch_oracle.py` (numpy + torch only) reads it, prints the
-comparison and writes its adjoints back. The split is forced by the platform:
-on an x86_64 Python under Rosetta on an arm64 Mac, the
-torch build
+comparison and writes its adjoints back. The split is forced by some torch
+builds, which
 
-* segfaults in the backward pass with two intra-op threads (3/3) and never
-  with one (3/3) -- `torch_oracle.py` pins itself to one thread;
-* deadlocks the interpreter's normal exit when pyscf's ISDF integrals and
+* segfault in the backward pass with two intra-op threads and never with
+  one -- `torch_oracle.py` pins itself to one thread;
+* deadlock the interpreter's normal exit when pyscf's ISDF integrals and
   torch have both run in one process -- both scripts end with `os._exit`.
 
 Neither is a property of the chain. The torch side reads only the `.npz`, so
@@ -78,7 +77,7 @@ total force sums to 6.8e-15 over the atoms. 103 s for the 36 displaced chains.
 
 ## The nuclear layer too: autograd from the coordinates
 
-No test runs this layer (about 2.5 minutes on a workstation); it is a manual gate.
+No test runs this layer (a few minutes on a single machine); it is a manual gate.
 
 `gate_nuclear.py` / `torch_nuclear_oracle.py` / `torch_nuclear.py` /
 `torch_integrals.py` (`python -m src.autograd_oracle.gate_nuclear`). Omega(R) and E_0(R) as ONE torch graph from the nuclear
@@ -97,7 +96,7 @@ PCM gradient or any hand-written adjoint:
   two dielectric constants; DF-RHF Fock with the reaction field; the converged
   density as an implicit fixed point (`SCFFixedPoint`: dense dg/dD by autograd,
   one transposed solve, the cotangent pushed through g onto the integrals);
-  one generalized eigensolve for (eps, C); the ISDF fit (`fit_M_stable`) and
+  one generalized eigensolve for (eps, C); the ISDF fit (`fit_M`) and
   the metric roots in both gauges; then `torch_chain.forward`.
 
 Every stage pins at round-off at the reference geometry (Fock 1e-14, cavity

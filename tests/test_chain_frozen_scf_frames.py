@@ -21,6 +21,7 @@ from src.Base.numerics.numerics import Numerics
 from src.Base.geometry.geometry import molecule_at
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1 as g1_counts
+from tests.molecules import WATER_ROUNDED
 
 H = 1e-3
 
@@ -33,7 +34,7 @@ def isdf_rhf(mol):
 
 
 def test_the_chain_scf_stands_on_the_reference_frames_and_its_slope():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     chain = RPAGroundStateChain(mol, isdf_rhf,
                                 numerics=Numerics(isdf={'counts': g1_counts(mol)}))

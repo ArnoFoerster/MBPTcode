@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from src.Base.utils.threaded_copies import threaded_transposes_default
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.EpsteinNesbet import (EpsteinNesbetDenominators,
                                                restricted_channel_shifts)
 from src.SingleReference.common.eri_blocks import b_block, g_slice_df
@@ -207,12 +207,9 @@ def _u_Ip_pv_vp_contract_streamed_bare(B, O, V, norb, eps_o, eps_v,
 # ============== U-block builders: streamed vs unstreamed ==============
 # build_matrix_free_operator dispatches to exactly ONE of the two functions
 # below (on its _u_streamable flag) to construct the explicit U_I/U_Ip
-# matrices and the four apply_U_* closures. They used to live inline in that
-# method as three sequential def-sites relying on Python's "last def wins"
-# (base DF defs, then a streamed override, then a materialized override) --
-# split out so each path's dependency surface is explicit in its parameter
-# list, at the accepted price of duplicating the U_I/U_Ip skeletons and the
-# _2h1p_specs/_2p1h_specs tables between the two.
+# matrices and the four apply_U_* closures. Each path's dependency surface is
+# explicit in its parameter list, at the accepted price of duplicating the
+# U_I/U_Ip skeletons and the _2h1p_specs/_2p1h_specs tables between the two.
 def _build_u_blocks_streamed(B, O, V, norb, eps_o, eps_v, dh, dp, dens,
                              Bo_full, Bv_full, Bov_full, Boo_full, Bvo_full, Bv_pp,
                              iu_o, ju_o, iu_v, ju_v, ints):

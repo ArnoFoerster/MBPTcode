@@ -54,10 +54,11 @@ from src.SingleReference.ADC.sigma_driver import restricted_dyson_operator
 from tests.generated_runtime import requires_runtime
 from tests.test_faddeev_adc3 import ccd_spin_orbital
 from tests.test_faddeev_adc4 import sigma_dyn
+from tests.molecules import WATER
 
 pytestmark = requires_runtime(4)
 
-MOLS = {'h2o': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+MOLS = {'h2o': WATER,
         'lih': 'Li 0 0 0; H 0 0 1.595'}
 LAMBDAS = (0.04, 0.02)
 LAMBDAS_FULL = (0.08, 0.04, 0.02)

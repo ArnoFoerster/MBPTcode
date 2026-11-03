@@ -65,8 +65,8 @@ from tests.reduction_bounds import (ULP, exact_offset, regrouped,
                                     rounding_bound)
 from tests.test_distributed_fit_mpi import Gate, serial
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 #: Water's 444 points in 7 tiles, the last of 60: 2 and 3 ranks own several
 #: each, 8 leave rank 7 none.

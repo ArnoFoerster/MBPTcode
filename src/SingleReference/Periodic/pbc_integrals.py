@@ -207,14 +207,6 @@ class PBCDFIntegrals:
         Lij = _ao2mo.r_e2(Lpq, moij, ijslice, [], None)
         return Lij.reshape(-1, nmo, nmo)
 
-    # ---- bookkeeping helpers ----
-
-    def occ_slice(self, k):
-        return slice(0, self.nocc[k])
-
-    def virt_slice(self, k):
-        return slice(self.nocc[k], self.nmo)
-
     def Lblock(self, k1, k2):
         """Full MO 3-center factor L^{k1,k2}_{L,pq}, shape (naux, nmo, nmo).
 

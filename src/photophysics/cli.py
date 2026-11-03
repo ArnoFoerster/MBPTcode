@@ -3,8 +3,9 @@
 
     python -m src.photophysics --system formaldehyde \\
         --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \\
-        --basis cc-pvdz --environment gas --temperature 300 --lambda-env 0.05 \\
-        --nudge 0.01 --refreeze 1 --saddle-check 0 --df-check 0 \\
+        --basis cc-pvdz --environment gas --grid-accuracy G1 --scf-grid GH \\
+        --temperature 300 --lambda-env 0.05 \\
+        --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \\
         --hessian analytic-df --relaxed-solvation equilibrium --span full \\
         --manifold-gaps stacked --out tadf
 

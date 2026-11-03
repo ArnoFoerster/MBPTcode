@@ -76,6 +76,7 @@ from pyscf.lib import logger
 
 from src.Base.factorization.test_sets import is_ao_products, replicated_fit
 from src.Base.basis.ri_fallback import paired_auxbasis
+from src.Base.orbital_spaces import occupied_count
 from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
                                          ISDF_JK_BLOCK_MEMORY_FRACTION,
                                          ISDF_JK_BLOCK_MIN_MB,
@@ -833,8 +834,6 @@ def separable_factors_from_jk(mf):
             'separable_factors_from_jk needs an SCF whose with_df is an ISDFJK '
             f'(got {type(with_df).__name__}); a mean field that did not fit '
             'one needs its factors built by build_separable_ri.')
-    # cycle: pyscf_interface -> distributed_df -> this module
-    from src.Base.pyscf.pyscf_interface import occupied_count
     if not with_df.built:
         with_df.build()
     V = with_df.auxmol.intor('int2c2e', aosym='s1')

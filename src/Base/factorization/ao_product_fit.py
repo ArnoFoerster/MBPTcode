@@ -115,6 +115,7 @@ from src.Base.factorization.separable_ri import (Held, RowFit, ao_values,
                                                  row_layout, tile_collocation,
                                                  tile_edge, total_bytes)
 from src.Base.factorization.shell_runs import shell_ranges
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (allgather_blocks,
                                               allgather_ranges, broadcast_rows,
                                               contiguous_block,
@@ -264,8 +265,7 @@ def fit_shell_runs(mol, auxmol, numerics=None, comp=1):
     one takes more)."""
     block_memory_gb, = fit_settings(numerics, 'block_memory_gb')
     per_ao = comp * mol.nao_nr() * auxmol.nao_nr() * 8
-    max_aos = max(1, int(AO_PRODUCT_BLOCK_SHARE * block_memory_gb
-                         * BYTES_PER_GB // per_ao))
+    max_aos = fits(AO_PRODUCT_BLOCK_SHARE * block_memory_gb, per_ao)
     return shell_ranges(mol.ao_loc_nr(), max_aos)
 
 

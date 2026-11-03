@@ -17,9 +17,10 @@ from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface
 from src.gradients.gwbse.rpa_bse_surface import RPAQPSurface
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 def hf_factory(mol):

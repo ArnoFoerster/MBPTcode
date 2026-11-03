@@ -64,8 +64,9 @@ from src.properties.vibronic import reorganization_four_point
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight
+from tests.molecules import WATER_CS, WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 AUX = 'cc-pvdz-ri'
 EPS_INF, EPS_S = 1.776, 78.355
 #: the Born ratio of the equilibrium extra to the optical shift
@@ -295,7 +296,7 @@ def test_whole_surface_gradients(kind):
 
 # Equilibrium solvation of a relaxed neutral excited state (the response at
 # eps_static, `SolventScreening(equilibrium=True)`, `equilibrium_partner`).
-WATER_EQ = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER_EQ = WATER_CS
 #: ethylene stacked over F2 at 3.5 A; ethylene pi -> F2 sigma* is the CT root
 C2H4_F2 = ('C 0.0000 0.6695 0.0000; C 0.0000 -0.6695 0.0000; '
            'H 0.9289 1.2321 0.0000; H -0.9289 1.2321 0.0000; '

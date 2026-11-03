@@ -33,8 +33,9 @@ from src.properties import spin_orbit
 from src.properties.spin_orbit import (SOC_PREFACTOR, soc_operator,
                                        x2c_one_electron)
 from tests.test_spin_orbit_mpi import main
+from tests.molecules import WATER_ROUNDED
 
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 @pytest.fixture(scope='module')

@@ -32,6 +32,7 @@ from src.SingleReference.LinearResponse.pp_rpa import (
     PPRPASolver, build_pprpa_matrices, build_pprpa_matrices_restricted)
 from src.SingleReference.LinearResponse.riccati import (
     amplitudes_from_phonons, solve_riccati)
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -42,7 +43,7 @@ def check(ok, label, detail=''):
 def build():
     """H2O/6-31G with a DF mean field; the dense tensor is the DF one, so the
     spin-orbital and restricted builds see identical integrals."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-12

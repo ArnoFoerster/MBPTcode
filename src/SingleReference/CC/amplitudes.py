@@ -10,25 +10,20 @@ the arithmetic is unchanged (verified: max|diff| ~1e-16 on every residual):
 1. `einsum` here is cached_einsum, not numpy's. As pdaggerq emits them, the
    two-operand contractions carry NO `optimize=` argument at all, and numpy's
    default is `optimize=False` -- meaning they run in numpy's own C einsum
-   kernel and never reach BLAS. That was 60% of triples_residual wall time in
-   20 calls, and it is why MKL_NUM_THREADS appeared to do nothing: there was
-   almost no BLAS work to thread. Individually those terms are 3-90x faster
-   with a real contraction path (e.g. 'adbk,dcij->abcijk': 0.58s -> 0.006s),
-   bit-identical.
+   kernel and never reach BLAS, where MKL_NUM_THREADS has nothing to thread.
+   With a real contraction path those terms are bit-identical and run through
+   BLAS.
 
 2. The P(x,y) antisymmetrizer lines accumulate via `pacc` (parallel_accum.py)
-   rather than `res += c0 * tmp + c1 * tmp.transpose(...) + ...`. With (1)
-   in place, those lines were 84% of triples_residual -- single-threaded, since
-   numpy elementwise ufuncs never use BLAS, and allocating a full rank-6
-   temporary per permutation. See parallel_accum.py for the measurements.
-
-Measured together on nv=24/no=8, 10 threads: triples_residual 36.6s -> 5.1s,
-and thread scaling (1 -> 10 threads) went from 1.08x to 3.13x.
+   rather than `res += c0 * tmp + c1 * tmp.transpose(...) + ...`: numpy's
+   elementwise ufuncs never use BLAS, run single-threaded and allocate a full
+   rank-6 temporary per permutation. See parallel_accum.py for the
+   measurements.
 """
 
 import numpy as np
 
-from .cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 from .fixed_point import iterate, jacobi_step
 from .parallel_accum import pacc
 

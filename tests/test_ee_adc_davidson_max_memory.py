@@ -26,8 +26,8 @@ from pyscf import gto, scf
 from src.Base.utils.parallel import memory
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers import davidson as dav
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 LARGE_MB = 10**6
 HELD_MB = 200       # the process's use, as memory.current_memory_mb reports it
 TOL_EH = 1e-10      # the two solves differ only in where the subspace is stored

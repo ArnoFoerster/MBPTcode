@@ -386,8 +386,7 @@ ISDF_PIVOT_CANDIDATES = 1024
 # its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
 # A fit adjoint formed from single solves of the Gram matrix (cond ~ 2e8)
 # carries such a change to ~1e-12 on water/cc-pVDZ, whole fit and row fit
-# alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8
-# (tests/test_fit_adjoint_stability.py).
+# alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8.
 FIT_ADJOINT_ULP_RESPONSE_MAX = 1e-10
 
 # How far, in Ha/Bohr and Ha, a composed force and its energy over ranks may
@@ -417,7 +416,7 @@ RANK_SPLIT_ENERGY_TOL = 5e-12
 CONVERGED_SCF_FORCE_TOL = 1e-9
 
 # How far a force may move between two realizations of the one ISDF fit
-# (the replicated fit_M_stable and the tiled row fit, or the fit with its
+# (the replicated fit_M and the tiled row fit, or the fit with its
 # arithmetic re-associated). Both solve the Gram matrix of cond ~ 2e8, so
 # they agree in D only to cond(G) u ~ 3e-8 relative, in its near-null space;
 # a force reads D through branches below 1 Ha/Bohr here, so it moves by at
@@ -768,7 +767,7 @@ THREE_CENTER_BLOCK_BYTES = 2 << 30
 SKELETON_AUX_TILE = 32
 
 # AO functions per tile of the four-centre exchange skeleton's derivative pass
-# (`gradients.skeleton_tiles.exchange_skeleton_by_atoms`): runs of consecutive
+# (`gradients.skeleton_tiles.exchange_skeleton_tiled`): runs of consecutive
 # shells, tile t rank t % size's, so each rank's rows interleave every part of
 # the molecule (a screened row's cost differs between atoms by far more than
 # its AO count says), and the tiles' (natm, 3) addends are added in tile order.
@@ -985,6 +984,18 @@ GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
 # margin of e^40 for a bell prefactor 1/sqrt(2 pi F''), which only a band
 # narrower than 1e-17 Hartree could exceed.
 FC_UNDERFLOW_EXPONENT = -748.0
+# The real-time Franck-Condon integrals (src/properties/franck_condon.py,
+# duschinsky.py): points per period of the fastest phase, the first window in
+# widths of the band (t_decay over its standard deviation), and the cap on a
+# grid's points (`FCTimeGrid`); the fraction of its largest |G| below which
+# the integrand at a window's ends counts as decayed; the windows tried, each
+# twice the last; and the fewest points of a grid over [-t_max, t_max].
+FC_DT_PER_PERIOD = 24
+FC_T_DECAY = 9.0
+FC_MAX_POINTS = 1 << 20
+FC_DECAYED_FRACTION = 1e-10
+FC_WINDOWS = 13
+FC_MIN_POINTS = 33
 
 # Largest |H_ixjy - H_jyix| a finite-difference Hessian (src/properties/
 # hessian.py) may carry before it is refused, relative to its own largest
@@ -1002,8 +1013,8 @@ HESSIAN_FD_NOISE_REL = 1e-5
 
 # Range the asymmetry ratio between steps 2h and h must fall in above the
 # noise floor: h^2 truncation gives 4 (3.85 on formaldehyde's G3 ISDF grid). A
-# surface still rough on the step's scale gives less (2.38 on its 148-point
-# grid).
+# surface still rough on the step's scale gives less (2.38 on a coarser grid of
+# the same molecule).
 HESSIAN_FD_STEP_RATIO = (2.5, 6.0)
 
 # Level of ISDF_GRID_ACCURACY ('GH', see there) a finite-difference Hessian of
@@ -1343,6 +1354,9 @@ GIT_PROVENANCE_TIMEOUT = 10.0
 # so on two or three threads there is nothing to win and the entry cost of
 # the wrap is all that is left -- which is what this gates.
 BLAS_WRAP_MIN_THREADS = 4
+# Threads the einsum's operand copies run on at most (`threaded_copies`): more copy
+# threads than this gain nothing over it.
+THREADED_COPY_MAX_THREADS = 32
 
 
 # Fraction of the job allocation's memory that `Base.utils.parallel.memory.
@@ -2017,8 +2031,8 @@ IR_EPS = 1e-10
 DAVIDSON_ACTION_SYMMETRY_TOL = 1e-8
 
 # What a pin recorded under one BLAS may miss by under another, per quantity
-# class (tests/pins.py; bitwise under the recording BLAS). Measured on a
-# cluster's MKL 2025.3 against a workstation's MKL 2021.4/SSE4.2 + Accelerate.
+# class (tests/pins.py; bitwise under the recording BLAS). Measured between MKL
+# 2025.3, MKL 2021.4 (SSE4.2) and Accelerate.
 # Energies, Ha: up to 1.4e-12 (water RPABSESurface[singlet]; mean fields 6e-14
 # to 4e-13); a pole strength not read off a continuation holds to the same
 # number, dimensionless.
@@ -2048,7 +2062,7 @@ PIN_CROSS_BLAS_ROOT_BAR = 2e-10
 # Two computations of one number on the recording machine (two solves, two
 # routes, a run and an archived tree's run) are not bitwise: a BLAS reduction
 # taken in another order reproduces only to an ulp (1.1e-16 Ha, one ulp of a
-# 0.689 Ha operand, measured in one run in five on a cluster node). They are held
+# 0.689 Ha operand, measured in one run in five). They are held
 # to this many ulp of the larger of their magnitude and one unit (`same_bar`
 # of tests/pins.py): the unit floor because a
 # difference of O(1) operands keeps their ulps, not its own. 8 ulp: a few
@@ -2275,10 +2289,6 @@ EE_RI_EXCHANGE_CHUNK = 128
 EE_RI_EXCHANGE_ARRAYS = 3
 # (kt, nv, no, nv) arrays alive in one occupied tile of a folded product
 EE_RI_FOLD_TILE_ARRAYS = 5
-# ... in one occupied tile of the RI difference density (`eeADC.ee_ri_density`)
-# and in one virtual tile of its vv pass
-EE_RI_DENSITY_OCC_TILE_ARRAYS = 9
-EE_RI_DENSITY_VIRT_TILE_ARRAYS = 6
 # ... in one occupied tile of the RI transition densities
 # (`eeADC.ee_ri_transition`) besides the two doubles of every root, in one of
 # their virtual tiles, and in one tile of their ground row's second-order pass
@@ -2719,9 +2729,10 @@ DAVIDSON_DENOMINATOR_FLOOR = 1e-8
 THOLE_FACTOR = 2.5874
 MIN_SITE_SEPARATION = 1e-6
 
-# Bohr. The box of the single-descent ISDF radius search, kept so every cached
-# and shipped grid keeps its key (`separable_ri.ELEMENT_R_MAX`).
-LEGACY_R_MAX = 5.0
+# Bohr. The box of the single-descent ISDF radius search; every cached and
+# shipped grid was searched in it, so their keys depend on it
+# (`separable_ri.ELEMENT_R_MAX` is the multi-start box).
+SINGLE_DESCENT_R_MAX = 5.0
 
 # Laplace quadrature points of the fused rank>=3 amplitudes in the MP3/MP4
 # densities (DensityMatrix drivers, ADC static corrections).
@@ -2736,12 +2747,12 @@ MPN_DENSITY_LAPLACE_NTAU = 6
 EE_ADC_DENSE_LIMIT = 2000
 EE_FOLD_DENSE_LIMIT = 64
 # (no, nj, nv, nv) slab blocks one slab of the restricted DF ADC(2) coupling
-# kernel holds at once (ee_r_sigma_df; the traced peak of
-# tests/test_ee_adc_fold.py), what slab_plan budgets the slab width with.
+# kernel holds at once (ee_r_sigma_df; the traced peak of a slab), what
+# slab_plan budgets the slab width with.
 EE_COUPLING_SLAB_BLOCKS = 11
 # (nk, nv, nm) slab blocks one slab of the GW fold's eq 66 kernel holds at once
-# (ee_gw_pieces; the traced peak of tests/test_ee_gw_fold.py), what slab_plan
-# budgets the slab width with.
+# (ee_gw_pieces; the traced peak of a slab), what slab_plan budgets the slab
+# width with.
 EE_GW_SLAB_BLOCKS = 3
 # The Laplace grid target of the GW and dBSE2 folds' kernel_laplace:
 # max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled to [1, R]

@@ -52,13 +52,13 @@ from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, FIT_CHOLESKY_BLOCK
 import scipy.linalg
 from pyscf import df as pyscf_df
 
-from src.Base.factorization.distributed_df import distributed_handles
+from src.Base.factorization.df_distribution import distributed_handles
 from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
 from src.environments.environment import dresses_interaction
 from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid
 from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, ao_l_labels,
                                                  content_key, atomic_frames,
-                                                 fit_settings, aux_metric_sqrt, fit_M_stable,
+                                                 fit_settings, aux_metric_sqrt, fit_M,
                                                  rows_transpose_product,
                                                  screened_layout, fit_test_set_D,
                                                  fit_test_set_layout)
@@ -437,20 +437,6 @@ def three_centre_adjoint(mol, auxmol, G3, omega=0.0, max_bytes=THREE_CENTER_BLOC
     return grad
 
 
-def dfactor_adjoint(mol, auxmol, coords, D_bar, layout, pts_local,
-                    atom_of_point, frames=None, decay=FRAME_DECAY,
-                    numerics=None, with_frames=True,
-                    environment=None, body=None):
-    """(natm, 3) gradient of sum_{gP} D_bar[g,P] D[g,P], D = M^T V_env^(1/2):
-    one gauge of `dfactor_adjoint_gauges`. A test gate, read by no
-    production route."""
-    return dfactor_adjoint_gauges(mol, auxmol, coords,
-                                  [(D_bar, environment)], layout, pts_local,
-                                  atom_of_point, frames=frames, decay=decay,
-                                  numerics=numerics,
-                                  with_frames=with_frames, body=body)
-
-
 def product_pairs(mol, numerics=None):
     """(mu, nu, weight) of every pair of the test set's product basis, (all
     AOs) x (AOs with l <= l_max_second), in `fit_test_set_layout`'s order.
@@ -555,7 +541,7 @@ def dfactor_adjoint_gauges(mol, auxmol, coords, gauges, layout, pts_local,
     del F_pairs
     ngram = len(gmu)
     D_test = fit_test_set_D(mol, auxmol, coords, (gmu, gnu, gw))
-    M = fit_M_stable(D_test, F, numerics)
+    M = fit_M(D_test, F, numerics)
 
     V_bar = np.zeros_like(V)
     ao_bar = np.zeros_like(ao)
@@ -812,7 +798,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     # The fit is rebuilt, not taken from the mean field, so that the function
     # differentiated is a single realization of the SCF's estimator
     # (`fit_M_streaming`: the Gram matrix over every product pair, F over the
-    # screened ones): `fit_adjoint` reverses `fit_M_stable` on D over every
+    # screened ones): `fit_adjoint` reverses `fit_M` on D over every
     # product pair with F zero on the screened ones. Taking the SCF's own M
     # instead mixes two realizations, which on water/cc-pVDZ differ by
     # 1.1e-08 relative in the fit's near-null space and move this force by
@@ -835,7 +821,7 @@ def isdf_exchange_skeleton(mf, dm=None, dm_other=None, prefactor=1.0,
     F = np.zeros((naux, ngram + naux))
     F[:, cols] = np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :]
     F[:, ngram:] = np.eye(naux)
-    M = fit_M_stable(D_test, F, with_df.numerics)
+    M = fit_M(D_test, F, with_df.numerics)
     X = mol.eval_gto('GTOval_sph', crd)
 
     # One channel per exchange operator, sharing the fit. The ISDF route keeps

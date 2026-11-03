@@ -1,7 +1,7 @@
 """The four-centre exchange skeleton in one pass, its rows in shell tiles dealt
 over the ranks.
 
-`mean_field_response.exchange_channel_skeleton` (`skeleton_tiles.exchange_skeleton_by_atoms`) differentiates one exchange
+`mean_field_response.exchange_channel_skeleton` (`skeleton_tiles.exchange_skeleton_tiled`) differentiates one exchange
 channel (the erf-attenuated one of a range-separated hybrid is never density
 fitted) with pyscf's direct derivative integrals, nao^4 work. It runs both
 densities through ONE pass (`derivative_exchange_rows`) on fixed tiles of

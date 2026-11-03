@@ -45,6 +45,7 @@ from src.properties.spin_orbit import (chain_manifolds, ground_state_element,
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 # the exact SOMF with X2C, which every table here was recorded with
 EXACT = {'two_electron': 'somf', 'one_electron': 'x2c'}
@@ -54,7 +55,7 @@ SOMF = Numerics().derive('the exact operator the tables were recorded with',
 BASIS = 'cc-pvdz'
 CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
         'H 0.0000 0.9376 -1.1188; H 0.0000 -0.9376 -1.1188')
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 def scf_factory(mol):
@@ -219,7 +220,7 @@ def test_coupling_is_rotationally_invariant(formaldehyde):
     failure of a hand-written spin algebra.
     """
     mol = formaldehyde[0]
-    rng = np.random.default_rng(20260906)
+    rng = np.random.default_rng(6)
     q, _ = np.linalg.qr(rng.standard_normal((3, 3)))
     if np.linalg.det(q) < 0:
         q[:, 0] *= -1

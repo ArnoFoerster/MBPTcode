@@ -3,7 +3,7 @@
 # MPn amplitude-numerator, overlap and density cross-term pieces
 # (spin-orbital) of the order-generic pdaggerq recursion.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 
 def t2_1_numerator(g, kd, o, v, nv, no):

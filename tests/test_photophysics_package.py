@@ -23,6 +23,7 @@ method-neutral minimum through the rate table.
     two methods are not mixed in one table.
 """
 import pathlib
+import shlex
 import subprocess
 import sys
 from dataclasses import replace
@@ -47,10 +48,8 @@ from src.properties.excitations import surface_of
 from src.properties.vibronic import normal_modes
 from tests.photophysics_cases import (REQUIRED, argv, declaration, refusing,
                                       run_in)
+from tests.molecules import WATER
 
-#: Water, its two displaced stand-in minima (Angstrom), small enough for a
-#: dense ADC(2) and an analytic Hessian in seconds.
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 S1_AT = 'O 0 0 0.1273; H 0 0.7872 -0.4892; H 0 -0.7872 -0.4892'
 T1_AT = 'O 0 0 0.1223; H 0 0.7772 -0.4792; H 0 -0.7772 -0.4792'
 
@@ -196,6 +195,15 @@ def test_the_command_line_has_no_default_grid(tmp_path, capsys):
         cli.parser().parse_args(full[:k] + full[k + 2:])
     assert '--grid-accuracy' in capsys.readouterr().err
     assert cli.parser().parse_args(full).grid_accuracy == 'G3'
+
+
+def test_the_help_example_is_a_declaration():
+    """The first command line of the help (the module docstring) parses
+    into a `Declaration`: every required option is in it."""
+    lines = cli.__doc__.split('python -m src.photophysics', 1)[1]
+    line = lines.split('\n\n', 1)[0].replace('\\\n', ' ')
+    d = cli.declaration_of(cli.parser().parse_args(shlex.split(line)))
+    assert d.system.name == 'formaldehyde'
 
 
 def drop(full, flag):

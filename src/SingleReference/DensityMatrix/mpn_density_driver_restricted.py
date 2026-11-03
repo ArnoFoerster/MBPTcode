@@ -54,7 +54,7 @@ from src.Base.utils.grids.grids import minimax_time_grid
 from src.Base.numerics.constants import MPN_DENSITY_LAPLACE_NTAU
 from src.Base.utils.parallel.mpi_grid import current_comm, reduce_sum
 from src.Base.utils.threaded_copies import threaded_transposes_default
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.common.mp_amplitudes import (orbital_denominator, to_l,
                                                       u2_2p1h_amplitude_chunks)
 from src.SingleReference.DensityMatrix.laplace_amplitudes import LaplaceAmplitude, denominator_grid
@@ -369,7 +369,6 @@ class MPnDensityDriverRestricted:
             self.e_abij_aaaa, self.e_abij_abab = e_abij
         else:
             self.e_abij_aaaa = self.e_abij_abab = e_abij
-        self.e_abij = self.e_abij_abab   # back-compat alias (rank-2 consumers)
 
     def kernel_args(self):
         return dict(g_aaaa=self.g_aaaa, g_abab=self.g_abab, g_bbbb=self.g_bbbb,

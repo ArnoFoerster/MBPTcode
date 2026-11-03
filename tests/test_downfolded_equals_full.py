@@ -37,6 +37,7 @@ from src.SingleReference.ADC.sigma_driver import (restricted_dyson_operator,
 from src.SingleReference.ADC.solve import follow_roots
 from src.Base.numerics.constants import HARTREE_TO_EV, HARTREE_TO_MEV
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_CS
 
 pytestmark = requires_runtime(4)
 
@@ -46,7 +47,7 @@ TOL_EV = 1e-4     # downfolded vs full, in eV
 def main():
     all_ok = True
 
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_CS, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     ns = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')

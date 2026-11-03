@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.numerics.constants import SOLVENT_RI_RESIDUAL_MAX
 from src.environments import solvent_screening
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 
 
 def orbitals(mol):

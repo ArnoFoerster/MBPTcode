@@ -241,7 +241,7 @@ def isdf_points(coords, c):
 
 
 def fit_M(Dt, F, reg):
-    """`separable_ri.fit_M_stable`: balanced, Tikhonov-regularized least squares."""
+    """`separable_ri.fit_M`: balanced, Tikhonov-regularized least squares."""
     s = torch.sqrt((Dt * Dt).sum(1))
     s = torch.where(s == 0.0, torch.ones_like(s), s)
     d = 1.0 / s

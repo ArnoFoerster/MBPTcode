@@ -49,7 +49,7 @@ from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator, singlet_pairs)
 from src.Base.factorization.distributed_df import metric_factor
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
-from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.one_electron import one_electron_skeleton
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
 from src.gradients.skeleton_tiles import fitted_fock_skeleton

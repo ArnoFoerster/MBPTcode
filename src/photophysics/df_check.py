@@ -51,7 +51,7 @@ from src.Base.numerics.constants import (DF_CHECK_BSE_CONV_TOL,
                                          SCF_ENERGY_CONV_TOL, SCF_ENERGY_GRAD_TOL)
 from src.Base.environment_seam import attach_environment
 from src.Base.geometry.geometry import molecule_at
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import UnrepresentedOrbitals
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf

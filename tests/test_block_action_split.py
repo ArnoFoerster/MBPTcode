@@ -64,12 +64,13 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from src.SingleReference.LinearResponse.trial_space import ActionNotSymmetric
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same, bitwise, davidson_root_bar
+from tests.molecules import WATER
 
 SIZES = [2, 3]
 NROOTS = 3
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 MOLECULES = {
-    'water': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    'water': WATER,
     'ethylene': ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
                  'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321'),
 }

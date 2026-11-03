@@ -14,7 +14,7 @@ of iterations is a numerical shortfall, not a bad input: the loop warns
 import numpy as np
 
 from src.Base.numerical_flags import flag
-from .diis import DIIS
+from src.Solvers.diis import DIIS
 
 
 class CCNotConverged(RuntimeWarning):

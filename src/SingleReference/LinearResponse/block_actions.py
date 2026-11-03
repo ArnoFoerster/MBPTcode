@@ -13,6 +13,7 @@ import numpy as np
 from src.Base.orbital_spaces import ov_energies
 from src.Base.numerics.constants import BYTES_PER_GB, DAVIDSON_DIAGONAL_TILE, ISDF_TILE_GB, KAPPA
 from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (allgather_blocks, contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
                                               ordered_chain_sum, reduce_scatter_rows,
@@ -187,7 +188,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     naux = C_ov.shape[0]
     no, nv = len(occ), len(virt)
     per_vec = 8 * naux * nv * max(no, nv)
-    chunk = max(1, int(tile_memory_gb * BYTES_PER_GB / max(per_vec, 1)))
+    chunk = fits(tile_memory_gb, per_vec)
 
     def apply_exchange_direct(z):
         # Explicit 2-step contraction (a single 3-operand einsum silently costs
@@ -259,7 +260,7 @@ def _screened_vv(coeff, virt, W_aux, tile_memory_gb=ISDF_TILE_GB):
     straight out of the full factor `coeff`: no unscreened naux n_vir^2 copy
     is held beside the screened one."""
     naux, nv = coeff.shape[0], len(virt)
-    rows = max(1, int(tile_memory_gb * BYTES_PER_GB / (8 * naux * nv)))
+    rows = fits(tile_memory_gb, 8 * naux * nv)
     if rows >= nv:
         # one tile: the product exactly as it was formed whole
         return np.einsum('PQ,Qab->Pab', W_aux, coeff[:, virt[:, None], virt],
@@ -525,8 +526,7 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
         # Sliced, D is whole only for this product and gone after it.
         Zt = _screened_rows(D_mine, isdf_factors.gather('D') if sliced else D,
                             W_aux, comm)                # (nmine, M)
-        rows = max(1, min(max(nmine, 1),
-                          int(tile_memory_gb * BYTES_PER_GB / max(npts * 8, 1))))
+        rows = fits(tile_memory_gb, npts * 8, cap=max(nmine, 1))
         S = np.empty((rows, npts))            # one row block of Zt * P
         # X_o^T (Zt * P), accumulated; under a rank count in owner order, rank
         # s's (n_occ, its columns) block in rows [s0, s1) of an (M, n_occ) one

@@ -36,6 +36,7 @@ from src.properties.band_shape import DisplacedOscillators
 from src.properties.conformers import boltzmann_weights
 from src.properties.franck_condon import TRAPEZOID
 from src.properties.state_moments import excited_transition_dipoles
+from tests.molecules import WATER
 
 EV = 1.0 / HARTREE_TO_EV
 CM = 1.0 / HARTREE_TO_CM
@@ -46,7 +47,7 @@ ROOM = 300.0
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).run(conv_tol=1e-12)
     return mol, mf

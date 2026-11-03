@@ -11,9 +11,10 @@ from pyscf import gto, scf
 
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_AT_ORIGIN
 
 def _water():
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-11

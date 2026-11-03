@@ -27,6 +27,7 @@ pytest test_dispersion_quick.py
 pytest test_distributed_df.py
 pytest test_distributed_scf_grid.py
 pytest test_distributed_trial_space.py
+pytest test_docs_property_examples.py
 pytest test_duschinsky.py
 pytest test_fitted_mean_field_force.py
 pytest test_fragment_diabatic_qp_hamiltonian.py  # about 14 minutes on a workstation

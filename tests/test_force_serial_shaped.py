@@ -83,13 +83,13 @@ from src.gradients.mean_field_surface import mean_field_force
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import pin_bar, recorded_blas
+from tests.molecules import WATER
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINS_BLAS = recorded_blas(os.path.join(REPO, 'tests', 'one_fit_pins.json'))
 SIZES = [2, 3, 8]
 #: The rank counts (c) runs at: its gate is (a)'s and (b)'s together.
 ALL_SIZES = [3, 8]
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: One hydrogen 0.03 A along y, where a surface fits and differentiates anew.
 WATER_DISPLACED = 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4692'
 #: A typical compute node's pyscf OpenMP thread count (`lib.num_threads()`).

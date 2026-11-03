@@ -1,8 +1,8 @@
 import numpy as np
 from pyscf import scf
 
-from src.SingleReference.GW.qp_solve import mean_field_static_operator
-from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
+from src.SingleReference.common.mean_field_operators import mean_field_static_operator
+from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.Base.orbital_spaces import get_occ_virt_indices

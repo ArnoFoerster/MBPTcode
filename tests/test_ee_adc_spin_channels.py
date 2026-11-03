@@ -42,9 +42,10 @@ from src.Base.pyscf.pyscf_interface import (DFIntegrals, get_orbital_energies,
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.Solvers.davidson import solve_symmetric
+from tests.molecules import WATER_AT_ORIGIN
 
 HARTREE_TO_EV = 27.211386245988
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 LEVELS = [('adc2', 'adc(2)'), ('adc2x', 'adc(2)-x'), ('adc3', 'adc(3)')]
 NROOTS = 3
 NREF = 8        # roots of the spin=None and pyscf references, above NROOTS so

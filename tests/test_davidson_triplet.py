@@ -34,6 +34,7 @@ from src.SingleReference.LinearResponse.block_actions import isdf_block_action
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER_CS
 
 NROOTS = 3
 
@@ -46,7 +47,7 @@ def check(ok, label, detail=''):
 def build():
     # cc-pVDZ, not sto-3g: the separable-RI factorization needs a <basis>-ri
     # auxiliary set and sto-3g has none.
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='cc-pvdz',
+    mol = gto.M(atom=WATER_CS, basis='cc-pvdz',
                 verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-13

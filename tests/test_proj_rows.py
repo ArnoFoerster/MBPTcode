@@ -70,6 +70,7 @@ from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gra
 from src.gradients.rpa.space_time_adjoint import polarizability_tau
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER
 
 SIZES = [2, 3, 8]
 #: The artificial count limit: every test array is several windows of it, and
@@ -260,7 +261,7 @@ def one_call_per_block(c, rows):
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

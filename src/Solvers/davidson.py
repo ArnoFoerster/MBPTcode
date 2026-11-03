@@ -24,7 +24,6 @@ upfolded BSE (BSE/bse_upfolded.py) is non-symmetric with possibly complex
 roots; EOM-CC (CC/eom.py, pyscf davidson_nosym1) is non-Hermitian
 biorthogonal.
 """
-import warnings
 
 import numpy as np
 from pyscf import lib as pyscf_lib
@@ -285,7 +284,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         max_subspace = _default_subspace(nroots)
     max_subspace = int(min(max_subspace, n))
     if n > max_subspace < 3 * nroots + 4:
-        warnings.warn(
+        flag('davidson_subspace_crowded',
             f'{label}: max_subspace={max_subspace} leaves almost no room above '
             f'the {nroots} Ritz vectors a restart collapses to, so the solve '
             'will restart continuously and may never converge. Raise it, or '
@@ -362,7 +361,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
 
     if warn_unconverged and not conv.all():
         stuck = np.flatnonzero(~conv)
-        warnings.warn(
+        flag('davidson_not_converged',
             f'{label} left {stuck.size} of {e.size} roots unconverged after '
             f'{max_cycle} cycles at |r| <= {tol_residual:g} (roots '
             f'{stuck.tolist()}); their energies are whatever the last '
@@ -442,7 +441,7 @@ def _complete_lowest(matvec, block, diag, e, X, warn, opts):
     else:
         why = f'{k + 1} rounds of merging did not end in a certificate'
     if warn:
-        warnings.warn(
+        flag('davidson_lowest_not_certified',
             f"{opts['label']}: the {k} converged roots are not certified to be "
             f'the lowest ({why}); all reported unconverged.',
             RuntimeWarning, stacklevel=3)

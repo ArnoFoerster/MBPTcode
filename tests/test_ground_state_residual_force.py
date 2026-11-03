@@ -13,10 +13,11 @@ from pyscf import dft, gto
 
 from src.properties.optimize import ground_state_residual_force
 from src.gradients.mean_field_surface import mean_field_force
+from tests.molecules import WATER_ROUNDED
 
 
 def test_the_residual_is_the_grid_response_force():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='6-31g', verbose=0)
     mf = dft.RKS(mol, xc='b3lyp')
     mf.conv_tol, mf.conv_tol_grad = 1e-12, 1e-9

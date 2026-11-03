@@ -48,7 +48,8 @@ from src.Base.numerics.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_
                                          FRAGMENT_PM_POLISH_MAX,
                                          LOCALIZED_ASSIGNMENT_FLOOR)
 from src.Base.numerical_flags import flag
-from src.Base.pyscf.pyscf_interface import fock_mo, occupied_count
+from src.Base.pyscf.pyscf_interface import fock_mo
+from src.Base.orbital_spaces import occupied_count
 from src.Base.utils.linear_algebra.krylov import root_driven_solve
 
 POPULATION_SCHEMES = ('lowdin', 'iao')

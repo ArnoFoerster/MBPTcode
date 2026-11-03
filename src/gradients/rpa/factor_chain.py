@@ -79,7 +79,7 @@ from src.Base.basis.ri_fallback import paired_auxbasis
 from src.Base.geometry.body_frame import BodyFrame
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.gradients.surface_identity import chain_identity
-from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, ENVIRONMENT_CACHE_SIZE,
+from src.Base.numerics.constants import (ENVIRONMENT_CACHE_SIZE,
                                          EVALUATION_CACHE_SIZE, FIT_CHOLESKY_BLOCK,
                                          FIT_REALIZATIONS, ISDF_DEFAULT_TEST_SET,
                                          ISDF_FIT_ERROR_FAILED)
@@ -99,6 +99,7 @@ from src.Base.factorization.ao_product_fit import (ao_product_fit,
                                                    pivoted_points)
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
+from src.Base.utils.record_compat import FACTORIZATION_ABSENT
 from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
 from src.gradients.isdf_derivatives import (collocation_adjoint, dfactor_adjoint_gauges,
@@ -118,9 +119,6 @@ FACTORIZATION_RECORD = ('basis', 'auxbasis', 'counts', 'n_start', 'radii_tag',
                         'radii', 'fit_errors', 'seconds', 'pts_local', 'owner',
                         'frames', 'M', 'naux', 'layout', 'sliced', 'fit',
                         'fit_block', 'test_set', 'pivot_points')
-#: What a record written before a field existed reads it as.
-FACTORIZATION_RECORD_DEFAULTS = {'test_set': ISDF_DUCHEMIN_BLASE,
-                                 'pivot_points': None}
 
 
 def radii_tag(radii):
@@ -485,11 +483,12 @@ class FrozenFactorization:
     @classmethod
     def from_record(cls, record):
         """The factorization `to_record` wrote, with nothing placed or
-        optimized again, and empty caches."""
+        optimized again, and empty caches; a field an older record lacks
+        reads as `record_compat.FACTORIZATION_ABSENT` says."""
         out = cls.__new__(cls)
         for name in FACTORIZATION_RECORD:
             setattr(out, name, record[name] if name in record
-                    else FACTORIZATION_RECORD_DEFAULTS[name])
+                    else FACTORIZATION_ABSENT[name])
         out.body = BodyFrame(record['body_reference'])
         out._fit_cache = weakref.WeakKeyDictionary()
         out._rows_cache = weakref.WeakKeyDictionary()

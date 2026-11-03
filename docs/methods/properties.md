@@ -150,24 +150,49 @@ for formaldehyde S1 end to end, both Huang-Rhys routes.
 lorentzian_fwhm)` is the same band for any model on the `VibronicModel`
 protocol (a density per direction and its first two cumulants);
 `band_shape` is it on `DisplacedOscillators`. `properties.duschinsky` gives
-each state its own modes and frequencies: `duschinsky_model(ground, excited)`
-takes two Hessians at their own minima (anything with `.mol` and `.hessian`;
+each state its own modes and frequencies: `duschinsky_model(ground, excited,
+coordinates)` takes two Hessians at their own minima (anything with `.mol` and `.hessian`;
 `read_orca_hessian` reads an ORCA `.hess` file as data) and returns J, K and
 both frequency sets, and `DuschinskyOscillators(model)` feeds
 `vibronic_band`. The density is the Fourier transform of the thermal
 correlation function of the two harmonic surfaces, with the zero-point shift
-of the 0-0 line included:
+of the 0-0 line included. Formaldehyde's S0 -> T1 band at HF/6-31G, from the
+repository root (about a minute on a single machine):
 
 ```python
-from src.properties.band_shape import vibronic_band, vibronic_band_grid
+import numpy as np
+from pyscf import gto, scf
+
+from src.gradients.mean_field_surface import MeanFieldSurface
+from src.properties.band_shape import vibronic_band
 from src.properties.duschinsky import (CartesianHessian, DuschinskyOscillators,
                                        duschinsky_model)
+from src.properties.vibronic import relax_state
 
-model = duschinsky_model(CartesianHessian(mol_s0, hess_s0, 'S0 analytic'),
-                         CartesianHessian(mol_s1, hess_s1, 'S1'))
+# formaldehyde S0 and T1, HF/STO-3G: each relaxed and its Hessian taken at its
+# own minimum (T1 as the high-spin UHF state, slightly pyramidal at the start)
+CH2O = 'C 0 0 -0.53; O 0 0 0.67; H 0 0.94 -1.12; H 0 -0.94 -1.12'
+CH2O_T1 = 'C 0 0.02 -0.53; O 0 0 0.67; H 0.25 0.94 -1.12; H 0.25 -0.94 -1.12'
+
+
+def relaxed(atom, spin):
+    mol = gto.M(atom=atom, basis='6-31g', spin=spin, verbose=0)
+    factory = lambda m: (scf.RHF(m) if spin == 0 else scf.UHF(m)).run(conv_tol=1e-12)
+    rec = relax_state(MeanFieldSurface(mol, factory), mol, engine='cartesian',
+                      verbose=False)
+    return rec['mol'], rec['mf'], rec['e_total']
+
+
+mol_s0, mf_s0, e_s0 = relaxed(CH2O, 0)
+mol_t1, mf_t1, e_t1 = relaxed(CH2O_T1, 2)
+model = duschinsky_model(CartesianHessian(mol_s0, mf_s0.Hessian().kernel(), 'S0'),
+                         CartesianHessian(mol_t1, mf_t1.Hessian().kernel(), 'T1'),
+                         coordinates='curvilinear')
 fc = DuschinskyOscillators(model)
-e = vibronic_band_grid(fc, e_adiabatic, 300.0, gaussian_fwhm=0.002,
-                       lorentzian_fwhm=0.0)
+e_adiabatic = e_t1 - e_s0                                 # Hartree
+# HF puts this 0-0 line low enough that the default grid would reach below
+# zero photon energy, so the photon energies are given
+e = np.linspace(0.005, 0.2, 4000)
 band = vibronic_band(fc, e_adiabatic, 300.0, e, gaussian_fwhm=0.002,
                      lorentzian_fwhm=0.0)
 print(band['fwhm_emission'], band['peak_emission'])
@@ -249,22 +274,61 @@ factor 3. With no mode below the cutoff nothing changes, bit for bit; every
 mode quantum is a rung of its own (`quantum_soft_modes`). The Cartesian J is a rung of its own (`rectilinear_duschinsky`), and so is the
 displaced-oscillator model. `ablation_ladder` removes
 one ingredient at a time down to a single Marcus-Levich-Jortner mode with an
-assumed reorganization energy, and every rung records its model:
+assumed reorganization energy, and every rung records its model. DMABN's S1
+and T1 from the test data, from the repository root (a few minutes):
 
 ```python
+from dataclasses import replace
+
+import numpy as np
+from pyscf import gto
+
+from src.Base.geometry.geometry import molecule_at
+from src.Base.numerics.constants import HARTREE_TO_CM, HARTREE_TO_EV
+from src.photophysics.minimum import StateMinimum
 from src.photophysics.rate_chain import (RateInputs, RateModel,
                                          ablation_ladder, rate_chain)
-from src.properties.duschinsky import read_orca_hessian
+from src.photophysics.rates import ManifoldGaps
+from src.properties.duschinsky import (CartesianHessian, displacement_from_minima,
+                                       mode_sets)
 
-inputs = RateInputs(s1=s1_minimum, t1=t1_minimum,
-                    hessians={'S1': read_orca_hessian('s1.hess', mol),
-                              'T1': read_orca_hessian('t1.hess', mol)},
-                    gradients={}, solvent=solvent_energies)
-full = RateModel.full('curvilinear', 0.0)
-table = rate_chain(inputs, full, 300.0)
-print(table['ISC']['k_eff'], table['RISC']['k_eff'])
-for rung in ablation_ladder(inputs, full, 300.0, shared=inputs):
-    print(rung['step'], rung.get('refused') or rung['table']['RISC']['k_eff'])
+# DMABN S1 and T1 (TDA-wB97X-D3), each at its own minimum, from the test data
+d = np.load('tests/data/dmabn_s1_t1_hessians.npz')
+mol = gto.M(atom=[(str(e), tuple(r)) for e, r in zip(d['symbols'], d['coords_s1'])],
+            unit='Bohr', basis='sto-3g', verbose=0)
+hessians = {'S1': CartesianHessian(mol, d['hessian_s1'], 'S1'),
+            'T1': CartesianHessian(molecule_at(mol, d['coords_t1']),
+                                   d['hessian_t1'], 'T1')}
+e_s1, e_t1 = float(d['energy_s1']), float(d['energy_t1'])
+socme = np.array([[0.0], [1.0]]) / HARTREE_TO_CM          # <S0|, <S1| x |T1>, 1 cm^-1
+
+
+def minimum(state, coords, energy):
+    """A state's minimum with both states' energies there."""
+    return StateMinimum(
+        method='TDA-wB97X-D3', where=state, coords_bohr=coords, e0=e_t1 - 3.0 / HARTREE_TO_EV,
+        energy=energy, omega={k: v - e_t1 + 3.0 / HARTREE_TO_EV for k, v in energy.items()},
+        emitter='S1', reservoir='T1', socme=socme, soc_dv_cart=None, soc_dv_paths=None,
+        dipole=None, f_osc=None, d_ground=None, solvation='gas')
+
+
+# each state's energy at the other minimum: a real run computes it; here the
+# curvilinear harmonic estimate on that state's own modes stands in for it
+lam = {}
+for state, other in (('S1', 'T1'), ('T1', 'S1')):
+    sg, se, _, _ = mode_sets(hessians[other], hessians[state], 'rectilinear')
+    k = displacement_from_minima(sg, se, hessians[other].mol, hessians[state].mol,
+                                 'curvilinear')
+    lam[state] = 0.5 * float(np.sum((se.omega * k) ** 2))
+inputs = RateInputs(s1=minimum('S1', d['coords_s1'], {'S1': e_s1, 'T1': e_t1 + lam['T1']}),
+                    t1=minimum('T1', d['coords_t1'], {'S1': e_s1 + lam['S1'], 'T1': e_t1}),
+                    hessians=hessians, gradients={}, solvent={})
+full = replace(RateModel.full('curvilinear', 0.0), coupling='condon', triplets='T1')
+gaps = ManifoldGaps('stacked', None)     # the declared gap rule, no default
+table = rate_chain(inputs, full, 300.0, gaps)
+print(table['ISC']['k_eff'])
+for rung in ablation_ladder(inputs, full, 300.0, gaps, shared=inputs):
+    print(rung['step'], rung.get('refused') or rung['table']['ISC']['k_eff'])
 ```
 
 **Photophysics from the command line** — `src/photophysics` runs the TADF

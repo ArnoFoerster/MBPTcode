@@ -60,6 +60,7 @@ from src.SingleReference.LinearResponse.linear_response import (
 from src.SingleReference.ADC.screened_coulomb import (
     screened_c1_tensor, solve_screened_adc)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 pytestmark = requires_runtime(4)
 
@@ -68,7 +69,7 @@ def main():
     all_ok = True
 
     for atom, basis in [('H 0 0 0; F 0 0 0.9', 'sto-3g'),
-                        ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', 'sto-3g'),
+                        (WATER_AT_ORIGIN_COARSE, 'sto-3g'),
                         ('N 0 0 0; N 0 0 1.1', 'sto-3g')]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()

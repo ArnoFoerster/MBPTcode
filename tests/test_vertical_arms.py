@@ -23,8 +23,9 @@ from src.photophysics import chain, vertical_arms
 from src.photophysics.cli import declaration_of, parser
 from tests.photophysics_cases import (calls, halves_electrons,
                                       occupied_counts_by_hand, run_in)
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 PACKAGE = pathlib.Path(vertical_arms.__file__).resolve().parent
 #: Options the arms must read from the declaration, all set.
 SHARED = ['--grid-accuracy', 'G1', '--nroots', '5', '--n-states', '2',

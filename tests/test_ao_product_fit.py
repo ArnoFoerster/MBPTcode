@@ -4,7 +4,7 @@
 Gates, on water (C1 geometry):
   * the fit's equations are those of the explicit test set: the balanced Gram
     matrix and the projection equal the products formed over all nao^2 AO
-    products, M is `fit_M_stable` on that test set, and D = M^T V^1/2 is the
+    products, M is `fit_M` on that test set, and D = M^T V^1/2 is the
     Coulomb-metric least-squares fit V^-1/2 (P|mn) ~ D^T (X_m X_n), to the
     rounding of the balanced Gram matrix (cc-pVDZ);
   * the selection, its Gram columns formed on demand, is the greedy pivoted
@@ -46,11 +46,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from src.Base.environment_seam import attach_environment
 from src.Base.factorization import ao_product_fit as apf
 from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
-                                                 fit_M_stable, fit_settings,
+                                                 fit_M, fit_settings,
                                                  resolve_grid)
 from src.Base.numerical_flags import collecting
 from src.Base.numerics.constants import HARTREE_TO_EV
-from src.Base.numerics.numerics import IDENTITY_RETIRED, Numerics
+from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_compat import NUMERICS_RETIRED
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.record_io import record_hash
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
@@ -58,8 +59,9 @@ from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from tests.pins import RECORDING_BLAS, blas_identity
+from tests.molecules import WATER_C1
 
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
+H2O_C1 = WATER_C1
 REG, = fit_settings(None, 'regularization')
 #: Rounding of the fit through its balanced Gram matrix, relative.
 FIT_ROUNDING = 1e-8
@@ -112,7 +114,7 @@ def test_the_equations_are_the_explicit_ao_products(water):
     ref = pq @ D.T
     assert np.abs(E - ref).max() < 1e-12 * np.abs(ref).max()
     _, M, V = apf.ao_product_fit(mol, auxmol, coords)
-    want = fit_M_stable(D, np.linalg.solve(V, pq))
+    want = fit_M(D, np.linalg.solve(V, pq))
     assert np.abs(M - want).max() < FIT_ROUNDING * np.abs(want).max()
 
 
@@ -298,7 +300,7 @@ def old_identity(numerics):
     values['solvent'].pop('loop_force_fraction')   # left out at its default
     for name in ('test_set', 'pivot_points'):      # left out at their default
         values['scf'].pop(name)
-    for section, name, held in IDENTITY_RETIRED:   # written then, at the value held
+    for section, name, held in NUMERICS_RETIRED:   # written then, at the value held
         values[section][name] = held
     return record_hash({k: values[k] for k in ('isdf', 'scf', 'span', 'qp',
                                                'quadrature', 'bse', 'solvent',

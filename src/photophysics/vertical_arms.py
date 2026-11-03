@@ -56,7 +56,7 @@ from src.Base.numerics.constants import (CONTINUATION_ROUTE, HARTREE_TO_EV,
                                          SCF_ENERGY_GRAD_TOL, VERTICAL_FRONTIER_LISTED,
                                          VERTICAL_WORST_LISTED)
 from src.Base.declaration import Excitation, QPStates
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import UnrepresentedOrbitals
 from src.gradients.gwbse.state_manifold import StateEvaluation, StateManifold
 from src.photophysics import chain

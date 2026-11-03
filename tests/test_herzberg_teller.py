@@ -33,6 +33,7 @@ from src.properties.herzberg_teller import (TransitionDipole,
                                             dipole_derivative,
                                             dipole_from_cartesian)
 from tests.test_duschinsky import TWO_MODE, overlap_lines
+from tests.molecules import WATER_ROUNDED_LOW
 
 CM = 1.0 / HARTREE_TO_CM
 EV = 1.0 / HARTREE_TO_EV
@@ -159,7 +160,7 @@ def test_expansion_point_does_not_change_the_band():
 def water_like_state():
     from pyscf import gto
     from src.properties.vibronic import normal_modes
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='sto-3g', verbose=0)
     rng = np.random.default_rng(1)
     a = rng.normal(size=(9, 9))

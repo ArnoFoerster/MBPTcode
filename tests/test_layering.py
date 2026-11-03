@@ -314,8 +314,18 @@ if __name__ == '__main__':
 LAYERS = {
     'src.Base': 0, 'src.Solvers': 0,                    # foundation
     'src.environments': 1,                              # environments: Base only
-    'src.SingleReference': 2, 'src.MultiReference': 2,  # electronic structure
-    'src.fragments': 2,
+    'src.SingleReference': 2, 'src.MultiReference': 2,  # electronic structure: the shared
+    # pieces (common) first, then the method packages in the order they build on
+    # each other -- response machinery, Epstein-Nesbet, CC, MPn densities, GW,
+    # and the methods built on those -- so GW may import CC and never the reverse
+    'src.SingleReference.LinearResponse': 2.1,
+    'src.SingleReference.EpsteinNesbet': 2.2,
+    'src.SingleReference.CC': 2.3,
+    'src.SingleReference.DensityMatrix': 2.4,
+    'src.SingleReference.GW': 2.5,
+    'src.SingleReference.ADC': 2.6, 'src.SingleReference.BSE': 2.6,
+    'src.SingleReference.Periodic': 2.6,
+    'src.fragments': 2.7,
     'src.gradients': 3.0,                               # the method-neutral core
     'src.gradients.rpa': 3.1,                           # the RPA screening GW-BSE is built on
     'src.gradients.gwbse': 3.2, 'src.gradients.adc': 3.2,

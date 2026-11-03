@@ -13,14 +13,9 @@ import numpy as np
 
 from src.Base.numerics.constants import QP_SUBSPACE_POLE_CHUNK, SOP_FIT_RCOND
 from src.Base.utils.parallel.mpi_grid import current_comm
-from src.SingleReference.GW.real_screening import screening_aux
-from src.Base.orbital_spaces import ov_energies
 from src.SingleReference.GW.sum_over_poles import (
     PoleSlice, denominators, large_group, lockstep_group, pole_pseudoinverse,
     subspace_self_energy_jacobian)
-from src.Base.orbital_spaces import get_occ_virt_indices
-from src.gradients.gwbse.contour_deformation_adjoint import (integral_term_backward,
-                                                             screening_chain)
 
 
 def sigma_sop_backward(omega, amplitudes, poles, eps, nocc, nu_points,
@@ -105,41 +100,3 @@ def subspace_residues_backward(amp_bar, poles, nu_points, pairs):
         g = amp_bar[:, a, b] if a == b else amp_bar[:, a, b] + amp_bar[:, b, a]
         out[(a, b)] = pinv.T @ g.reshape(-1, n_poles).T
     return out
-
-
-def sop_partials(omega, amplitudes, poles, eps, nocc, nu_points, Bp, C_ov,
-                 sigma_bar=1.0):
-    """(eps_bar, Bp_bar, Cov_bar) of sigma_bar * Sigma^c_pp, all the way down.
-    A test gate, read by no production route: the whole-chain reference the
-    production adjoint of the pole model is checked against.
-
-    `sigma_sop_backward` stops at wc, and wc enters the screening exactly as
-    the integral term's own weights do -- both terms are
-    sum_q weight_q Bp[:,q]^T [W(i.nu_k) - 1] Bp[:,q] -- so this is
-    `sigma_cd_backward`'s explicit branch with weights = wc_bar[k] in place of
-    -w_k g_k/pi, and with no residue block at all. That absence is the whole
-    point: there is no frozen pole set in the reverse pass, no dW/domega' at a
-    real frequency, and no backend.
-
-    The O(N^4) screening rebuild here is the REFERENCE route, the same one
-    `sigma_cd_backward` takes when handed C_ov. A cubic caller passes chi0
-    adjoints instead; the wc_bar this consumes is identical either way.
-    """
-    eps_bar, wc_bar, _ = sigma_sop_backward(omega, amplitudes, poles, eps, nocc,
-                                            nu_points, sigma_bar)
-    d = ov_energies(eps, nocc)
-    Bp_bar = np.zeros_like(Bp)
-    Cov_bar = np.zeros_like(C_ov)
-    d_bar = np.zeros_like(d)
-    for k, nu in enumerate(nu_points):
-        wtb = screening_aux(C_ov, d, nu, True)[1] @ Bp
-        bb, _, _ = integral_term_backward(Bp, wtb, wc_bar[k], want_chi0=False)
-        Bp_bar += bb
-        cvb, db, _ = screening_chain(wtb, wc_bar[k], C_ov, d, nu, True)
-        Cov_bar += cvb
-        d_bar += db
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    d4 = d_bar.reshape(len(occ), len(virt))
-    eps_bar[virt] += d4.sum(axis=0)
-    eps_bar[occ] -= d4.sum(axis=1)
-    return eps_bar, Bp_bar, Cov_bar

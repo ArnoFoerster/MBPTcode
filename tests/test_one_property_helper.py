@@ -3,7 +3,7 @@
 "A molecule at new coordinates" was written in seven places, the occupied
 count in seven, git provenance in four with `except Exception -> 'unknown'`,
 and `spin_vibronic.evaluated_coupling` repeated `analytic_coupling`'s
-evaluation branch. Now: `geometry.molecule_at`, `pyscf_interface.occupied_count`,
+evaluation branch. Now: `geometry.molecule_at`, `orbital_spaces.occupied_count`,
 `record_io.git_commit` (which warns when git cannot answer) and
 `derivative_coupling.evaluated_coupling`. The photophysics package (the
 stages, the chain, the rate models, the vertical arms, the acceptance check,
@@ -22,12 +22,14 @@ import pytest
 from pyscf import gto
 
 from src.Base.utils import record_io
-from src.Base.utils.record_io import code_id, git_commit, same_code
+from src.Base.utils.record_compat import same_code
+from src.Base.utils.record_io import code_id, git_commit
 from src.Base.geometry.geometry import displaced, molecule_at
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.gradients.gwbse import derivative_coupling as dc
 from src.properties import hessian, spin_vibronic
 from tests.photophysics_cases import calls, occupied_counts_by_hand
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 #: The modules this cleanup owns; none may move a molecule or count the
@@ -40,7 +42,7 @@ OWNED = ('src/photophysics/rates.py', 'src/properties/hessian.py',
          'src/photophysics/rate_models.py', 'src/photophysics/minimum.py',
          'src/photophysics/vertical_arms.py', 'src/photophysics/df_check.py',
          'src/photophysics/uisc.py')
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 
 
 @pytest.mark.parametrize('rel', OWNED)

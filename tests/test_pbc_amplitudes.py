@@ -1,7 +1,7 @@
 """Validation of the periodic GW transition amplitudes chi_a and chi_b.
 
 At the Gamma-only (nk=1, q=0) limit the periodic chi_a must reduce exactly to
-the molecular GW.transition_amplitudes.AmplitudeGenerator.get_chi_a fed the same
+the molecular LinearResponse.transition_amplitudes.AmplitudeGenerator.get_chi_a fed the same
 DF factor and the same Casida eigenvectors -- an external check against the
 trusted molecular code. (The end-to-end oracle for the momentum-resolved
 amplitude is the plain-GW self-energy vs krgw_ac, test_pbc_self_energy.py.)
@@ -18,7 +18,7 @@ from src.SingleReference.Periodic.pbc_integrals import PBCDFIntegrals
 from src.SingleReference.Periodic import pbc_casida as pc
 from src.SingleReference.Periodic import pbc_amplitudes as pa
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
+from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.Base.orbital_spaces import get_occ_virt_indices
 
 

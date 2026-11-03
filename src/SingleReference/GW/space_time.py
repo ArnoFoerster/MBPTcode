@@ -46,8 +46,8 @@ from src.Base.environment_seam import environment_of
 from pyscf import scf as pyscf_scf
 
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
-                                            require_closed_shell_or_unrestricted,
-                                            spin_index, occupied_count)
+                                            require_closed_shell_or_unrestricted, spin_index)
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  molecular_points_covariant,
                                                  refuse_unrepresented_factors,

@@ -75,7 +75,7 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, curre
                                               ordered_chain_sum, ordered_sum, reduce_sum)
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
-from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.one_electron import one_electron_skeleton
 from src.gradients.isdf_mean_field import (fitted_force_supported,
                                            mean_field_skeleton_force)
 from src.gradients.skeleton_tiles import fitted_fock_skeleton

@@ -47,6 +47,7 @@ from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_tight
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: The protocol's methods. `mol0` is data, checked separately.
 REQUIRED = ('total_energy', 'total_gradient', 'refreeze', 'label')
@@ -117,7 +118,7 @@ def test_a_surface_names_the_mean_field_it_evaluates_on(name):
 
 def water():
     """The one geometry the dispatched surfaces below are built at."""
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    return gto.M(atom=WATER_ROUNDED_LOW,
                  basis='cc-pvdz', verbose=0)
 
 

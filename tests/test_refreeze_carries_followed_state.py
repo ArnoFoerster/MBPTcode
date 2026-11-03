@@ -21,6 +21,7 @@ from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_C
 from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 #: Hartree: two evaluations of one state at one geometry on two SCFs.
 SAME_STATE = 1e-8
@@ -36,7 +37,7 @@ def scf_factory(mol):
 
 
 def test_the_refrozen_surface_matches_the_followed_state():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     chain = ExcitedStateChain(
         mol, scf_factory, spin='singlet', state=0, mf=scf_factory(mol),

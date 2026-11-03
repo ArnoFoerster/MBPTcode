@@ -27,6 +27,7 @@ from src.gradients.gwbse.conventions import FrozenConventions
 from src.gradients.evaluation import GeometryCache
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.state_following import CasidaSolution, RootFollowingLost
+from tests.molecules import WATER_AT_ORIGIN
 
 #: Roots a matrix-free solve returns; the planted pair space holds 10.
 NROOTS = 3
@@ -34,7 +35,7 @@ NROOTS = 3
 
 @pytest.fixture(scope='module')
 def mean_field():
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.kernel()

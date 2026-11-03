@@ -29,7 +29,7 @@ from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.pyscf_interface import get_orbital_energies
-from src.SingleReference.CC.diis import DIIS
+from src.Solvers.diis import DIIS
 from src.SingleReference.GW import qp_energy  # module import: it imports this file
 
 #: What the iterate screens: P0 and W rebuilt from it (evGW), or the mean

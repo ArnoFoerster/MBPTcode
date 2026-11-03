@@ -25,8 +25,9 @@ from src.SingleReference.GW.qp_selection import (ac_quasiparticle_shifts,
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.SingleReference.GW.qp_states import fit_outside_curve
 from src.SingleReference.GW.space_time import separable_factors
+from tests.molecules import WATER_ROUNDED
 
-ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+ATOM = WATER_ROUNDED
 SHIFT_MAX_EV = 10.0
 
 

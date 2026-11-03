@@ -65,7 +65,7 @@ import numpy as np
 from scipy.special import k0e
 
 from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.gradients.surface import require
 from src.properties.spin_orbit import soc_vectors
 from src.properties.franck_condon import bose, require_vibrational_modes

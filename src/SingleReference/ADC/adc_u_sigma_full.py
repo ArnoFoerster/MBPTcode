@@ -3,7 +3,7 @@ are applied via sigma-vector contractions, U blocks via the bilinear
 t2 closed forms (dressing hook: t2_ijcd + u1_shift)."""
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.ADC.adc_u_utils import (
     assemble_operator, u2_denominators, u1_dressing_shift,
     u1_shift_terms_2h1p, u1_shift_terms_2p1h)
