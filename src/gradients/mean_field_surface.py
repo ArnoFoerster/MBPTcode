@@ -13,9 +13,8 @@ from src.Base.declaration import SurfacePhysics
 from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
 from src.environments.environment import environment_label
 from src.Base.environment_seam import resolve_environment
-from src.Base.factorization.isdf_jk import (ISDFJK, frozen_frames,
-                                            frozen_pair_layout,
-                                            reference_frames)
+from src.Base.factorization.isdf_jk import (frozen_frames, frozen_pair_layout,
+                                            interpolated_exchange, reference_frames)
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.Base.utils.parallel.mpi_grid import lockstep, lockstep_mean_field
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
@@ -27,8 +26,7 @@ from src.gradients.surface import PotentialEnergySurface
 def pivoted_frames(mf):
     """`reference_frames` of `mf` where its ISDF-K fit is on pivoted
     AO-product points, the selection riding on them; None otherwise."""
-    with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK) or with_df.test_set != 'ao_products':
+    if not interpolated_exchange(mf) or mf.with_df.test_set != 'ao_products':
         return None
     return reference_frames(mf)
 

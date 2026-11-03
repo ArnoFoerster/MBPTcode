@@ -11,6 +11,10 @@ force on water 6-31G (frozen 1, cc-pvdz-ri / -jkfit).
      factored, one with such a block to the general build.
   5. the tiled force's Z-vector is solved by every rank (each building its
      share of the Fock matrices), not by rank 0 alone, over 2 simulated ranks.
+  6. one kernel per mean field: the correlation force's Z-vector kernel and
+     the orbital response every other route reads (`response_kernel`) are
+     the same ResponseKernel, kept while the orbitals are, built anew for
+     new orbitals.
 
 The same checks under real MPI: tests/test_response_kernel_mpi.py.
 Run: python -m pytest -q tests/test_response_kernel.py
@@ -25,6 +29,7 @@ from pyscf import gto, scf
 
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.cphf import ResponseKernel
+from src.Base.pyscf.pyscf_interface import response_kernel
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients import df_correlation_force as dcf
 from src.gradients.multipliers import rotation_gradient
@@ -142,3 +147,16 @@ def test_force_zvector_on_every_rank():
     finally:
         dcf.relax_gradient = fn
     assert sorted(seen) == [0, 1], seen
+
+
+def test_one_kernel_per_mean_field():
+    _, mf = mean_field()
+    kernel = dcf.scf_kernel(mf)
+    assert isinstance(kernel, ResponseKernel)
+    assert response_kernel(mf, environment=False) is kernel
+    assert response_kernel(mf) is not kernel        # its own cache entry
+    assert isinstance(response_kernel(mf), ResponseKernel)
+    mf.mo_coeff = mf.mo_coeff.copy()
+    again = response_kernel(mf, environment=False)
+    assert again is not kernel
+    np.testing.assert_array_equal(again(X), kernel(X))

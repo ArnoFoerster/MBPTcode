@@ -56,7 +56,7 @@ from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
                                        solve_multipliers)
 from src.gradients.mean_field_response import fock_partial_Y, solve_lambda
-from src.gradients.multipliers import solve_orbital_multipliers
+from src.gradients.multipliers import close_lagrangian, solve_orbital_multipliers
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.gwbse.targets import rpa_partials
 from tests.pins import assert_same
@@ -257,6 +257,33 @@ def test_the_cubic_route_reproduces_its_old_solver(cubic_case):
     assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6
+
+
+def test_one_closure_of_the_lagrangian(cubic_case):
+    """`close_lagrangian`: the relaxed density gamma + Lambda, the stationary
+    gradient Y_E + Y[Lambda] and the energy-weighted matrix -(Y + Y^T)/4 of the
+    solve `solve_lambda` makes, bitwise; an earlier solve handed in is taken
+    as it is, not solved again."""
+    mf, Y_E, nocc = cubic_case
+    gamma = np.diag(np.linspace(-1.0, 1.0, len(mf.mo_energy)))
+
+    def matvec(Lam):
+        return fock_partial_Y(mf, Lam, nocc)
+    c = close_lagrangian(matvec, Y_E, mf.mo_energy, gamma, numerics=Numerics())
+    lam, res = solve_lambda(mf, Y_E, nocc, numerics=Numerics())
+    Y = Y_E + matvec(lam)
+    np.testing.assert_array_equal(c.lam, lam)
+    np.testing.assert_array_equal(c.gamma, gamma + lam)
+    np.testing.assert_array_equal(c.Y, Y)
+    np.testing.assert_array_equal(c.M, -0.25 * (Y + Y.T))
+    assert c.res == res and c.stationarity < ORBITAL_MULTIPLIER_RESIDUAL_TOL
+
+    def refused(*a, **k):
+        raise AssertionError('an earlier solve was solved again')
+    again = close_lagrangian(refused, Y_E, mf.mo_energy, gamma, solved=(lam, res),
+                             numerics=Numerics(), total=lambda L: Y_E + matvec(L))
+    for got, want in zip(again, c):
+        np.testing.assert_array_equal(got, want)
 
 
 def test_a_degenerate_pair_is_projected_out_when_its_gradient_vanishes():

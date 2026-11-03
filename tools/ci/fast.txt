@@ -82,6 +82,7 @@ pytest test_environment.py
 pytest test_environment_cache.py
 pytest test_environment_guards.py
 pytest test_eom_left_right_pairing.py
+pytest test_exchange_realization.py
 pytest test_exchange_skeleton_split.py
 pytest test_fitted_exchange_columns.py
 pytest test_fitted_exchange_conditioning.py

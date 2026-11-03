@@ -341,38 +341,52 @@ def _restore_methods(mf, saved):
             setattr(mf, name, original)
 
 
-def metric_factor(mol, auxmol):
+def metric_factor(mol, auxmol, j2c=None):
     """(L, mode) with (P|Q) = L L^T, or the eigen-replacement where it is not
-    positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes.
+    positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes:
+    mode 'eig' and L^T the kept eigenvectors over the square roots of their
+    eigenvalues (above LINEAR_DEP_THR), so L L^T is the pseudo-inverse.
+    j2c: the metric matrix itself, by default pyscf's (hermi=1).
 
-    Rank 0's alone, because `mode` is a discrete decision taken from threaded
-    dense arithmetic: a rank that fell back to the eigendecomposition holds a
-    factor with fewer rows than one that did not, and the ranks would then be
-    slicing auxiliary indices of different lengths.
+    Rank 0's alone across ranks (`rank0_metric_factor`), because `mode`
+    is a discrete decision taken from threaded dense arithmetic: a rank that
+    fell back to the eigendecomposition holds a factor with fewer rows than
+    one that did not, and the ranks would then be slicing auxiliary indices
+    of different lengths.
     """
-    j2c = auxmol.intor('int2c2e', hermi=1)
+    if j2c is None:
+        j2c = auxmol.intor('int2c2e', hermi=1)
     try:
         return scipy.linalg.cholesky(j2c, lower=True), 'cd'
     except scipy.linalg.LinAlgError:
         return _eig_decompose(mol, j2c), 'eig'
 
 
-def _replicated_metric_factor(mol, auxmol, comm):
-    """Rank 0's metric factor and its mode on every rank.
+def rank0_metric_factor(mol, auxmol, comm=None, j2c=None):
+    """Rank 0's `metric_factor` and its mode on every rank of comm (default:
+    the current region's; None or one rank: this process alone). Every rank
+    takes rank 0's choice between the Cholesky factor and the
+    eigen-replacement, so no rank decides it alone.
 
     L^-1 mixes the whole auxiliary index into every row, so rows built against
     two factors that differ in the last bits are rows of two different tensors
     and their partials are not partials of one sum. (naux, naux) doubles, one
     broadcast, once.
     """
+    comm = current_comm() if comm is None else comm
+    if comm is None or comm.Get_size() == 1:
+        return metric_factor(mol, auxmol, j2c)
     if comm.Get_rank() == 0:
-        low, mode = metric_factor(mol, auxmol)
-        header = (mode, low.shape, low.dtype.str)
+        low, mode = metric_factor(mol, auxmol, j2c)
+        order = 'C' if low.flags.c_contiguous else 'F'
+        header = (mode, low.shape, low.dtype.str, order)
     else:
         low, header = None, None
-    mode, shape, dtype = broadcast(header, comm)
+    mode, shape, dtype, order = broadcast(header, comm)
     if low is None:
-        low = np.empty(shape, dtype=dtype)
+        # rank 0's memory order too: a triangular solve against the same
+        # factor in the other order takes another BLAS path and other bits
+        low = np.empty(shape, dtype=dtype, order=order)
     replicate(low, comm=comm)
     return low, mode
 
@@ -624,7 +638,7 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         t_build = time.time()
         mol = self.mol
         auxmol = self.auxmol = addons.make_auxmol(mol, self.auxbasis)
-        low, mode = _replicated_metric_factor(mol, auxmol, self.comm)
+        low, mode = rank0_metric_factor(mol, auxmol, self.comm)
         naux = low.shape[0]
         rank, size = self.comm.Get_rank(), self.comm.Get_size()
         start, stop = contiguous_block(naux, rank, size)

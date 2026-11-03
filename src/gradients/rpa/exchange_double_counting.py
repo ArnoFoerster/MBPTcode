@@ -8,7 +8,7 @@ import numpy as np
 from pyscf import scf as pyscf_scf
 
 from src.Base.factorization.distributed_df import share_distributed
-from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.factorization.isdf_jk import interpolated_exchange
 from src.Base.pyscf.dispersion import refuse_dispersion_under_rpa
 from src.SingleReference.common.mean_field_operators import mean_field_static_operator
 from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
@@ -44,7 +44,7 @@ def exx_double_counting_skeleton(mf, mol=None):
     hf.mo_coeff, hf.mo_energy = mf.mo_coeff, mf.mo_energy
     hf.mo_occ, hf.converged = mf.mo_occ, True
     refuse_dispersion_under_rpa(mf, 'the Kohn-Sham-to-Hartree-Fock skeleton')
-    if isinstance(with_df, ISDFJK):
+    if interpolated_exchange(ks):
         # Both sides must be the same fit, so the Hartree-Fock partner is given
         # the very same ISDFJK object. The points, collocation and fit matrix
         # are then bit-identical and everything but the exchange fraction

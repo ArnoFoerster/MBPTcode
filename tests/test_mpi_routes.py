@@ -305,10 +305,10 @@ SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 #: One hydrogen 0.03 A along y, where a surface fits and differentiates anew.
 WATER_DISPLACED = 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4692'
 #: The whole-array gathers of one composed force on sliced factors: the dRPA
-#: sweep and assembly, then the static W, the quasiparticle solve, the
-#: Davidson, the BSE cache and adjoint, the quasiparticle and chi0 adjoints
-#: and the excited assembly, one each.
-SLICED_CHAIN_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
+#: sweep and assembly, then the quasiparticle solve, the Davidson, the BSE
+#: cache and adjoint, the quasiparticle and chi0 adjoints and the excited
+#: assembly, one each; the static W reads the grid tiles and gathers none.
+SLICED_CHAIN_GATHERS = {'X_mo': 7, 'D': 7, 'X_o': 2, 'X_v': 1}
 #: The row fit's tile edge here: water's 444 points in 7 tiles, so every rank
 #: count owns a different set of them and the tiled Cholesky crosses ranks.
 ROW_FIT_BLOCK = 64
@@ -319,10 +319,11 @@ ROW_FIT_BLOCK = 64
 ROW_FIT_BSE_CONV_TOL = 1e-9
 #: Trial vectors in the batch the recorded block action is applied to.
 RECORDED_BATCH = 3
-#: The grid-row section's working-set budget: water's 444 points in 16 chi0
-#: tiles and 4 self-energy blocks, so ranks share a tau point's tiles and
-#: block pairs, not whole points.
-ROW_TILE_GB = 3e-4
+#: The grid-row section's working-set budget: water's 600 points in 11 grid
+#: tiles of 57 rows (the last 30), so ranks share a tau point's tiles, not
+#: whole points; no tile edge is naux (84), so no tile block takes the shape
+#: of a whole (naux, naux) slice in the census.
+ROW_TILE_GB = 2e-4
 #: Its tau points: 3 and 8 ranks leave a last window of the sweep that splits
 #: a point's tiles and block pairs over the ranks.
 ROW_NTAU = 14
@@ -983,9 +984,9 @@ def sliced_factors_routes(gate, mf, mol, F):
                f'max|d| {np.abs(om_s - om_w).max() * HARTREE_TO_EV:.2e} eV')
     same_davidson(gate, 'BSE [context] on sliced factors', om_s, info_s)
     gathers = gate.everyone(dict(Fs.gathers))
-    # the window; the BSE's GW diagonal; its Davidson's action, which the
-    # probe after it reuses
-    once = {'D': 3, 'X_o': 3, 'X_v': 2, 'X_ao': 2}
+    # the window and the BSE's GW diagonal read the grid tiles and gather
+    # none; the Davidson's action gathers X_o once, which the probe reuses
+    once = {'X_o': 1}
     gate.check(all(g == once for g in gathers),
                'each whole-array gather once per solve or sweep, every rank',
                f'{gathers[0]} on rank 0')
@@ -1150,13 +1151,17 @@ def grid_row_sums(gate, mf, mol, F, w0_route):
 
 
 def planted_whole_slice(kernel):
-    """`kernel` with the whole Pi(tau) = Go * Gv of its tau point formed
-    beside it, (M, M): what the grid-row sweep exists not to hold."""
-    def whole_slice(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs):
-        Pi = ((X_o * np.exp(e_o * tau)) @ X_o.T) * ((X_v * np.exp(-e_v * tau))
-                                                    @ X_v.T)
-        out = kernel(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs)
-        del Pi
+    """`kernel`, the grid-tile sweep's `_proj_items`, with the whole
+    Pi(tau) = Go * Gv of its first tau point formed beside it, (M, M): what
+    the grid-tile sweep exists not to hold. Every rank calls the kernel in
+    lockstep, so the tiles' gather is collective."""
+    def whole_slice(tiled, tau_points, items, on_done):
+        F, no, nmo = tiled.tiles.gather(), tiled.nocc, tiled.nmo
+        tau = tau_points[items[0][0] if items else 0]
+        Pi = (((F[:, :no] * np.exp(tiled.e_o * tau)) @ F[:, :no].T)
+              * ((F[:, no:nmo] * np.exp(-tiled.e_v * tau)) @ F[:, no:nmo].T))
+        out = kernel(tiled, tau_points, items, on_done)
+        del F, Pi
         return out
     return whole_slice
 
@@ -1214,16 +1219,16 @@ def gw_grid_rows(gate, mf, mol, F):
     gate.check(n == 1, "the window and W(0) rank 0's on every rank, bitwise",
                f'{n} distinct of {gate.size}')
 
-    real = ls_space_time.polarizability_projected_tau
+    real = ls_space_time._proj_items
     gate.everyone(None)                        # every rank's run is done
-    ls_space_time.polarizability_projected_tau = planted_whole_slice(real)
+    ls_space_time._proj_items = planted_whole_slice(real)
     gate.everyone(None)                        # ...and every rank is planted
     try:
         planted = HeldCensus(solve_qp_energy_space_time.__code__, M, naux, nao)
         planted.trace(window_and_w0, Fs, gate.comm)
     finally:
         gate.everyone(None)                    # every planted run is done
-        ls_space_time.polarizability_projected_tau = real
+        ls_space_time._proj_items = real
     found = gate.everyone(sorted(planted.flags.get('grid square', ())))
     gate.check(all((M, M) in f for f in found), 'the census finds a planted '
                'whole Pi(tau) slice on every rank', f'{found}')

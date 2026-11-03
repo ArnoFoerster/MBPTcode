@@ -106,8 +106,6 @@ import ctypes
 import numpy as np
 import scipy.linalg
 from pyscf import gto, lib
-from pyscf.df import incore
-from pyscf.df.incore import LINEAR_DEP_THR
 from pyscf.dft import gen_grid, numint, radi
 from pyscf.scf import _vhf
 
@@ -118,7 +116,10 @@ from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, SKELETON_AUX_TILE,
                                          THREE_CENTER_BLOCK_BYTES, XC_SKELETON_TILE)
 from src.Base.factorization.separable_ri import (Held, row_layout, tile_collocation,
                                                  tile_edge)
-from src.Base.factorization.shell_runs import shell_runs
+from src.Base.factorization.distributed_df import rank0_metric_factor
+from src.Base.factorization.ao_product_fit import three_centre_block
+from src.Base.factorization.shell_runs import function_atoms, functions_to_atoms, shell_runs
+from src.gradients.isdf_adjoint_pieces import two_centre_rows
 from src.gradients.ao_product_fit_adjoint import row_fit_adjoints
 from src.gradients.isdf_fit_adjoint import (AdjointSeeds, tiles_at_root,
                                             two_centre_rows_adjoint)
@@ -149,8 +150,8 @@ class FittedFockSkeleton:
     factor, and where that factorization fails -- an attenuated metric is
     singular -- through the pseudo-inverse of its eigenvalues above
     LINEAR_DEP_THR (`metric` says which, rank 0's choice on every rank).
-    The pseudo-inverse is applied as its eigenvector and eigenvalue factors
-    and never formed: its entries reach 1/LINEAR_DEP_THR, and a product
+    The pseudo-inverse is applied as its two factors
+    (`distributed_df.metric_factor`'s eigen-replacement) and never formed: its entries reach 1/LINEAR_DEP_THR, and a product
     with it turns a last-bit change of the density into ~1e-8 Ha/Bohr of
     the force.
     """
@@ -178,11 +179,7 @@ class FittedFockSkeleton:
                                 SKELETON_AUX_TILE if tile is None else tile)
         self.aux_loc = auxmol.ao_loc_nr()
         self.ao_loc = mol.ao_loc_nr()
-        self.ao_slices = [(int(p0), int(p1))
-                          for _, _, p0, p1 in mol.aoslice_by_atom()]
-        self.aux_atom = np.empty(auxmol.nao_nr(), dtype=int)
-        for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-            self.aux_atom[q0:q1] = ia
+        self.aux_atom = function_atoms(auxmol)
         self.Va = self.Vb = None
         self.At, self.VTV = {}, {}
         #: {array: most bytes of it this rank held at once}
@@ -204,13 +201,11 @@ class FittedFockSkeleton:
 
     def _block(self, intor, comp, s0, s1, t):
         """(comp, a, nao, n_t) of `intor` on AO shells [s0, s1) and tile t."""
-        k0, k1 = self.tiles[t]
-        nb = self.mol.nbas
-        out = incore.aux_e2(self.mol, self.auxmol, intor=intor, aosym='s1',
-                            comp=comp, shls_slice=(s0, s1, 0, nb, k0, k1))
+        run = (s0, s1, int(self.ao_loc[s0]), int(self.ao_loc[s1]))
+        out = three_centre_block(self.mol, self.auxmol, run, intor, comp,
+                                 aux_shells=self.tiles[t])
         self._hold('integral_block', out.nbytes)
-        return out.reshape(comp, int(self.ao_loc[s1] - self.ao_loc[s0]),
-                           self.mol.nao_nr(), -1)
+        return out.reshape(comp, run[3] - run[2], self.mol.nao_nr(), -1)
 
     def prepare(self, owned, comm=None):
         """Pass 1 on the `owned` tiles, then the gathers, the metric solves
@@ -244,28 +239,24 @@ class FittedFockSkeleton:
         self._hold('L_tiles', sum(x.nbytes for x in L.values()))
         ranges = [[self.functions(t) for t in own] for own in owners]
         V = self.auxmol.intor('int2c2e', aosym='s1')
-        # pyscf's rule: the Cholesky factor where it exists, else the
-        # eigenvectors U and eigenvalues e above LINEAR_DEP_THR, the
-        # pseudo-inverse U e^-1 U^T applied as three factors and never
-        # formed; rank 0's on every rank. The bare Coulomb half alone solves
-        # V directly and needs neither.
-        Lc = U = e = None
+        # the metric factor rule (`rank0_metric_factor`, rank 0's choice
+        # on every rank): the Cholesky factor Lc where it exists, else the
+        # eigen-replacement Xe, whose rows are the eigenvectors above
+        # LINEAR_DEP_THR over the square roots of their eigenvalues, the
+        # pseudo-inverse Xe^T Xe applied as its two factors and never formed.
+        # The bare Coulomb half alone solves V directly and needs neither.
+        Lc = Xe = None
         if self.w or self.omega:
-            try:
-                Lc = scipy.linalg.cholesky(V, lower=True)
-            except np.linalg.LinAlgError:
-                w, v = scipy.linalg.eigh(V)
-                keep = w > LINEAR_DEP_THR
-                U, e = np.ascontiguousarray(v[:, keep]), w[keep]
-            Lc, U, e = lockstep((Lc, U, e), comm, check=True)
-        self.metric = 'eigen' if U is not None else 'cholesky'
+            low, mode = rank0_metric_factor(self.mol, self.auxmol, comm, V)
+            Lc, Xe = (low, None) if mode == 'cd' else (None, low)
+        self.metric = 'eigen' if Xe is not None else 'cholesky'
         if self.coulomb:
             allgather_ranges(a, ranges, comm)
             allgather_ranges(b, ranges, comm)
             # each rank's own solve, rank 0's the one every addend reads
             self.Va, self.Vb = lockstep(
-                (np.linalg.solve(V, a), np.linalg.solve(V, b)) if U is None
-                else (U @ ((U.T @ a) / e), U @ ((U.T @ b) / e)), comm,
+                (np.linalg.solve(V, a), np.linalg.solve(V, b)) if Xe is None
+                else (Xe.T @ (Xe @ a), Xe.T @ (Xe @ b)), comm,
                 check=True)
         if not self.w:
             return self
@@ -313,17 +304,17 @@ class FittedFockSkeleton:
         for b in range(*runs[rank]):
             b0, b1 = blocks[b][0] - i0, blocks[b][1] - i0
             X = Lb[:, b0:b1, :].reshape(naux, -1)
-            if U is None:
+            if Xe is None:
                 # V = Lc Lc^T, by substitution, never by an explicit inverse:
                 # on a near-singular metric the inverse's product loses
                 # digits that the solves keep
                 Kb = scipy.linalg.solve_triangular(Lc, X, lower=True)
                 Kb = scipy.linalg.solve_triangular(Lc, Kb, lower=True, trans='T')
             else:
-                # the pseudo-inverse as its factors, U (e^-1 (U^T L)): the
+                # the pseudo-inverse as its factors, Xe^T (Xe L): the
                 # explicit one carries round-off of 1/LINEAR_DEP_THR into
                 # every direction of Kt
-                Kb = U @ ((U.T @ X) / e[:, None])
+                Kb = Xe.T @ (Xe @ X)
             Kb = Kb.reshape(naux, b1 - b0, nao)
             # (g Kt^P), the only form of Kt pass 2 reads
             At[:, b0:b1, :] = np.matmul(Kb, self.g)
@@ -412,14 +403,8 @@ class FittedFockSkeleton:
                 t_aux[x] -= 0.5 * np.einsum('Pnm,Pnm->P',
                                             d[x].transpose(2, 1, 0), ST)
             del d, ST
-        k0, k1 = self.tiles[t]
-        v1 = auxmol.intor('int2c2e_ip1', comp=3,
-                          shls_slice=(k0, k1, 0, auxmol.nbas))
-        t_aux -= 2.0 * np.einsum('xPQ,PQ->xP', v1, self._metric_rows(t))
-        del v1
-        out = np.zeros((mol.natm, 3))
-        for ia, (q0, q1) in enumerate(self.ao_slices):
-            out[ia] += t_ao[:, q0:q1].sum(axis=1)
+        t_aux += two_centre_rows(auxmol, self._metric_rows(t), self.tiles[t])
+        out = functions_to_atoms(t_ao, mol)
         np.add.at(out, self.aux_atom[p0:p1], t_aux.T)
         return out
 
@@ -508,15 +493,23 @@ def exchange_skeleton_tiled(mol, g_ao, D, omega, weight, comm=None):
     interleave the whole molecule and the ranks finish together (a screened
     row's cost differs between atoms far more than its AO count says); each
     tile gives a (natm, 3) addend, added in tile order (`tile_sum`): the same
-    bits at every rank count.
+    bits at every rank count. A tile's cost follows its screened shell
+    quartets far more than its AO count, so the tiles go to the ranks by
+    that estimate (`balanced_owners` on `exchange_tile_costs`), the costliest
+    first onto the least loaded rank; which rank holds a tile does not touch
+    the bits.
     """
     comm = current_comm() if comm is None else comm
     tiles = exchange_skeleton_tiles(mol)
+    size = 1 if comm is None else comm.Get_size()
+    owners = None
+    if size > 1:
+        with mol.with_range_coulomb(omega):
+            screen = _derivative_exchange_screen(mol)
+        owners = balanced_owners(exchange_tile_costs(mol, tiles, screen), size)
     ao_loc = mol.ao_loc_nr()
-    ao_atom = np.empty(mol.nao_nr(), dtype=int)
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        ao_atom[p0:p1] = ia
-    held = {}
+    ao_atom = function_atoms(mol)
+    held = {} if owners is None else {'screen': screen}
 
     def addend(t):
         sh0, sh1 = tiles[t]
@@ -532,7 +525,44 @@ def exchange_skeleton_tiled(mol, g_ao, D, omega, weight, comm=None):
         np.add.at(out, ao_atom[p0:p1], rows.T)
         return out
 
-    return tile_sum(addend, len(tiles), mol.natm, comm)
+    return tile_sum(addend, len(tiles), mol.natm, comm, owners=owners)
+
+
+def exchange_tile_costs(mol, tiles, screen):
+    """The estimated cost of each tile (s0, s1) of the derivative exchange
+    pass: the AO-weighted count of the shell quartets (ij|kl), i in the
+    tile, whose Schwarz bound q_ij q_kl (`screen.q_cond`, pyscf's) passes
+    its `direct_scf_tol`. A function of the molecule and basis alone, the
+    same on every rank."""
+    q = np.asarray(screen.q_cond[1])
+    nao_sh = np.diff(mol.ao_loc_nr()).astype(float)
+    # the bounds of every pair, ascending, with the AO weight of all pairs
+    # at or above each
+    order = np.argsort(q, axis=None)
+    bound = q.ravel()[order]
+    weight = np.outer(nao_sh, nao_sh).ravel()[order]
+    above = np.cumsum(weight[::-1])[::-1]
+    tol = float(screen.direct_scf_tol)
+    out = []
+    for s0, s1 in tiles:
+        qij = q[s0:s1]
+        cut = np.searchsorted(bound, tol / np.maximum(qij, np.finfo(float).tiny).ravel())
+        tail = np.where(cut < bound.size, above[np.minimum(cut, bound.size - 1)], 0.0)
+        out.append(float((np.outer(nao_sh[s0:s1], nao_sh).ravel() * tail).sum()))
+    return out
+
+
+def balanced_owners(costs, size):
+    """[rank of each item]: the items by descending cost (ties by index),
+    each onto the rank with the least cost so far (ties to the lowest rank):
+    the longest-first rule, the same on every rank."""
+    load = [0.0] * size
+    owners = [0] * len(costs)
+    for t in sorted(range(len(costs)), key=lambda t: (-costs[t], t)):
+        r = min(range(size), key=lambda r: (load[r], r))
+        owners[t] = r
+        load[r] += costs[t]
+    return owners
 
 
 def isdf_exchange_rows(mol, auxmol, coords, layout, dm, dm_other=None,
@@ -855,8 +885,7 @@ def _xc_tile_addend(mol, ni, xc_code, xctype, coords, weight, owner, g_ao,
             q += ao[hessian_rows[x][i]] * e_i
         by_ao[x] = q.sum(axis=0)
         by_point[x] = q.sum(axis=1)
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        out[ia] -= 2.0 * by_ao[:, p0:p1].sum(axis=1)
+    out -= 2.0 * functions_to_atoms(by_ao, mol)
     # grad_r f = -sum_B d_B f at a point: the point term is +2 sum_m q_x
     np.add.at(out, owner, 2.0 * by_point.T)
     return out + becke_weight_response(mol, coords, owner, weight * f, adjust)
@@ -914,18 +943,21 @@ def _xc_moving_grid(mol, grids, ni, xc_code, g_ao, dm, comm, tile):
     return tile_sum(addend, len(tiles), natm, comm)
 
 
-def tile_sum(addend, ntiles, natm, comm=None):
-    """(natm, 3) sum over tiles t of `addend(t)`, tile t rank t % size's:
-    the addends are gathered verbatim and summed in tile order on every rank,
-    so the same bits at every rank count, ranks owning no tile included."""
+def tile_sum(addend, ntiles, natm, comm=None, owners=None):
+    """(natm, 3) sum over tiles t of `addend(t)`, tile t rank `owners[t]`'s
+    (t % size's without `owners`): the addends are gathered verbatim and
+    summed in tile order on every rank, so the same bits at every rank count
+    and for any owners, ranks owning no tile included."""
     comm = current_comm() if comm is None else comm
     rank, size = ((0, 1) if comm is None
                   else (comm.Get_rank(), comm.Get_size()))
+    if owners is None or size == 1:
+        owners = [t % size for t in range(ntiles)]
     addends = np.zeros((ntiles, natm * 3))
-    for t in partition(ntiles, rank, size):
-        addends[t] = addend(int(t)).ravel()
-    allgather_ranges(addends, [[(int(t), int(t) + 1)
-                                for t in partition(ntiles, r, size)]
+    for t in range(ntiles):
+        if owners[t] == rank:
+            addends[t] = addend(int(t)).ravel()
+    allgather_ranges(addends, [[(t, t + 1) for t in range(ntiles) if owners[t] == r]
                                for r in range(size)], comm)
     out = np.zeros(natm * 3)
     for row in addends:

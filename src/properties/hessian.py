@@ -76,8 +76,8 @@ from src.Base.numerics.constants import (BOHR_TO_ANGSTROM, FD_LADDER_RATIO_FLOOR
                                          ISDF_HESSIAN_MIN_GRID,
                                          NUCLEAR_FD_STEP)
 from src.Base.factorization.distributed_isdf_jk import scf_pair_layout
-from src.Base.factorization.isdf_jk import (ISDFJK, FrozenFrames, frozen_frames,
-                                            frozen_pair_layout)
+from src.Base.factorization.isdf_jk import (FrozenFrames, frozen_frames,
+                                            frozen_pair_layout, interpolated_exchange)
 from src.Base.utils.record_io import record_hash
 from src.Base.geometry.geometry import displaced, grid_key
 from src.Base.factorization.separable_ri import (SHELL_ORDER, frame_turning_record,
@@ -229,10 +229,9 @@ def isdf_grid_counts(with_df):
 
 def require_hessian_grid(mf, level=ISDF_HESSIAN_MIN_GRID):
     """Raise if `mf` is an ISDF-K mean field on a grid below `level`."""
-    with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
+    if not interpolated_exchange(mf):
         return
-    got = isdf_grid_counts(with_df)
+    got = isdf_grid_counts(mf.with_df)
     if got is None:
         raise NotImplementedError(
             'this ISDF-K mean field was handed its interpolation points from '

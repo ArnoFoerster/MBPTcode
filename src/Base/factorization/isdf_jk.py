@@ -813,6 +813,22 @@ class ISDFJK(df.df.DF):
             raise NotImplementedError('ISDFJK stores no cderi; see loop().')
 
 
+def exchange_realization(mf):
+    """How mf builds its exchange, the one question every force, skeleton
+    and post-SCF step asks of a mean field: 'isdf' (an ISDF-K fit:
+    density-fitted Coulomb, interpolated exchange), 'df' (a density fit of
+    both), or 'exact' (four-centre integrals)."""
+    with_df = getattr(mf, 'with_df', None)
+    if isinstance(with_df, ISDFJK):
+        return 'isdf'
+    return 'exact' if with_df is None else 'df'
+
+
+def interpolated_exchange(mf):
+    """Whether mf's exchange is interpolated (`exchange_realization` 'isdf')."""
+    return exchange_realization(mf) == 'isdf'
+
+
 def separable_factors_from_jk(mf):
     """(X_mo, D, X_ao, coords) for GW/BSE, from an SCF that already fitted.
 

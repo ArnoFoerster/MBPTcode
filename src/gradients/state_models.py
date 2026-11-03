@@ -184,6 +184,9 @@ class MP2State:
             raise ValueError('MP2State needs a Hartree-Fock reference: its relaxed '
                              'density and force solve the CPHF with the HF kernel, '
                              f'not {type(hf.mf).__name__}\'s')
+        # its force differentiates a density-fitted reference: none, or an
+        # interpolated (ISDF-K) one, is refused here, before any solve
+        dcf.jk_fit(hf.mf)
         self.hf, self.frozen, self.auxbasis = hf, frozen, auxbasis
         self.mol = hf.mol
         tiled_force_route(force_route, self.mol)

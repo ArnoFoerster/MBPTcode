@@ -54,8 +54,9 @@ def static_screening(x_mo, d, eps, nocc, grid=None, mu=None, comm=None,
     factors are identical by construction, and an audited run compares their
     digests and those of (A, W).
 
-    `SlicedFactors`: D is gathered whole once and the sweep gathers the two
-    branches of X_mo, so W is the whole factors' bit for bit. A is a sum over
+    `SlicedFactors`: d is gathered whole once (it may be another gauge than
+    the factors' own D) and the sweep reads X_mo through its grid tiles, so
+    W is the one-rank W of (X_mo, d) bit for bit. A is a sum over
     the grid of row products, formed from the rows (`density_projection`).
     """
     comm = current_comm() if comm is None else comm

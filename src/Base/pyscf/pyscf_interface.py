@@ -12,16 +12,23 @@ from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import environment_of
+from src.Base.pyscf.cphf import ResponseKernel
 
 #: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
 _FOCK_MO_CACHE = weakref.WeakKeyDictionary()
 
 
-def response_kernel(mf, environment=True):
+def response_kernel(mf, environment=True, comm=None):
     """G(x) = dV_eff/dD . x for this mean field, cached on it.
 
     pyscf's `gen_response` is this operator: `vj - 0.5 vk` on Hartree-Fock,
-    with f_xc and the hybrid scaling on a Kohn-Sham reference.
+    with f_xc and the hybrid scaling on a Kohn-Sham reference. On a
+    density-fitted Hartree-Fock reference with no continuum that responds,
+    it is `cphf.ResponseKernel`, the fit's J - K/2 in fixed auxiliary blocks
+    over comm's ranks (default none: serial), which also builds the
+    exchange of an occupied-virtual density from its occupied
+    half-transforms (`factored`): the one kernel of every orbital response
+    on such a reference, a correlation force's Z-vector included.
 
     A continuum must respond here, and pyscf gates that on
     `equilibrium_solvation`, default False: right for a vertical excitation,
@@ -38,7 +45,8 @@ def response_kernel(mf, environment=True):
 
     Cached because a Z-vector solve calls this inside its matvec; a mean field
     is immutable for one gradient and a displaced geometry gets a new object,
-    so the cache cannot go stale. pyscf's closure holds the mean field, so the
+    so the cache cannot go stale (the fitted kernel, which holds the occupied
+    orbitals, is kept only while the mean field holds the same orbital array). pyscf's closure holds the mean field, so the
     cache is a reference cycle: an abandoned mean field (its integrals, grids,
     xc kernel and the fit cached weakly on its Mole) is freed only by the
     cyclic collector, which `FactorChain.mean_field` runs before each new
@@ -49,6 +57,14 @@ def response_kernel(mf, environment=True):
     the SCF's tiles, f_xc on each rank's block of the grid, one reduction.
     """
     key = '_cached_response_kernel' + ('' if environment else '_gas')
+    if _fitted_hartree_fock(mf, environment, comm):
+        # it holds the occupied orbitals: kept while the mean field holds the
+        # same orbital array and the ranks are the same
+        held = getattr(mf, key + '_fit', None)
+        if held is None or held[0] is not comm or held[1] is not mf.mo_coeff:
+            held = (comm, mf.mo_coeff, ResponseKernel(mf, comm))
+            setattr(mf, key + '_fit', held)
+        return held[2]
     with distributed_fock(mf, build=False) as handles:
         # pyscf's closure holds the numint it was made with and that
         # numint's f_xc on its grid: one made serially is not the ranks' own
@@ -70,6 +86,18 @@ def response_kernel(mf, environment=True):
         with distributed_fock(mf, build=False):
             return fn(x)
     return distributed_response
+
+
+def _fitted_hartree_fock(mf, environment, comm):
+    """Whether `response_kernel` takes `cphf.ResponseKernel` for mf: a
+    Hartree-Fock reference whose J and K are pyscf's density fit, with no
+    continuum responding in this kernel; serially (comm None) only where no
+    distributed SCF left its handles, whose slices then build G instead."""
+    if hasattr(mf, 'xc') or type(getattr(mf, 'with_df', None)) is not pyscf_df.DF:
+        return False
+    if environment and hasattr(mf, 'with_solvent'):
+        return False
+    return comm is not None or getattr(mf, '_distributed', None) is None
 
 
 def fock_mo(mf):

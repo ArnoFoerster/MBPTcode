@@ -52,7 +52,7 @@ optional third-party one.
 | the state models' force of a Kohn-Sham reference carries the motion of its XC grid | `test_state_model_ks_force` |
 | the mean-field part of the MP2, ADC(2) and state-model forces is the tiled assembly, the same bits at every rank count | `test_correlated_mean_field_force` |
 | the stage pipeline's four named solvent schemes and scheme B: refusals, stamps, external S0 Hessian; forces against their own energy, the stages, their restart, the saddle check | `test_photophysics_scheme_b`, `test_photophysics_scheme_b_run` (slow) |
-| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_fitted_mean_field_force`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_isdf_test_sets`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_fitted_exchange_conditioning` |
+| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_fitted_mean_field_force`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_isdf_test_sets`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_exchange_realization`, `test_fitted_exchange_conditioning` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
 | couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
@@ -85,7 +85,7 @@ optional third-party one.
 | an environment from a charged structure file, and the diabatic gradient in it | `test_protein_environment` (unit tests in seconds; the gradient gate about 10 minutes) |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
 | MPI: the context, `lockstep` and the collectives | `test_mpi_context`, `test_mpi_grid_primitives`, `test_mpi_map`, `test_layering`, `test_ordered_reductions` |
-| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
+| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_gw_tiles_distributed`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
 | MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_block_action_trims`, `test_davidson_lockstep`, `test_distributed_trial_space` |
 | MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf`, `test_distributed_scf_grid`, `test_orbital_response_distributed`, `test_state_pair_force_distributed_ks` |
 | MPI: a solvated chain on the row fit and sliced factors, the solvated SCF over ranks | `test_solvated_row_fit`, `test_solvated_sliced_energy`, `test_solvated_scf_ranks`, `test_adaptive_solvated_ranks`, `test_tadf_rank_paths` |
@@ -230,6 +230,15 @@ holds its array. Run it on at least two nodes with several ranks per node:
 
 ```bash
 OMP_NUM_THREADS=1 srun --mpi=pmi2 -N 2 --ntasks-per-node=4 python tests/test_node_shared_mpi.py
+```
+
+`test_gw_tiles_mpi` runs the quasiparticle solve's grid-tile sweeps on the
+wire: W(0) and the self-energy's branch sums from sliced factors are the
+one-rank results bit for bit, the window on slices is the replicated one, and
+each rank holds its share of the tiles. Run it across nodes:
+
+```bash
+OMP_NUM_THREADS=1 srun --mpi=pmi2 -N 2 --ntasks-per-node=2 python tests/test_gw_tiles_mpi.py
 ```
 
 `test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:

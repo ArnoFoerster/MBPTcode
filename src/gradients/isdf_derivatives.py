@@ -55,7 +55,7 @@ from pyscf import df as pyscf_df
 from src.Base.factorization.df_distribution import distributed_handles
 from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
 from src.environments.environment import dresses_interaction
-from src.Base.factorization.isdf_jk import ISDFJK, isdf_grid
+from src.Base.factorization.isdf_jk import interpolated_exchange, isdf_grid
 from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, FRAME_DECAY, ao_l_labels,
                                                  content_key, atomic_frames,
                                                  fit_settings, aux_metric_sqrt, fit_M,
@@ -73,7 +73,8 @@ from src.gradients.isdf_adjoint_pieces import (GaugeAdjoint, PointChain,
                                                sqrtm_adjoint,
                                                two_centre_adjoint)
 from src.gradients.skeleton_tiles import isdf_exchange_seeds
-from src.Base.factorization.shell_runs import shell_runs
+from src.Base.factorization.ao_product_fit import three_centre_block
+from src.Base.factorization.shell_runs import functions_to_atoms, shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels
@@ -414,27 +415,19 @@ def three_centre_adjoint(mol, auxmol, G3, omega=0.0, max_bytes=THREE_CENTER_BLOC
     with mol.with_range_coulomb(omega), auxmol.with_range_coulomb(omega):
         for sh0, sh1 in shell_runs(mol.ao_loc_nr(), max_bytes // int(per_ao)):
             a0, a1 = ao_loc[sh0], ao_loc[sh1]
-            sl = (sh0, sh1, 0, mol.nbas, 0, auxmol.nbas)
-            d1 = pyscf_df.incore.aux_e2(
-                mol, auxmol, intor='int3c2e_ip1', aosym='s1', comp=3,
-                shls_slice=sl).reshape(3, a1 - a0, nao, naux)
+            run = (sh0, sh1, a0, a1)
+            d1 = three_centre_block(mol, auxmol, run, 'int3c2e_ip1', 3)
             # minus, for the same reason as the two-centre case
             t_first[:, a0:a1] = -np.einsum('xmnP,mnP->xm', d1, G3[a0:a1],
                                            optimize=True)
             t_second[:, a0:a1] = -np.einsum('xnmP,mnP->xn', d1, G3[:, a0:a1],
                                             optimize=True)
             del d1
-            d2 = pyscf_df.incore.aux_e2(
-                mol, auxmol, intor='int3c2e_ip2', aosym='s1', comp=3,
-                shls_slice=sl).reshape(3, a1 - a0, nao, naux)
+            d2 = three_centre_block(mol, auxmol, run, 'int3c2e_ip2', 3)
             t_aux -= np.einsum('xmnP,mnP->xP', d2, G3[a0:a1], optimize=True)
             del d2
-    grad = np.zeros((mol.natm, 3))
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        grad[ia] += t_first[:, p0:p1].sum(axis=1) + t_second[:, p0:p1].sum(axis=1)
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        grad[ia] += t_aux[:, q0:q1].sum(axis=1)
-    return grad
+    grad = functions_to_atoms(t_first, mol) + functions_to_atoms(t_second, mol)
+    return grad + functions_to_atoms(t_aux, auxmol)
 
 
 def product_pairs(mol, numerics=None):
@@ -1018,7 +1011,7 @@ def require_fitted_coulomb(mf, what):
     'df-direct'): every ISDF-K skeleton takes the Coulomb derivative from the
     density-fitted one, which is the derivative of another function then."""
     with_df = getattr(mf, 'with_df', None)
-    if isinstance(with_df, ISDFJK) and with_df.j_route != 'df-direct':
+    if interpolated_exchange(mf) and with_df.j_route != 'df-direct':
         raise NotImplementedError(
             f'{what} takes the Coulomb derivative from the density-fitted '
             f'skeleton, which is the right function only for '
@@ -1034,7 +1027,7 @@ def mean_field_exchange_wanted(mf):
     pending call's stash both read. Every exchange channel counts, so a
     screened hybrid with no long-range exact exchange (alpha = 0) still has
     its short-range term."""
-    return (isinstance(getattr(mf, 'with_df', None), ISDFJK)
+    return (interpolated_exchange(mf)
             and any(w != 0.0 for _, w in exchange_channels(mf)))
 
 

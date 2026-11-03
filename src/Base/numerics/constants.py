@@ -1944,12 +1944,11 @@ QP_SUBSPACE_GMRES_MAXITER = 100
 QP_SUBSPACE_POLE_CHUNK = 256
 
 # The QP-set reverse pass (`gradients.gwbse.qp_space_time.QPSetPass`) joins each
-# state's B_p_bar terms in frequency order, the running sum handed from the
-# owner of one frequency to the next (`ordered_chain_sum`, one collective of
-# every rank per hand-over). Consecutive states of one slice owner are chained
-# together as one stacked sum, up to this many GB a rank (the busiest rank's
-# share of their terms, stacked, and the running sums), so one hand-over
-# carries several states: fewer collectives, the same additions and bits.
+# state's B_p_bar terms in frequency order (`ordered_sliced_sum`, two
+# collectives of every rank per sum). Consecutive states of one slice owner are
+# summed together as one stacked sum, up to this many GB a rank (the busiest
+# rank's share of their terms, stacked, sliced and packed, and the sums), so one
+# sum carries several states: fewer collectives, the same additions and bits.
 QP_CHAIN_BATCH_GB = 0.5
 
 # Interior samples of an interval between neighbouring poles that no bound
@@ -2616,6 +2615,13 @@ PCM_CAVITY_MIN_TILES = 32
 # The flop count does not depend on it; at nao 1090 a force block is 46 cavity
 # points.
 PCM_CAVITY_BLOCK_GB = 0.5
+# The memory (GB) a rank may keep its cavity tiles' potential integrals in
+# between the continuum's calls at one geometry
+# (src.environments.pcm_factorization): the SCF cycles and the response
+# solves evaluate the same (nao, nao, k) tiles in every call, twice per
+# cycle. Tiles past the budget are evaluated again each time, so the
+# integrals and the bits do not depend on it.
+PCM_CAVITY_CACHE_GB = 2.0
 
 # Folded ADC(2) nuclear force (src.gradients.adc.ee_gradient)
 # eigenvalue tolerance (Hartree) of the root whose force is taken

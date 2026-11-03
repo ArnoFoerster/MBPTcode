@@ -74,7 +74,8 @@ from src.Base.pyscf.dispersion import dispersion_gradient
 from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.environments.pcm_derivatives import solvation_gradient
-from src.Base.factorization.isdf_jk import ISDFJK, isdf_jk
+from src.Base.factorization.isdf_jk import (exchange_realization, interpolated_exchange,
+                                            isdf_jk)
 from src.gradients.skeleton_tiles import (fitted_energy_skeleton,
                                           one_electron_energy_skeleton,
                                           xc_energy_grid_skeleton)
@@ -87,7 +88,7 @@ from src.gradients.one_electron import one_electron_gradient
 def require_isdf_gradient_support(mf, what):
     """Raise unless this ISDF mean field is one whose force is built here."""
     with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
+    if not interpolated_exchange(mf):
         raise TypeError(
             f'{what} needs a mean field whose exchange comes from ISDF factors '
             f'(with_df an ISDFJK, got {type(with_df).__name__}); pyscf\'s own '
@@ -176,7 +177,7 @@ def mean_field_skeleton_force(mf):
     core Hamiltonian enters through the orbitals alone and its own derivative
     is the caller's.
     """
-    if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+    if interpolated_exchange(mf):
         return np.asarray(isdf_mean_field_gradient(mf))
     if fitted_force_supported(mf):
         return np.asarray(fitted_mean_field_gradient(mf))
@@ -192,7 +193,7 @@ def fitted_force_supported(mf):
     bare operator, in no continuum or a pyscf PCM, and on Kohn-Sham the
     original Becke partition `xc_energy_grid_skeleton` differentiates."""
     with_df = getattr(mf, 'with_df', None)
-    if (not isinstance(with_df, pyscf_df.DF) or isinstance(with_df, ISDFJK)
+    if (exchange_realization(mf) != 'df' or not isinstance(with_df, pyscf_df.DF)
             or not isinstance(mf, pyscf_scf.hf.RHF)
             or isinstance(mf, pyscf_scf.rohf.ROHF) or mf.mol.omega):
         return False
@@ -422,8 +423,7 @@ def refuse_isdf_jk_gradient(mf, what):
     half is built from the auxiliary basis, and `exx_double_counting_skeleton`
     differences two fitted pyscf gradients. Energies are unaffected.
     """
-    with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
+    if not interpolated_exchange(mf):
         return
     raise NotImplementedError(
         f'{what} takes a nuclear force from a mean field whose exchange comes '

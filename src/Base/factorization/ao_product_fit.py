@@ -269,15 +269,19 @@ def fit_shell_runs(mol, auxmol, numerics=None, comp=1):
     return shell_ranges(mol.ao_loc_nr(), max_aos)
 
 
-def three_centre_block(mol, auxmol, run, intor='int3c2e', comp=1):
-    """(mu nu|P) for the AOs mu of one shell run (`fit_shell_runs`), shape
-    (a1 - a0, nao, naux), or (comp, a1 - a0, nao, naux) for a derivative
-    integral."""
+def three_centre_block(mol, auxmol, run, intor='int3c2e', comp=1, aux_shells=None):
+    """(mu nu|P) for the AOs mu of one shell run (sh0, sh1, a0, a1)
+    (`fit_shell_runs`) and the auxiliary functions of the auxiliary shells
+    aux_shells = (k0, k1) (None: all), shape (a1 - a0, nao, naux), or
+    (comp, a1 - a0, nao, naux) for a derivative integral: the one fetch of a
+    three-centre block. Its memory is pyscf's, P slowest and mu fastest, so
+    transpose(..., 3, 2, 1) of it is C-contiguous."""
     sh0, sh1, a0, a1 = run
+    k0, k1 = (0, auxmol.nbas) if aux_shells is None else aux_shells
     block = pyscf_df.incore.aux_e2(
         mol, auxmol, intor=intor, aosym='s1', comp=comp,
-        shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas))
-    shape = (a1 - a0, mol.nao_nr(), auxmol.nao_nr())
+        shls_slice=(sh0, sh1, 0, mol.nbas, k0, k1))
+    shape = (a1 - a0, mol.nao_nr(), block.shape[-1])
     return block.reshape(shape if comp == 1 else (comp,) + shape)
 
 

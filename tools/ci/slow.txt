@@ -104,6 +104,7 @@ pytest test_shared_states.py
 pytest test_simulated_ranks.py
 pytest test_skeleton_tiles.py
 pytest test_sliced_factors.py
+pytest test_gw_tiles_distributed.py
 pytest test_solvated_chain.py
 pytest test_solvated_rpa_energy.py
 pytest test_sop_force_follows_its_energy.py

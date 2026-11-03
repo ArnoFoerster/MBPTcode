@@ -37,7 +37,7 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
 from src.SingleReference.common.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
 from src.Base.environment_seam import environment_of
 from src.Base.numerics.numerics import required_numerics
-from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.factorization.isdf_jk import exchange_realization
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.utils.parallel.mpi_grid import lockstep
@@ -239,12 +239,10 @@ def mean_field_integrals(mf, mol):
     None), ('df', its auxiliary molecule at `mol`) for a pyscf density-fitted
     SCF, or ('isdf', None) for an ISDF-K one (DF Coulomb, interpolated
     exchange), which no dense post-SCF step reproduces."""
-    with_df = getattr(mf, 'with_df', None)
-    if isinstance(with_df, ISDFJK):
-        return 'isdf', None
-    if with_df is not None:
-        return 'df', make_auxmol(mol, with_df.auxbasis)
-    return 'exact', None
+    realization = exchange_realization(mf)
+    if realization == 'df':
+        return 'df', make_auxmol(mol, mf.with_df.auxbasis)
+    return realization, None
 
 
 def refuse_mismatched_integrals(mf, mol, auxmol, surface, auxbasis=True):

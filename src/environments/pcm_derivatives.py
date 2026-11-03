@@ -35,6 +35,7 @@ from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
 from pyscf.solvent.pcm import PCM
 
+from src.Base.environment_seam import attach_cavity_comm, cavity_comm, detach_cavity_comm
 from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import ordered_sum, partition
 from src.Base.numerics.constants import (INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
@@ -421,15 +422,36 @@ def reaction_field_fock_skeleton(pcmobj, dm, gamma_ao,
     (t/2) B[gamma, gamma] behind, so this costs two solver gradients.
 
     The PCM charge cache is restored to `dm` on return, since pyscf's pieces
-    leave it holding the charges of the last density they were given.
+    leave it holding the charges of the last density they were given: from
+    the cache as it was on entry where that cache was taken at `dm` itself
+    (the same bits a recomputation gives), by one more charge solve
+    otherwise.
 
     With `comm` (every rank calling) both solver gradients divide their cavity
-    blocks over the ranks (`solvation_gradient`): the same bits at every rank
-    count.
+    blocks over the ranks (`solvation_gradient`), and a continuum that splits
+    its surface points (`environments.pcm_factorization.tile_cavity`) gets
+    `comm` for the charge solves of the two displaced densities, so their
+    surface potential is divided over the ranks too: the same bits at every
+    rank count.
     """
     g = np.asarray(gamma_ao, float)
     g = 0.5 * (g + g.T)
-    grad = (solvation_gradient(pcmobj, dm + step * g, comm=comm)
-            - solvation_gradient(pcmobj, dm - step * g, comm=comm)) / (2.0 * step)
-    pcmobj._get_vind(dm)
+    entry = dict(pcmobj._intermediates) if pcmobj._intermediates else {}
+    cached = entry.get('dm')
+    at_dm = (cached is not None and np.size(cached) == np.size(dm)
+             and np.array_equal(np.reshape(cached, np.shape(dm)), dm))
+    split = (comm is not None and comm.Get_size() > 1
+             and cavity_comm(pcmobj) is None)
+    if split:
+        attach_cavity_comm(pcmobj, comm)
+    try:
+        grad = (solvation_gradient(pcmobj, dm + step * g, comm=comm)
+                - solvation_gradient(pcmobj, dm - step * g, comm=comm)) / (2.0 * step)
+        if at_dm:
+            pcmobj._intermediates.update(entry)
+        else:
+            pcmobj._get_vind(dm)
+    finally:
+        if split:
+            detach_cavity_comm(pcmobj)
     return grad

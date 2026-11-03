@@ -19,7 +19,13 @@ its residual tolerance is warned about and flagged there
 ('orbital_response_not_converged', appended to `flags` where the caller hands
 a list). A degenerate pair that carries gradient is an input the equation does
 not cover (a symmetry the caller has to adapt to) and is refused.
+
+Every route then closes its Lagrangian the same way (`close_lagrangian`):
+the stationary gradient Y = Y_E + Y[fold(Lambda)], the relaxed density
+gamma + Lambda and the energy-weighted matrix M = -(Y + Y^T)/4, the
+overlap's partial, whose one-electron skeleton is `lagrangian_skeleton`.
 """
+from typing import NamedTuple
 
 import numpy as np
 from pyscf import lib
@@ -28,6 +34,7 @@ from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import ORBITAL_MULTIPLIER_DEGENERACY_TOL
 from src.Base.numerics.numerics import required_numerics
 from src.Base.pyscf import cphf
+from src.gradients.one_electron import one_electron_skeleton
 
 
 def antisym_to_vec(Mmat, iu):
@@ -137,3 +144,56 @@ def solve_orbital_multipliers(matvec, Y_E, eps, *, numerics, free=None,
     if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
         print(f"    [multipliers] n={rhs.size} info={info} |res|={res:.3e}")
     return vec_to_sym(np.where(fixed, 0.0, x), norb, iu), res
+
+
+class ClosedLagrangian(NamedTuple):
+    """A Lagrangian closed on its multiplier (`close_lagrangian`), MO basis.
+
+    gamma: the relaxed density, the target's partial plus Lambda.
+    M: the energy-weighted matrix -(Y + Y^T)/4, the overlap's partial: with
+        antisym(Y) = 0 the coefficient of a rotation dC = C X is
+        Y_up + M_pu + M_up = 0.
+    Y: the stationary orbital-rotation gradient Y_E + Y[fold(Lambda)].
+    lam, res: the multiplier and its solve's residual norm.
+    """
+    gamma: np.ndarray
+    M: np.ndarray
+    Y: np.ndarray
+    lam: np.ndarray
+    res: float
+
+    @property
+    def stationarity(self):
+        """max |Y - Y^T|, which the solve drives to its tolerance."""
+        return float(np.abs(self.Y - self.Y.T).max())
+
+
+def close_lagrangian(matvec, Y_E, eps, gamma, *, numerics, free=None,
+                     flags=None, verbose=False, solved=None, total=None):
+    """The `ClosedLagrangian` of a target with MO partial gamma (symmetric)
+    and orbital-rotation gradient Y_E.
+
+    matvec, eps, numerics, free, flags, verbose: `solve_orbital_multipliers`'s,
+        which solves Lambda unless `solved` = (Lambda, residual) holds an
+        earlier solve of the same right-hand side; numerics is required.
+    total: Lambda -> Y where a route forms its stationary gradient in one
+        build of the whole density (Y_E being that build at Lambda = 0);
+        None takes Y_E + matvec(Lambda).
+    """
+    if solved is None:
+        lam, res = solve_orbital_multipliers(matvec, Y_E, eps, numerics=numerics,
+                                             free=free, verbose=verbose,
+                                             flags=flags)
+    else:
+        lam, res = solved
+    Y = Y_E + matvec(lam) if total is None else total(lam)
+    return ClosedLagrangian(gamma + lam, -0.25 * (Y + Y.T), Y, lam, res)
+
+
+def lagrangian_skeleton(mol, mf, closed):
+    """(len(closed), natm, 3): each closed Lagrangian's one-electron skeleton,
+    Tr[gamma dh] + Tr[M dS] in the AO basis of mf's orbitals
+    (`one_electron.one_electron_skeleton`)."""
+    C = np.asarray(mf.mo_coeff)
+    return one_electron_skeleton(mol, mf, [C @ c.gamma @ C.T for c in closed],
+                                 [C @ c.M @ C.T for c in closed])

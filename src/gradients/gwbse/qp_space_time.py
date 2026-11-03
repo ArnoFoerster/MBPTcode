@@ -66,7 +66,7 @@ from src.Base.numerics.constants import (BYTES_PER_GB, CONTINUATION_ROUTE,
                                          SOP_N_POLES)
 from src.Base.utils.parallel.mpi_grid import (OwnedSlices, agreement,
                                               current_comm, lockstep,
-                                              mpi_map, ordered_chain_sum, ordered_sum,
+                                              mpi_map, ordered_sliced_sum, ordered_sum,
                                               partition, reduce_sum)
 from src.SingleReference.GW.contour_deformation import (
     cd_integral_weights, cd_pair_contraction_multi,
@@ -886,7 +886,7 @@ class QPSetPass:
         frequencies. Every addend is the one of the frequency-outside loop
         and joins its sum in the same order: chi0_bar(i.nu_k) the states in
         set order and then the pairs, B_p_bar the frequencies in order
-        (`ordered_chain_sum`, kept by the slice's owner), eps_bar by
+        (`ordered_sliced_sum`, kept by the slice's owner), eps_bar by
         (frequency, state) (`ordered_sum`): the one-rank bits."""
         active, eps, comm = self.active, self.eps, self.comm
         proj_tau, grid, naux, eye = (self.proj_tau, self.grid, self.naux,
@@ -936,15 +936,16 @@ class QPSetPass:
                  for k, owner in zip(fb.block, fb.owners or fb.block)]
 
         # states whose terms wait to be chained together: consecutive states
-        # of one slice owner, chained as one stacked sum, so a hand-over of
-        # the running sum (a collective of every rank) carries all of them
+        # of one slice owner, summed as one stacked sum, so one sum (two
+        # collectives of every rank, `ordered_sliced_sum`) carries all of them
         pending, waiting = [], [0]
         # what one pending state costs the busiest rank: its terms at that
-        # rank's frequencies, kept until the flush and stacked there, and the
-        # running sum's slice and its copy (replicated: the owners are)
+        # rank's frequencies, kept until the flush, stacked there, cut into
+        # slices and packed for the exchange, and the sum's slices received,
+        # its slice and the root's copy (replicated: the owners are)
         busiest = max((sum(1 for _, owner in chain if owner == r)
                        for r in set(owner for _, owner in chain)), default=0)
-        per_state = (2 * busiest + 2) * int(np.prod(Bp_bars.shape)) * 8
+        per_state = (4 * busiest + 4) * int(np.prod(Bp_bars.shape)) * 8
 
         def flush():
             """The pending states' terms joined onto their B_p_bar in
@@ -957,7 +958,7 @@ class QPSetPass:
             shape = (len(pending),) + tuple(Bp_bars.shape)
             onto = (np.stack([Bp_bars.held[si] for si, _ in pending])
                     if rank == root else np.empty(shape))
-            total = ordered_chain_sum(
+            total = ordered_sliced_sum(
                 {n: np.stack([terms[k] for _, terms in pending])
                  for n, (k, owner) in enumerate(chain) if owner == rank},
                 [owner for _, owner in chain], comm, onto, root=root)
