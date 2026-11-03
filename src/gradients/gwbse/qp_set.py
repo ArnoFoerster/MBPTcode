@@ -23,6 +23,7 @@ from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         static_term)
 from src.SingleReference.GW.qp_selection import (ac_quasiparticle_roots,
                                                  ac_quasiparticle_shifts,
+                                                 contiguous_runs,
                                                  merged_blocks,
                                                  true_degenerate_blocks,
                                                  window_blocks,
@@ -464,6 +465,15 @@ class QuasiparticleSet:
         (`window_blocks`: a band is never chained into one group), joined with the subspaces
         carried from the surface this one was refrozen from.
 
+        A GROUP IS A CONTIGUOUS ENERGY WINDOW: every orbital between two of
+        its members (in the energy order of this forward's mean field) is a
+        member, and a group is cut where one is not (`contiguous_runs`). The
+        frozen conventions match a group by its span (`FrozenConventions.at`),
+        and an orbital inside a group's window but outside the group is the
+        one most likely to rotate into it: at a fixed geometry the reaction
+        field of a solvation loop does that between two cycles. A cut group
+        is listed in `qp_subspace_record['cut']` with the orbitals between.
+
         Decided at the first forward of a set, the reference geometry's, and
         frozen with it. Generous on purpose: inside a subspace H is invariant
         to how its orbitals rotate into each other, and a pair that does not
@@ -489,16 +499,21 @@ class QuasiparticleSet:
                         'reason': 'not in the explicit set',
                         'remaining': [int(q) for q in b if q in set(key)]}
                        for b in before for p in b if int(p) not in set(key)]
-            kept = []
+            kept, cut = [], []
             for b in self._window_subspaces(key, eps):
                 pole = tuple(p for p in b if routes.get(p) == 'sop')
+                runs = [r for r in contiguous_runs(pole) if len(r) > 1]
                 dropped += [{'orbital': p, 'subspace': list(b),
                              'route': routes.get(p), 'carried': p in carried,
                              'reason': 'off the pole model',
-                             'remaining': list(pole) if len(pole) > 1 else []}
+                             'remaining': [p for r in runs for p in r]}
                             for p in b if p not in pole]
-                if len(pole) > 1:
-                    kept.append(pole)
+                if len(runs) > 1 or (runs and len(runs[0]) < len(pole)):
+                    cut.append({'subspace': list(pole),
+                                'runs': [list(r) for r in runs],
+                                'between': [p for p in range(pole[0], pole[-1])
+                                            if p not in pole]})
+                kept += runs
             if dropped:
                 warnings.warn(
                     f'quasiparticle Hamiltonian: orbitals '
@@ -509,27 +524,31 @@ class QuasiparticleSet:
                     RuntimeWarning, stacklevel=3)
             self.chain.conventions.freeze_subspaces(self.chain.resolved, key, tuple(kept), {
                 'rule': 'complete linkage: every orbital of a group within '
-                        'the window of the group\'s lowest',
+                        'the window of the group\'s lowest; a group is a '
+                        'contiguous energy window, cut where an orbital '
+                        'between its members is not solved in it',
                 'window_Ha': float(QP_HAMILTONIAN_WINDOW),
                 'sizes': [len(b) for b in kept],
                 'spans_Ha': [float(max(eps[p] for p in b) - min(eps[p] for p in b))
                              for b in kept],
                 'subspaces': [list(b) for b in kept],
                 'carried': [list(b) for b in self.chain.resolved.carried_subspaces],
-                'dropped': dropped})
+                'dropped': dropped, 'cut': cut})
         return self.chain.resolved.qp_subspaces[1]
 
     def _window_subspaces(self, key, eps):
         """The subspaces of two or more of the set `key` before any member
         leaves for another route: complete linkage within
         QP_HAMILTONIAN_WINDOW on each side of the gap (`window_blocks`),
-        joined with the carried subspaces."""
+        joined with the carried subspaces, each cut into its contiguous runs
+        (an orbital outside the set between two members cuts the group)."""
         groups = []
         for side in ([p for p in key if p < self.chain.nocc],
                      [p for p in key if p >= self.chain.nocc]):
             groups += window_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
-        return [b for b in merged_blocks(
-            key, groups, self.chain.resolved.carried_subspaces) if len(b) > 1]
+        return [r for b in merged_blocks(
+            key, groups, self.chain.resolved.carried_subspaces)
+            for r in contiguous_runs(b) if len(r) > 1]
 
     def _forward_pairs(self, eps, states):
         """(i, j) positions into `states` of every pair the quasiparticle

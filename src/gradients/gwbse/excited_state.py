@@ -111,7 +111,7 @@ from src.Base.geometry.geometry import molecule_at
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
-from src.SingleReference.GW.qp_selection import merged_blocks
+from src.SingleReference.GW.qp_selection import contiguous_range, merged_blocks
 from src.SingleReference.LinearResponse.casida import solver_choice
 from src.SingleReference.LinearResponse.davidson import DavidsonWarmStart
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
@@ -1258,10 +1258,22 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         one quasiparticle-Hamiltonian group, its orbitals in the explicit set
         (an adaptive set's candidates and floor), joined with the groups
         carried, and kept as `absorbed` for every later refreeze; the orbitals
-        a frozen group mixed with on a walk (`FrozenConventions.absorb`)."""
+        a frozen group mixed with on a walk (`FrozenConventions.absorb`).
+
+        Each group is taken as the whole energy window it spans here
+        (`contiguous_range`): an orbital between a group and the partner it
+        mixed with joins too, since a group is a contiguous window
+        (`QuasiparticleSet._frozen_qp_subspaces`) and one left outside it
+        between two members is matched as a unit of its own, which the next
+        rotation inside the window refuses. A group reaching across the gap
+        is taken as given."""
         groups = tuple(tuple(int(p) for p in g) for g in groups)
         if not groups:
             return
+        nocc = self.nocc
+        groups = tuple(
+            contiguous_range(g) if len({p < nocc for p in g}) == 1 else g
+            for g in groups)
         c = self.conventions
         members = {p for g in groups for p in g}
         c.qp_set = np.asarray(sorted(set(int(p) for p in c.qp_set) | members),
