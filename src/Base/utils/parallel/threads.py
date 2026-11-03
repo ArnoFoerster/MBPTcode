@@ -114,6 +114,46 @@ class BlasLimit:
         return False
 
 
+@contextlib.contextmanager
+def spread_over(cpus):
+    """Context manager moving every thread of this process onto `cpus` (a set
+    of CPU ids) until exit, when each thread gets its own mask back and a
+    thread started inside gets the main thread's.
+
+    The thread COUNT is not touched, so a BLAS splits its work as before and
+    returns the same bits; what moves is where the threads run, and with that
+    which memory controllers serve them. A dense eigensolve on 16 threads bound
+    to one 16-core NUMA domain of an AMD EPYC 7H12 node ran 3.3 times slower
+    than on the same 16 threads free to run on the whole node: the reduction
+    to tridiagonal form streams its matrix through memory. A no-op where the
+    OS has no per-thread masks (no `/proc/self/task`, no `sched_setaffinity`)
+    or `cpus` is empty.
+    """
+    tasks = '/proc/self/task'
+    if not cpus or not hasattr(os, 'sched_setaffinity') or not os.path.isdir(tasks):
+        yield
+        return
+    saved = {}
+    for tid in (int(t) for t in os.listdir(tasks)):
+        try:
+            saved[tid] = os.sched_getaffinity(tid)
+            os.sched_setaffinity(tid, cpus)
+        except OSError:  # the thread has exited, or no CPU of `cpus` is allowed
+            pass
+    try:
+        yield
+    finally:
+        main = saved.get(os.getpid())
+        for tid in (int(t) for t in os.listdir(tasks)):
+            mask = saved.get(tid, main)
+            if mask is None:
+                continue
+            try:
+                os.sched_setaffinity(tid, mask)
+            except OSError:
+                pass
+
+
 def blas_single_threaded(min_threads=BLAS_WRAP_MIN_THREADS):
     """Context manager holding every BLAS pool at one thread, OpenMP untouched.
 

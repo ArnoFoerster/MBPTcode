@@ -22,7 +22,11 @@ SCFs differ in their last bits, here far beyond them):
     as a chain's kernels hold it; the transform reads each rank's orbitals);
   * 'ri-somf', which divides its tiles over the ranks, cut into several tiles
     a rank: every rank holds the serial operator of rank 0's density, bit for
-    bit.
+    bit;
+  * the step the X2C operator runs in (`on_root_with_node_cpus`): rank 0
+    alone runs it and gets its value, the other ranks get None, rank 0 runs
+    on at least its own CPUs meanwhile, and every rank has its own CPU mask
+    back after it.
 """
 import os
 import sys
@@ -36,7 +40,8 @@ from pyscf import gto, scf
 
 from src.Base.numerics.numerics import Numerics
 from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
-                                             lockstep_mean_field)
+                                             lockstep_mean_field,
+                                             on_root_with_node_cpus)
 from src.Base.pyscf import spin_orbit_mean_field
 from src.Base.pyscf.spin_orbit_mean_field import _soc_jk_ri
 from src.properties.spin_orbit import soc_operator, soc_operator_mo
@@ -124,7 +129,23 @@ def main(comm):
         gate.check(bitwise((h,), (reference,)),
                    "the serial operator of rank 0's density",
                    f'{abs(h - reference).max():.1e}')
+        gate.section('one rank, on the CPUs of its node')
+        own = _mask()
+        out = on_root_with_node_cpus(lambda: (gate.rank, _mask()), comm)
+        if gate.rank == 0:
+            gate.check(out is not None and out[0] == 0, 'rank 0 runs the step')
+            gate.check(own is None or own <= out[1],
+                       'on at least its own CPUs',
+                       f'{len(own or ())} own, {len(out[1] or ())} during')
+        else:
+            gate.check(out is None, 'the other ranks get None')
+        gate.check(_mask() == own, 'every rank has its own CPU mask back')
     return gate.finish()
+
+
+def _mask():
+    """This thread's CPU mask, None where the OS has none."""
+    return os.sched_getaffinity(0) if hasattr(os, 'sched_getaffinity') else None
 
 
 if __name__ == '__main__':

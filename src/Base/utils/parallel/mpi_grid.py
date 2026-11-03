@@ -80,13 +80,15 @@ import os
 import pickle
 import sys
 import threading
+import time
 import traceback
 import weakref
 
 import numpy as np
 
 from src.Base.numerics.constants import (AGREEMENT_DIGEST_BLOCK, AGREEMENT_DIGEST_SEED,
-                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES)
+                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES,
+                                         NODE_IDLE_POLL_S)
 from src.Base.utils.parallel.simulated_comm import SimulatedComm
 
 MPI = None
@@ -627,6 +629,41 @@ def node_comm(comm):
     if not _genuine_mpi(comm):
         return comm
     return comm.Split_type(_mpi().COMM_TYPE_SHARED, key=comm.Get_rank())
+
+
+def on_root_with_node_cpus(fn, comm, root=0):
+    """fn() on rank `root` of `comm` alone, with its threads spread over the
+    CPUs of every rank of `comm` on root's node while all the other ranks wait
+    without spinning: fn's value on root, None on every other rank. A
+    collective on `comm`.
+
+    For a step that is cheaper to run once than to divide: a dense
+    eigensolve that is bound by memory bandwidth gains the node's other
+    memory controllers this way, and its bits do not move, since the thread
+    count stays root's own (`threads.spread_over`). The other ranks wait at a
+    non-blocking barrier they test every NODE_IDLE_POLL_S seconds, so no core
+    of the node spins. Serially, on a world of one and on a `SimulatedComm`,
+    fn() runs on root as it is.
+    """
+    from src.Base.utils.parallel.threads import spread_over
+    if comm is None or not _genuine_mpi(comm):
+        return fn() if comm is None or comm.Get_rank() == root else None
+    node = _node_of(comm).comm
+    mine = (sorted(os.sched_getaffinity(0))
+            if hasattr(os, 'sched_getaffinity') else None)
+    here = node.allgather((comm.Get_rank(), mine))
+    if comm.Get_rank() == root:
+        masks = [m for _, m in here]
+        cpus = (set().union(*masks)
+                if all(m is not None for m in masks) else None)
+        with spread_over(cpus):
+            value = fn()
+        comm.Ibarrier().Wait()
+        return value
+    pending = comm.Ibarrier()
+    while not pending.Test():
+        time.sleep(NODE_IDLE_POLL_S)
+    return None
 
 
 class NodeShared:

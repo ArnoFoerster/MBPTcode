@@ -27,7 +27,7 @@ from pyscf import gto, scf
 
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.Base.pyscf import spin_orbit_mean_field
+from src.Base.pyscf import spin_orbit_mean_field, x2c_spin_orbit
 from src.Base.pyscf.spin_orbit_mean_field import mean_field_term
 from src.properties import spin_orbit
 from src.properties.spin_orbit import (SOC_PREFACTOR, soc_operator,
@@ -100,12 +100,12 @@ def test_only_rank_zero_builds_the_x2c_operator(water, monkeypatch, size):
     mol, _ = water
     serial = x2c_one_electron(mol)
     builders = []
-    real = spin_orbit._x2c_build
+    real = x2c_spin_orbit._x2c_build
 
     def counted(m):
         builders.append(current_comm().Get_rank())
         return real(m)
-    monkeypatch.setattr(spin_orbit, '_x2c_build', counted)
+    monkeypatch.setattr(x2c_spin_orbit, '_x2c_build', counted)
     out = run_simulated(lambda comm: x2c_one_electron(mol), size)
     assert builders == [0]
     for r, h in enumerate(out):

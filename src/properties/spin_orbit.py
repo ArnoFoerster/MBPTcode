@@ -64,20 +64,19 @@ import copy
 
 import numpy as np
 from pyscf.data import nist
-from pyscf.x2c import sfx2c1e, x2c
 
 from src.Base.numerics.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
                                          SOC_MANIFOLD_CONV_TOL)
 from src.Base.numerics.numerics import (Numerics, Stamped, numerics_identity,
                                         require_one_stamp)
 from src.Base.utils.linear_algebra.diagonalization import diagonalize_matrix
-from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.LinearResponse.davidson import (
     davidson_flags, solve_casida_davidson)
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
+from src.Base.pyscf.x2c_spin_orbit import one_electron_term
 from src.Base.pyscf.spin_orbit_mean_field import (TWO_ELECTRON_TERMS,
                                                   mean_field_term)
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
@@ -129,31 +128,11 @@ def x2c_one_electron(mol):
     approximately with a non-relativistic one. The mismatch is negligible for
     first-row atoms and is not for a 5d metal.
 
-    Built once over the ranks: rank 0 runs the decoupling (one complex
-    generalized eigenproblem of four times the uncontracted basis, the
-    largest cost of the pass once the two-electron term is fitted) and every
-    rank returns rank 0's array, bit for bit. Collective under ranks
-    (`current_comm()`); serial where there is none.
+    Built once over the ranks, the same bits on every rank
+    (`Base.pyscf.x2c_spin_orbit`). Collective under ranks (`current_comm()`);
+    serial where there is none.
     """
-    comm = current_comm()
-    if comm is not None and comm.Get_size() > 1 and comm.Get_rank() != 0:
-        nao = mol.nao_nr()
-        return lockstep(np.zeros((3, nao, nao)), comm)
-    h = _x2c_build(mol)
-    return h if comm is None else lockstep(h, comm)
-
-
-def _x2c_build(mol):
-    """The X2C operator of `x2c_one_electron`, on this process."""
-    nao = mol.nao_nr()
-    soc = (x2c.SpinOrbitalX2CHelper(mol).get_hcore(mol)
-           - np.kron(np.eye(2), sfx2c1e.SpinFreeX2CHelper(mol).get_hcore(mol)))
-    h = np.array([soc[:nao, nao:].imag, soc[:nao, nao:].real,
-                  soc[:nao, :nao].imag])
-    # antisymmetric by construction; the X2C decoupling leaves ~1e-11 of noise
-    # on that, and the vanishing diagonal is what lets the interstate density
-    # skip its i = j, a = b mask
-    return 0.5 * (h - h.transpose(0, 2, 1))
+    return one_electron_term(mol)
 
 
 def soc_operator(mol, dm=None, *, two_electron, one_electron, auxbasis=None):

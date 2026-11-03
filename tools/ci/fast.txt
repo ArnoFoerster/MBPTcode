@@ -23,6 +23,7 @@ pytest test_auxiliary_bosons.py
 pytest test_auxiliary_bosons_move.py
 script test_base.py
 pytest test_blas_single_threaded.py
+pytest test_spread_over.py
 pytest test_block_action_trims.py
 script test_block_cyclic_transfer.py
 script test_bn_unrestricted_excitations.py

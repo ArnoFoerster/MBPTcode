@@ -1572,6 +1572,13 @@ MPI_COUNT_MAX = INT32_MAX
 # nodes ran 36 times slower than into one reused buffer. 128 MiB a thread.
 MPI_STAGE_DOUBLES = 2 ** 24
 
+# Seconds between two looks at a pending non-blocking barrier by a rank that
+# waits while another rank of its node computes alone (`on_root_with_node_cpus`).
+# A blocking MPI wait spins a core per waiting rank; this one sleeps, so the
+# computing rank has the node's cores. A latency knob only: the wait ends at
+# most this long after the computation.
+NODE_IDLE_POLL_S = 0.01
+
 # Relative Coulomb-energy error above which the ISDF-K mean field
 # (`Base.factorization.isdf_jk.ISDFJK.check`) warns that its grid is weak, on the first density the SCF
 # asks about: benzene/cc-pVDZ on `optimize_atomic_radii`'s default single
