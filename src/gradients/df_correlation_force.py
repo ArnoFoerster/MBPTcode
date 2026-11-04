@@ -46,7 +46,7 @@ from src.Base.pyscf.pyscf_interface import auxmol_of, response_kernel
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator, singlet_pairs)
-from src.Base.factorization.distributed_df import rank0_metric_factor
+from src.Base.factorization.distributed_df import correlation_metric_mode, rank0_metric_factor
 from src.Base.factorization.isdf_jk import interpolated_exchange
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
@@ -71,13 +71,15 @@ class RIFactors:
 
 def whitening(auxmol):
     """(V, X) of the auxiliary metric V: X = L^-1 for V = L L^T, or, where V
-    is not positive definite, the eigen-replacement the energy's fit uses
-    (`distributed_df.metric_factor`, as pyscf's `cholesky_eri`): X then has
-    one row per kept eigenvector, and X^T X is the pseudo-inverse of V. Over
-    the current region's ranks the factor and its mode are rank 0's
-    (`rank0_metric_factor`), a collective every rank calls."""
+    has an eigenvalue below the eigen-replacement's cut, that replacement, the
+    one the energy's fit takes (`distributed_df.correlation_metric_mode`,
+    `correlation_df`): X then has one row per kept eigenvector, and X^T X is
+    the pseudo-inverse of V. Over the current region's ranks the choice and
+    the factor are rank 0's (`rank0_metric_factor`), a collective every rank
+    calls."""
     V = auxmol.intor('int2c2e')
-    low, mode = rank0_metric_factor(auxmol, auxmol)
+    mode = correlation_metric_mode(auxmol, current_comm())
+    low, mode = rank0_metric_factor(auxmol, auxmol, mode=mode)
     if mode == 'eig':
         return V, low
     return V, scipy.linalg.solve_triangular(low, np.eye(low.shape[0]), lower=True)

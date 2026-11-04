@@ -156,14 +156,15 @@ pyscf's own blocking. They were checked against pyscf 2.12.1, the version the
 tests here run on; a pyscf that renames one fails at import, not in a result.
 """
 import contextlib
+import tempfile
 import time
 import weakref
 
 import numpy as np
 import scipy.linalg
 from pyscf import df, gto, lib
-from pyscf.df import addons, df_jk
-from pyscf.df.incore import _eig_decompose
+from pyscf.df import addons, df_jk, incore, outcore
+from pyscf.df.incore import LINEAR_DEP_THR, _eig_decompose
 from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.dft import gen_grid, numint
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
@@ -341,12 +342,14 @@ def _restore_methods(mf, saved):
             setattr(mf, name, original)
 
 
-def metric_factor(mol, auxmol, j2c=None):
+def metric_factor(mol, auxmol, j2c=None, mode=None):
     """(L, mode) with (P|Q) = L L^T, or the eigen-replacement where it is not
     positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes:
     mode 'eig' and L^T the kept eigenvectors over the square roots of their
     eigenvalues (above LINEAR_DEP_THR), so L L^T is the pseudo-inverse.
-    j2c: the metric matrix itself, by default pyscf's (hermi=1).
+    j2c: the metric matrix itself, by default pyscf's (hermi=1). mode 'cd'
+    or 'eig' takes that factor instead of pyscf's choice (a correlation fit's,
+    `correlation_metric_mode`).
 
     Rank 0's alone across ranks (`rank0_metric_factor`), because `mode`
     is a discrete decision taken from threaded dense arithmetic: a rank that
@@ -356,17 +359,70 @@ def metric_factor(mol, auxmol, j2c=None):
     """
     if j2c is None:
         j2c = auxmol.intor('int2c2e', hermi=1)
+    if mode == 'eig':
+        return _eig_decompose(mol, j2c), 'eig'
+    if mode == 'cd':
+        return scipy.linalg.cholesky(j2c, lower=True), 'cd'
     try:
         return scipy.linalg.cholesky(j2c, lower=True), 'cd'
     except scipy.linalg.LinAlgError:
         return _eig_decompose(mol, j2c), 'eig'
 
 
-def rank0_metric_factor(mol, auxmol, comm=None, j2c=None):
+def correlation_metric_mode(auxmol, comm=None):
+    """The factor a correlation fit takes on the metric of auxmol: 'eig' (the
+    eigen-replacement) where an eigenvalue lies below LINEAR_DEP_THR, the cut
+    that replacement applies, and 'cd' otherwise.
+
+    pyscf's own choice (`metric_factor` without a mode) is whether the
+    Cholesky factorization happens to fail, and on a metric whose smallest
+    eigenvalues are round-off that is a property of the BLAS: one library
+    whitens directions another drops, and the energy and the force of the fit
+    move with it. From the spectrum the choice is the same on every library,
+    and a metric it gives 'cd' is positive definite far above round-off, so
+    its Cholesky factor is pyscf's. Rank 0's on every rank of comm (None: this
+    process alone), as `rank0_metric_factor`'s.
+    """
+    def decide():
+        j2c = auxmol.intor('int2c2e', hermi=1)
+        return 'eig' if scipy.linalg.eigvalsh(j2c)[0] < LINEAR_DEP_THR else 'cd'
+    if comm is None or comm.Get_size() == 1:
+        return decide()
+    return broadcast(decide() if comm.Get_rank() == 0 else None, comm)
+
+
+def correlation_df(mol, auxbasis, max_memory):
+    """A built `pyscf.df.DF` of the correlation fit auxbasis on mol, with the
+    factor `correlation_metric_mode` chooses on this process (pyscf's
+    `DF.build` takes pyscf's): in memory where the tensor fits, on disk as
+    `DF.build` would put it otherwise."""
+    with_df = df.DF(mol, auxbasis=auxbasis)
+    with_df.max_memory = max_memory
+    auxmol = addons.make_auxmol(mol, auxbasis)
+    if correlation_metric_mode(auxmol) == 'cd':
+        return with_df.build()
+    with_df.auxmol = auxmol
+    nao_pair = mol.nao_nr() * (mol.nao_nr() + 1) // 2
+    free = with_df.max_memory - lib.current_memory()[0]
+    int3c, int2c = mol._add_suffix('int3c2e'), mol._add_suffix('int2c2e')
+    if nao_pair * auxmol.nao_nr() * 8 / 1e6 < .9 * free:
+        with_df._cderi = incore.cholesky_eri(mol, int3c=int3c, int2c=int2c, auxmol=auxmol,
+                                             max_memory=free, decompose_j2c='eig',
+                                             lindep=LINEAR_DEP_THR)
+    else:
+        with_df._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        outcore.cholesky_eri_b(mol, with_df._cderi_to_save.name, dataname=with_df._dataname,
+                               int3c=int3c, int2c=int2c, auxmol=auxmol, max_memory=free,
+                               decompose_j2c='ED', lindep=LINEAR_DEP_THR)
+        with_df._cderi = with_df._cderi_to_save
+    return with_df
+
+
+def rank0_metric_factor(mol, auxmol, comm=None, j2c=None, mode=None):
     """Rank 0's `metric_factor` and its mode on every rank of comm (default:
     the current region's; None or one rank: this process alone). Every rank
     takes rank 0's choice between the Cholesky factor and the
-    eigen-replacement, so no rank decides it alone.
+    eigen-replacement, so no rank decides it alone; mode as `metric_factor`'s.
 
     L^-1 mixes the whole auxiliary index into every row, so rows built against
     two factors that differ in the last bits are rows of two different tensors
@@ -375,9 +431,9 @@ def rank0_metric_factor(mol, auxmol, comm=None, j2c=None):
     """
     comm = current_comm() if comm is None else comm
     if comm is None or comm.Get_size() == 1:
-        return metric_factor(mol, auxmol, j2c)
+        return metric_factor(mol, auxmol, j2c, mode)
     if comm.Get_rank() == 0:
-        low, mode = metric_factor(mol, auxmol, j2c)
+        low, mode = metric_factor(mol, auxmol, j2c, mode)
         order = 'C' if low.flags.c_contiguous else 'F'
         header = (mode, low.shape, low.dtype.str, order)
     else:

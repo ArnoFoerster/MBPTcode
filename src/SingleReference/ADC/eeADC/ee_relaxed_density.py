@@ -77,8 +77,8 @@ tensor whole) and the orbital response shared with the tiled route
 """
 import numpy as np
 from pyscf import lib
-from pyscf import df as pyscf_df
 
+from src.Base.factorization.distributed_df import correlation_df
 from src.Base.numerics.constants import DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB
 from src.Base.pyscf import cphf
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
@@ -428,9 +428,7 @@ def core_factors(mol, mf, frozen, auxbasis=None):
     if auxbasis is None:
         with_df = mf.with_df
     else:
-        with_df = pyscf_df.DF(mol, auxbasis=auxbasis)
-        with_df.max_memory = mf.max_memory
-        with_df.build()
+        with_df = correlation_df(mol, auxbasis, mf.max_memory)
     C = np.asarray(mf.mo_coeff)
     Cc, Ca = C[:, :frozen], C[:, frozen:]
     out = []
