@@ -14,7 +14,7 @@ Copyright (C) 2020 A. Eugene DePrince III
 https://github.com/edeprince3/pdaggerq
 Licensed under the Apache License, Version 2.0.
 
-  * src/SingleReference/CC/diis.py
+  * src/Solvers/diis.py
     Unmodified copy of the DIIS implementation from the pdaggerq package.
     The original Apache-2.0 header is retained at the top of the file.
 

@@ -74,6 +74,8 @@ THE PROTOCOLS. A `FragmentMethod` is what an element's gradient reads of a
 method, and all it reads:
 
     mol0                                the reference geometry
+    numerics                            the run's `Numerics` (the
+                                        localization term's Z-vector)
     require_differentiable_environment()  refuses an environment it cannot
                                         differentiate
     mean_field(mol=None, mf=None)       (mol, mf) at a geometry
@@ -286,10 +288,11 @@ class _PMResponse:
         return self.sv @ sb @ self.sv.T
 
 
-def _localization_term(mol, mf, orbitals, d_occ, d_vir, flags=None):
+def _localization_term(mol, mf, orbitals, d_occ, d_vir, numerics, flags=None):
     """(natm, 3) sum D_anti (.) theta, theta the local orbitals' own rotation;
     a localization response that stops short keeps its last iterate and is
-    flagged 'localization_response_not_converged' in `flags`."""
+    flagged 'localization_response_not_converged' in `flags`. numerics: the
+    run's `Numerics`, the occupied-virtual Z-vector's (`ov_coupling`)."""
     nocc = orbitals.nocc
     c = np.asarray(mf.mo_coeff, float)
     c_o, c_v = c[:, :nocc], c[:, nocc:]
@@ -333,7 +336,7 @@ def _localization_term(mol, mf, orbitals, d_occ, d_vir, flags=None):
         w_s_total += pm.s_bar_from_l_bar(pm.l_bar(z))
     # sum V_ai A_ai + V'_ia A_ia, and A_ai = -A_ia: the orbitals are
     # orthonormal at every geometry, so <phi_a|dphi_i> + <phi_i|dphi_a> = 0
-    out = ov_coupling(mol, mf, nocc, v_ia - v_ai.T)
+    out = ov_coupling(mol, mf, nocc, v_ia - v_ai.T, numerics)
     out = out + _overlap_derivative(mol, w_s_total) + _ket_derivative(mol, w_1_total)
     return -out
 
@@ -551,7 +554,8 @@ class DiabaticGradient:
         if self.localization == 'frozen':
             return canon, np.zeros_like(canon)
         with self._timed('localization_response'):
-            loc = _localization_term(self.mol, self.mf, o, d_o, d_v, self.flags)
+            loc = _localization_term(self.mol, self.mf, o, d_o, d_v,
+                                     self.method.numerics, self.flags)
         return canon, loc
 
     def gradient(self, w):

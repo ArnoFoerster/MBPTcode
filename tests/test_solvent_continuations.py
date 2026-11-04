@@ -31,8 +31,9 @@ from src.environments.solvent_screening import (attach_solvent_screening,
                                                 detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 CONTINUATIONS = ('pade', 'cd', 'laplace', 'sop')
 #: The continuation error of the dynamic part cancels in the solvent shift;
 #: what is left is the static-grid difference of the two Eq. (18) builds.

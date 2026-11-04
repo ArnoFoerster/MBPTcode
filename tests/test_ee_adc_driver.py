@@ -10,9 +10,11 @@ from pyscf import gto, scf, adc
 
 from src.SingleReference.ADC.eeADC import ee_driver
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+from tests.adc_common import ee_numerics
+from tests.molecules import WATER_AT_ORIGIN
 
 ATOMS = ['H 0 0 0; F 0 0 0.917',
-         'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+         WATER_AT_ORIGIN,
          'Be 0 0 0; H 0 0 1.34; H 0 0 -1.34']
 
 
@@ -104,7 +106,36 @@ def test_every_route_returns_the_convergence_flags(monkeypatch):
     for name, kw in routes.items():
         kw = dict(kw)
         m = kw.pop('mf', mf)
-        e, Z, *_ = r = solve_ee_adc(m, level='adc2', nroots=3, dense_limit=0,
+        e, Z, *_ = r = solve_ee_adc(m, level='adc2', nroots=3, numerics=ee_numerics(dense_limit=0),
                                     **kw)
         assert len(e) == 3 and Z.shape[1] == 3, name
         assert r.converged.shape == (3,) and not r.converged.any(), name
+
+
+def test_the_fold_reads_its_settings_from_numerics(monkeypatch):
+    """conv_tol, residual_tol and dense_limit of numerics.adc reach the fold's
+    solver, and layout.tile_gb its operator: Numerics is their one source."""
+    mf = scf.RHF(gto.M(atom='H 0 0 0; H 0 0 0.74; H 0 0 2.0; H 0 0 2.74',
+                       basis='6-31g', verbose=0)).density_fit().run()
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def solve_folded(pieces, nroots, **kw):
+        seen.update(kw)
+        raise Stop
+    monkeypatch.setattr(ee_driver.ee_fold, 'solve_folded', solve_folded)
+    real = ee_driver.ee_ri_fold.RIFoldADC2
+
+    def operator(*a, **kw):
+        seen['tile_gb'] = kw['tile_gb']
+        return real(*a, **kw)
+    monkeypatch.setattr(ee_driver.ee_ri_fold, 'RIFoldADC2', operator)
+    with pytest.raises(Stop):
+        solve_ee_adc(mf, level='adc2', nroots=1, spin='singlet', fold=True,
+                     auxbasis='cc-pvdz-ri',
+                     numerics=ee_numerics(conv_tol=1e-7, residual_tol=1e-9,
+                                          dense_limit=3, tile_gb=0.5))
+    assert (seen['tol_omega'], seen['tol_residual'], seen['dense_limit'],
+            seen['tile_gb']) == (1e-7, 1e-9, 3, 0.5), seen

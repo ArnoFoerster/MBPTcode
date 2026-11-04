@@ -23,11 +23,12 @@ from src.environments.solvent_screening import (SolventScreening,
 from src.SingleReference.GW import reaction_field
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    return gto.M(atom=WATER_ROUNDED,
                  basis='cc-pvdz', verbose=0)
 
 

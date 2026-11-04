@@ -40,6 +40,7 @@ from src.Base.numerics.constants import (DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX,
                                          HARTREE_TO_CM, HARTREE_TO_EV)
 from src.photophysics.rate_chain import RateInputs, RateModel, rate_chain
 from src.photophysics.rate_models import RateRefused
+from src.photophysics.rates import ManifoldGaps
 from src.properties import curvilinear as cv
 from src.properties.duschinsky import (CartesianHessian, DuschinskyModel,
                                        DuschinskyOscillators,
@@ -55,6 +56,7 @@ from test_duschinsky_guard import dmabn, minimum  # noqa
 
 CM = 1.0 / HARTREE_TO_CM
 EV = 1.0 / HARTREE_TO_EV
+STACKED = ManifoldGaps('stacked', None)
 
 # a strongly rotated, frequency-changed two-mode model whose J is not
 # orthogonal (singular values 1.15 and 0.9)
@@ -199,7 +201,7 @@ def models(hs, ht):
 def t1_mode_lambda(hs, ht):
     """The S1 minimum's curvilinear displacement projected directly on the
     T1 modes: its T1 reorganization."""
-    ss, st, _, _ = mode_sets(hs, ht)
+    ss, st, _, _ = mode_sets(hs, ht, 'rectilinear')
     k = displacement_from_minima(ss, st, hs.mol, ht.mol, 'curvilinear')
     return 0.5 * float(np.sum((st.omega * k) ** 2))
 
@@ -267,11 +269,11 @@ def test_dmabn_rate_chain_records_the_curvilinear_refusal(dmabn):
     full = replace(RateModel.full('curvilinear', 0.01), coupling='condon',
                    triplets='T1', classical_below_cm=0.0)
     with pytest.raises(RateRefused, match='RISC: band first moment'):
-        rate_chain(inp, full, 300.0)
+        rate_chain(inp, full, 300.0, STACKED)
     with pytest.raises(RateRefused, match='ISC: a soft mode'):
         rate_chain(inp, replace(full, duschinsky_coordinates='rectilinear'),
-                   300.0)
-    off = rate_chain(inp, replace(full, duschinsky=False), 300.0)
+                   300.0, STACKED)
+    off = rate_chain(inp, replace(full, duschinsky=False), 300.0, STACKED)
     assert off['huang_rhys_sum_t1_modes'] < 10.0
     for side in ('ISC', 'RISC'):
         assert off[side]['k_pair'] > 0.0

@@ -32,8 +32,21 @@ them, `mixing`) fails at every radius near a crossing, so shrinking the step
 only collapses the radius. The walk instead refreezes the conventions at the
 last accepted geometry with those orbitals absorbed into the group
 (`convention_refreeze`), evaluates there on the rebuilt surface and retries
-the step at the same radius; `convention_refreezes` in the record lists each
-event. Two orbitals that merely swapped order are matched to their new indices
+the step at the same radius (WALK_STEP_SHRINK times it when that retry is
+refused again before any step is accepted); `convention_refreezes` in the
+record lists each event. A rebuilt surface whose energy at the last accepted
+geometry moves by more than REFREEZE_TOL_MEV from the surface it was rebuilt
+from is a new surface, not the old one continued: the walk starts a new ROUND
+there, on the walk's starting radius and Hessian, the event recording the
+round it starts and the jump (`round`, `jump_meV`), and the minimum returned
+is the last round's (`rounds` in the record counts them). At most
+WALK_CONVENTION_REFREEZES_MAX rounds: a jump past them
+(`RefreezeRoundsExhausted`), or a rebuilt surface that does not evaluate at
+the geometry it was rebuilt at (a `StepFailed` there, as a `ConventionsLost`
+of conventions that do not match their own geometry), ends the walk on every
+rank as a record, not converged, its status 'convention refreeze failed: ...',
+the event in `convention_refreezes` with `refrozen` False; the walk and its
+checkpoint stay on the surface of the last accepted step. Two orbitals that merely swapped order are matched to their new indices
 and raise nothing (`gradients.conventions`).
 
 ONE WALK, HOWEVER MANY RANKS. Inside `with distributed(comm):` every rank runs
@@ -96,6 +109,38 @@ class NonFiniteEvaluation(StepFailed):
     inside the walkers only, so the walk rejects the step and retries it
     shorter as for any StepFailed; the surface itself returns the NaN,
     flagged."""
+
+
+class RefreezeRoundsExhausted(StepFailed):
+    """A convention refreeze that moves the energy at the geometry it was
+    rebuilt at by more than REFREEZE_TOL_MEV on a walk that has walked
+    WALK_CONVENTION_REFREEZES_MAX rounds already: the rounds do not settle.
+    Raised by the convention refreeze inside the walkers only, which end the
+    walk on it, flagged (`refreeze_failed_status`)."""
+
+    def __init__(self, e_before, e_after, rounds):
+        self.e_before, self.e_after = float(e_before), float(e_after)
+        jump = (self.e_after - self.e_before) * HARTREE_TO_MEV
+        super().__init__(
+            f'the rebuilt surface moves the energy at the geometry it was '
+            f'rebuilt at by {jump:+.1f} meV ({self.e_before:.10f} -> '
+            f'{self.e_after:.10f} Ha), above REFREEZE_TOL_MEV = '
+            f'{REFREEZE_TOL_MEV} meV, after {rounds} rounds '
+            f'(WALK_CONVENTION_REFREEZES_MAX = {WALK_CONVENTION_REFREEZES_MAX})')
+
+
+def refreeze_round(e_before, e_after, rounds):
+    """The jump (meV) of a surface rebuilt at a geometry, its energy there
+    `e_after` against `e_before` on the surface it was rebuilt from, when it
+    starts a new round of the walk (above REFREEZE_TOL_MEV), else None;
+    `RefreezeRoundsExhausted` when the walk has walked `rounds` =
+    WALK_CONVENTION_REFREEZES_MAX rounds already."""
+    jump = (float(e_after) - float(e_before)) * HARTREE_TO_MEV
+    if abs(jump) <= REFREEZE_TOL_MEV:
+        return None
+    if rounds >= WALK_CONVENTION_REFREEZES_MAX:
+        raise RefreezeRoundsExhausted(e_before, e_after, rounds)
+    return jump
 
 
 def walk_evaluate(surface, mol):
@@ -519,12 +564,38 @@ def convention_refreeze(surface, mol, exc):
     return surface.refreeze(mol)
 
 
-def convention_event(cycle, exc, trust, e_before, e_after):
-    """The record of one convention refreeze of a walk."""
-    return {'cycle': int(cycle), 'trust': float(trust),
-            'absorbed': [list(g) for g in exc.conventions.absorbed],
-            'e_before': float(e_before), 'e_after': float(e_after),
-            'status': f'{type(exc).__name__}: {exc}'}
+def convention_event(cycle, exc, trust, e_before, e_after, failed=None,
+                     starts=None):
+    """The record of one convention refreeze of a walk; `failed`, the
+    `StepFailed` of a rebuilt surface that did not evaluate (e_after None) or
+    whose jump ended the rounds (`RefreezeRoundsExhausted`, e_after its
+    energy); `starts`, the round a jump started (`refreeze_round`), else
+    None."""
+    # a geomeTRIC round restarts on geomeTRIC's own radius: None
+    out = {'cycle': int(cycle),
+           'trust': None if trust is None else float(trust),
+           'absorbed': [list(g) for g in exc.conventions.absorbed],
+           'e_before': float(e_before),
+           'e_after': None if e_after is None else float(e_after),
+           'jump_meV': (None if e_after is None else
+                        (float(e_after) - float(e_before)) * HARTREE_TO_MEV),
+           'round': starts,
+           'status': f'{type(exc).__name__}: {exc}', 'refrozen': failed is None}
+    if failed is not None:
+        out['failed'] = f'{type(failed).__name__}: {failed}'
+    return out
+
+
+def refreeze_failed_status(failed):
+    """The status of a walk ended by a rebuilt surface that does not evaluate
+    at the geometry it was rebuilt at, or whose jump there ended the rounds."""
+    if isinstance(failed, RefreezeRoundsExhausted):
+        return (f'convention refreeze failed: the rounds on the conventions '
+                f'refrozen at the last accepted geometry do not settle '
+                f'({type(failed).__name__}: {failed})')
+    return (f'convention refreeze failed: the conventions refrozen at the last '
+            f'accepted geometry do not evaluate there '
+            f'({type(failed).__name__}: {failed})')
 
 
 def refrozen_walker(walk, **fixed):
@@ -564,11 +635,16 @@ class CartesianWalk:
         n3 = 3 * mol.natm
         self.hess = (np.eye(n3) * 0.5 if hess_init is None
                      else np.asarray(hess_init, float).reshape(n3, n3).copy())
+        # the radius and Hessian a round starts on (`refreeze_conventions`)
+        self.trust0, self.hess0 = trust, self.hess.copy()
+        self.rounds = 1
         tr = translation_rotation_basis(mol.atom_coords())
         self.proj = np.eye(n3) - tr.T @ tr
         self.history, self.converged, self.status = [], False, 'ok'
         self.rejected = 0
         self.convention_refreezes = []
+        # convention refreezes since the last accepted step
+        self.refrozen_here = 0
 
     def at(self, xvec):
         """(projected gradient, energy, diagnostics, molecule) at `xvec`."""
@@ -660,24 +736,54 @@ class CartesianWalk:
     def refreeze_conventions(self, trial, cycle, verbose):
         """After a trial refused by a convention event, the walk on the
         conventions refrozen at the last accepted geometry, evaluated there,
-        the radius kept (`convention_refreeze`): True when the walk goes on
-        so, False when the refusal is an ordinary rejected step."""
+        the radius kept, or shrunk when no step was accepted since the last
+        refreeze (`convention_refreeze`); a new round on the walk's starting
+        radius and Hessian when the energy there jumps (`refreeze_round`):
+        True when the walk goes on so, False when the refusal is an ordinary
+        rejected step. A rebuilt surface that does not evaluate there, or a
+        jump past the rounds, ends the walk (`status`, module docstring):
+        True, with `ended` set."""
         if len(self.convention_refreezes) >= WALK_CONVENTION_REFREEZES_MAX:
             return False
         rebuilt = convention_refreeze(self.surface, self.m_cur, trial.exc)
         if rebuilt is None:
             return False
         e_before = self.e
-        self.surface = rebuilt
-        self.g, self.e, self.diags, self.m_cur = self.at(self.x)
+        if self.refrozen_here:
+            self.trust = max(self.trust * WALK_STEP_SHRINK, self.trust_min)
+        old, self.surface = self.surface, rebuilt
+        try:
+            g, e, diags, m_cur = self.at(self.x)
+            jump = refreeze_round(e_before, e, self.rounds)
+        except StepFailed as failed:
+            # every rank raised it: the evaluation is locked to rank 0's
+            self.surface = old
+            self.convention_refreezes.append(convention_event(
+                cycle, trial.exc, self.trust, e_before,
+                getattr(failed, 'e_after', None), failed))
+            self.status = refreeze_failed_status(failed)
+            self.ended = True
+            if verbose:
+                print(f'  [opt {cycle:3d}] {self.status}', flush=True)
+            return True
+        self.g, self.e, self.diags, self.m_cur = g, e, diags, m_cur
+        if jump is None:
+            self.refrozen_here += 1
+        else:
+            self.rounds += 1
+            self.trust, self.hess = self.trust0, self.hess0.copy()
+            self.refrozen_here = 0
         commit(self.surface, self.m_cur)
         self.convention_refreezes.append(convention_event(
-            cycle, trial.exc, self.trust, e_before, self.e))
+            cycle, trial.exc, self.trust, e_before, self.e,
+            starts=None if jump is None else self.rounds))
         if verbose:
+            how = (f'trust kept {self.trust:.3f}' if jump is None else
+                   f'{jump:+.1f} meV: round {self.rounds} from here, trust '
+                   f'{self.trust:.3f} and the starting Hessian')
             print(f'  [opt {cycle:3d}] conventions refrozen here, orbitals '
                   f'{self.convention_refreezes[-1]["absorbed"]} absorbed; '
-                  f'E {e_before:.10f} -> {self.e:.10f}, trust kept '
-                  f'{self.trust:.3f}', flush=True)
+                  f'E {e_before:.10f} -> {self.e:.10f}, {how}', flush=True)
         self.save()
         return True
 
@@ -717,11 +823,14 @@ class CartesianWalk:
         self.trust = max(trust, self.trust_min)
         self.x, self.g, self.e = self.x + step, trial.g, trial.e
         self.diags, self.m_cur = trial.d, trial.m
+        self.refrozen_here = 0
         commit(self.surface, self.m_cur)
         self.save()
 
     def descend(self, budget, conv, verbose):
-        """Cycle until converged, the radius collapses or the budget ends."""
+        """Cycle until converged, the radius collapses, a convention
+        refreeze fails or the budget ends."""
+        self.ended = False
         for cycle in range(len(self.history), budget):
             step = self.plan_step(cycle, verbose)
             if self.has_converged(conv):
@@ -730,6 +839,8 @@ class CartesianWalk:
             trial = self.take_step(step)
             if trial.failed and self.refreeze_conventions(trial, cycle,
                                                           verbose):
+                if self.ended:
+                    break
                 continue
             if self.is_rejected(trial):
                 if self.reject_step(trial):
@@ -751,7 +862,7 @@ class CartesianWalk:
                 'opt_grad_max': residual,
                 'rejected': self.rejected, 'status': self.status,
                 'convention_refreezes': list(self.convention_refreezes),
-                'optimizer': 'internal', 'hessian': self.hess.copy(),
+                'rounds': self.rounds, 'optimizer': 'internal', 'hessian': self.hess.copy(),
                 'walk_resolution': (walk_resolution(
                     self.g, self.hess, self.m_cur.atom_coords())
                     if self.converged else None)}
@@ -985,10 +1096,17 @@ class GeometricWalk:
         self.failed_at = []
         # Bohr, the radius the current geomeTRIC run starts on (None: its own)
         self.radius = None if resume is None else resume.get('trust')
+        # ... and the radius a round starts on (`refreeze_conventions`); every
+        # restart starts on the walk's starting Hessian
+        self.radius0, self.rounds = self.radius, 1
         self.rejected = 0 if resume is None else resume.get('rejected', 0)
         self.retries = []
         self.steps = []
         self.convention_refreezes = []
+        # convention refreezes since the last accepted step, and the status of
+        # a refreeze whose rebuilt surface did not evaluate
+        self.refrozen_here = 0
+        self.refreeze_failure = None
 
     def save(self):
         """The checkpoint of the walk as it stands."""
@@ -1031,6 +1149,7 @@ class GeometricWalk:
         commit(self.surface, self.visited[-1])
         self.accepted[:] = [self.visited[-1], self.trace[-1]['e'],
                             self.last_gradient[0]]
+        self.refrozen_here = 0
         self.steps.append(len(self.trace))
         self.save()
 
@@ -1081,31 +1200,65 @@ class GeometricWalk:
     def refreeze_conventions(self, exc):
         """After a trial refused by a convention event, the conventions
         refrozen at the last accepted geometry and evaluated there, and
-        geomeTRIC to be restarted from it at the length of the refused step
-        (`convention_refreeze`): True then, False when the refusal is an
-        ordinary rejected step."""
+        geomeTRIC to be restarted from it at the length of the refused step,
+        WALK_STEP_SHRINK times it when no step was accepted since the last
+        refreeze (`convention_refreeze`), or as a new round on the walk's
+        starting radius when the energy there jumps (`refreeze_round`): True
+        then, False when the refusal is an ordinary rejected step. A rebuilt
+        surface that does not evaluate there, or a jump past the rounds, ends
+        the walk: False, `refreeze_failure` its status (module docstring)."""
         if len(self.convention_refreezes) >= WALK_CONVENTION_REFREEZES_MAX:
             return False
         m, e_before = self.accepted[0], self.accepted[1]
         rebuilt = convention_refreeze(self.surface, m, exc)
         if rebuilt is None:
             return False
-        self.radius = self.failed_step()
-        self.surface = rebuilt
+        radius = self.failed_step() * (WALK_STEP_SHRINK if self.refrozen_here
+                                       else 1.0)
+        old, self.surface = self.surface, rebuilt
+        traced, visited = len(self.trace), len(self.visited)
+        gradient = list(self.last_gradient)
+        try:
+            self.evaluate_at(np.asarray(m.atom_coords(), float).ravel(),
+                             False)
+            jump = refreeze_round(e_before, self.trace[-1]['e'], self.rounds)
+        except StepFailed as failed:
+            # every rank raised it: the evaluation is locked to rank 0's; the
+            # walk stays where it was on the old surface
+            self.surface = old
+            del self.trace[traced:], self.visited[visited:]
+            self.last_gradient[:] = gradient
+            self.convention_refreezes.append(convention_event(
+                len(self.trace), exc, radius, e_before,
+                getattr(failed, 'e_after', None), failed))
+            self.refreeze_failure = refreeze_failed_status(failed)
+            if self.verbose:
+                print(f'  [geomeTRIC] {self.refreeze_failure}', flush=True)
+            return False
+        if jump is None:
+            self.radius = radius
+            self.refrozen_here += 1
+        else:
+            self.rounds += 1
+            self.radius = self.radius0
+            self.refrozen_here = 0
         self.replay.clear()
-        self.evaluate_at(np.asarray(m.atom_coords(), float).ravel(), False)
         self.visited[-1] = m
         commit(self.surface, m)
         self.accepted[:] = [m, self.trace[-1]['e'], self.last_gradient[0]]
         self.replay[:] = [(self.accepted[1], self.accepted[2])]
         self.convention_refreezes.append(convention_event(
-            len(self.trace), exc, self.radius, e_before, self.accepted[1]))
+            len(self.trace), exc, self.radius,
+            e_before, self.accepted[1],
+            starts=None if jump is None else self.rounds))
         if self.verbose:
+            how = (f'trust kept {self.radius:.3e} Bohr' if jump is None else
+                   f'{jump:+.1f} meV: round {self.rounds} from there, its '
+                   f'starting trust and Hessian')
             print(f'  [geomeTRIC] conventions refrozen at the last accepted '
                   f'geometry, orbitals '
                   f'{self.convention_refreezes[-1]["absorbed"]} absorbed; '
-                  f'restarting there, trust kept {self.radius:.3e} Bohr',
-                  flush=True)
+                  f'restarting there, {how}', flush=True)
         self.save()
         return True
 
@@ -1177,6 +1330,8 @@ class GeometricWalk:
                 if (self.failed_at and self.accepted
                         and self.refreeze_conventions(exc)):
                     continue
+                if self.refreeze_failure is not None:
+                    return False, self.refreeze_failure
                 if self.failed_at and self.accepted:
                     collapsed = self.reject_step(status)
                     if collapsed is None:
@@ -1212,6 +1367,7 @@ class GeometricWalk:
                 'hessian': hessian, 'rejected': self.rejected,
                 'retries': self.retries,
                 'convention_refreezes': list(self.convention_refreezes),
+                'rounds': self.rounds,
                 'walk_resolution': (walk_resolution(
                     self.last_gradient[0], hessian, visited[-1].atom_coords())
                     if converged and hessian is not None else None)}
@@ -1273,7 +1429,7 @@ def _geometric_walk(surface, mol, maxiter, converge, coordsys, refreeze,
 #: What a single walk's record says about that walk alone: after a refreeze
 #: these are the last walk's, the one whose geometry is returned.
 WALK_FLAGS = ('converged', 'status', 'cycles', 'opt_grad_max', 'rejected',
-              'convention_refreezes',
+              'convention_refreezes', 'rounds',
               'walk_resolution')
 
 

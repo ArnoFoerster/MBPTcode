@@ -21,14 +21,15 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
-from src.SingleReference.CC.cached_einsum import factorized_einsum
+from src.Base.utils.cached_einsum import factorized_einsum
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted, STORED_BLOCKS, _blocks, _call, order4_ground_state_module)
 from src.SingleReference.common.mp_amplitudes import to_l
 from src.SingleReference.DensityMatrix.generated_mpn_restricted import \
     mpn_density_pieces_restricted as gen
+from tests.molecules import WATER_RIGHT_ANGLE
 
-ATOM = 'O 0 0 0; H 0 0 0.96; H 0.96 0 0'
+ATOM = WATER_RIGHT_ANGLE
 NTAUS = (6, 10, 16, 24)
 TOL_TABLE = 1e-12
 TOL_LAPLACE = 1e-9

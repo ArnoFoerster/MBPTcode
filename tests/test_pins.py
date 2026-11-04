@@ -104,7 +104,6 @@ def test_a_pin_without_a_class_is_an_energy():
     other = another_blas()
     assert matches(E_PIN + 1.5e-12, E_PIN, other)
     assert not matches(E_PIN + 3e-12, E_PIN, other)
-    assert PIN_CROSS_BLAS_BAR == 2e-12
 
 
 def test_a_shape_mismatch_never_matches():

@@ -149,10 +149,7 @@ class ADC2State:
                                      frozen=self.mp2.frozen,
                                      auxbasis=self.mp2.auxbasis,
                                      environment=self.lr_environment,
-                                     conv_tol=self.conv_tol, return_fold=True,
-                                     residual_tol=self.mp2.numerics.adc.residual_tol,
-                                     dense_limit=self.mp2.numerics.adc.dense_limit,
-                                     tile_gb=self.tile_gb,
+                                     return_fold=True,
                                      numerics=self.mp2.numerics,
                                      spin_scaling=self.mp2.scaling,
                                      start=start, full_check=full)

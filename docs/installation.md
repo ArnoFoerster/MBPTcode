@@ -12,7 +12,7 @@ quasiparticle root scan and similar per-state loops
 same results, but those loops may oversubscribe the cores. Thread settings are
 under [Threads](parallel.md#threads).
 
-`opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
+`opt_einsum` is imported at module load by `Base/utils/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
 
 The restricted coupled-cluster integral path and the determinant-basis

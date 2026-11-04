@@ -2,12 +2,11 @@
 (`QPSetPass._reverse_group`).
 
 WHAT BREAKS IF THIS FAILS. Each state's terms join its B_p_bar in frequency
-order, the running sum handed from one frequency's owner to the next, a
-collective of every rank per hand-over. One chain per state made nstates x
-nfreq collectives a group (CzBN1, 2 nodes: 4471 calls, 55 s a rank, mostly
-waiting for the slowest rank at each). Consecutive states of one slice owner
-now share a chain as one stacked sum: the same additions, element by element,
-so the same bits.
+order (`ordered_sliced_sum`), collectives of every rank per sum. One sum per
+state made a collective of every rank per state (with the earlier hand-over
+chain, nstates x nfreq of them a group: CzBN1, 2 nodes: 4471 calls, 55 s a
+rank). Consecutive states of one slice owner share a sum as one stacked sum:
+the same additions, element by element, so the same bits.
 
 Water, cc-pVDZ, HF, G0W0-BSE S1 in fixed toluene charges on the row fit
 (tests/test_force_after_density.py's model), over 2 simulated ranks: the
@@ -34,14 +33,14 @@ def force():
 
 
 def test_states_share_their_chains(monkeypatch):
-    calls, lock, chain = [], threading.Lock(), qp_space_time.ordered_chain_sum
+    calls, lock, chain = [], threading.Lock(), qp_space_time.ordered_sliced_sum
 
     def counted(terms, owners, comm, onto, root=None):
         if comm is not None and comm.Get_rank() == 0:
             with lock:
                 calls.append(np.shape(onto)[0])
         return chain(terms, owners, comm, onto, root=root)
-    monkeypatch.setattr(qp_space_time, 'ordered_chain_sum', counted)
+    monkeypatch.setattr(qp_space_time, 'ordered_sliced_sum', counted)
     out = run_simulated(lambda comm: force(), 2)
     batched = list(calls)
     calls.clear()

@@ -27,6 +27,7 @@ from pyscf import gto
 
 from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL,
                                          QP_DEGENERACY_TOL)
+from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse import dense_surfaces
 from src.gradients.gwbse.dense_surfaces import DenseBSESurface
 from src.gradients.gwbse.diagnostics import qp_bookkeeping
@@ -53,7 +54,7 @@ ROUND_BAR = bar_with_drift(ROUND_OFF)
 def surface(atom):
     mol = gto.M(atom=atom, basis='6-31g', verbose=0)
     return mol, DenseBSESurface(mol, spin='triplet',
-                                qp_orbs=list(range(mol.nao)), filter_z=False)
+                                qp_orbs=list(range(mol.nao)), filter_z=False, numerics=Numerics())
 
 
 def displaced(mol, atom, axis, step):

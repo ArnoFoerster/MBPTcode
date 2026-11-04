@@ -76,7 +76,8 @@ from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
 from src.photophysics import rates
 from src.photophysics.rate_models import RateRefused
 from src.photophysics.records import key_of
-from src.properties.duschinsky import (DuschinskyModel, DuschinskyOscillators,
+from src.properties.duschinsky import (COORDINATES, DuschinskyModel,
+                                       DuschinskyOscillators,
                                        displacement_from_gradient,
                                        displacement_from_minima,
                                        duschinsky_density, duschinsky_guard,
@@ -94,7 +95,6 @@ TRIPLET_MODELS = ('manifold', 'T1')
 DENSITIES = ('multimode', 'mlj')
 MIXINGS = ('auto', 'diabatic', 'perturbative')
 HUANG_RHYS_ROUTES = ('curvilinear', 'cartesian', 'gradient')
-DUSCHINSKY_COORDINATES = ('curvilinear', 'rectilinear')
 
 #: The gradient keys of `RateInputs`: 'S1@T1' is S1's gradient at the T1
 #: minimum, 'T1@S1' T1's at the S1 minimum.
@@ -172,8 +172,7 @@ class RateModel:
                               ('triplets', TRIPLET_MODELS),
                               ('density', DENSITIES),
                               ('mixing', MIXINGS),
-                              ('duschinsky_coordinates',
-                               DUSCHINSKY_COORDINATES),
+                              ('duschinsky_coordinates', COORDINATES),
                               ('huang_rhys_route', HUANG_RHYS_ROUTES)):
             if getattr(self, name) not in allowed:
                 raise ValueError(f'RateModel.{name} = {getattr(self, name)!r} '
@@ -385,8 +384,7 @@ class _Bath:
             return rho
         shifted = de + (self.zpe if m.zero_point else 0.0)
         if m.density == 'mlj':
-            s_sum = float(self.s_g.sum())
-            om_eff = float((self.s_g * self.omega_g).sum() / max(s_sum, 1e-30))
+            s_sum, om_eff = rates.effective_mode(self.s_g, self.omega_g)
             return np.array([rates.mlj_density(e, self.lam, s_sum, om_eff,
                                                self.temperature,
                                                RATE_MLJ_N_MAX)
@@ -442,7 +440,7 @@ def _pair_rate(at, de, average, model, omega_modes, modes, masses, rotation,
         de, v / np.sqrt(average), dv / np.sqrt(average), w, bath,
         bath.temperature)
     return k, k_c, k_h, {'v_condon_cm': v * HARTREE_TO_CM,
-                         'dv_dq_rms_cm': _rms_cm(dv) if dv.size else None,
+                         'dv_dq_rms_cm': rates.rms_cm(dv) if dv.size else None,
                          'path_gaps_meV': _path_gaps(at), **rec}, mixing
 
 
@@ -497,7 +495,7 @@ def _mixing(at, model, on_modes, omega, temperature):
                         * HARTREE_TO_EV * 1e3,
                         'ratio': r, 'sin2_second_order': r * r,
                         'sin2': mixed_weight(r),
-                        'dv_dq_rms_cm': _rms_cm(on_modes(part))}
+                        'dv_dq_rms_cm': rates.rms_cm(on_modes(part))}
     r_max = max((p['ratio'] for p in paths.values()), default=0.0)
     diabatic = (model.mixing == 'diabatic'
                 or (model.mixing == 'auto' and r_max > RATE_MIXING_RATIO_MAX))
@@ -520,11 +518,6 @@ def _mixing(at, model, on_modes, omega, temperature):
         condon *= 1.0 - s
     record['mixing']['condon_factor'] = condon
     return dv, condon, record, {p['state']: p['sin2'] for p in paths.values()}
-
-
-def _rms_cm(x):
-    """Root mean square over the modes, cm^-1."""
-    return float(np.sqrt((np.asarray(x) ** 2).mean()) * HARTREE_TO_CM)
 
 
 def _path_gaps(at):
@@ -568,11 +561,13 @@ def _rotations(sg, s1, t1):
     return {'S1': rot_s, 'T1': rot_t}
 
 
-def rate_chain(inputs, model, temperature, shared=None):
+def rate_chain(inputs, model, temperature, gaps, shared=None):
     """ISC and RISC of one method on the declared `RateModel`, s^-1.
 
-    inputs: the method's `RateInputs`. shared: the reference `RateInputs`
-    (GW-BSE's) whose coupling soc='shared' reads; None otherwise.
+    inputs: the method's `RateInputs`. gaps: the declared gap rule of the
+    state manifold (`rates.ManifoldGaps`, `rate_models.manifold_gaps`), no
+    default. shared: the reference `RateInputs` (GW-BSE's) whose coupling
+    soc='shared' reads; None otherwise.
 
     The S1 <-> T1 bath is one Duschinsky model, T1 the 'ground' state and
     S1 the 'excited' one: ISC is its emission direction, RISC its absorption.
@@ -670,7 +665,7 @@ def rate_chain(inputs, model, temperature, shared=None):
             else (initial.reservoir, initial.emitter, e_t1, e_s1))
         man = rates.manifold_crossings(
             levels, first, second, e_first, e_second, bath, temperature,
-            average, k, rates.ManifoldGaps('stacked', None))
+            average, k, gaps)
         out[name] = {'dE_eV': de * HARTREE_TO_EV,
                      'lambda_solvent_eV': (None if lam_solv is None
                                            else lam_solv * HARTREE_TO_EV),
@@ -758,12 +753,13 @@ def _kinetics(s1, k_isc, k_risc):
     return {'k_r': k_r, 'pl': rates.photoluminescence(k_r, k_isc, k_risc)}
 
 
-def ablation_ladder(inputs, full, temperature, shared):
+def ablation_ladder(inputs, full, temperature, gaps, shared):
     """[{'step', 'model', 'table' or 'refused'}] down `ABLATION_LADDER`
     from the model `full`, each rung removing one more ingredient; the
     assumed-lambda rungs both stand on the 'mlj' one, and the quantum soft
     mode and rectilinear Duschinsky rungs on 't1_only' (the next rung keeps
-    the classical block and the curvilinear J). `shared` is the
+    the classical block and the curvilinear J), every rung on the gap rule
+    `gaps` (`rate_chain`). `shared` is the
     reference `RateInputs` of the shared-coupling rung (the method's own
     for the reference method itself). A rung the inputs cannot carry, or
     whose switches do not make a `RateModel` (the 'mlj' rung of a model with
@@ -782,7 +778,7 @@ def ablation_ladder(inputs, full, temperature, shared):
             continue
         try:
             out.append({'step': step, 'model': fields,
-                        'table': rate_chain(inputs, model, temperature,
+                        'table': rate_chain(inputs, model, temperature, gaps,
                                             shared=shared)})
         except RateRefused as why:
             out.append({'step': step, 'model': fields, 'refused': str(why)})

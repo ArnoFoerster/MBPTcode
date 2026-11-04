@@ -20,12 +20,14 @@ region:
     the ranks the slices add up to one copy of each array;
   * the BSE block action on slices (BSE, TDHF, RPA; Davidson and the (A-B)
     probe): roots, vectors and probe value the unsliced run's (to the
-    Davidson's solution bars) on every rank, every rank's bitwise rank 0's, and ONE gather of D and one of X_o
-    per action build whatever the iteration count (none for RPA, which reads
+    Davidson's solution bars) on every rank, every rank's bitwise rank 0's,
+    and ONE gather of X_o per action build whatever the iteration count, D
+    streamed into Zt one owner's rows at a time (none for RPA, which reads
     rows alone);
   * the GW window on slices, in-core and frequency-blocked: quasiparticle
-    energies to a few ulp, every rank rank 0's, and one gather each of D, X_o,
-    X_v and X_ao per solve;
+    energies to a few ulp, every rank rank 0's; the in-core route reads grid
+    tiles and gathers nothing, the frequency-blocked one gathers D, X_o, X_v
+    and X_ao once each per solve;
   * the whole ISDF BSE on slices (GW diagonal, the static W the GW stage
     built and hands over, Davidson, and the probe on the Davidson's own action) and the static W
     rebuilt on its own: to a few ulp, with the gathers counted per stage;
@@ -75,9 +77,9 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 
 from tests.test_proj_rows import LIMIT
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 SIZES = [2, 3, 8]
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 NROOTS = 3
 
@@ -271,12 +273,12 @@ def test_block_action_on_slices(water, collectives, size, mode):
             f'rank {r}: not the whole layout\'s',
             solution_miss(out['sliced'], out['whole']))
         assert bitwise(out['sliced'], res[0]['sliced']), f"rank {r} != rank 0"
-        per_build = 0 if mode == 'RPA' else 2          # D and X_o, once each
+        per_build = 0 if mode == 'RPA' else 1          # X_o once; D streamed
         davidson, probe, vind = out['sliced_gathers']
         assert vind > 1, 'the Davidson applied the action only once'
         assert (davidson, probe) == (per_build, per_build), (
             f'{davidson} + {probe} gathers for {vind} action calls')
-        assert out['by_name'] == ({} if mode == 'RPA' else {'D': 2, 'X_o': 2})
+        assert out['by_name'] == ({} if mode == 'RPA' else {'X_o': 2})
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -300,7 +302,11 @@ def test_gw_window_on_slices(water, collectives, size, path):
         assert_same(qp, qp_whole, quantity='continued',
                     label=f'rank {r}: {qp - qp_whole}')
         assert np.array_equal(qp, res[0][0]), f'rank {r} != rank 0'
-        assert n == 4 and by_name == {'D': 1, 'X_o': 1, 'X_v': 1, 'X_ao': 1}
+        if path == 'in-core':        # grid tiles: nothing gathered whole
+            assert n == 0 and by_name == {}
+        else:
+            assert n == 4 and by_name == {'D': 1, 'X_o': 1, 'X_v': 1,
+                                          'X_ao': 1}
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -325,10 +331,10 @@ def test_bse_on_slices(water, size):
             f'rank {r}: not the whole layout\'s',
             solution_miss(out['sliced'], out['whole']))
         assert bitwise(out['sliced'], res[0]['sliced']), f'rank {r} != rank 0'
-        # the GW diagonal once each, its static W on the same branches; D and
-        # X_o once more for the Davidson's action, which the probe after it
-        # reuses rather than rebuilds
-        assert out['by_name'] == {'D': 2, 'X_o': 2, 'X_v': 1, 'X_ao': 1}
+        # the GW diagonal and its static W read grid tiles and gather
+        # nothing; X_o once for the Davidson's action, which the probe after
+        # it reuses rather than rebuilds, D streamed into its Zt
+        assert out['by_name'] == {'X_o': 1}
 
 
 @pytest.mark.parametrize('size', [3])
@@ -344,7 +350,7 @@ def test_static_w_on_slices(water, size):
     for r, (same, D, W, W_whole, by_name) in enumerate(run_simulated(rank, size)):
         assert same and D is None
         assert_same(W, W_whole, quantity='root', label=f'rank {r}')
-        assert by_name == {'D': 1, 'X_o': 1, 'X_v': 1}
+        assert by_name == {}
 
 
 def test_what_slices_cannot_serve_is_refused(water):

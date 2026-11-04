@@ -57,12 +57,12 @@ small matrices on every rank.
 """
 import sys
 import time
-import warnings
 
 import numpy as np
 from pyscf import gto
 from pyscf.lib import logger, param
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (
     BYTES_PER_GB, BSE_DENSE_MAX_NOV, DAVIDSON_FLOOR_EPS_MULTIPLE,
     DAVIDSON_GUESS_FACTOR, DAVIDSON_LINDEP, DAVIDSON_MIN_NEW_FRACTION,
@@ -920,7 +920,8 @@ def run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
         verdict = ('unconverged' if not refuse_unconverged
                    else 'read_within_tol' if residuals is not None
                    else 'read_converged')
-        warnings.warn(f'{message} {advice}', RuntimeWarning, stacklevel=3)
+        flag('davidson_not_converged', f'{message} {advice}', RuntimeWarning,
+             stacklevel=3)
     else:
         every = None
     if unconfirmed.any():
@@ -938,8 +939,9 @@ def run_davidson(apply_AB, diag_d, nroots, conv_tol, max_cycle, x_sym,
             raise DavidsonRefusal(f'{message} Refused. Raise max_cycle, or ask '
                                   'for more roots; refuse_unconverged=False '
                                   'returns them for diagnosis.')
-        warnings.warn(f'{message} Raise max_cycle, or ask for more roots.',
-                      RuntimeWarning, stacklevel=3)
+        flag('davidson_unconfirmed',
+             f'{message} Raise max_cycle, or ask for more roots.',
+             RuntimeWarning, stacklevel=3)
         if converged.all():
             verdict = 'unconfirmed'
     _record_verdict(timings, converged & ~unconfirmed, verdict, residuals,

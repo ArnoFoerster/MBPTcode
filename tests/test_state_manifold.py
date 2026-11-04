@@ -27,11 +27,12 @@ from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight_default_cycles
 from tests.pins import isdf_gradient_bar
+from tests.molecules import WATER_ROUNDED
 
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    return gto.M(atom=WATER_ROUNDED,
                  basis='cc-pvdz', verbose=0)
 
 

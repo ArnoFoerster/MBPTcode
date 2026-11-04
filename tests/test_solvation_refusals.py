@@ -32,9 +32,11 @@ each flag test shows the warning and the named flag.
     (--xc-grid) and refuses a grid for Hartree-Fock; GW-BSE carries the
     quasiparticle options into its Numerics; an older record without these settings resumes, a Kohn-Sham one
     is refused (it ran on pyscf's default grid)
-  - a walk writes its checkpoint after every accepted step and a rerun
-    restarts it there, not nudged, from the stored Hessian, recorded as
-    restarted_from; the checkpoint of another walk is refused
+  - a walk writes its progress to the walks' store after every accepted
+    step and a rerun restarts it there, not nudged, from the stored Hessian,
+    recorded as restarted_from; the progress of another state is refused, a
+    finished walk's is set aside, and a checkpoint of the earlier form is
+    refused
 """
 import json
 import os
@@ -51,6 +53,7 @@ from pyscf import dft
 from src.environments import solvation_loop as sl
 from src.Base.numerics.constants import HARTREE_TO_MEV
 from src.Base.numerics.numerics import Numerics
+from src.Base.utils.record_compat import SOLVATED_ABSENT
 from src.environments.reaction_field import ContinuumField, NoMedium
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
@@ -61,7 +64,8 @@ from src.SingleReference.ADC.eeADC.ee_follow import (FollowedRoot, FollowingWarn
 from src.gradients.adc.ee_state_model import ADC2State
 from src.photophysics import solvated
 from tests.adc_common import (ADC_NUMERICS, ATOMS, AUX, NF, SOLVATION_TIGHT, SOLVATION_TIGHT_LOOP,
-                              df_rhf, make_scf_loop, molecule)
+                              WATER_C2V, df_rhf, make_scf_loop, molecule)
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 def toluene(mol):
@@ -108,7 +112,8 @@ def test_driver_keeps_an_unconverged_walk_flagged(tmp_path, monkeypatch):
     args = SimpleNamespace(out=out)
     # the walk itself warns (`_minimum`, excitations.relaxation_flags); the
     # store keeps the entry and its flag
-    mod._ground_state(args, rec, R, 'gas', None, None, lambda kind: None, {})
+    mod._ground_state(args, rec, R, 'gas', None, None, lambda kind: None, {},
+                      mod._walk_store(args))
     saved = json.load(open(out))['gas']['S0']
     assert saved['converged'] is False and saved['flags'] == ['walk_not_converged']
     # a rerun walks it again: the entry and everything built on it go
@@ -160,8 +165,8 @@ def _args(tmp_path, **kw):
     xyz.write_text('3\n\nO 0 0 0\nH 0 0.76 0.59\nH 0 -0.76 0.59\n')
     a = dict(xyz=str(xyz), basis='6-31g', auxbasis='cc-pvdz-ri',
              jk_auxbasis='cc-pvdz-jkfit', solvent='toluene', frozen=1, nroots=3,
-             follow='index', saddle_check=True, tol_q=1e-9, tol_energy=1e-11,
-             method='adc2', xc=None, isdf_grid=None, bse_solver=None, bse_kernel=None,
+             track='index', saddle_check=True, loop_tol_q=1e-9, loop_tol_energy=1e-11,
+             method='adc2', reference=None, grid_accuracy=None, bse_solver=None, bse_kernel=None,
              refreeze=None, maxiter=100, max_memory=4000, out=str(tmp_path / 'rec.json'))
     a.update(kw)
     return SimpleNamespace(**a)
@@ -172,32 +177,43 @@ def test_driver_refuses_a_record_of_other_settings(tmp_path):
     first = _args(tmp_path)
     mod._save(mod._start_record(first), first.out)
     assert mod._start_record(first)['basis'] == '6-31g'      # same settings resume
-    for change in (dict(basis='cc-pvdz'), dict(follow='overlap'), dict(tol_q=1e-8),
-                   dict(nroots=5), dict(method='gwbse', isdf_grid='G1'),
-                   dict(method='gwbse', isdf_grid='G1', bse_kernel='full'),
-                   dict(method='gwbse', isdf_grid='G1', refreeze=False)):
+    for change in (dict(basis='cc-pvdz'), dict(track='overlap'), dict(loop_tol_q=1e-8),
+                   dict(nroots=5), dict(method='gwbse', grid_accuracy='G1'),
+                   dict(method='gwbse', grid_accuracy='G1', bse_kernel='full'),
+                   dict(method='gwbse', grid_accuracy='G1', refreeze=False)):
         with pytest.raises(SystemExit, match='other settings'):
             mod._start_record(_args(tmp_path, **change))
 
 
-@pytest.mark.parametrize('change', [dict(isdf_grid='G1'), dict(xc='pbe0'),
+def test_driver_refuses_a_retired_option():
+    """The parser takes no abbreviations: a retired option is refused, not
+    read as the option it begins (--solvent as --solvent-arm)."""
+    for old in (['--solvent', 'ss'], ['--xc', '4']):
+        with pytest.raises(SystemExit):
+            driver()._parse_args(['--xyz', 'w.xyz', '--basis', '6-31g', '--environment',
+                                  'gas', '--saddle-check', '1', '--out', 'r.json', *old])
+
+
+@pytest.mark.parametrize('change', [dict(grid_accuracy='G1'), dict(reference='pbe0'),
                                     dict(bse_solver='dense'),
                                     dict(bse_kernel='full'),
-                                    dict(refreeze=True), dict(refreeze=False),
-                                    dict(method='gwbse', isdf_grid='G1', nroots=5),
-                                    dict(method='gwbse', isdf_grid='G1', auxbasis='x'),
-                                    dict(method='gwbse', isdf_grid='G1', frozen=1),
-                                    dict(method='gwbse')])
+                                    dict(refreeze=1), dict(refreeze=0),
+                                    dict(method='gwbse', grid_accuracy='G1', nroots=5),
+                                    dict(method='gwbse', grid_accuracy='G1', auxbasis='x'),
+                                    dict(method='gwbse', grid_accuracy='G1', frozen=1),
+                                    dict(method='gwbse'),
+                                    dict(method='gwbse', grid_accuracy='G1')])
 def test_driver_refuses_the_other_methods_options(tmp_path, change):
     """An option the method does not read is refused before any work, and
-    GW-BSE without an ISDF grid."""
+    GW-BSE without an ISDF grid or without --refreeze (no default)."""
     args = _args(tmp_path, **dict(dict(auxbasis=None, nroots=None, frozen=None), **change))
-    with pytest.raises(SystemExit, match='takes no|needs --isdf-grid'):
+    with pytest.raises(SystemExit, match='takes no|needs --grid-accuracy|needs --refreeze'):
         driver()._check_args(args, None)
 
 
 #: The GW-BSE run of `_args` (the ADC(2) options unset).
-GWBSE_ARGS = dict(method='gwbse', isdf_grid='G1', auxbasis=None, nroots=None, frozen=None)
+GWBSE_ARGS = dict(method='gwbse', grid_accuracy='G1', refreeze=1, auxbasis=None, nroots=None,
+                  frozen=None)
 
 
 class _Surface:
@@ -522,7 +538,7 @@ def test_driver_walk_warns_through_the_one_walk_policy(tmp_path, monkeypatch):
     def no_check(*a, **k):
         raise AssertionError('a walk that did not relax is not checked')
     monkeypatch.setattr(mod, 'relax', relax)
-    monkeypatch.setattr(mod, 'saddle_check', no_check)
+    monkeypatch.setattr(mod, 'checked_minimum', no_check)
     monkeypatch.setattr(mod, '_geom', lambda m: m)
     args = _args(tmp_path, **GWBSE_ARGS, saddle_check=True)
     mod._check_args(args, None)
@@ -539,7 +555,7 @@ def test_driver_kohn_sham_reference_on_the_xc_grid(tmp_path):
     from src.Base.numerics.constants import XC_GRID_LEVEL
     mod = driver()
     for given, level in ((None, XC_GRID_LEVEL), (5, 5)):
-        args = _args(tmp_path, **GWBSE_ARGS, xc='pbe0', xc_grid=given)
+        args = _args(tmp_path, **GWBSE_ARGS, reference='pbe0', xc_grid=given)
         mod._check_args(args, None)
         _, make_state = mod._factories(args, 'gas', dict(numerics=Numerics()))
         s0 = make_state('S0')(molecule(ATOMS), NoMedium(molecule(ATOMS)))
@@ -550,12 +566,50 @@ def test_driver_kohn_sham_reference_on_the_xc_grid(tmp_path):
         mod._check_args(_args(tmp_path, xc_grid=4), None)
 
 
+def test_driver_gwbse_mean_field_converges_as_its_numerics(tmp_path):
+    """The GW-BSE mean field converges as the scf section of the run's
+    Numerics, the one the record states."""
+    mod = driver()
+    args = _args(tmp_path, **GWBSE_ARGS)
+    mod._check_args(args, None)
+    num = Numerics(scf={'conv_tol': 1e-9, 'conv_tol_grad': 1e-9, 'max_cycle': 77})
+    _, make_state = mod._factories(args, 'gas', dict(numerics=num))
+    s0 = make_state('S0')(molecule(ATOMS), NoMedium(molecule(ATOMS)))
+    mf = s0.make_scf(molecule(ATOMS))
+    assert (mf.conv_tol, mf.conv_tol_grad, mf.max_cycle) == (1e-9, 1e-9, 77)
+
+
+def test_driver_gwbse_grid_is_looked_up_as_the_factors_ask(tmp_path, monkeypatch):
+    """The grid is looked up before the first walk under the keys and the -ri
+    set the factors ask for: an atom of its own basis by its label."""
+    from src.Base.basis.basis_map import molecule_basis
+    from src.Base.basis.ri_fallback import paired_auxbasis
+    from src.Base.geometry.geometry import elements_of
+    mod = driver()
+    from pyscf import gto
+    atom, basis = molecule_basis(WATER_C2V, 'cc-pvdz', None, {(1,): 'aug-cc-pvdz'})
+    mol = gto.M(atom=atom, basis=basis, verbose=0)
+    args = _args(tmp_path, **GWBSE_ARGS, basis=basis)
+    mod._check_args(args, mol)
+    asked = {}
+
+    def lookup(level, basis, elements=(), auxbasis=None):
+        asked.update(basis=basis, elements=elements, auxbasis=auxbasis)
+        raise KeyError('grid does not exist')
+    monkeypatch.setattr(mod, 'resolve_isdf_grid', lookup)
+    with pytest.raises(KeyError, match='grid does not exist'):
+        mod.gwbse_numerics(args, mol)
+    assert asked == dict(basis=mol.basis, elements=elements_of(mol),
+                         auxbasis=paired_auxbasis(mol.basis))
+    assert any('@' in key for key in asked['elements'])
+
+
 def test_driver_gwbse_numerics_carry_the_qp_options(tmp_path):
     """The outside scissor, the residue route and the XC grid reach the one
     Numerics; omitted, each is the Numerics default."""
     mod = driver()
     mol = molecule(ATOMS, basis='cc-pvdz')
-    args = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz', xc='pbe0',
+    args = _args(tmp_path, **GWBSE_ARGS, basis='cc-pvdz', reference='pbe0',
                  outside_scissor='curve', residues='sop')
     mod._check_args(args, mol)
     num = mod.gwbse_numerics(args, mol)
@@ -601,10 +655,10 @@ def test_an_older_record_resumes_without_the_later_settings(tmp_path):
     one this run integrates on."""
     mod = driver()
     for xc, refused in (('hf', False), ('pbe0', True)):
-        args = _args(tmp_path, **GWBSE_ARGS, xc=xc, out=str(tmp_path / f'{xc}.json'))
+        args = _args(tmp_path, **GWBSE_ARGS, reference=xc, out=str(tmp_path / f'{xc}.json'))
         mod._check_args(args, None)
         rec = mod._start_record(args)
-        for key in mod.LATER_SETTINGS:
+        for key in SOLVATED_ABSENT:
             rec.pop(key)
         mod._save(rec, args.out)
         if refused:
@@ -614,41 +668,49 @@ def test_an_older_record_resumes_without_the_later_settings(tmp_path):
             assert mod._start_record(args)['xc'] == 'hf'
 
 
-def test_walk_restarts_from_its_checkpoint(tmp_path, monkeypatch):
-    """The first walk writes its checkpoint after an accepted step; a rerun
+def test_walk_restarts_from_its_progress(tmp_path, monkeypatch):
+    """The first walk writes its progress after an accepted step; a rerun
     starts there, not nudged, on the stored Hessian, and records
-    restarted_from; another state's checkpoint is refused."""
+    restarted_from; another state's progress is refused; a finished walk's
+    progress is set aside; a checkpoint of the earlier form is refused."""
+    from src.photophysics.store import StoreRefused
     mod = driver()
     monkeypatch.setattr(mod, '_geom', lambda m: m.atom_coords().tolist())
     args = _args(tmp_path, **GWBSE_ARGS, saddle_check=False)
     mod._check_args(args, None)
     start = molecule(ATOMS)
-    path = mod._walk_path(args, 'toluene', 'T1')
+    store = mod._walk_store(args)
+    name = mod._progress_name('toluene', 'T1')
     moved = start.atom_coords() + 0.01
     hessian = np.eye(9)
 
     def interrupted(surf, at, **kw):
         kw['checkpoint']({'pass': 0, 'coords': moved, 'energy': -1.5,
-                            'hessian': hessian, 'history': [1, 2]})
+                          'hessian': hessian, 'history': [1, 2], 'surface': None})
         raise KeyboardInterrupt
     monkeypatch.setattr(mod, 'relax', interrupted)
     with pytest.raises(KeyboardInterrupt):
-        mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet', checkpoint=path)
-    assert os.path.isfile(path)
+        mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet', progress=(store, name))
+    assert store.has(name)
     seen = {}
 
     def resumed(surf, at, **kw):
         seen.update(kw, at=at.atom_coords())
         return at, dict(converged=True, cycles=1, opt_grad_max=0.0, refreeze='measured')
     monkeypatch.setattr(mod, 'relax', resumed)
-    out = mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet', checkpoint=path)[1]
+    out = mod._minimum(args, _Surface(-1.0), start, 0.02, 'triplet',
+                       progress=(store, name))[1]
     assert np.allclose(seen['at'], moved) and seen['nudge'] == 0
     assert np.array_equal(seen['hess_init'], hessian)
     assert out['restarted_from'] == dict(walk_pass=0, accepted_steps=2, G=-1.5)
-    with pytest.raises(SystemExit, match='checkpoint of another walk'):
-        mod._minimum(args, _Surface(-1.0), start, 0.02, 'singlet', checkpoint=path)
-    mod._drop_checkpoint(path)
-    assert not os.path.exists(path)
+    with pytest.raises(StoreRefused, match='another declaration'):
+        mod._minimum(args, _Surface(-1.0), start, 0.02, 'singlet', progress=(store, name))
+    mod._set_progress_aside(store, name)
+    assert not store.has(name) and (store.dir / 'finished' / f'{name}.json').is_file()
+    old = tmp_path / 'rec.json.walk.toluene.T1.json'
+    old.write_text('{}')
+    with pytest.raises(SystemExit, match='earlier form'):
+        mod._refuse_retired_checkpoints(args)
 
 
 def test_ee_adc_refuses_an_equilibrium_mode_continuum():
@@ -657,7 +719,7 @@ def test_ee_adc_refuses_an_equilibrium_mode_continuum():
     the static response 'vertical': refused, not unwrapped."""
     from pyscf import gto, scf
     from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
                 verbose=0)
     env = SolventScreening(mol, eps=1.78, eps_static=78.0, equilibrium=True)
     mf = scf.RHF(mol).run()

@@ -35,10 +35,11 @@ from src.environments.polarizable_sites import (PolarizableSites, response_matri
                                                 site_field)
 from src.Base.factorization.separable_ri import aux_metric_sqrt
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER_ROUNDED
 
 #: Bohr, on the auxiliary centres. Central, so the residual is O(h^2).
 H = 1e-4
-ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+ATOM = WATER_ROUNDED
 #: Bohr, 7.2-10.0 from the nearest nucleus: outside the QM density, which is
 #: where the model is defined. Closer in is CLOSE_SITES below, the refused case.
 SITES = np.array([[0.0, 0.0, 9.0], [5.0, 2.0, -6.0], [-5.0, -6.0, 2.0]])

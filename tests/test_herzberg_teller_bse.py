@@ -34,6 +34,7 @@ from src.properties.herzberg_teller import (ExcitedRoots, PhaseTrackedDipole,
                                             aligned_dipoles,
                                             degenerate_group,
                                             dipole_derivative)
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: Formaldehyde, the DF-PBE0/cc-pVDZ minimum (geomeTRIC, |g| < 3e-4), Bohr,
 #: symmetrized to C2v in the yz plane.
@@ -53,7 +54,7 @@ def model_roots(mol, mo, x, dipole, omega):
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run(conv_tol=1e-12)
     nocc = mol.nelectron // 2

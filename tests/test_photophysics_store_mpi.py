@@ -20,6 +20,11 @@ Checks:
   * a missing record raises on every rank, and so does a record of another
     stamp
   * `set_aside` and `write_xyz` agree on every rank
+  * a write that fails on rank 0 (a full disk) raises on every rank, which
+    otherwise would wait for rank 0 until the walltime
+  * a walk's progress (`walks`, the solvated driver's and the stages'),
+    written by rank 0 into a directory store (`Store.at`), restarts every
+    rank from the same geometry
 """
 import os
 import sys
@@ -33,6 +38,8 @@ import numpy as np
 import pytest
 
 import src.Base.utils.record_io as record_io
+import src.photophysics.store as store_module
+from src.photophysics import solvated
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm, is_root
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.photophysics.store import Store, StoreRefused
@@ -126,6 +133,46 @@ def main(comm, root, delay=0.05):
     gate.check(moved == ['s0.xyz'], 'the names moved are the same everywhere')
     gate.check(store.has('old/s0.xyz') or 's0.xyz' not in store.names(),
                's0.xyz no longer in the run directory')
+
+    gate.section('a write that fails on rank 0')
+    write = store_module.write_record
+
+    def full_disk(*args, **kwargs):
+        raise OSError(122, 'Disk quota exceeded')
+    if is_root():               # thread-ranks share the module: one patches
+        store_module.write_record = full_disk
+    store.barrier()
+    try:
+        store.write('vert', record, STAMP)
+        gate.check(False, 'the failed write raises on this rank')
+    except OSError as exc:
+        gate.check(exc.errno == 122, 'the failed write raises on this rank')
+    finally:
+        store.barrier()
+        if is_root():
+            store_module.write_record = write
+        store.barrier()
+    try:
+        solvated._save({'a': 1}, str(root / 'missing_dir' / 'out.json'))
+        gate.check(False, "the driver's failed save raises on this rank")
+    except OSError:
+        gate.check(True, "the driver's failed save raises on this rank")
+
+    gate.section("a walk's progress over the ranks")
+    from pyscf import gto
+    from src.photophysics.walks import progress_writer, restart_from, walk_progress
+    from src.Base.geometry.geometry import molecule_at
+    start = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g', verbose=0)
+    walks_store = Store.at(root / 'walks')
+    moved = start.atom_coords() + 0.05
+    progress_writer(walks_store, 'gas_S0_progress', STAMP, start)(
+        {'pass': 1, 'coords': moved, 'energy': -1.0, 'hessian': None,
+         'history': [0, 1, 2], 'surface': None})
+    state = walk_progress(walks_store, 'gas_S0_progress', STAMP, start)
+    m, _, restarted = restart_from(state, lambda c: molecule_at(start, c))
+    gate.check(restarted == {'walk_pass': 1, 'accepted_steps': 3, 'G': -1.0}
+               and np.array_equal(m.atom_coords(), moved),
+               'restarted from the progress on this rank')
     return gate.finish()
 
 

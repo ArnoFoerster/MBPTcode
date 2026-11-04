@@ -72,7 +72,7 @@ from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base.factorization import separable_ri
 from src.gradients import isdf_fit_adjoint
-from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_stable
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M
 from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
                                                    whole_factor)
 from src.environments.solvent_screening import SolventScreening
@@ -170,7 +170,7 @@ def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
 
 
 def reassociated_fit(mol, layout):
-    """`fit_M_stable` with its three sums over the test set -- the row norms,
+    """`fit_M` with its three sums over the test set -- the row norms,
     the Gram matrix and F Dt^T -- cut per mu shell and accumulated in
     reverse: one reordering of the whole form's own sums, its anchor."""
     mu = np.asarray(layout[0])
@@ -655,7 +655,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
         """rows, replicated, whole and bar, on whatever `patch` holds."""
         rows, replicated = run(**row_kw()), run(sliced=True)
         patch.setattr(FactorChain, 'row_fit_factors',
-                      product_fit_factors(fit_M_stable))
+                      product_fit_factors(fit_M))
         whole = run(**row_kw())
         patch.setattr(FactorChain, 'row_fit_factors', product_fit_factors(
             reassociated_fit(mol, product_pairs(mol))))
@@ -665,7 +665,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
     with monkeypatch.context() as patch:
         rows, replicated, whole, bar = four(patch)
         patch.setattr(FactorChain, 'row_fit_factors',
-                      product_fit_factors(fit_M_stable, gram=False))
+                      product_fit_factors(fit_M, gram=False))
         retired = run(**row_kw())
     with monkeypatch.context() as patch:
         def bare_davidson(*args, numerics=None, **kwargs):

@@ -24,11 +24,11 @@ from src.gradients.reference_mean_field import check_scf_quality, scf_force_tol
 from src.gradients.gwbse.state_manifold import StateEvaluation, StateManifold
 from src.gradients.gwbse.derivative_coupling import evaluated_coupling
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER
 
 pytestmark = pytest.mark.filterwarnings('ignore::RuntimeWarning')
 
 AUXBASIS = 'cc-pvdz-ri'
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: the loose SCF's orbital-gradient threshold, far above any force tolerance
 LOOSE_GRAD = 1e-4
 S0, S1 = ('singlet', 0), ('singlet', 1)
@@ -67,7 +67,7 @@ def loose_evaluation(case):
     chain, mol, loose = case
     good = StateManifold(chain, states=(S0, S1)).evaluate(
         mol, couplings=((S0, S1),))
-    ev = StateEvaluation(mol, loose)
+    ev = StateEvaluation(mol, loose, good.numerics)
     for name in ('energy', 'omega', 'root', 'target', 'interstate',
                  'spectrum'):
         setattr(ev, name, getattr(good, name))

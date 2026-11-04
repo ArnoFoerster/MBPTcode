@@ -87,7 +87,7 @@ def test_a_far_start_builds_its_own_chain(tmp_path, monkeypatch):
         return minimum, info, 0, chain
     monkeypatch.setattr(run, 'walk', walk)
 
-    def props(ev, s_key, t_key, n_states):
+    def props(ev, s_key, t_key, n_states, *, numerics):
         return {'coords_bohr': ev.mol.atom_coords(),
                 'energy': {label(s_key): float(ev.energy[s_key])}}
     monkeypatch.setattr(stages, 'geometry_properties', props)

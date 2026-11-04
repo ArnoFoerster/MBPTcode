@@ -75,6 +75,7 @@ from src.gradients.rpa.space_time_adjoint import (polarizability_tau,
 from src.Base.utils.grids.time_frequency import sigma_transforms
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER
 
 NTAU, NFREQ = 8, 24
 SIZES = [2, 3, 8, 16]
@@ -112,7 +113,7 @@ class RowCountSensitiveNumpy:
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

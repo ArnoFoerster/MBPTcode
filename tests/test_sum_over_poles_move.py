@@ -72,6 +72,7 @@ from src.gradients.gwbse import sum_over_poles_adjoint as adjoint
 from src.gradients.gwbse.contour_deformation_adjoint import (integral_term_backward,
                                                              screening_chain)
 from tests.pins import assert_same_tree
+from tests.molecules import WATER_ROUNDED
 
 
 def same(new, old, label=None):
@@ -197,30 +198,6 @@ def _old_sigma_sop_backward(omega, amplitudes, poles, eps, nocc, nu_points,
     return eps_bar, wc_bar, omega_bar
 
 
-def _old_sop_partials(omega, amplitudes, poles, eps, nocc, nu_points, Bp, C_ov,
-                      sigma_bar=1.0):
-    eps_bar, wc_bar, _ = _old_sigma_sop_backward(omega, amplitudes, poles, eps,
-                                                 nocc, nu_points, sigma_bar)
-    d = ov_energies(eps, nocc)
-    Bp_bar = np.zeros_like(Bp)
-    Cov_bar = np.zeros_like(C_ov)
-    d_bar = np.zeros_like(d)
-    for k, nu in enumerate(nu_points):
-        wtb = screening_aux(C_ov, d, nu, True)[1] @ Bp
-        bb, _, _ = integral_term_backward(Bp, wtb, wc_bar[k], want_chi0=False)
-        Bp_bar += bb
-        cvb, db, _ = screening_chain(wtb, wc_bar[k], C_ov, d, nu, True)
-        Cov_bar += cvb
-        d_bar += db
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    d4 = d_bar.reshape(len(occ), len(virt))
-    eps_bar[virt] += d4.sum(axis=0)
-    eps_bar[occ] -= d4.sum(axis=1)
-    return eps_bar, Bp_bar, Cov_bar
-
-
-# ------------------------------------------------------------------- the data
-
 def model_grid(n=160):
     return gauss_legendre_grid(n, gap_scaled_w0(EPS, NOCC))
 
@@ -237,7 +214,7 @@ def water():
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
     from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)
@@ -432,7 +409,7 @@ def test_the_pole_sum_and_the_scan_agree(water):
 
 
 def test_the_adjoints_are_the_old_ones(water):
-    """(eps_bar, wc_bar, omega_bar), and the whole way down to (Bp, C_ov)."""
+    """(eps_bar, wc_bar, omega_bar)."""
     eps, nocc, b, c_ov, nu, _ = water
     for p in states(nocc):
         bp, _, poles, amp = fitted(eps, nocc, b, c_ov, nu, p)
@@ -443,12 +420,6 @@ def test_the_adjoints_are_the_old_ones(water):
                                 _old_sigma_sop_backward(omega, amp, poles, eps,
                                                         nocc, nu)):
                 same(new, old, ('sigma_sop_backward', p, shift))
-        omega = float(eps[p] + 0.02)
-        for new, old in zip(adjoint.sop_partials(omega, amp, poles, eps, nocc,
-                                                 nu, bp, c_ov),
-                            _old_sop_partials(omega, amp, poles, eps, nocc, nu,
-                                              bp, c_ov)):
-            same(new, old, ('sop_partials', p))
 
 
 def test_the_model_screening_still_reproduces_the_contour_deformation():

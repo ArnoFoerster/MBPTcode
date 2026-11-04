@@ -107,13 +107,14 @@ from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
                                          DUSCHINSKY_STIFF_MODE_CM,
                                          HARTREE_TO_CM, HARTREE_TO_EV,
                                          RATE_FC_LAMBDA_RATIO_MAX)
-from src.properties.franck_condon import (envelope_time, real_axis_density,
+from src.properties.franck_condon import (FC_TIME_GRID, envelope_time,
+                                          real_axis_density,
                                           require_vibrational_modes,
                                           thermal_energy)
 from src.properties.curvilinear import (curvilinear_displacement,
                                         curvilinear_duschinsky)
 from src.properties.optimize import cartesian_hessian
-from src.properties.vibronic import align_to, normal_modes
+from src.properties.vibronic import align_to, normal_modes, project_coupling
 
 #: Largest disagreement (radians) between the phase increment of det N1 N2
 #: over one step of the time grid and its trapezoid estimate from
@@ -360,7 +361,7 @@ class DuschinskyModel:
         return 0.5 * float(self.omega_e.sum() - self.omega_g.sum())
 
 
-def duschinsky_model(ground, excited, coordinates='rectilinear'):
+def duschinsky_model(ground, excited, coordinates):
     """The Duschinsky model between two Hessians at their own minima.
 
     ground, excited: `CartesianHessian`s (or anything with `.mol` and
@@ -385,7 +386,7 @@ def duschinsky_model(ground, excited, coordinates='rectilinear'):
                            coordinates=coordinates)
 
 
-def mode_sets(ground, excited, coordinates='rectilinear'):
+def mode_sets(ground, excited, coordinates):
     """(ground `HarmonicState`, excited `HarmonicState` turned onto the
     ground minimum's frame, J, deviation): the two mode sets of
     `duschinsky_model` and J. 'rectilinear': their overlap J = L_e^T L_g,
@@ -480,13 +481,12 @@ def displacement_from_gradient(sg, se, j, mol_g, mol_e, gradient, state):
     are turned into the mode sets' frame first (`minima_in_frame`).
     """
     _, rot_g, _, rot_e = minima_in_frame(sg, mol_g, mol_e)
-    w = np.repeat(sg.masses, 3) ** -0.5
     if state == 'excited':
         g = np.asarray(gradient, float) @ rot_g
-        return (se.modes.T @ (g.ravel() * w)) / se.omega ** 2
+        return project_coupling(g, se.modes, sg.masses) / se.omega ** 2
     if state == 'ground':
         g = np.asarray(gradient, float) @ rot_e
-        return -j @ ((sg.modes.T @ (g.ravel() * w)) / sg.omega ** 2)
+        return -j @ (project_coupling(g, sg.modes, sg.masses) / sg.omega ** 2)
     raise ValueError(f"state is 'excited' or 'ground', got {state!r}")
 
 
@@ -662,7 +662,7 @@ def cumulants_of(log_g, omega_min):
 
 def duschinsky_density(model, delta_e, temperature, direction,
                        broadening=0.0, lorentzian=0.0, dipole=None,
-                       dt_per_period=24, t_decay=9.0, max_points=1 << 20):
+                       time_grid=FC_TIME_GRID):
     """rho(dE) = (1/2 pi) int dt e^{-i dE t} G(t) e^{-sig^2 t^2/2 - gamma|t|}.
 
     The band-shape density of `fc_weighted_dos` (dE = -x, x the vibrational
@@ -671,6 +671,7 @@ def duschinsky_density(model, delta_e, temperature, direction,
     standard deviation) or lorentzian (half width) must be positive. With a
     dipole (mu0, m) (`herzberg_teller`), the density is the dipole-weighted
     one and its area is <|mu|^2> over the initial state's thermal ensemble.
+    time_grid is the integral's `franck_condon.FCTimeGrid`.
     """
     if broadening < 0.0 or lorentzian < 0.0:
         raise ValueError('a broadening cannot be negative')
@@ -694,8 +695,7 @@ def duschinsky_density(model, delta_e, temperature, direction,
     k1, k2 = cumulants_of(log_g, float(min(wi.min(), wf.min())))
     de = np.atleast_1d(np.asarray(delta_e, float))
     rho = real_axis_density(de, log_g, k2, k1, float(lorentzian),
-                             float(max(wi.max(), wf.max())), dt_per_period,
-                             t_decay, max_points,
+                             float(max(wi.max(), wf.max())), time_grid,
                              envelope_time(gauss, float(lorentzian)))
     rho = area * np.maximum(rho, 0.0)
     return rho if np.ndim(delta_e) else float(rho[0])

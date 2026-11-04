@@ -100,3 +100,60 @@ def test_the_scanner_fails_on_a_planted_keyword_and_passes_on_the_object():
     assert numerical_parameters(clean) == {'other': {'ntau'}}
     exempt = ast.parse('def derive(self, ntau=3):\n    pass\n')
     assert numerical_parameters(exempt) == {}
+
+
+#: The orbital-response (Z-vector) solves and their entry points: each takes the run's `Numerics`
+#: with no default, so a caller that hands none is refused instead of solving on defaults the run
+#: did not declare.
+Z_VECTOR_FUNCTIONS = {
+    'src/Base/pyscf/cphf.py': ('solve_operator', 'solve'),
+    'src/gradients/multipliers.py': ('solve_orbital_multipliers',),
+    'src/gradients/mean_field_response.py': ('solve_lambda', 'eps_chain_gradient',
+                                             'relaxed_density_mo', 'relaxed_multiplier'),
+    'src/gradients/grad_engine.py': ('solve_multipliers', 'kohn_sham_correlation_gradients',
+                                     'correlation_gradients', 'correlation_gradient'),
+    'src/gradients/orbital_coupling.py': ('z_vector_contraction', 'configuration_coupling',
+                                          'ov_coupling'),
+    'src/gradients/gwbse/derivative_coupling.py': ('ground_state_coupling',),
+    'src/gradients/scf_loop_response.py': ('loop_density_response',),
+    'src/SingleReference/DensityMatrix/density_matrix.py': ('solve_cphf_relaxation',
+                                                            'solve_cphf_relaxation_uhf'),
+}
+
+
+def defaulted_numerics(tree, names):
+    """{name: 'missing' | 'defaulted'} of the functions in `names` whose `numerics` parameter is
+    absent or carries a default; the ones that require it are left out."""
+    out = {name: 'missing' for name in names}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in names:
+            continue
+        a = node.args
+        positional = a.posonlyargs + a.args
+        defaults = dict(zip([p.arg for p in positional][len(positional) - len(a.defaults):],
+                            a.defaults))
+        defaults.update({p.arg: d for p, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None})
+        if 'numerics' in {p.arg for p in positional + a.kwonlyargs}:
+            if 'numerics' in defaults:
+                out[node.name] = 'defaulted'
+            else:
+                out.pop(node.name)
+    return out
+
+
+def test_the_z_vector_solves_require_numerics():
+    bad = {}
+    for path, names in Z_VECTOR_FUNCTIONS.items():
+        for name, why in defaulted_numerics(ast.parse((REPO / path).read_text()),
+                                            set(names)).items():
+            bad[f'{path}::{name}'] = why
+    assert not bad, f'a Z-vector solve takes no Numerics or defaults it: {bad}'
+
+
+def test_the_z_vector_scan_fails_on_a_default_and_passes_on_a_required_argument():
+    planted = ast.parse('def a(x, numerics=None):\n    pass\n'
+                        'def b(x, *, numerics=None):\n    pass\n'
+                        'def c(x, numerics, flags=None):\n    pass\n'
+                        'def d(x, y=1, *, numerics):\n    pass\n')
+    assert defaulted_numerics(planted, {'a', 'b', 'c', 'd', 'e'}) == {
+        'a': 'defaulted', 'b': 'defaulted', 'e': 'missing'}

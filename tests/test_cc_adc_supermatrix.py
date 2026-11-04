@@ -16,6 +16,7 @@ from pyscf import cc, gto, mp, scf
 from pyscf.cc import addons as cc_addons
 from pyscf.cc import dfccsd
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (DFIntegrals,
                                             get_antisymmetrized_spin_block_eri,
                                             get_antisymmetrized_spin_eri,
@@ -34,13 +35,14 @@ from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
 from src.Base.numerics.constants import HARTREE_TO_EV, QP_WINDOW_Z_MIN
 from tests.adc_common import water_df  # noqa: F401  (fixture)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_ROUNDED_LOW
 
 pytestmark = requires_runtime(4)
 
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12          # fov noise leaks straight into T1^(2)
@@ -67,7 +69,7 @@ def test_restricted_and_spinorbital_hooks_give_the_same_ip(water):
     one, substitution included."""
     mf = water
     nocc = mf.mol.nelectron // 2
-    sc = build_static_correction(mf, kind='mp2_relaxed')
+    sc = build_static_correction(mf, kind='mp2_relaxed', numerics=Numerics())
 
     e, _ = ADCSolver(mf, level='adc3', pdaggerq=True,
                      amplitudes=cc_amplitudes_restricted(mf)
@@ -90,7 +92,7 @@ def test_substituting_the_mbpt_pool_back_reproduces_plain_adc3(water):
     """The null test of the whole hook: inject the amplitudes the solver would
     have built anyway and ADC(3) must come back bit-for-bit."""
     mf = water
-    sc = build_static_correction(mf, kind='mp2_relaxed')
+    sc = build_static_correction(mf, kind='mp2_relaxed', numerics=Numerics())
     e_ref, _ = ADCSolver(mf, level='adc3', pdaggerq=True).solve(static_correction=sc)
     e_inj, _ = ADCSolver(mf, level='adc3', pdaggerq=True,
                          amplitudes=mbpt_amplitudes_restricted(mf)
@@ -121,7 +123,7 @@ def test_gfree_df_route_equals_the_dense_route_on_the_same_integrals(water_df):
     eps = get_orbital_energies(mf, representation='spatial')
     B = DFIntegrals.from_scf(mf.mol, mf).B_aa
     amps = cc_amplitudes_restricted(mf)
-    sc = build_static_correction(mf, kind='mp2_relaxed')
+    sc = build_static_correction(mf, kind='mp2_relaxed', numerics=Numerics())
 
     df = ADCSolver(mf, level='adc3', pdaggerq=True, df=True, amplitudes=amps)
     gen = df._generated()

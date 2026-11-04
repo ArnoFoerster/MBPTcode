@@ -13,6 +13,7 @@ from pyscf import gto, scf, ao2mo
 
 from src.Base.numerics.constants import (KAPPA, SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.gradients.gwbse.quasi_boson_adjoint import (BSEqbAdjoint as BSEqb,
                                                      QPqbAdjoint as QPqb,
@@ -201,7 +202,7 @@ def test_blocks_refuse_gradients_rather_than_guess(h4):
     b = BSEqb(mf, built, nocc, screening='rpa', bse_tda=False, qp_orbs='all')
     gF, G4, _ = b.partials(0)
     with pytest.raises(NotImplementedError, match='full'):
-        correlation_gradients(mol, mf, [(gF, G4)], eri_mo=built)
+        correlation_gradients(mol, mf, [(gF, G4)], eri_mo=built, numerics=Numerics())
 
 
 def test_bse_kernel_vs_static_screened_coulomb(h4):

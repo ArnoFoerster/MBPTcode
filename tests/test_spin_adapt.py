@@ -36,6 +36,7 @@ from src.SingleReference.ADC.spin_adapt import (apply_ops, build_class_T,
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                  get_two_electron_integrals_chemist,
                                  get_antisymmetrized_spin_eri)
+from tests.molecules import WATER_AT_ORIGIN
 
 #: Orbital-block weight below which a root is not a pole.
 Z_MIN = 1e-8
@@ -52,7 +53,7 @@ def check(label, ok, detail=""):
 @functools.lru_cache(maxsize=None)
 def water():
     """H2O/sto-3g: the spin-orbital solver, its T and its spatial sizes."""
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     nocc_spin = mol.nelectron

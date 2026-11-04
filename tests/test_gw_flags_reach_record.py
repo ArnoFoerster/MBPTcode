@@ -24,6 +24,7 @@ from src.Solvers.qp_equation import (QPNoRoot, QPWeightOutside,
                                      solve_qp_equation_pole_strength,
                                      solve_qp_equation_poles,
                                      solve_qp_equation_scan)
+from tests.molecules import WATER_ROUNDED_LOW
 
 # f(w) = w + 0.1/(w - 1): one negative-weight pole, root 0.1127 Ha, Z 1.1455
 NUM, POL = [-0.1], [1.0]
@@ -73,7 +74,7 @@ def test_no_root_is_a_named_flag():
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.kernel()

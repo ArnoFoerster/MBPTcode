@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, cc, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.DensityMatrix.density_matrix import compute_gw_density_matrix
 
@@ -33,7 +34,8 @@ def build_density_corrections(mf, mol):
     dm_ccsd = mf_hf.mo_coeff @ mycc.make_rdm1() @ mf_hf.mo_coeff.T
 
     dm_gw_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=False)
-    dm_gw_rel = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True)
+    dm_gw_rel = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True,
+                                          numerics=Numerics())
 
     return {
         'none': None,

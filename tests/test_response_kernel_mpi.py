@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.cphf import ResponseKernel
 from src.Base.utils.parallel.mpi_grid import distributed, grid_comm
 from src.gradients.adc import ee_gradient as eg
@@ -34,7 +35,7 @@ from tests.test_response_kernel import BLOCK, MF, P, X
 
 def force(mf, mol, comm):
     return eg.adc2_force_tiled(mf, mol, 'singlet', frozen=NF, auxbasis=AUX, comm=comm,
-                               tile_gb=1e-9)[0]
+                               tile_gb=1e-9, numerics=Numerics())[0]
 
 
 def main(comm):

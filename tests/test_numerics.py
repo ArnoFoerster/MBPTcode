@@ -3,8 +3,8 @@
 What is pinned here: its record round-trips, any choice changes its
 identity, provenance does not, `derive` writes down its parent, the change
 and the reason, and its defaults are the chain's own -- a second default is
-exactly the inconsistency the object exists to remove. Memory and layout are recorded and not
-hashed, and a bar is no choice.
+exactly the inconsistency the object exists to remove. Memory and layout, and the
+properties pass's evaluation, are recorded and not hashed, and a bar is no choice.
 """
 from dataclasses import FrozenInstanceError, fields
 
@@ -76,11 +76,18 @@ def test_every_choice_moves_the_identity(section, name):
         other = QPStates('adaptive')
     if (section, name) == ('solvent', 'loop_force_fraction'):
         other = 1.0 / 3.0
+    if (section, name) == ('properties', 'soc_two_electron'):
+        other = 'amfi'
+    if (section, name) == ('properties', 'soc_auxbasis'):
+        other = 'cc-pvtz-jkfit'
+    if (section, name) == ('properties', 'soc_one_electron'):
+        other = 'breit-pauli'
     changed = base.derive('test', **{section: {name: other}})
     assert record_hash(changed.values()) != record_hash(base.values())
-    if section == 'layout' or (section, name) in IDENTITY_EXCLUDED:
-        # the layout, and a declaration that permits a calculation without
-        # changing any (`IsdfNumerics.runtime_radii`)
+    if section in ('layout', 'properties') or (section, name) in IDENTITY_EXCLUDED:
+        # the layout, how a property is evaluated on a surface, and a
+        # declaration that permits a calculation without changing any
+        # (`IsdfNumerics.runtime_radii`)
         assert (section not in IDENTITY_FIELDS
                 or (section, name) in IDENTITY_EXCLUDED)
         assert changed.identity() == base.identity(), (section, name)

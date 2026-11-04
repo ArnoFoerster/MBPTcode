@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import pytest
 
 from src.Base.numerics.constants import LOOP_FORCE_FRACTION
-from src.photophysics import solvated
+from src.photophysics import solvated, walks
 from tests.adc_common import ATOMS, check, molecule
 
 
@@ -36,8 +36,8 @@ def _xyz(tmp_path):
 
 
 def _args(tmp_path, *extra, out='r.json'):
-    argv = ['--xyz', _xyz(tmp_path), '--basis', '6-31g', '--solvent', 'toluene',
-            '--frozen', '1', '--out', str(tmp_path / out), *extra]
+    argv = ['--xyz', _xyz(tmp_path), '--basis', '6-31g', '--environment', 'toluene',
+            '--frozen', '1', '--saddle-check', '1', '--out', str(tmp_path / out), *extra]
     args = solvated._parse_args(argv)
     solvated._resolve_basis(args)
     solvated._check_args(args, molecule(ATOMS))
@@ -50,7 +50,9 @@ def test_the_option_sets_the_tie_and_is_a_resume_setting(tmp_path):
     assert solvated.adc2_numerics(fixed).solvent.loop_force_fraction is None
     assert solvated.adc2_numerics(tied).solvent.loop_force_fraction == LOOP_FORCE_FRACTION
     gw = solvated._parse_args(['--xyz', _xyz(tmp_path), '--basis', 'cc-pvdz',
-                               '--method', 'gwbse', '--isdf-grid', 'G1', '--out',
+                               '--environment', 'gas', '--saddle-check', '1',
+                               '--refreeze', '1',
+                               '--method', 'gwbse', '--grid-accuracy', 'G1', '--out',
                                str(tmp_path / 'gw.json'), '--loop-tolerance',
                                'gradient-tied'])
     solvated._resolve_basis(gw)
@@ -74,14 +76,14 @@ def _walk(args, monkeypatch=None, seen=None):
     loop_kw = dict(numerics=solvated.adc2_numerics(args))
     make_field, make_state = solvated._factories(args, 'toluene', loop_kw)
     if monkeypatch is not None:
-        plain = solvated.saddle_check
+        plain = walks.saddle_check
 
         def watched(surface, m, walk, **kw):
             seen.append((surface._untied, len(surface.loop_log)))
             out = plain(surface, m, walk, **kw)
             seen.append((surface._untied, len(surface.loop_log)))
             return out
-        monkeypatch.setattr(solvated, 'saddle_check', watched)
+        monkeypatch.setattr(walks, 'saddle_check', watched)
     mol = molecule(ATOMS)
     surf = solvated.SolvatedSurface(mol, make_field, make_state('S0'),
                                     label='S0 toluene',

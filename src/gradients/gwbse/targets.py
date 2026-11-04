@@ -7,10 +7,11 @@ correctness). Index map for boson pairs: I = i * nvirt + (a - nocc).
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, cg
 
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import (QB_Z_DEGENERATE_REL, QB_Z_MAX_ITER,
                                          QB_Z_PRECONDITIONER_FLOOR, QB_Z_RESIDUAL_REL,
                                          QB_Z_SOLVE_TOL)
-from src.Base.pyscf.cphf import not_converged
+from src.Base.numerical_flags import flag
 
 
 def _pair_views(mat, nocc, norb):
@@ -130,6 +131,11 @@ def qp_partials_with_shift(qp, p, w):
     return gammaF, Gamma4, t_grad, rp ** 2
 
 
+class QuasiBosonZNotConverged(RuntimeWarning):
+    """The quasi-boson Z solve (`solve_Z`) ended above its residual tolerance
+    (its last iterate returned)."""
+
+
 def solve_Z(qb, t_grad, tol=QB_Z_SOLVE_TOL, verbose=False, flags=None):
     """Solve t_grad + dJ/dt-adjoint(Z) = 0 for symmetric Z, in the t eigenbasis.
 
@@ -148,8 +154,8 @@ def solve_Z(qb, t_grad, tol=QB_Z_SOLVE_TOL, verbose=False, flags=None):
     rather than a restarted Krylov method carrying thirty of length (n_ov)^2.
 
     A solve left above its residual tolerance returns its last iterate and is
-    warned about and flagged (`cphf.not_converged`, the policy every
-    orbital-response solve follows).
+    warned about and flagged ('quasi_boson_z_not_converged'), the policy:
+    refuse inputs, warn numerics.
     """
     n = t_grad.shape[0]
     w, V = qb.wt, qb.Vt
@@ -188,11 +194,12 @@ def solve_Z(qb, t_grad, tol=QB_Z_SOLVE_TOL, verbose=False, flags=None):
                  atol=tol * max(1.0, np.linalg.norm(rhs)), maxiter=QB_Z_MAX_ITER)
     res = np.linalg.norm(mv(z) - rhs)
     if info != 0 or res > QB_Z_RESIDUAL_REL * max(1.0, np.linalg.norm(rhs)):
-        not_converged(f'quasi-boson Z solve not converged: info={info}, true '
-                      f'residual {res:.3e}; its last iterate is returned',
-                      flags)
+        flag('quasi_boson_z_not_converged',
+             f'quasi-boson Z solve not converged: info={info}, true residual '
+             f'{res:.3e}; its last iterate is returned',
+             QuasiBosonZNotConverged, into=flags)
     Z = V @ (0.5 * (z.reshape(n, n) + z.reshape(n, n).T)) @ V.T
-    if verbose:
+    if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
         print(f"    [Z] res={res:.3e} |Z|={np.abs(Z).max():.3e}")
     return 0.5 * (Z + Z.T)
 

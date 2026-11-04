@@ -100,7 +100,7 @@ def test_the_loop_density_response_is_the_density_derivative(xc, solvated):
         return mf
     mf = solved(mol)
     continuum = toluene(mol).scf_continuum() if solvated else None
-    g = loop_density_response(mf, mf.get_hcore(), continuum, h)
+    g = loop_density_response(mf, mf.get_hcore(), continuum, h, NUMERICS)
     step = 1e-3
     density = [np.sum(h * solved(molecule_at(mol, mol.atom_coords() + t * u))
                       .make_rdm1()) for t in (2 * step, step, -step, -2 * step)]
@@ -129,7 +129,7 @@ def lambda_terms(s):
     return (field.response_force(lam, v0, 'static')
             - field.response_force(lam, v0, 'fast')
             + field.charge_force(d0, mu)
-            + g['state'].loop_response(field.operator(mu)[0], field))
+            + g['state'].loop_response(field.operator(mu)[0], field, NUMERICS))
 
 
 @pytest.mark.parametrize('kind', ['singlet', 'triplet'])

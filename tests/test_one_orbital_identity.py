@@ -30,9 +30,9 @@ from src.gradients.state_identity import body_overlap
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.state_identity import mo_overlap
 from tests.reference_scf import rhf_df_differentiable_checked
+from tests.molecules import WATER
 
 BASIS = 'cc-pvdz'
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: Degrees the molecule turns, rigidly, about the x axis through its centroid.
 TURN = 90.0
 

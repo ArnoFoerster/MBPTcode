@@ -19,6 +19,9 @@ where the gate needs several tiles):
   * over 2 and 3 simulated ranks with the communicator attached, each rank
     evaluates only its tiles (together the cavity once), and every rank
     returns the one-rank result bit for bit;
+  * a rank keeps its tiles for the next call at the same geometry, within
+    PCM_CAVITY_CACHE_GB (bit for bit what it evaluates afresh with nothing
+    kept), and evaluates them again once the atoms move;
   * a solvated SCF over 3 ranks evaluates each cycle's cavity once in total,
     not once per rank, ends on the serial mean field, and leaves no
     communicator on the continuum after the block.
@@ -38,13 +41,15 @@ from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.numerics.constants import (BYTES_PER_GB, PCM_CAVITY_BLOCK_GB, PCM_CAVITY_MIN_TILES,
                                          RANK_SPLIT_ENERGY_TOL, SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
+from src.Base.utils.parallel import mpi_grid
 from src.Base.utils.parallel.mpi_grid import distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.environments import pcm_factorization
 from src.environments.pcm_derivatives import LIBCINT_BLOCK_LIMIT, owned_blocks
 from src.environments.pcm_factorization import _cavity_share, cavity_tiles, factorize_once
+from tests.molecules import WATER_DISTORTED
 
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 
 #: Surface points per tile where a gate lowers the budget.
 PER_TILE = 7
@@ -147,8 +152,9 @@ def test_tiles_are_pyscf_and_bounded(monkeypatch):
     np.testing.assert_allclose(v, v_ref, rtol=1e-12, atol=1e-13)
     np.testing.assert_allclose(vmat, vmat_ref, rtol=1e-12, atol=1e-13)
     blocks = [n for calls in census.points.values() for n in calls]
-    assert max(blocks) <= PER_TILE and len(blocks) >= 2 * (ngrids // PER_TILE)
-    assert census.total() == 2 * ngrids
+    # the potential evaluates every tile and keeps it; the matrix reads them
+    assert max(blocks) <= PER_TILE and len(blocks) >= ngrids // PER_TILE
+    assert census.total() == ngrids
 
 
 @pytest.mark.parametrize('size', [2, 3])
@@ -174,11 +180,11 @@ def test_ranks_evaluate_their_tiles(size, monkeypatch):
     for rank, (name, v, vmat) in enumerate(out):
         mine = sum(tiles[k][1] - tiles[k][0]
                    for k in owned_blocks(len(tiles), _Ranks(rank, size)))
-        assert sum(census.points[name]) == 2 * mine
+        assert sum(census.points[name]) == mine
         assert max(census.points[name]) <= PER_TILE
         np.testing.assert_array_equal(v, v_serial)
         np.testing.assert_array_equal(vmat, vmat_serial)
-    assert census.total() == 2 * ngrids
+    assert census.total() == ngrids
 
 
 def solvated_mean_field(mol):
@@ -216,3 +222,82 @@ def test_scf_over_ranks_evaluates_the_cavity_once(monkeypatch):
     # every rank evaluates the same number of cavity passes, each over its own tiles
     passes = {sum(census.points[name]) / share for (name, *_), share in zip(out, shares)}
     assert len(passes) == 1 and float(passes.pop()).is_integer()
+
+
+def test_tiles_are_kept_between_calls_at_one_geometry(monkeypatch):
+    mol = water()
+    dms = density(mol)
+    small_tiles(monkeypatch, mol.nao)
+    census = Census(monkeypatch)
+    pcm = factorize_once(continuum(mol))
+    ngrids = pcm.surface['grid_coords'].shape[0]
+    v = pcm._get_v(dms)
+    q = np.random.default_rng(3).standard_normal(v.shape)
+    vmat = pcm._get_vmat(q)
+    for _ in range(3):
+        np.testing.assert_array_equal(pcm._get_v(dms), v)
+        np.testing.assert_array_equal(pcm._get_vmat(q), vmat)
+    assert census.total() == ngrids
+
+    # nothing kept: every call evaluates afresh, to the same bits
+    monkeypatch.setattr(pcm_factorization, 'PCM_CAVITY_CACHE_GB', 0.0)
+    fresh = factorize_once(continuum(mol))
+    np.testing.assert_array_equal(fresh._get_v(dms), v)
+    np.testing.assert_array_equal(fresh._get_vmat(q), vmat)
+    assert census.total() == 3 * ngrids
+
+    # the atoms move: the kept tiles belong to the old cavity
+    monkeypatch.setattr(pcm_factorization, 'PCM_CAVITY_CACHE_GB', 2.0)
+    moved = mol.set_geom_(mol.atom_coords() + 0.01, unit='Bohr', inplace=False)
+    pcm.reset(moved)
+    pcm.build()
+    n_moved = pcm.surface['grid_coords'].shape[0]
+    pcm._get_v(dms)
+    assert census.total() == 3 * ngrids + n_moved
+
+
+@pytest.mark.parametrize('size', [2, 3])
+def test_reaction_field_matrix_moves_slices_not_every_tile(size, monkeypatch):
+    """Over ranks the reaction-field matrix is summed in tile order on element
+    slices (`ordered_sliced_sum`): a rank receives each tile's term only on
+    its 1 / size slice, and the slices once, instead of every tile's whole
+    term (`ordered_sum`). The result is the serial matrix bit for bit."""
+    mol = water()
+    dms = density(mol)
+    small_tiles(monkeypatch, mol.nao)
+    with distributed(None):
+        serial = factorize_once(continuum(mol))
+        q = np.random.default_rng(3).standard_normal(serial._get_v(dms).shape)
+        vmat_serial = serial._get_vmat(q)
+    ntiles = len(cavity_tiles(mol.nao, serial.surface['grid_coords'].shape[0]))
+    assert ntiles > 4 * size
+    received, lock = {}, threading.Lock()
+
+    def note(n):
+        with lock:
+            name = threading.current_thread().name
+            received[name] = received.get(name, 0) + n
+    exchange, gather = mpi_grid.exchange_blocks, mpi_grid.allgather_ranges
+
+    def counted_exchange(send, shapes, comm):
+        note(sum(int(np.prod(s)) for s in shapes))
+        return exchange(send, shapes, comm)
+
+    def counted_gather(a, ranges, comm):
+        note(sum(s1 - s0 for own in ranges for s0, s1 in own) * a.shape[1])
+        return gather(a, ranges, comm)
+    monkeypatch.setattr(mpi_grid, 'exchange_blocks', counted_exchange)
+    monkeypatch.setattr(mpi_grid, 'allgather_ranges', counted_gather)
+
+    def one_rank(comm):
+        pcm = factorize_once(continuum(water()))
+        attach_cavity_comm(pcm, comm)
+        return pcm._get_vmat(q)
+
+    for vmat in run_simulated(one_rank, size):
+        np.testing.assert_array_equal(vmat, vmat_serial)
+    assert len(received) == size
+    whole = vmat_serial.size
+    for n in received.values():
+        # its slice of the start (zeros) and of every tile, then the sum
+        assert n <= (ntiles + 1) * -(-whole // size) + whole, (n, whole, ntiles)

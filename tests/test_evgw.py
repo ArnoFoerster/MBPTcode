@@ -43,6 +43,7 @@ import src.SingleReference.GW.space_time as gwst
 import src.SingleReference.BSE.solve as dv
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER, WATER_CS
 
 
 MODES = sorted(set(EVGW_MODES.values()))
@@ -509,7 +510,7 @@ def check_evgw0_keeps_w_and_moves_the_poles():
     iterate. Its gap lands between G0W0 and evGW on water: the moved poles open
     it, the frozen W leaves it below the loop that screens less every cycle.
     The first cycle is the Casida G0W0."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol)
     mf.xc = 'pbe0'
@@ -578,7 +579,7 @@ def check_the_reaction_field_follows_the_iterate():
     opened by 0.5 eV, one step equals calc_qp_energy on that view anchored on
     the mean field to 1e-10 Ha, while the term moves the HOMO by more than
     1e-6 Ha between the two spectra. evGW0 keeps it at the mean field."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol = 1e-11
@@ -623,7 +624,7 @@ def check_the_reaction_field_follows_the_iterate():
 def build_water():
     """H2 has no core state, so the update window has to be tested on a
     molecule that owns one."""
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='cc-pvdz',
+    mol = gto.M(atom=WATER_CS, basis='cc-pvdz',
                 verbose=0)
     m = dft.RKS(mol)
     m.xc = 'pbe0'

@@ -41,7 +41,7 @@ from src.Base.numerics.numerics import SolventNumerics
 from src.Base.geometry.geometry import elements_of
 from src.Base.factorization.isdf_jk import canonical_span_size, span_confined
 from src.gradients.isdf_mean_field import isdf_jk_with_force
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.pyscf.scf_convergence import SCFHistory, newton_finished, warm_started
 from src.Base.factorization.separable_ri import grid_identity, resolve_isdf_grid
 from src.environments.medium import parse as parse_medium

@@ -15,6 +15,7 @@ import numpy as np
 
 from src.Base.geometry.geometry import grid_key
 from src.Base.numerics.constants import AUX_METRIC_ROOT_FLOOR
+from src.Base.factorization.shell_runs import functions_to_atoms
 from src.Base.factorization.separable_ri import (FRAME_DECAY, atomic_frames,
                                                  atomic_points,
                                                  metric_eigensystem)
@@ -201,23 +202,33 @@ def sqrtm_adjoint(V, Vh_bar, tol=AUX_METRIC_ROOT_FLOOR):
     return Uk @ (E / (sk[:, None] + sk[None, :])) @ Uk.T
 
 
-def two_centre_adjoint(auxmol, V_bar, omega=0.0):
-    """(natm, 3) gradient of sum_PQ V_bar[P,Q] (P|Q), V_bar symmetrized here.
-
-    omega != 0 takes the integrals with the erf-attenuated operator, the
-    long-range channel of a range-separated hybrid.
+def two_centre_rows(auxmol, V_rows, shells=None, omega=None):
+    """(3, rows) of -2 sum_Q (grad P|Q) V_rows[P, Q] for the auxiliary
+    functions P of the auxiliary shells shells = (k0, k1) (None: all), V_rows
+    their rows of a symmetric V_bar: the per-function gradient of
+    sum_PQ V_bar[P,Q] (P|Q), the one two-centre adjoint.
 
     pyscf's int2c2e_ip1 is +(grad P|Q), so the nuclear derivative is minus it,
     and both index positions contribute equally once V_bar is symmetric.
+    omega: the operator, set on auxmol while the integrals are made (nonzero:
+    the erf-attenuated long-range channel of a range-separated hybrid); None
+    takes the one auxmol carries.
     """
-    with auxmol.with_range_coulomb(omega):
-        v1 = auxmol.intor('int2c2e_ip1', comp=3)           # +(grad P|Q)
+    sl = None if shells is None else (shells[0], shells[1], 0, auxmol.nbas)
+    if omega is None:
+        v1 = auxmol.intor('int2c2e_ip1', comp=3, shls_slice=sl)
+    else:
+        with auxmol.with_range_coulomb(omega):
+            v1 = auxmol.intor('int2c2e_ip1', comp=3, shls_slice=sl)
+    return -2.0 * np.einsum('xPQ,PQ->xP', v1, V_rows, optimize=True)
+
+
+def two_centre_adjoint(auxmol, V_bar, omega=0.0):
+    """(natm, 3) gradient of sum_PQ V_bar[P,Q] (P|Q), V_bar symmetrized here
+    (`two_centre_rows` folded onto the atoms); omega != 0 the erf-attenuated
+    operator's."""
     Vb = 0.5 * (V_bar + V_bar.T)
-    t = -2.0 * np.einsum('xPQ,PQ->xP', v1, Vb, optimize=True)
-    grad = np.zeros((auxmol.natm, 3))
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        grad[ia] += t[:, q0:q1].sum(axis=1)
-    return grad
+    return functions_to_atoms(two_centre_rows(auxmol, Vb, omega=omega), auxmol)
 
 
 @dataclass(frozen=True)

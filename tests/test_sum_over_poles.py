@@ -29,6 +29,7 @@ from src.SingleReference.GW.sum_over_poles import (compressible, fit_poles,
                                                    qp_energy_sop, sigma_sop,
                                                    sigma_sop_slope, sop_from_wc)
 from src.gradients.gwbse.sum_over_poles_adjoint import sigma_sop_backward
+from tests.molecules import WATER_ROUNDED
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -211,7 +212,7 @@ def test_water_frontier_against_contour_deformation(n_poles, tol_mev):
     from src.SingleReference.GW.contour_deformation import (qp_energy_cd,
                                                             wc_explicit)
     from src.Base.orbital_spaces import ov_energies
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)

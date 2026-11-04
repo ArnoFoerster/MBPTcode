@@ -3,8 +3,9 @@
 
     python -m src.photophysics --system formaldehyde \\
         --atom 'C 0 0 -0.5296; O 0 0 0.6742; H 0 0.9429 -1.1123; H 0 -0.9429 -1.1123' \\
-        --basis cc-pvdz --environment gas --temperature 300 --lambda-env 0.05 \\
-        --nudge 0.01 --refreeze 1 --saddle-check 0 --df-check 0 \\
+        --basis cc-pvdz --environment gas --grid-accuracy G1 --scf-grid GH \\
+        --temperature 300 --lambda-env 0.05 \\
+        --nudge 0.02 --no-far-start --refreeze 1 --saddle-check 0 --df-check 0 \\
         --hessian analytic-df --relaxed-solvation equilibrium --span full \\
         --manifold-gaps stacked --out tadf
 
@@ -141,19 +142,8 @@ def add_system(ap):
     ap.add_argument('--system', default=None,
                     help='the run\'s name (its store directory); omitted is '
                          'the xyz file\'s stem')
-    ap.add_argument('--basis', required=True,
-                    help='the orbital basis of every atom --basis-for does '
-                         'not name')
-    ap.add_argument('--basis-for', action='append', default=None,
-                    metavar='EL=NAME',
-                    help='another basis for one element (H=cc-pvdz) or for '
-                         'atoms counted from 1 (atoms=1-41:aug-cc-pvdz, over '
-                         'the element\'s), repeatable; each atom\'s auxiliary '
-                         'sets (-jkfit, -ri) follow its own basis')
-    ap.add_argument('--environment', required=True,
-                    help="'gas', a solvent of pyscf's SMD table, "
-                         "'eps=EPS_S,n2=N2[,label=NAME]' or 'N2:EPS_STATIC', "
-                         "each optionally ',cavity=NAME' (src.environments.medium)")
+    add_basis_options(ap)
+    add_environment_option(ap)
     ap.add_argument('--solvent-scheme', default=None,
                     choices=tuple(s for s in SOLVENT_SCHEMES if s != GAS),
                     help='in a continuum, required: how every state stands '
@@ -185,9 +175,7 @@ def add_policies(ap):
                           '(its t1.xyz), where the T1 single point is taken '
                           'when the full kernel\'s triplet walk stops at the '
                           'instability')
-    pol.add_argument('--refreeze', type=int, choices=(0, 1), required=True)
-    pol.add_argument('--saddle-check', type=int, choices=(0, 1),
-                     required=True)
+    add_walk_policies(pol)
     pol.add_argument('--df-check', type=int, choices=(0, 1), required=True)
     pol.add_argument('--hessian', choices=HESSIAN_ROUTES, required=True)
     pol.add_argument('--hessian-file', metavar='HESS', default=None,
@@ -261,17 +249,7 @@ def add_numerics(ap):
     num.add_argument('--scf-grid', default=None,
                      help='the ISDF-K mean field\'s grid level; required '
                           'with --scf isdf (no ISDF grid is a default)')
-    num.add_argument('--grid-accuracy', required=True,
-                     help='required: the factors\' grid level; no ISDF '
-                          'grid is a default')
-    num.add_argument('--isdf-test-set', default=None, choices=ISDF_TEST_SETS,
-                     help='the products the factors\' fit is trained on; '
-                          'omitted is ao_products; duchemin_blase, the pair '
-                          'set on the tabulated grid, by name')
-    num.add_argument('--pivot-points', type=int, default=None,
-                     help='the AO-product fit\'s points pivoted from the '
-                          '--grid-accuracy level\'s parent grid; omitted is '
-                          'ao_product_fit.pivot_count')
+    add_factor_options(num)
     num.add_argument('--scf-isdf-test-set', default=None,
                      choices=ISDF_TEST_SETS,
                      help='the ISDF-K mean field\'s own fit, apart from the '
@@ -300,9 +278,7 @@ def add_numerics(ap):
     num.add_argument('--bse-conv-tol', type=float, default=None,
                      help='omitted is BSE_DAVIDSON_CONV_TOL')
     num.add_argument('--no-probe', action='store_true')
-    num.add_argument('--xc-grid', type=int, default=None,
-                     help='pyscf\'s XC grid level of every Kohn-Sham mean '
-                          'field; omitted is XC_GRID_LEVEL')
+    add_xc_grid_option(num)
     num.add_argument('--scf-conv-tol', type=float, default=None,
                      help='omitted is SCF_OPTIMIZATION_CONV_TOL')
     num.add_argument('--scf-grad-tol', type=float, default=None,
@@ -310,21 +286,7 @@ def add_numerics(ap):
     num.add_argument('--no-scf-warm-start', action='store_true')
     num.add_argument('--scf-finish', default='diis', choices=SCF_FINISH)
     num.add_argument('--engine', default='auto', choices=ENGINES)
-    num.add_argument('--loop-tol-q', type=float, default=None,
-                     help='scheme-b-*: the loop\'s largest charge change (e) at '
-                          'convergence; omitted is PHOTOPHYSICS_LOOP_TOL_Q')
-    num.add_argument('--loop-tol-energy', type=float, default=None,
-                     help='scheme-b-*: the loop\'s change of G (Ha) at '
-                          'convergence; omitted is the larger of '
-                          'PHOTOPHYSICS_LOOP_TOL_ENERGY and the SCF\'s '
-                          'conv_tol (G settles no further)')
-    num.add_argument('--loop-tolerance', default=None,
-                     choices=('fixed', 'gradient-tied'),
-                     help='scheme-b-*: every walk loop to the tolerances above '
-                          '(fixed, the default), or stopped once its estimated '
-                          'force error is LOOP_FORCE_FRACTION of the walk\'s '
-                          'gradient (the first gradient of each surface and '
-                          'the converged one at the tolerances above)')
+    add_loop_options(num)
 
 
 def add_launch(ap):
@@ -340,6 +302,96 @@ def add_launch(ap):
                          f'{TADF_ALLOCATION_MB}')
     ap.add_argument('--out', required=True, help='the store\'s root')
     ap.add_argument('--dry-run', action='store_true')
+
+
+# ------------------------------------------- options the drivers share
+# One name, one type and one meaning on both command lines: this one and the
+# solvated driver's (`solvated`). An option the declaration requires has no
+# default; `ap` is a parser or one of its groups.
+def add_basis_options(ap):
+    """--basis (required) and --basis-for."""
+    ap.add_argument('--basis', required=True,
+                    help='the orbital basis of every atom --basis-for does '
+                         'not name')
+    ap.add_argument('--basis-for', action='append', default=None,
+                    metavar='EL=NAME',
+                    help='another basis for one element (H=cc-pvdz) or for '
+                         'atoms counted from 1 (atoms=1-41:aug-cc-pvdz, over '
+                         'the element\'s), repeatable; each atom\'s auxiliary '
+                         'sets (-jkfit, -ri) follow its own basis')
+
+
+def add_environment_option(ap):
+    """--environment (required): the gas phase or a continuum."""
+    ap.add_argument('--environment', required=True,
+                    help="'gas', a solvent of pyscf's SMD table, "
+                         "'eps=EPS_S,n2=N2[,label=NAME]' or 'N2:EPS_STATIC', "
+                         "each optionally ',cavity=NAME' (src.environments.medium)")
+
+
+def environment_of(args):
+    """--environment as a run reads it: GAS for the gas phase ('gas', 'none'
+    or empty), else the continuum's name."""
+    return (GAS if args.environment.lower() in ('', 'none', GAS)
+            else args.environment)
+
+
+def add_factor_options(ap, required=True):
+    """The GW-BSE factors' fit: --grid-accuracy (no ISDF grid is a default:
+    `required`, else refused where the run needs it), --isdf-test-set,
+    --pivot-points."""
+    ap.add_argument('--grid-accuracy', required=required, default=None,
+                    help='the factors\' grid level (G1, G2, G3) or shell '
+                         'counts; no ISDF grid is a default')
+    ap.add_argument('--isdf-test-set', default=None, choices=ISDF_TEST_SETS,
+                    help='the products the factors\' fit is trained on; '
+                         'omitted is ao_products; duchemin_blase, the pair '
+                         'set on the tabulated grid, by name')
+    ap.add_argument('--pivot-points', type=int, default=None,
+                    help='the AO-product fit\'s points pivoted from the '
+                         '--grid-accuracy level\'s parent grid; omitted is '
+                         'ao_product_fit.pivot_count')
+
+
+def add_xc_grid_option(ap):
+    """--xc-grid: pyscf's XC grid level of a Kohn-Sham mean field."""
+    ap.add_argument('--xc-grid', type=int, default=None,
+                    help='pyscf\'s XC grid level of every Kohn-Sham mean '
+                         'field; omitted is XC_GRID_LEVEL')
+
+
+def add_walk_policies(ap, refreeze_required=True):
+    """--refreeze and --saddle-check, each 0 or 1 with no default; the
+    refreeze is required where every run declares it (`refreeze_required`),
+    else refused where the run needs it."""
+    ap.add_argument('--refreeze', type=int, choices=(0, 1),
+                    required=refreeze_required, default=None,
+                    help='rebuild the frozen conventions at each excited '
+                         'minimum and walk again while the drift exceeds '
+                         'REFREEZE_TOL_MEV')
+    ap.add_argument('--saddle-check', type=int, choices=(0, 1), required=True,
+                    help='the Hessian at each minimum, and a saddle left '
+                         'along its negative mode')
+
+
+def add_loop_options(ap):
+    """The state-specific loop's tolerances: --loop-tol-q, --loop-tol-energy
+    and --loop-tolerance, each omitted for the run's default."""
+    ap.add_argument('--loop-tol-q', type=float, default=None,
+                    help='the loop\'s largest charge change (e) at '
+                         'convergence; omitted is PHOTOPHYSICS_LOOP_TOL_Q')
+    ap.add_argument('--loop-tol-energy', type=float, default=None,
+                    help='the loop\'s change of G (Ha) at convergence; '
+                         'omitted is PHOTOPHYSICS_LOOP_TOL_ENERGY (the TADF '
+                         'run: the larger of it and the SCF\'s conv_tol, '
+                         'where G settles no further)')
+    ap.add_argument('--loop-tolerance', default=None,
+                    choices=('fixed', 'gradient-tied'),
+                    help='every walk loop to the tolerances above (fixed, '
+                         'the default), or stopped once its estimated force '
+                         'error is LOOP_FORCE_FRACTION of the walk\'s '
+                         'gradient (the first gradient of each surface and '
+                         'the converged one at the tolerances above)')
 
 
 # ----------------------------------------------------------- declaration
@@ -584,8 +636,7 @@ def rate_model_of(args):
 def declaration_of(args):
     """The `Declaration` the parsed command line `args` says."""
     numerics = production_numerics(args)
-    environment = (GAS if args.environment.lower() in ('', 'none', GAS)
-                   else args.environment)
+    environment = environment_of(args)
     return Declaration(
         system=system_of(args), ground=args.ground, reference=args.reference,
         environment=environment,

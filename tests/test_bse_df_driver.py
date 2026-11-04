@@ -34,8 +34,9 @@ from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 BASIS, AUXBASIS, XC = 'cc-pvdz', 'cc-pvdz-ri', 'pbe0'
 NROOTS = 3
 #: eV. Two factorizations of one interaction: the interpolative fit at its

@@ -37,7 +37,7 @@ import numpy as np
 from pyscf import df, gto
 from threadpoolctl import threadpool_limits
 
-from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
+from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, SINGLE_DESCENT_R_MAX, _START_SHAPES,
                                                  _shipped_key, _start_radii, atomic_points,
                                                  fit_error_coulomb, lebedev_subshells,
                                                  optimize_atomic_radii, published_grids,
@@ -103,25 +103,39 @@ if __name__ == '__main__':
     # 3. Start diversity, on a PLANTED stall. Whether carbon's own first start
     #    stalls depends on the fit's rounding and on the machine (the descent is
     #    a numerically differentiated local search), so the check does not rely
-    #    on it: descent 0 is started from every shell at one radius, which the
-    #    descent cannot leave -- coincident radii have equal gradients -- and the
-    #    other starts are the production ones. Multi-start has to be never worse
-    #    than the single start and much better than it; and the same check, on
-    #    a multi-start whose every descent is the planted one, must fail.
-    #    `return_candidates=True` runs the live search (no table, no cache);
-    #    one BLAS thread, for the reason the descent is machine dependent.
+    #    on it: descent 0 starts from every shell at one radius and is held
+    #    there -- its local search returns its start, at that grid's own fit
+    #    error -- and the other starts are the production ones, descended as in
+    #    production. Coincident radii alone do not hold a descent everywhere:
+    #    on OpenBLAS the rounding of the numerical gradient separates them and
+    #    the descent leaves (5.161e-03 from the start, as low as four starts).
+    #    Multi-start has to be never worse than the single start and much
+    #    better than it; and the same check, on a multi-start whose every
+    #    descent is the planted one, must fail. `return_candidates=True` runs
+    #    the live search (no table, no cache); one BLAS thread, for the reason
+    #    the descent is machine dependent.
     print('\n3. multi-start rescues a planted stall (carbon, 148 counts, '
           'production settings):')
+    from scipy.optimize import OptimizeResult
     from src.Base.factorization import separable_ri as sri
-    production_start = sri._start_radii
+    production_start, production_minimize = sri._start_radii, sri.minimize
+    PLANTED_RADIUS = 1.0
 
     def planted_stall(counts, r_min, r_max, k):
         if k == 0:
-            return {name: np.full(n, 1.0) for name, n in counts.items() if n}
+            return {name: np.full(n, PLANTED_RADIUS)
+                    for name, n in counts.items() if n}
         return production_start(counts, r_min, r_max, k)
 
+    def held_at_planted(objective, x0, **kw):
+        """The local search, except from the planted start, which it does
+        not leave."""
+        if np.all(x0 == np.log(PLANTED_RADIUS)):
+            return OptimizeResult(x=np.array(x0, float), fun=objective(x0))
+        return production_minimize(objective, x0, **kw)
+
     def descents(start):
-        sri._start_radii = start
+        sri._start_radii, sri.minimize = start, held_at_planted
         try:
             with threadpool_limits(limits=1, user_api='blas'):
                 one = optimize_atomic_radii(
@@ -132,7 +146,7 @@ if __name__ == '__main__':
                     maxiter=30, n_start=4, return_candidates=True)[:2]
             return one, many
         finally:
-            sri._start_radii = production_start
+            sri._start_radii, sri.minimize = production_start, production_minimize
 
     def rescued(one, many_err):
         return many_err <= one and many_err < one / 2.0
@@ -206,17 +220,17 @@ if __name__ == '__main__':
           f'mixed-case MOLOPT lookup: {molopt_same}   '
           f'{"OK" if ok5 else "FAIL"}')
 
-    # 6. The box rule: one descent keeps the legacy box for every element, so
-    #    nothing cached changes meaning; a multi-start search widens it only
+    # 6. The box rule: one descent keeps the single-descent box for every
+    #    element, so nothing cached changes meaning; a multi-start search widens it only
     #    where the density asks for it.
-    print('\n6. search box: legacy for one descent, per element otherwise:')
-    ok6 = (all(search_r_max(el, 1) == LEGACY_R_MAX for el in ELEMENT_R_MAX)
-           and search_r_max('C', 8) == LEGACY_R_MAX
+    print('\n6. search box: single-descent box for one descent, per element otherwise:')
+    ok6 = (all(search_r_max(el, 1) == SINGLE_DESCENT_R_MAX for el in ELEMENT_R_MAX)
+           and search_r_max('C', 8) == SINGLE_DESCENT_R_MAX
            and search_r_max('Mg', 8) == 16.0
            and search_r_max('Mg', 8, r_max=7.0) == 7.0
            and search_r_max('Xx', 8) == 12.0)
     all_ok &= ok6
-    print(f'   n_start=1 -> {LEGACY_R_MAX} for all {len(ELEMENT_R_MAX)} elements; '
+    print(f'   n_start=1 -> {SINGLE_DESCENT_R_MAX} for all {len(ELEMENT_R_MAX)} elements; '
           f'n_start=8 -> C {search_r_max("C", 8)}, Mg {search_r_max("Mg", 8)}; '
           f'explicit wins; unlisted -> 12.0   {"OK" if ok6 else "FAIL"}')
 

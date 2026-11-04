@@ -43,9 +43,6 @@ THE CORE, used by every method.
   state_models, solvated_surface
                the state models of state-specific solvation and the surface
                built from the medium, a state model and the loop
-  spin_orbit_mean_field
-               the two-electron spin-orbit mean-field term, built once on
-               rank 0 and locked to every rank
 
 rpa/           the RPA ground state and the screening machinery GW-BSE builds
                on: the factor chain, the space-time adjoint, the chain

@@ -82,8 +82,8 @@ from src.SingleReference.GW.space_time import (_dyson_in_place, _dyson_owned,
                                                solve_qp_energy_space_time)
 from tests.isdf_test_grid import g1, duchemin_blase
 from tests.pins import RECORDING_BLAS, THREAD_CAPS, matches
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: (geometry, basis, continuum solvent or None for the gas phase).
 SYSTEMS = {
     'water': (WATER, 'cc-pvdz', None),

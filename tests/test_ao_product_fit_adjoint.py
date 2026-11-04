@@ -56,8 +56,9 @@ from tests.test_body_fixed_frames import (ENERGY_TOL, RIGID_TOL, five_point,
                                           moved, rhf, rigid_part, rotation,
                                           water)
 from tests.pins import isdf_gradient_bar
+from tests.molecules import WATER_C1
 
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
+H2O_C1 = WATER_C1
 #: Force bar of the fit adjoint against the five-point difference, Ha/Bohr.
 FIT_FD_TOL = 1e-8
 FD_STEP = 1e-3

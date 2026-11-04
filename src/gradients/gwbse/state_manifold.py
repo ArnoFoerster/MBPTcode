@@ -73,8 +73,8 @@ import dataclasses
 import numpy as np
 
 from src.Base.numerics.constants import KAPPA
-from src.Base.numerics.numerics import Stamped, numerics_identity
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.numerics.numerics import Stamped, surface_numerics
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.gradients.surface_identity import FirstPoint
 from src.gradients.gwbse.derivative_coupling import evaluated_coupling
@@ -125,15 +125,18 @@ class StateEvaluation:
     targets, `interstate` {(m, n): (d<m|H|n>/dR, diagnostics)}, `spectrum`
     {spin: (omega, X, Y)}, `g0` the ground-state force (None without a force
     target), `target` {key: (spin, root)} and `scf_residual`, max |F_ia| of
-    `mf` (None until measured). `numerics_identity` names the `Numerics` the
-    whole evaluation stands on, and stamps every spectrum in it."""
+    `mf` (None until measured). `numerics` is the `Numerics` the whole
+    evaluation stands on (the chain's; the couplings read off it solve their
+    Z-vector on it), and `numerics_identity` its identity, which stamps every
+    spectrum in it (None without one)."""
 
     #: The ingredients an evaluation provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'coupling', 'scf_flags'})
 
-    def __init__(self, mol, mf, numerics_identity=None):
+    def __init__(self, mol, mf, numerics=None):
         self.mol, self.mf = mol, mf
-        self.numerics_identity = numerics_identity
+        self.numerics = numerics
+        self.numerics_identity = None if numerics is None else numerics.identity()
         self.energy, self.omega, self.root, self.target = {}, {}, {}, {}
         self.gradient, self.info, self.interstate = {}, {}, {}
         self.spectrum = {}
@@ -434,7 +437,7 @@ class StateManifold:
                     f'an interstate element is taken between two roots of ONE '
                     f'Casida solve; got {m!r} and {n!r}')
         mol, mf = self._mean_field(mol, mf)
-        ev = StateEvaluation(mol, mf, numerics_identity(self.driven))
+        ev = StateEvaluation(mol, mf, surface_numerics(self.driven))
         if gradients or couplings:
             self.driven.require_differentiable_environment()
             ev.scf_residual = self.driven.residual_of(mf)

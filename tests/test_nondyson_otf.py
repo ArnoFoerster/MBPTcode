@@ -24,8 +24,9 @@ from src.SingleReference.ADC import build_static_correction
 from src.SingleReference.ADC import adc_r_nondyson_otf as otf
 from src.SingleReference.ADC.adc_r_nondyson_df import build_operator
 from src.SingleReference.ADC.base import ADCSolverRestricted
+from tests.molecules import WATER
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 NH3 = 'N 0 0 0.1; H 0.94 0 -0.25; H -0.47 0.81 -0.25; H -0.47 -0.81 -0.25'
 
 

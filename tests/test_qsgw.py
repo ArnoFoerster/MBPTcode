@@ -33,8 +33,9 @@ from src.SingleReference.GW.self_energy import (SelfEnergySolver,
                                                 _srg_laplace_quadrature)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 import src.SingleReference.GW.qp_energy as qpe
+from tests.molecules import WATER
 
-GEOMETRY = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+GEOMETRY = WATER
 
 
 def rotated_mean_field(mf, eps, mo_coeff):

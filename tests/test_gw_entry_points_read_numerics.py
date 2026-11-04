@@ -25,8 +25,9 @@ from src.Base.utils.grids import time_frequency
 from src.SingleReference.GW import qp_selection, space_time
 from src.SingleReference.BSE import solve as bse_solve
 from tests.isdf_test_grid import g1_kw
+from tests.molecules import WATER
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 RETIRED = {'ntau', 'nfreq', 'npade', 'w0', 'tau_target', 'tile_gb'}
 
 

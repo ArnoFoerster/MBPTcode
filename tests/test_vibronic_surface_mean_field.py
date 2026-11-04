@@ -29,8 +29,8 @@ from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.surface import surface_mean_field
 from src.properties.vibronic import (huang_rhys_from_gradient, normal_modes,
                                      vibronic_analysis)
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def factory(mol):

@@ -36,7 +36,7 @@ conditioned around 2e8, and that is what the gates below measure:
     ethylene/cc-pVTZ  M  1.9e-12    Z  8.9e-12    D  6.1e-11
 
 Put that beside the discrepancy the repo already lives with between its own
-two realizations of the same estimator, `fit_M_stable` (Cholesky) against
+two realizations of the same estimator, `fit_M` (Cholesky) against
 `fit_M_streaming`: on water, 1.2e-08 on M and 2.6e-08 on D, on ethylene
 1.8e-06 on M. The rank split moves the fit by the same amount that choosing
 between the two existing fits already moves it on water, and a million times
@@ -92,8 +92,8 @@ from src.SingleReference.GW.space_time import separable_factors
 from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, TEST_GRID_LEVEL, counts_at, g1, g1_kw
 from tests.archived_tree import require_commit, unpack_commit
 from tests.pins import THREAD_CAPS_WITHOUT_OMP, assert_archive_same, assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 

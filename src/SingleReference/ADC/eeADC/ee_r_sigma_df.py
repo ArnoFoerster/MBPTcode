@@ -26,7 +26,7 @@ shows up at machine precision rather than as a plausible small error.
 """
 import numpy as np
 
-from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
+from src.Base.numerics.constants import FLOAT64_PER_GB, EE_COUPLING_SLAB_BLOCKS
 from src.Base.pyscf.pyscf_interface import get_coulomb_exchange_diagonals_df
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
@@ -78,26 +78,22 @@ class DFVvvvKernels(_eq.VvvvKernels):
     bounded auxiliary batch axis on top of the four orbital indices; its size
     is chosen from `mem_gb`, so it is a memory knob, not a scaling axis.
 
-    The particle ladder is common.df_ladder's: `ladder_kernel` 'auto' (default)
-    takes the cheaper of its 'aux' evaluation (the chunks above) and 'slab'
-    ((ac|bd) in slabs of a, built once for every spin block of one call),
-    about six times faster on a naphthalene-sized block (no 24, nv 146, naux
-    672) and the same numbers to a few ulps.
+    The particle ladder is common.df_ladder's, which takes the cheaper of its
+    'aux' evaluation (the chunks above) and 'slab' ((ac|bd) in slabs of a,
+    built once for every spin block of one call; the faster one once nv is in
+    the hundreds), the same numbers to a few ulps.
     """
 
-    def __init__(self, B, no, norb, mem_gb=2.0, ladder_kernel='auto'):
-        if ladder_kernel not in df_ladder.KERNELS:
-            raise ValueError(f'ladder_kernel={ladder_kernel!r}: one of {df_ladder.KERNELS}')
+    def __init__(self, B, no, norb, mem_gb=2.0):
         self.B = B
         self.Bvv = np.ascontiguousarray(B[:, no:norb, no:norb])
         self.no, self.nv = no, norb - no
         self.mem_gb = mem_gb
-        self.ladder_kernel = ladder_kernel
 
     def _chunks(self, per_aux_elems):
         """Aux-function slices sized so one batch stays inside mem_gb."""
         naux = self.Bvv.shape[0]
-        n = max(1, min(naux, int(self.mem_gb * 1.25e8 / max(per_aux_elems, 1))))
+        n = max(1, min(naux, int(self.mem_gb * FLOAT64_PER_GB / max(per_aux_elems, 1))))
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------
@@ -107,7 +103,7 @@ class DFVvvvKernels(_eq.VvvvKernels):
 
     def _ldir(self, Ys):
         """ladder_direct of several blocks in one call (one set of slabs)."""
-        return df_ladder.ladders(self.Bvv, self.Bvv, Ys, self.mem_gb, self.ladder_kernel)
+        return df_ladder.ladders(self.Bvv, self.Bvv, Ys, self.mem_gb)
 
     def ladder(self, X):
         """R[key] = Ldir(X[key]) - Ldir(X[key with a,b swapped] transposed).

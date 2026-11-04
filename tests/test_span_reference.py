@@ -33,8 +33,9 @@ from src.environments.solvent_screening import SolventScreening
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics, duchemin_blase
+from tests.molecules import WATER
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 BENZENE = ('C 0 1.3915 0; C 1.2051 0.6958 0; C 1.2051 -0.6958 0; '
            'C 0 -1.3915 0; C -1.2051 -0.6958 0; C -1.2051 0.6958 0; '
            'H 0 2.4715 0; H 2.1404 1.2358 0; H 2.1404 -1.2358 0; '

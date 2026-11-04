@@ -31,6 +31,7 @@ from src.SingleReference.ADC.cc_amplitudes import brueckner_reference
 from src.SingleReference.ADC.static_correction import (
     _dgamma_spatial_from_ao_density, _static_correction_from_dgamma_restricted)
 from src.SingleReference.CC.pipeline import compute_ccsd_density_matrix
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -39,7 +40,7 @@ def check(ok, label, detail=''):
 
 
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol = 1e-12

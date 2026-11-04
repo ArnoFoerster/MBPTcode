@@ -46,8 +46,9 @@ from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.reference_mean_field import converged_factory
 from src.gradients.gwbse.surface_factory import potential_energy_surface
+from tests.molecules import WATER_DISTORTED
 
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 COUNTS, N_START = resolve_isdf_grid('G1', 'cc-pvdz', ['H', 'O'],
                                     auxbasis='cc-pvdz-ri')
 

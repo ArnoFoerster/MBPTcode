@@ -80,13 +80,15 @@ import os
 import pickle
 import sys
 import threading
+import time
 import traceback
 import weakref
 
 import numpy as np
 
 from src.Base.numerics.constants import (AGREEMENT_DIGEST_BLOCK, AGREEMENT_DIGEST_SEED,
-                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES)
+                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES,
+                                         NODE_IDLE_POLL_S)
 from src.Base.utils.parallel.simulated_comm import SimulatedComm
 
 MPI = None
@@ -627,6 +629,41 @@ def node_comm(comm):
     if not _genuine_mpi(comm):
         return comm
     return comm.Split_type(_mpi().COMM_TYPE_SHARED, key=comm.Get_rank())
+
+
+def on_root_with_node_cpus(fn, comm, root=0):
+    """fn() on rank `root` of `comm` alone, with its threads spread over the
+    CPUs of every rank of `comm` on root's node while all the other ranks wait
+    without spinning: fn's value on root, None on every other rank. A
+    collective on `comm`.
+
+    For a step that is cheaper to run once than to divide: a dense
+    eigensolve that is bound by memory bandwidth gains the node's other
+    memory controllers this way, and its bits do not move, since the thread
+    count stays root's own (`threads.spread_over`). The other ranks wait at a
+    non-blocking barrier they test every NODE_IDLE_POLL_S seconds, so no core
+    of the node spins. Serially, on a world of one and on a `SimulatedComm`,
+    fn() runs on root as it is.
+    """
+    from src.Base.utils.parallel.threads import spread_over
+    if comm is None or not _genuine_mpi(comm):
+        return fn() if comm is None or comm.Get_rank() == root else None
+    node = _node_of(comm).comm
+    mine = (sorted(os.sched_getaffinity(0))
+            if hasattr(os, 'sched_getaffinity') else None)
+    here = node.allgather((comm.Get_rank(), mine))
+    if comm.Get_rank() == root:
+        masks = [m for _, m in here]
+        cpus = (set().union(*masks)
+                if all(m is not None for m in masks) else None)
+        with spread_over(cpus):
+            value = fn()
+        comm.Ibarrier().Wait()
+        return value
+    pending = comm.Ibarrier()
+    while not pending.Test():
+        time.sleep(NODE_IDLE_POLL_S)
+    return None
 
 
 class NodeShared:
@@ -1600,3 +1637,66 @@ def mpi_map(fn, items, comm=None):
         for i, result in chunk:
             out[i] = result
     return out
+
+
+def ordered_sliced_sum(terms, owners, comm, onto, root=None):
+    """`ordered_chain_sum`'s sum, to the bit, in two collectives instead of
+    one hand-over per change of owner.
+
+    The sum's elements are cut into one contiguous slice per rank
+    (`contiguous_block`); every rank sends each slice of its terms -- and
+    the chain's start its slice of `onto` -- to that slice's rank
+    (`exchange_blocks`); each rank adds its slice's terms onto `onto`'s in
+    index order, the additions the chain makes, element by element; and the
+    slices are gathered, to `root` alone where it is given (every other rank
+    gets None) and to every rank otherwise. The chain starts from `root`'s
+    `onto`, or without one from the first owner's, and so does this.
+
+    A rank receives 1 / size of every term and one sum, where the chain
+    carries the whole running sum across once per change of owner and makes
+    every rank wait for each hand-over. The arguments are
+    `ordered_chain_sum`'s; serially it is that call.
+    """
+    if comm is None or comm.Get_size() == 1:
+        return ordered_chain_sum(terms, owners, comm, onto, root=root)
+    size, rank = comm.Get_size(), comm.Get_rank()
+    owners = [int(o) for o in owners]
+    start = int(root) if root is not None else (owners[0] if owners else 0)
+    shape = tuple(np.shape(onto))
+    n = int(np.prod(shape, dtype=np.int64))
+    cuts = [contiguous_block(n, s, size) for s in range(size)]
+    rows = [np.ravel(np.asarray(terms[k], dtype=np.float64))
+            for k, owner in enumerate(owners) if owner == rank]
+    if rank == start:
+        rows.insert(0, np.ravel(np.asarray(onto, dtype=np.float64)))
+    send = [np.array([row[c0:c1] for row in rows],
+                     dtype=np.float64).reshape(len(rows), c1 - c0)
+            for c0, c1 in cuts]
+    rows = None
+    c0, c1 = cuts[rank]
+    counts = [owners.count(r) + (r == start) for r in range(size)]
+    got = exchange_blocks(send, [(counts[r], c1 - c0) for r in range(size)],
+                          comm)
+    send = None
+    # this slice of `onto` from the chain's start, then each term's in index
+    # order: the k-th term of an owner is that owner's k-th row
+    nth = [0] * size
+    nth[start] = 1
+    total = np.array(got[start][0], dtype=np.float64, copy=True)
+    for owner in owners:
+        total += got[owner][nth[owner]]
+        nth[owner] += 1
+    got = None
+    if root is None:
+        out = np.zeros(n)
+        out[c0:c1] = total
+        allgather_ranges(out.reshape(n, 1), [[cut] for cut in cuts], comm)
+        return out.reshape(shape)
+    empty = np.empty(0)
+    pieces = exchange_blocks(
+        [total if peer == root else empty for peer in range(size)],
+        [((cuts[r][1] - cuts[r][0]) if rank == root else 0,)
+         for r in range(size)], comm)
+    if rank != root:
+        return None
+    return np.concatenate(pieces).reshape(shape)

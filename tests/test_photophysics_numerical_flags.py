@@ -148,7 +148,8 @@ def test_the_rate_table_gathers_every_stage_flag(tmp_path, monkeypatch):
 def test_an_undecayed_fc_integrand_warns_with_its_class():
     # one mode and no bath recurs forever
     with pytest.warns(franck_condon.FCIntegrandNotDecayed, match='had not decayed'):
-        franck_condon.fc_weighted_dos(-0.02, [1.0], [0.01], 300.0, t_decay=0.5)
+        franck_condon.fc_weighted_dos(-0.02, [1.0], [0.01], 300.0,
+                                      time_grid=franck_condon.FCTimeGrid(t_decay=0.5))
 
 
 def test_the_rate_table_names_an_undecayed_density(monkeypatch):

@@ -93,19 +93,20 @@ from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 SIZES = [2, 3, 8]
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: One hydrogen 0.03 A along y: a geometry the chain fits and differentiates
 #: on its own, away from the reference's cached rows.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'
 #: What one composed force at a displaced geometry gathers, by name: the dRPA
-#: sweep X_mo + D and its assembly X_mo; the static W D + X_o + X_v, the
-#: quasiparticle solve X_mo + D, the Davidson D + X_o, the BSE cache X_mo + D,
-#: its adjoint X_mo + D, the quasiparticle adjoint X_mo + D, the chi0 adjoint
-#: D + X_o + X_v and the excited assembly X_mo.
-COMPOSED_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
+#: sweep X_mo + D and its assembly X_mo; the quasiparticle solve X_mo + D,
+#: the Davidson D + X_o, the BSE cache X_mo + D, its adjoint X_mo + D, the
+#: quasiparticle adjoint X_mo + D, the chi0 adjoint D + X_o + X_v and the
+#: excited assembly X_mo. The static W reads the grid tiles and gathers none.
+COMPOSED_GATHERS = {'X_mo': 7, 'D': 7, 'X_o': 2, 'X_v': 1}
 
 
 def chain_scf(mol):

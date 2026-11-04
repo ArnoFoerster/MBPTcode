@@ -32,9 +32,9 @@ supercell-folding check that catches it (ratio exactly 2.000000 at nk=2,
 The exciton set feeding chi_a is RPA (plain GW) or BSE-screened (vertex); this
 module builds Sigma_c generically from whatever (Omega, X, Y) per q are passed.
 """
-import warnings
 
 import numpy as np
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA,
                                          PBC_OCCUPATION_THRESHOLD,
                                          PBC_QP_ROOT_TOL, PBC_QP_Z_MIN)
@@ -310,7 +310,7 @@ def qp_energy_g0w0(dfints, eig_all_q, kn, n, mo_energy=None, mo_occ=None,
     found = sorted((float(r), float(z)) for r, z in got.found)
     keep = [r for r, z in found if abs(z) >= z_min]
     if found and not got.quasiparticle:
-        warnings.warn(
+        flag('z_outside',
             f"state {n} at k-point {kn}: the QP root kept, {got.w:.6f} Ha, has "
             f"Z = {got.z:.4g}, not in ({z_min}, 1]: no quasiparticle in the "
             f"window ({len(found)} root(s)). The root is returned and flagged "

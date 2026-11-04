@@ -40,7 +40,7 @@ import numpy as np
 
 from src.Base.utils.parallel.mpi_grid import (NodeShared, allgather_blocks, contiguous_block, current_comm,
                                               distributed)
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.common.df_ladder import ladder_slabs
 from src.SingleReference.common.mp_amplitudes import occ_chunk
 from src.SingleReference.ADC.adc_r_sigma_df import c2h1p_df_chunks, c2p1h_df_chunks, build_pieces
@@ -350,10 +350,6 @@ def _pp_ladders(Bv, jobs, slab_gb=2.0, B2=None):
                 Xj = X[e0:e1].reshape(O, -1, a1 - a0, V)
                 out[:, lo:hi] = Xj[:, :, iu[lo:hi] - a0, ju[lo:hi]].transpose(0, 2, 1)
     return outs
-
-
-def _pp_ladder_batch(Bv, z, iu, ju, antisymmetric):
-    return _pp_ladders(Bv, [(z, iu, ju, antisymmetric)])[0]
 
 
 def _c_2p1h_batch(P, pp_pair=None, chunk=None):

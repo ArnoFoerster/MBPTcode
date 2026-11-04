@@ -18,10 +18,12 @@ the group) and 7 (outside it), at every step length, as at a sharp crossing:
     converges with no rejected step;
   - on a GW-BSE chain (formaldehyde/cc-pVDZ, Hartree-Fock, the quasiparticle
     Hamiltonian on: group 12-13) absorbed orbitals join the explicit set on
-    the refrozen chain, and its group where the pole model admits them (11);
-    one it does not (18, solved by explicit residues) is dropped from the
-    group and recorded; every later refreeze carries what was absorbed; a
-    scheme-B state model built afresh takes it in.
+    the refrozen chain with every orbital between them (11 and 18 bring
+    14-17: a group is a contiguous window), and its group where the pole
+    model admits them (11); those it does not (14-18, solved by explicit
+    residues) are dropped from the group and recorded; every later refreeze
+    carries what was absorbed; a scheme-B state model built afresh takes it
+    in.
 """
 import types
 import warnings
@@ -243,15 +245,18 @@ def test_absorbed_orbitals_join_the_set_and_the_group():
     assert outside not in set(int(p) for p in ch.conventions.qp_set)
     assert ch.conventions.absorb((((12, 13), (inside, outside)),))
     rebuilt = ch.refreeze(ch.mol0)
-    assert rebuilt.conventions.absorbed == ((11, 12, 13, 18),)
+    # the window from 11 to 18, every orbital between them
+    window = tuple(range(inside, outside + 1))
+    assert rebuilt.conventions.absorbed == (window,)
     rebuilt.excitation()
-    assert outside in set(int(p) for p in rebuilt.conventions.qp_set)
+    assert set(window) <= set(int(p) for p in rebuilt.conventions.qp_set)
     assert rebuilt.conventions.group_slots() == ((11, 12, 13),)
     record = rebuilt.conventions.qp_subspace_record
     assert [(d['orbital'], d['reason']) for d in record['dropped']] == [
-        (outside, 'off the pole model')]
+        (p, 'off the pole model') for p in range(14, outside + 1)]
+    assert record['cut'] == []
     again = rebuilt.refreeze(ch.mol0)
-    assert again.conventions.absorbed == ((11, 12, 13, 18),)
+    assert again.conventions.absorbed == (window,)
 
 
 def test_a_scheme_b_state_built_afresh_takes_the_absorbed_orbitals():

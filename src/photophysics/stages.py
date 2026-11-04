@@ -194,10 +194,11 @@ from src.Base.numerics.constants import (CONTINUATION_ROUTE,
 from src.Base.declaration import Excitation
 from src.environments.environment import equilibrium_environment
 from src.Base.geometry.geometry import elements_of, molecule_at
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.pyscf.scf_convergence import WarmStart
 from src.Base.factorization.separable_ri import (frame_turning_record, resolve_isdf_grid,
                                                  shell_tuple)
+from src.Base.utils.record_compat import stamp_unless
 from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distributed,
                                               is_root, mpi_map, n_ranks)
 from src.SingleReference.GW.qp_selection import AdaptivePartition
@@ -213,11 +214,11 @@ from src.photophysics.minimum import (GW_BSE, GroundModes,
                                       from_gw_bse_record)
 from src.photophysics.records import (StageRefused, following, label, log,
                                       refreeze_summary, walk_fields)
+from src.photophysics.walks import checked_minimum, restart_from, walk_progress
 from src.gradients.gwbse.diagnostics import qp_bookkeeping
 from src.properties.duschinsky import read_orca_hessian
 from src.properties.excitations import (grid_record, relaxation_fields,
-                                        relaxation_flags, saddle_check,
-                                        saddle_verdict, surface_of)
+                                        relaxation_flags, surface_of)
 from src.properties.hessian import (REFERENCE_FRAMES, numerical_hessian,
                                     require_hessian_counts,
                                     translation_residual)
@@ -226,7 +227,7 @@ from src.properties.optimize import (relax, resolved_conv, saddle_test,
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.environments import solvation_loop as sl
 from src.gradients.solvated_surface import SolvatedSurface
-from src.properties.spin_orbit import spin_orbit_couplings
+from src.properties.spin_orbit import declared_operator, spin_orbit_couplings
 from src.properties.spin_vibronic import (merge_scf_flags,
                                           condon_element, spin_vibronic_coupling)
 from src.gradients.surface import lockstep_geometry
@@ -243,12 +244,10 @@ CHECKED_STAGES = ('vert', 's1', 't1')
 # ----------------------------------------------------------------- stamps
 def scf_stamp(numerics):
     """The scf section a stamp holds: its record, the mean field's own fit
-    (test_set, pivot_points) left out where undeclared: a stamp without
-    them is a run that declared neither."""
+    (test_set, pivot_points) left out where undeclared (`stamp_unless`)."""
     record = numerics.to_record()['scf']
     for name in ('test_set', 'pivot_points'):
-        if record.get(name) is None:
-            record.pop(name, None)
+        stamp_unless(record, name, record.get(name))
     return record
 
 
@@ -270,15 +269,12 @@ class Stamps:
                   'mean_field': mean_field,
                   'scf': scf_stamp(n),
                   'span': span}
-        if d.policies.r0 != 'walk':
-            # stamped only where R0 is not walked: a stamp without r0 is a
-            # walked run
-            ground['r0'] = d.policies.r0
-        if d.scheme_b:
-            # stamped under scheme B only: a stamp without it is a gas or
-            # scheme-A run, which the environment already tells apart
-            ground['solvent_scheme'] = {'scheme': d.solvent_scheme,
-                                        'loop': n.to_record()['solvent']}
+        # each stamped only away from what its absence means
+        # (record_compat.STAGE_STAMP_ABSENT)
+        stamp_unless(ground, 'r0', d.policies.r0)
+        stamp_unless(ground, 'solvent_scheme',
+                     {'scheme': d.solvent_scheme,
+                      'loop': n.to_record()['solvent']} if d.scheme_b else None)
         hess = dict(ground, hessian=d.policies.hessian)
         if d.policies.hessian == 'external':
             hess['external_hessian'] = d.policies.external_hessian.sha256
@@ -292,9 +288,7 @@ class Stamps:
                         # and place their points on R0's frames
                         fd_hessian={'pair_layout': 'reference',
                                     'frames': REFERENCE_FRAMES})
-        # the property set, stamped where it is not every property alone
-        partial = ({} if d.policies.properties == 'all'
-                   else {'properties': d.policies.properties})
+        partial = stamp_unless({}, 'properties', d.policies.properties)
         vert = dict(ground, numerics=n.identity(), **partial,
                     factors=chain.grid_content(n.isdf.level, mol),
                     kernel=d.kernel, ground=d.ground,
@@ -665,12 +659,9 @@ class Run:
         start = np.array(mol.atom_coords(), float)
         nudge, restarted = p.nudge_bohr, None
         if d.scheme_b and resume is not None and resume.get('surface') is None:
-            restarted = {'walk_pass': int(resume['pass']),
-                         'accepted_steps': len(resume['history']),
-                         'G': float(resume['energy'])}
-            mol = self.molecule_at(np.asarray(resume['coords'], float))
-            if resume.get('hessian') is not None:
-                given['hess_init'] = np.asarray(resume['hessian'], float)
+            mol, hessian, restarted = restart_from(resume, self.molecule_at)
+            if hessian is not None:
+                given['hess_init'] = hessian
             nudge, resume = 0.0, None
         if stage is not None and p.engine != 'cartesian':
             workdir = self.store.workdir(f'geometric_{stage}')
@@ -704,17 +695,9 @@ class Run:
 
     def progress(self, stage, start):
         """The walk state '<stage>_progress' holds for a walk from `start` on
-        this declaration, or None. Another stamp refuses the run; a walk
-        from another start is walked again and its progress overwritten."""
+        this declaration, or None (`walks.walk_progress`)."""
         name = f'{stage}_progress'
-        if not self.store.has(name):
-            return None
-        held = self.read(name)
-        if not np.array_equal(held['start_bohr'], start.atom_coords()):
-            log(f'WARNING {name} is a walk from another start; walking again '
-                f'from this one')
-            return None
-        return held['state']
+        return walk_progress(self.store, name, self.stamp(name), start)
 
     def restored(self, record):
         """The relaxed states' surface rebuilt from its record
@@ -807,10 +790,8 @@ class Run:
             log(f'{stage}: {name} Hessian at the new minimum')
             return moved, dict(again, final_surface=last)
 
-        # the Hessian's forces at full loop tolerances (SolvatedSurface.untied)
-        untied = getattr(final, 'untied', None)
-        moved, again, record = saddle_check(
-            final if untied is None else untied(), mol, walk, verbose=self.store.root_rank,
+        moved, again, record, flags = checked_minimum(
+            final, mol, walk, stage, verbose=self.store.root_rank,
             cache_dir=self.store.workdir(f'hess_{stage}'))
         first = record['first']
         log(f'{stage}: {name} lowest internal curvature '
@@ -818,7 +799,7 @@ class Run:
             f'{first["tolerance"]:.1e}): {record["status"]}', t0)
         if again is None:
             info = dict(info, numerical_flags=dict(
-                info.get('numerical_flags') or {}, **saddle_verdict(stage, record)))
+                info.get('numerical_flags') or {}, **flags))
             return mol, info, root, final, record
         again.pop('final_surface', None)
         record['saddle_walk'] = walk_fields(info)
@@ -827,9 +808,7 @@ class Run:
             f'{record.get("energy_drop", float("nan")) * HARTREE_TO_MEV:.2f}'
             f' meV below it')
         # the policy: refuse inputs, warn numerics
-        again['numerical_flags'] = dict(
-            relaxation_flags(f'{stage} escape', again),
-            **saddle_verdict(stage, record))
+        again['numerical_flags'] = flags
         return moved, again, walked_['root'], walked_['final'], record
 
     def analytic_df_hessian(self):
@@ -851,6 +830,8 @@ class Run:
         def build():
             factory = self.mean_field_factory(twin)
             mf = chain.solvated(self.env, factory)(self.mol0)
+            from src.environments.pcm_derivatives import require_pyscf_pcm_hessian_fits
+            require_pyscf_pcm_hessian_fits(mf)
             return np.asarray(mf.Hessian().kernel())
         comm, root = current_comm(), is_root()
         with distributed(None):
@@ -971,7 +952,7 @@ def merged_flags(*parts):
 
 # ------------------------------------------------------------ properties
 def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
-                        spin_orbit=True):
+                        spin_orbit=True, *, numerics):
     """Everything a rate needs at one geometry, off ONE evaluation: the
     energies of every reported root, the oscillator strengths and transition
     dipoles, the spin-orbit table, d(S0, S), d(S, S+1), d(T, T+1) and the
@@ -983,14 +964,18 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
     None for every derivative (d_ground, nac, soc_dv_cart, soc_dv_paths).
     spin_orbit=False (policies.properties 'energies'): the energies,
     oscillator strengths and dipoles, and None for the spin-orbit table, the
-    Condon element and every derivative; derivatives must be False then."""
+    Condon element and every derivative; derivatives must be False then.
+    numerics: the run's `Numerics`, whose properties section names the
+    spin-orbit operator (`spin_orbit.declared_operator`); the record names
+    it ('soc_term'; a record without it holds the exact SOMF's table, the
+    pass before the declaration existed)."""
     if spin_orbit is False and derivatives:
         raise ValueError('the derivative couplings read the spin-orbit pass')
     nocc = occupied_count(ev.mf)
     singlet, triplet = ev.spectrum['singlet'], ev.spectrum['triplet']
     f_osc, dipole = oscillator_strengths(ev.mf, ev.mol, nocc, *singlet)
     soc = (spin_orbit_couplings(ev.mf, ev.mol, nocc, singlet, triplet,
-                                nroots=n_states, two_electron='somf')
+                                nroots=n_states, numerics=numerics)
            if spin_orbit else None)
     keys = list(ev.energy)
     common = {'coords_bohr': ev.mol.atom_coords(), 'e0': ev.e0,
@@ -999,7 +984,8 @@ def geometry_properties(ev, s_key, t_key, n_states, derivatives=True,
               'root': {label(k): int(ev.root[k]) for k in keys},
               'emitter': label(s_key), 'reservoir': label(t_key),
               'f_osc': f_osc[:n_states], 'dipole': dipole[:n_states],
-              'socme': None if soc is None else soc['socme']}
+              'socme': None if soc is None else soc['socme'],
+              'soc_term': None if soc is None else declared_operator(numerics)}
     if soc is None:
         return dict(common, d_ground=None, nac=None, soc_v0=None,
                     soc_v0_vector=None, soc_dv_cart=None, soc_dv_paths=None,
@@ -1210,7 +1196,7 @@ def vertical(run, walks_next=False):
         return run.read('vert')
     props = geometry_properties(ev, run.s_key, run.t_key, d.n_states,
                                 derivatives=derivatives,
-                                spin_orbit=spin_orbit)
+                                spin_orbit=spin_orbit, numerics=d.numerics)
     record = {'props': props, 'seconds': time.time() - t0,
               'residues': d.numerics.qp.residue_route,
               'qp_states': man.chain.realization.qp_states,
@@ -1220,7 +1206,7 @@ def vertical(run, walks_next=False):
               'qp_partition': (None if run.partition is None
                                else run.partition.as_record()),
               'factor_layout': chain.factor_layout(man),
-              'method': GW_BSE, 'kernel': d.kernel}
+              'method': GW_BSE, 'kernel': d.kernel, 'solvation': d.solvation}
     run.write('vert', record)
     report_properties('vert (R0)', props)
     log('vert done', t0)
@@ -1250,7 +1236,8 @@ def scheme_b_vertical(run):
     props = free_energies(
         geometry_properties(ev, run.s_key, run.t_key, d.n_states,
                             derivatives=d.policies.properties == 'all',
-                            spin_orbit=d.policies.properties == 'all'),
+                            spin_orbit=d.policies.properties == 'all',
+                            numerics=d.numerics),
         {label(run.s_key): e0 + r['singlet']['absorption'],
          label(run.t_key): e0 + r['triplet']['absorption']}, e0)
     absorption_flags = {label(k): r[k[0]]['flags']
@@ -1336,7 +1323,8 @@ def finish_minimum(run, stage, walked, t0, extra):
                       couplings=(following(*s_key), following(*t_key)))
     if singlet:
         run.first['t1'] = (man, ev, mol)
-    props = geometry_properties(ev, s_key, t_key, d.n_states)
+    props = geometry_properties(ev, s_key, t_key, d.n_states,
+                                numerics=d.numerics)
     record = {'props': props, 'root_followed': root,
               'solvation': d.solvation,
               'adaptive_posteriori': run.posteriori(man, ev, key),
@@ -1387,7 +1375,8 @@ def scheme_b_minimum(run, stage, walked, t0, extra):
         e0, vertical_g = final.last_ground['result'].energy, r['G']['neq_state']
     else:
         e0, vertical_g = g_walk - r['emission'], r['G']['eq_state']
-    props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states),
+    props = free_energies(geometry_properties(ev, s_key, t_key, d.n_states,
+                                              numerics=d.numerics),
                           {label(key): g_walk}, e0)
     refrozen = relaxation_fields(info).get('refreeze') in ('measured',
                                                            'not converged')

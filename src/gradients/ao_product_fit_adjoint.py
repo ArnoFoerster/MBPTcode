@@ -90,6 +90,7 @@ from src.gradients.isdf_fit_adjoint import (centre_forces, collocation_rows,
                                             tiles_at_root)
 from src.environments.environment import dresses_interaction
 from src.Base.pyscf.pyscf_interface import auxmol_of
+from src.Base.factorization.shell_runs import function_atoms, functions_to_atoms
 from src.gradients.isdf_adjoint_pieces import (GaugeAdjoint, PointChain,
                                                basis_centre_forces,
                                                isdf_exchange_adjoints,
@@ -271,12 +272,7 @@ def _projection_adjoint(mol, auxmol, X, E_bar, X_bar, numerics):
     reduce_sum(t_ao, comm)
     X_bar += x_bar
     aux_total = ordered_sum(aux_terms, comm, shape=(3, naux))
-    grad = np.zeros((mol.natm, 3))
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        grad[ia] += t_ao[:, p0:p1].sum(axis=1)
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        grad[ia] += aux_total[:, q0:q1].sum(axis=1)
-    return grad
+    return functions_to_atoms(t_ao, mol) + functions_to_atoms(aux_total, auxmol)
 
 
 def row_fit_adjoints(test_set, mol, auxmol, coords, layout, targets,
@@ -504,12 +500,7 @@ def _projection_rows_adjoint(mol, auxmol, coords, Ub, X_own, tiles, owners,
     width = [a1 - a0 for _, _, a0, a1 in runs]
     order = sorted(range(len(runs)), key=lambda ib: (-width[ib], ib))
     owner_of = {ib: c % nranks for c, ib in enumerate(order)}
-    ao_atom = np.empty(nao, dtype=int)
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        ao_atom[p0:p1] = ia
-    aux_atom = np.empty(naux, dtype=int)
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        aux_atom[q0:q1] = ia
+    ao_atom, aux_atom = function_atoms(mol), function_atoms(auxmol)
     batches, current, load = [], [], np.zeros(nranks)
     for c0 in range(0, len(order), nranks):
         add = np.zeros(nranks)

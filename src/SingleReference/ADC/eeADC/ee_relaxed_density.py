@@ -76,9 +76,9 @@ tensor whole) and the orbital response shared with the tiled route
 (`relaxed_density`).
 """
 import numpy as np
-from pyscf import lib, scf
-from pyscf import df as pyscf_df
+from pyscf import lib
 
+from src.Base.factorization.distributed_df import correlation_df
 from src.Base.numerics.constants import DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB
 from src.Base.pyscf import cphf
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
@@ -87,8 +87,8 @@ from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
                                                       doubles_denominator, singlet_pairs,
                                                       spin_weights, tile_amplitude_fock,
                                                       triplet_pairs)
-from src.SingleReference.ADC.eeADC.ee_ri_density import (Pass, oo_contract, tile_ranges,
-                                                     vv_contract)
+from src.SingleReference.ADC.eeADC.ee_ri_tiles import (Pass, oo_contract, tile_ranges,
+                                                   vv_contract)
 # symmetrize is also read from here (df_correlation_force_tiled: erd.symmetrize)
 from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
@@ -132,40 +132,6 @@ def dense_inputs(op):
     L = f.LT.transpose(1, 2, 0)
     return (np.array(f.eo), np.array(f.ev), np.ascontiguousarray(L),
             np.ascontiguousarray(f.Boo), np.ascontiguousarray(Bvv))
-
-
-def dense_phi(inp, y, omega, spin, level='adc2', rf=None, scaling=None):
-    """Phi = y^T A_eff(omega) y from whole tensors (module docstring); rf a
-    TransitionReactionField or None; scaling (c_os, c_ss) of SCS-ADC(2) or
-    None."""
-    eo, ev, L, Boo, Bvv = inp
-    no, nv = eo.size, ev.size
-    y = np.asarray(y, float).reshape(no, nv)
-    singlet = spin == 'singlet'
-    phi = float(np.sum(y * y * (ev[None, :] - eo[:, None])))
-    c = np.einsum('iaP,ia->P', L, y)
-    ex = np.einsum('ia,ijP,abP,jb->', y, Boo, Bvv, y)
-    phi += (2.0 * c @ c - ex) if singlet else -ex
-    if rf is not None and singlet:
-        q = rf.V.T @ y.ravel()
-        phi += 2.0 * q @ (rf.Q @ q)
-    if level == 'adc1':
-        return phi
-    I = np.einsum('iaP,jbP->iajb', L, L)
-    D = doubles_denominator(eo, ev)
-    tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
-    x_oo = 0.5 * np.einsum('kdic,kdjc->ij', I, tau)
-    x_vv = 0.5 * np.einsum('kalc,kblc->ab', I, tau)
-    xo, xv = x_oo + x_oo.T, x_vv + x_vv.T
-    if singlet:
-        K, T = 2.0 * I - I.transpose(PAIR), tau
-    else:
-        K, T = -I.transpose(PAIR), triplet_pairs(I, I.transpose(PAIR), scaling) / D
-    Ky = np.einsum('iakc,kc->ia', K, y)
-    Ty = np.einsum('iakc,kc->ia', T, y)
-    phi += float(np.sum(y * (xo @ y + y @ xv)) - np.sum(Ky * Ty))
-    R, H, _ = _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling)
-    return phi + float(np.sum(R * H))
 
 
 def _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling=None):
@@ -462,9 +428,7 @@ def core_factors(mol, mf, frozen, auxbasis=None):
     if auxbasis is None:
         with_df = mf.with_df
     else:
-        with_df = pyscf_df.DF(mol, auxbasis=auxbasis)
-        with_df.max_memory = mf.max_memory
-        with_df.build()
+        with_df = correlation_df(mol, auxbasis, mf.max_memory)
     C = np.asarray(mf.mo_coeff)
     Cc, Ca = C[:, :frozen], C[:, frozen:]
     out = []
@@ -519,16 +483,6 @@ def lr_potential(env, mol, C, q):
     return C.T @ U @ C
 
 
-def _gas_jk(mf):
-    """get_jk of mf's interaction without any continuum: the JK the SCF
-    Fock matrix is built from (density fitting included)."""
-    m = scf.RHF(mf.mol)
-    if getattr(mf, 'with_df', None) is not None:
-        m = m.density_fit(auxbasis=mf.with_df.auxbasis)
-        m.with_df = mf.with_df
-    return m.get_jk
-
-
 def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
                     env=None, pcm_response=False, numerics=None, flags=None):
     """Delta rho_rel (nmo, nmo), the full MO basis of mf (frozen core
@@ -565,11 +519,12 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
         zc = Xco / (eps[None, nf:nocc] - eps[:nf, None])
         G[:nf, nf:nocc] += 0.5 * zc
         G[nf:nocc, :nf] += 0.5 * zc.T
-    get_jk = _gas_jk(mf)
+    # mf's own interaction without any continuum (its JK fit included), the
+    # one kernel of the P term and of the orbital response below
+    kernel = cphf.ResponseKernel(mf)
     Co, Cv = C[:, :nocc], C[:, nocc:]
     P = C @ G @ C.T
-    vj, vk = get_jk(mol, P, hermi=1)
-    v = 4.0 * vj - 2.0 * vk
+    v = 4.0 * kernel(P)
     pcm = None
     if pcm_response:
         pcm = getattr(mf, 'with_solvent', None)
@@ -580,8 +535,6 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
 
     # the response of a rotation density Co (Cv z)^T + its transpose, from
     # the occupied half-transforms of the same fit (ResponseKernel.factored)
-    kernel = cphf.ResponseKernel(mf)
-
     def fvind(z):
         z = z.reshape(nocc_v)
         v = 2.0 * kernel.factored(Cv @ z)

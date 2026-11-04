@@ -1,4 +1,4 @@
-"""The legacy chain's defaults and the renamed keys.
+"""The excited-state chain's defaults and its renamed keys.
 
 WHAT BREAKS IF THIS FAILS. Two names would mean two things at once, and each
 would cost a comparison that looks sound:
@@ -58,9 +58,10 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.properties.optimize import resolved_conv
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 #: A quartic bond, in Bohr and Hartree: cheap enough to relax twice per
 #: spelling of the threshold, and -- unlike a harmonic one, which an RFO step

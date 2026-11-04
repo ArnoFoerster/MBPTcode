@@ -206,7 +206,8 @@ class SolvatedSurface(PotentialEnergySurface):
         if not self.noneq:
             return sl.force(state, field, r, flags)
         return sl.force_neq(state, self.last_ground['state'], field, r,
-                            self.last_ground['result'], flags)
+                            self.last_ground['result'], flags,
+                            self.loop_kw.get('numerics'))
 
     def _ground_loop(self, mol, field):
         """S0's equilibrium loop at `mol` (module docstring): (slow, q0 for

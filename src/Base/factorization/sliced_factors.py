@@ -2,22 +2,28 @@
 
 Replicated, every rank holds X_mo (M, nmo), X_ao (M, nao) and D (M, naux)
 whole at every stage. `SlicedFactors` keeps this rank's `contiguous_block` of
-the grid rows of all three, the block of Zt the BSE action already owns, and a
-stage that reads an array whole gathers it once (`gather`, an output
-partition: every row travels verbatim, so the gathered array is the
-replicated one bit for bit) and drops it when it returns.
+the grid rows of all three and the block of Zt the BSE action already owns.
 
-The chi0 sweep (GW window, BSE diagonal, static W; reads X_o, X_v, D whole)
-and the self-energy sweep (X_ao, D) contract the grid index on both sides of
-every M^2 GEMM (P x Q tiles over the whole grid), so they gather once per
-solve; dividing them as well would need a two-dimensional (row x column)
-decomposition with column blocks passed between ranks, which re-associates
-their sums. The block action reads X_v and D by rows once Zt = (D_rows W) D^T
-is built, and X_o whole in (Zt * P) X_o. The static exchange reads none of the
-three (the mean field's own K). The replicated fit forms X, X_mo, D and M
-whole on every rank before the cut; `separable_factors(fit='rows')` builds the
-rows directly (`separable_ri.fit_rows`, held through `from_rows`), so no rank
-holds any of them whole during the fit. The gradient chains hold the same rows
+The M^2 sweeps of the quasiparticle solve -- chi0 (GW window, static W) and
+the self-energy -- contract the grid index on both sides of every block, so
+they read the factors through fixed grid tiles (`GridTileRows`): the rows cut
+into tiles set by the grid and the budget alone (`grid_factor_tiles`), each
+held by one rank, and a sweep's (p, q) blocks run with the p tiles of the
+current pass fetched and every q tile streamed past from its owner in tile
+order (`GridTileRows.sweep`). No rank holds any factor whole, and what a rank
+holds falls with the rank count. Each tile is the same rows at every rank
+count and each block the same calls on them, so a sum the sweep adds in tile
+order is the one-rank sum, bitwise (W(0), the self-energy); a sum it joins
+over the ranks' partials re-associates (the GW chi0's proj(tau)). The block
+action reads X_v and D by rows once Zt = (D_rows W) D^T is built, D's rows
+reaching that product one owner's block at a time, and X_o whole in
+(Zt * P) X_o, gathered once (`gather`, an output partition: every row travels
+verbatim, so the gathered array is the replicated one bit for bit). The
+static exchange reads none of the three (the mean field's own K). The
+replicated fit forms X, X_mo, D and M whole on every rank before the cut;
+`separable_factors(fit='rows')` builds the rows directly
+(`separable_ri.fit_rows`, held through `from_rows`), so no rank holds any of
+them whole during the fit. The gradient chains hold the same rows
 (`FrozenFactorization(sliced=True)`); their adjoint kernels gather what they
 read whole once per sweep through `whole_factor`.
 
@@ -25,20 +31,65 @@ The slices are cut from the whole products because a row block of a GEMM is
 in general not the same bits as those rows of the whole GEMM ((D C)[r0:r1]
 against D[r0:r1] C). `separable_factors(sliced=True)` forms and locksteps X_mo
 and D as the replicated fit does and only then keeps this rank's rows, so
-every gathered array is the replicated array: on one mean field, and on a
-pyscf that repeats its bits, every distributed output is bitwise the
-replicated run's. pyscf's OpenMP GEMM adds its partial sums in thread-arrival
-order, so a gradient chain's own K builds and mean-field force differ between
-two runs, which are compared on an anchored bar. The row-distributed fit
-computes every array one fixed tile at a time, whoever owns the tile, so a
-rank's rows are bitwise the same rows of a one-rank run at any rank count: a
-different realization from the replicated fit, not its bits.
+every row is the replicated array's: on one mean field, and on a pyscf that
+repeats its bits, every distributed output is bitwise the replicated run's at
+the same rank count. pyscf's OpenMP GEMM adds its partial sums in
+thread-arrival order, so a gradient chain's own K builds and mean-field force
+differ between two runs, which are compared on an anchored bar. The
+row-distributed fit computes every array one fixed tile at a time, whoever
+owns the tile, so a rank's rows are bitwise the same rows of a one-rank run
+at any rank count: a different realization from the replicated fit, not its
+bits.
 """
+import contextlib
+import threading
+
 import numpy as np
 
+from src.Base.numerics.constants import BYTES_PER_GB, ISDF_TILE_GB
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, allgather_rows,
                                               broadcast_rows, contiguous_block,
-                                              current_comm, exchange_blocks, partition)
+                                              current_comm, exchange_blocks,
+                                              exchange_rows, partition)
+
+
+class _Ledger(threading.local):
+    """The open `tile_ledger` of this thread (one simulated rank), or None."""
+    current = None
+
+
+_LEDGER = _Ledger()
+
+
+@contextlib.contextmanager
+def tile_ledger():
+    """{'tiles': bytes, 'pass': bytes}: the most this rank held at once in
+    grid tiles (`GridTileRows` built while the ledger is open, the largest
+    one) and in one pass of a tile sweep (its fetched p tiles, the items'
+    arrays and the streamed tile), read off the arrays. Per thread, so each
+    simulated rank keeps its own."""
+    outer = _LEDGER.current
+    _LEDGER.current = {'tiles': 0, 'pass': 0}
+    try:
+        yield _LEDGER.current
+    finally:
+        _LEDGER.current = outer
+
+
+def _record(kind, nbytes):
+    """Note `nbytes` held at once under `kind` in this thread's ledger."""
+    led = _LEDGER.current
+    if led is not None:
+        led[kind] = max(led[kind], int(nbytes))
+
+
+def _array_bytes(state):
+    """Bytes of the arrays an item's state holds."""
+    if isinstance(state, np.ndarray):
+        return state.nbytes
+    if isinstance(state, (list, tuple)):
+        return sum(_array_bytes(x) for x in state)
+    return 0
 
 
 class SlicedFactors:
@@ -112,6 +163,23 @@ class SlicedFactors:
     @property
     def naux(self):
         return self.D.shape[1]
+
+    def coulomb_rows(self, D=None):
+        """This rank's rows of the Coulomb factor a sweep reads beside these
+        collocations: the factors' own D (D None or these factors), or this
+        rank's rows of a whole D on the same grid -- another gauge of it, as
+        a reaction field's bare factor is. Anything else is refused."""
+        if D is None or D is self:
+            return self.D
+        if isinstance(D, SlicedFactors):
+            raise ValueError('a Coulomb factor beside sliced factors is their '
+                             'own or a whole array on their grid, not other '
+                             'sliced factors')
+        D = np.asarray(D)
+        if D.ndim != 2 or D.shape[0] != self.npts:
+            raise ValueError(f'a whole D beside sliced factors has '
+                             f'{self.npts} grid rows; got shape {D.shape}')
+        return D[self.rows[0]:self.rows[1]]
 
     def require(self, comm):
         """Refuse a consumer running over any other rank layout than the one
@@ -200,6 +268,8 @@ class GridTileRows:
             raise ValueError(f'rows {rows.shape} are not the {at} rows of rank '
                              f'{self.rank} of {size} in tiles of {self.block}')
         self.rows = np.ascontiguousarray(rows)
+        self.pass_gb = ISDF_TILE_GB
+        _record('tiles', self.rows.nbytes)
 
     def owned(self, rank):
         """The tiles `rank` owns, in order."""
@@ -317,6 +387,180 @@ class GridTileRows:
             broadcast_rows(buf, t % self.size, self.comm)
         return buf
 
+    @classmethod
+    def from_rows(cls, rows, npts, block, comm=None, order=None):
+        """This rank's tiles from every rank's `contiguous_block` rows of an
+        (npts, ncol) array, the tiles cut from the grid taken in `order`: a
+        permutation, position i of the tiled array holding grid row
+        order[i]; None is the grid's own order. One windowed exchange
+        (`exchange_rows`), every row verbatim."""
+        out = cls.zeros(npts, rows.shape[1], block, comm)
+        if order is not None:
+            order = np.asarray(order, dtype=np.intp)
+        if out.comm is None:
+            out.rows[...] = rows if order is None else rows[order]
+            return out
+        size = out.size
+        starts = [contiguous_block(out.npts, r, size)[0] for r in range(size)]
+        r0, r1 = contiguous_block(out.npts, out.rank, size)
+        mine = np.arange(r0, r1)
+        if order is None:
+            pos = mine
+        else:
+            where = np.empty(out.npts, dtype=np.intp)
+            where[order] = np.arange(out.npts)
+            pos = where[mine]
+        owner = (pos // out.block) % size
+        sort = np.lexsort((pos, owner))
+        send = np.ascontiguousarray(rows[sort])
+        counts = np.bincount(owner, minlength=size)
+        edges = np.concatenate([[0], np.cumsum(counts)])
+        held = np.concatenate([np.arange(*out.bounds[t]) for t in out.mine]
+                              + [np.empty(0, dtype=np.intp)])
+        source = held if order is None else order[held]
+        peer = np.searchsorted(starts, source, side='right') - 1
+        land = np.concatenate([np.flatnonzero(peer == r) for r in range(size)])
+        got = np.empty_like(out.rows)
+        lands = np.concatenate([[0], np.cumsum(np.bincount(peer,
+                                                            minlength=size))])
+        exchange_rows(send, [(int(edges[r]), int(edges[r + 1]))
+                             for r in range(size)],
+                      got, [(int(lands[r]), int(lands[r + 1]))
+                            for r in range(size)], out.comm)
+        out.rows[land] = got
+        return out
+
+    @classmethod
+    def from_columns(cls, parts, block, comm=None, order=None):
+        """This rank's tiles of [parts[0] | parts[1] | ...], whole arrays of
+        one row count, the rows taken in `order` as for `from_rows`: each
+        tile stacked from the parts' own rows, so no whole stack is formed."""
+        npts = parts[0].shape[0]
+        out = cls.zeros(npts, sum(p.shape[1] for p in parts), block, comm)
+        for t in out.mine:
+            t0, t1 = out.bounds[t]
+            rows = slice(t0, t1) if order is None else np.asarray(order)[t0:t1]
+            out.tile(t)[...] = np.hstack([p[rows] for p in parts])
+        return out
+
+    def map_tiles(self, fn, ncol):
+        """A new layout of `ncol` columns whose tile t is fn(tile t's rows),
+        computed on its owner one fixed tile at a time, so each tile is the
+        same bits whoever owns it."""
+        tiles = [np.asarray(fn(self.tile(t))) for t in self.mine]
+        rows = np.concatenate(tiles) if tiles else np.empty((0, int(ncol)))
+        out = GridTileRows(rows, self.npts, self.block, self.comm)
+        out.pass_gb = self.pass_gb
+        return out
+
+    def fetch(self, wanted):
+        """{t: tile t's rows} for every tile of `wanted`, this rank's list:
+        each a fresh C-contiguous copy, its owner's rows verbatim, the owner's
+        own included, so every rank computes on the same arrays. A collective:
+        the lists travel first (one small allgather), then one
+        `exchange_rows` per round hands each rank its next tile."""
+        wanted = [int(t) for t in wanted]
+        ncol = self.rows.shape[1]
+        if self.comm is None:
+            return {t: np.array(self.tile(t)) for t in wanted}
+        lists = self.comm.allgather(wanted)
+        out = {}
+        for j in range(max(len(own) for own in lists)):
+            asks = [own[j] if j < len(own) else None for own in lists]
+            send = []
+            for t in asks:
+                if t is not None and t in self.offsets:
+                    at = self.offsets[t]
+                    send.append((at, at + self.bounds[t][1] - self.bounds[t][0]))
+                else:
+                    send.append((0, 0))
+            t = asks[self.rank]
+            if t is None:
+                buf, recv = np.empty((0, ncol)), [(0, 0)] * self.size
+            else:
+                n = self.bounds[t][1] - self.bounds[t][0]
+                buf = np.empty((n, ncol))
+                recv = [(0, n) if r == t % self.size else (0, 0)
+                        for r in range(self.size)]
+            exchange_rows(self.rows, send, buf, recv, self.comm)
+            if t is not None:
+                out[t] = buf
+        return out
+
+    def stream(self):
+        """(t, tile t's rows) for every tile in order, on every rank: each
+        sent by its owner into one buffer that is reused, so read a tile
+        before asking for the next. Serially the tile is copied into the
+        same buffer, so a kernel reads the same arrays at every rank count.
+        A collective: every rank runs the whole stream."""
+        buf = np.empty((self.block, self.rows.shape[1]))
+        for t, (t0, t1) in enumerate(self.bounds):
+            view = buf[:t1 - t0]
+            if t in self.offsets:
+                view[...] = self.tile(t)
+            if self.comm is not None:
+                broadcast_rows(view, t % self.size, self.comm)
+            yield t, view
+
+    def sweep(self, items, start, step, finish, item_bytes):
+        """Run this rank's `items`, [(key, p)] with p a tile, against every
+        tile q of the grid, q ascending: the (p, q) block sweep of an M^2
+        kernel whose p rows a rank holds while the q rows stream past.
+
+        The items go in passes, each as many of them, in order, as
+        `item_bytes(p)` fits into `pass_gb` (the layout's budget, set by the
+        builder of the tiles); a pass fetches its p tiles
+        (`fetch`) and streams the grid once (`stream`). For each item,
+        state = start(key, p, rows of p), then step(state, q, rows of q) for
+        every q in order, then finish(key, p, rows of p, state), items in
+        their order. Every tile is the same rows at every rank count and each
+        item runs the same calls on them, so an item's result does not depend
+        on the rank count or on the pass it fell into. A collective: every
+        rank runs the most passes any rank needs, with an empty pass where it
+        has none left."""
+        passes, cur, used = [], [], 0.0
+        budget = self.pass_gb * BYTES_PER_GB
+        for key, p in items:
+            need = float(item_bytes(p))
+            if cur and used + need > budget:
+                passes.append(cur)
+                cur, used = [], 0.0
+            cur.append((key, p))
+            used += need
+        if cur:
+            passes.append(cur)
+        npass = (len(passes) if self.comm is None
+                 else max(self.comm.allgather(len(passes))))
+        for j in range(npass):
+            work = passes[j] if j < len(passes) else []
+            rows = self.fetch(sorted({p for _, p in work}))
+            states = [start(key, p, rows[p]) for key, p in work]
+            _record('pass', sum(a.nbytes for a in rows.values())
+                    + _array_bytes(states)
+                    + self.block * self.rows.shape[1] * 8)
+            for q, rows_q in self.stream():
+                for state in states:
+                    step(state, q, rows_q)
+            for (key, p), state in zip(work, states):
+                finish(key, p, rows[p], state)
+            del rows, states
+
+
+def column_tiles(parts, npts, block, comm=None, order=None, whole=None):
+    """`GridTileRows` of [parts[0] | parts[1] | ...] in tiles of `block`
+    rows, the grid taken in `order` (`GridTileRows.from_rows`).
+
+    The parts are this rank's `contiguous_block` rows of each array
+    (`SlicedFactors`' layout) under a communicator of more than one rank,
+    and whole arrays serially or where `whole` says so (factors replicated
+    on every rank): either way a rank keeps its tiles alone, and the tiles
+    are the same rows."""
+    size = 1 if comm is None else comm.Get_size()
+    if whole is None:
+        whole = size == 1
+    if whole:
+        return GridTileRows.from_columns(parts, block, comm, order)
+    return GridTileRows.from_rows(np.hstack(parts), npts, block, comm, order)
 
 def _overlap(layout, tiles, span):
     """[lo, hi) of each of `tiles` inside the row range `span`, in order,

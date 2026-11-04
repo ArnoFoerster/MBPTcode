@@ -37,9 +37,10 @@ from src.environments.solvent_screening import SolventScreening  # noqa: E402
 from src.gradients.gwbse.excited_state import ExcitedStateChain  # noqa: E402
 from src.gradients.gwbse.diagnostics import qp_bookkeeping  # noqa: E402
 from tests.isdf_test_grid import g1_numerics  # noqa: E402
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Exact bookkeeping: the scissor is a sum of the same floats.
 EXACT_HA = 1e-12
 #: How far a scissored orbital's solvation shift may sit from its own

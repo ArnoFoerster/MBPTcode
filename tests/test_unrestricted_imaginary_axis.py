@@ -51,8 +51,9 @@ from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 OH = 'O 0 0 0; H 0 0 0.97'
 BASIS = 'cc-pvdz'
 AUX = 'cc-pvdz-ri'

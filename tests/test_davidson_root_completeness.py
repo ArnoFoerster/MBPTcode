@@ -44,10 +44,11 @@ from src.SingleReference.LinearResponse.davidson import (DavidsonNotConverged,
                                                          DavidsonRefusal,
                                                          _dense_casida,
                                                          run_davidson)
+from tests.molecules import WATER_CS
 
 BASIS = 'cc-pvdz'
 MOLECULES = {
-    'water': 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24',
+    'water': WATER_CS,
     'formaldehyde': 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.59; H 0 -0.94 -0.59'}
 #: Ha: the Davidson roots against the dense ones, at conv_tol = CONV_TOL
 ROOT_TOL = 1e-7

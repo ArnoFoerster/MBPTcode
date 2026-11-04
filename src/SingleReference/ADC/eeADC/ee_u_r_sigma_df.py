@@ -40,6 +40,7 @@ the same arrangement that validated the closed-shell DF path.
 """
 import numpy as np
 
+from src.Base.numerics.constants import FLOAT64_PER_GB
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
@@ -180,7 +181,7 @@ class UDFVvvvKernels(_eq.VvvvKernels):
 
     def _chunks(self, per_aux_elems):
         naux = self.Bvv['a'].shape[0]
-        n = max(1, min(naux, int(self.mem_gb * 1.25e8 / max(per_aux_elems, 1))))
+        n = max(1, min(naux, int(self.mem_gb * FLOAT64_PER_GB / max(per_aux_elems, 1))))
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------

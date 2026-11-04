@@ -6,7 +6,7 @@ ee_transition_density writes the transition densities once, in spin orbitals,
 and evaluates them with every doubles-sized array whole (o^2 v^2), the route
 of small molecules and the oracle of this one. Here the same terms (its
 names) are evaluated for one spin channel of a closed shell from the tiled
-operators of ee_ri_fold, as ee_ri_density does for a root's own density.
+operators of ee_ri_fold; ee_ri_density is the pair (k, k) of a root with itself.
 
 Spin cases. A root of parity s (+1 singlet, -1 Ms = 0 triplet) is a flip
 eigenvector, so the beta block of <l|a^dag_p a_q|r> is s_l s_r times the
@@ -20,7 +20,7 @@ density only, two roots of one spin charge only. With x the alpha singles
 (sqrt(T1 / 2) y), Z, W the opposite- and same-spin doubles of ee_ri_density
 (W and the amplitudes tau, ts symmetric under the pair swap (i a) <-> (j b),
 Z of parity s), T_p v = (ts + p tau) v and the tile contractions
-oo_contract, vv_contract of ee_ri_density, the alpha block of a pair (l, r)
+oo_contract, vv_contract of ee_ri_tiles, the alpha block of a pair (l, r)
 is
 
     oo_dd   -2 [oo(W^r, W^l) + 2 s_l s_r oo(Z^r, Z^l)]
@@ -62,7 +62,7 @@ t1_2 (p0_ov) c, and the second-order amplitudes are built from the scaled
 first-order ones.
 
 Every pass deals tiles over the operators' ranks and sums them in tile order
-(ee_ri_density.Pass, ordered_chain_sum): the same bits at every rank count at one
+(ee_ri_tiles.Pass, ordered_chain_sum): the same bits at every rank count at one
 tile size, and the memory per rank a few tiles (plus the factors and, for
 the ground row, B_vv on its node).
 """
@@ -75,7 +75,7 @@ from src.Base.utils.parallel.mpi_grid import NodeShared, broadcast_rows
 from src.SingleReference.common import df_ladder
 from src.SingleReference.common.df_amplitudes import doubles_denominator
 from src.SingleReference.ADC.eeADC.ee_transition_density import assemble
-from src.SingleReference.ADC.eeADC.ee_ri_density import (Pass, tile_amplitudes, tile_doubles,
+from src.SingleReference.ADC.eeADC.ee_ri_tiles import (Pass, tile_amplitudes, tile_doubles,
                                                      oo_contract, tile_ranges, vv_contract)
 
 GROUND = ('ground', 0)

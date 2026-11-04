@@ -27,10 +27,11 @@ from src.SingleReference.LinearResponse import (block_actions, davidson,
                                                 trial_space)
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
+from tests.molecules import WATER
 
 CHOICES = ('nroots', 'conv_tol', 'max_cycle', 'guess_factor',
            'preconditioner')
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 
 
 def test_the_entry_points_take_the_object():

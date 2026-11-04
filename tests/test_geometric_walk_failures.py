@@ -31,6 +31,7 @@ from src.properties.optimize import optimize_geometric
 
 geometric_optimize = pytest.importorskip('geometric.optimize')
 from geometric.errors import GeomOptNotConvergedError  # noqa: E402
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 #: Bohr: where the stub's last evaluation stands, off the start.
 STEP = 0.01
@@ -65,7 +66,7 @@ class Harmonic:
 
 @pytest.fixture
 def water():
-    return gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59',
+    return gto.M(atom=WATER_AT_ORIGIN_COARSE,
                  basis='sto-3g', verbose=0)
 
 

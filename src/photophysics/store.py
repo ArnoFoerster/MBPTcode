@@ -27,10 +27,11 @@ fields at the values they always held is that stamp without them
 resume on another commit or BLAS is allowed and visible.
 
 Under ranks the store reads the communicator of the enclosing
-`distributed(comm)` block: rank 0 alone touches the disk, to write (a barrier
-follows every write) and to read or look: what it finds is broadcast, so every
-rank holds the same record whatever its view of the filesystem, and no rank
-reads a file that rank 0 is replacing. Every call of `has`, `names`, `held`,
+`distributed(comm)` block: rank 0 alone touches the disk, to write and to read
+or look, and what it finds or raises is broadcast: every rank holds the same
+record whatever its view of the filesystem, no rank reads a file that rank 0
+is replacing, and a write that fails on rank 0 (a full disk, a quota) raises on
+every rank instead of leaving the others waiting. Every call of `has`, `names`, `held`,
 `read`, `reusable`, `update`, `write`, `write_xyz`, `set_aside` and `workdir`
 is therefore collective: every rank makes it. The stages themselves hold no
 communicator.
@@ -40,10 +41,11 @@ import functools
 import json
 import os
 import pathlib
+import pickle
 import platform
 
 from src.Base.numerics.constants import BOHR_TO_ANGSTROM
-from src.Base.numerics.numerics import without_retired
+from src.Base.utils.record_compat import retired_dropped
 from src.Base.utils.record_io import git_commit, read_record, record_hash, write_record
 from src.Base.utils.parallel.mpi_grid import broadcast, current_comm, is_root, n_ranks
 from src.Base.utils.parallel.threads import blas_libraries
@@ -68,27 +70,14 @@ def provenance():
             'written': datetime.datetime.now().isoformat(timespec='seconds')}
 
 
-def _without_retired_scf(tree):
-    """`tree` with every scf section in it (a stage's, and the Hessian
-    stage's inside a later stage's stamp) read through `without_retired`."""
-    out = {}
-    for key, value in tree.items():
-        if key == 'scf' and isinstance(value, dict):
-            value = without_retired({'scf': value})['scf']
-        elif isinstance(value, dict):
-            value = _without_retired_scf(value)
-        out[key] = value
-    return out
-
-
 def stamp_as_read(stamp):
     """The held `stamp` as the current code writes it: the retired fields
-    (`numerics.IDENTITY_RETIRED`) at the values they always held left out
+    (`record_compat.NUMERICS_RETIRED`) at the values they always held left out
     and its identity hashed again; a retired field at another value refuses.
     A stamp that names no retired field is returned as it is."""
     bare = {k: v for k, v in stamp.items() if k != 'identity'}
     try:
-        now = _without_retired_scf(bare)
+        now = retired_dropped(bare)
     except ValueError as exc:
         raise StoreRefused(str(exc)) from exc
     if now == bare:
@@ -114,18 +103,56 @@ def _sync_record(path):
     _sync(path.parent)
 
 
+def on_root(act):
+    """`act()` made on rank 0 alone of the enclosing distribution, and its
+    value, or the exception it raised, on every rank: what the disk shows is
+    one fact, however each rank's view of the filesystem is cached or
+    delayed, and a write that fails there fails everywhere. The broadcast is
+    the synchronization: no rank returns before rank 0 has finished."""
+    comm = current_comm()
+    if comm is None:
+        return act()
+    verdict = raised = None
+    if is_root():
+        try:
+            verdict = ('value', act())
+        except Exception as exc:
+            raised = exc
+            verdict = ('raised', _sendable(exc))
+    kind, got = broadcast(verdict, comm)
+    if raised is not None:
+        raise raised
+    if kind == 'raised':
+        raise got
+    return got
+
+
 class Store:
     """One run's records (module docstring). `root` is the directory the
-    caller names; the run's own directory is root/<system>/<environment>."""
+    caller names; the run's own directory is root/<system>/<environment>
+    (`Store.at`: a directory of its own)."""
 
     def __init__(self, root, declaration):
-        self.dir = (pathlib.Path(root).resolve() / declaration.system.name
-                    / declaration.environment_dir)
         medium = None if declaration.gas else parse_medium(declaration.environment)
-        self.medium = None if medium is None else medium.record()
-        if self.root_rank:
-            self.dir.mkdir(parents=True, exist_ok=True)
-        self.barrier()
+        self._open(pathlib.Path(root) / declaration.system.name
+                   / declaration.environment_dir,
+                   None if medium is None else medium.record())
+
+    @classmethod
+    def at(cls, directory, medium=None):
+        """A store whose records are in `directory` itself, outside a
+        declaration's layout (the solvated driver's walk progress), each
+        carrying `medium` (a medium's record, or None)."""
+        store = cls.__new__(cls)
+        store._open(pathlib.Path(directory), medium)
+        return store
+
+    def _open(self, directory, medium):
+        """Hold `directory` (made by rank 0) and the `medium` every record
+        carries."""
+        self.dir = directory.resolve()
+        self.medium = medium
+        self.on_root(lambda: self.dir.mkdir(parents=True, exist_ok=True))
 
     # ------------------------------------------------------------ ranks
     @property
@@ -149,23 +176,10 @@ class Store:
         """The file of record `name` (a stage record is name.json)."""
         return self.dir / (name if '.' in name else f'{name}.json')
 
-    def on_root(self, look):
-        """`look()` made on rank 0 alone and its value, or the exception it
-        raised, on every rank: what the disk shows is one fact, however each
-        rank's view of the filesystem is cached or delayed."""
-        comm = current_comm()
-        if comm is None:
-            return look()
-        verdict = None
-        if self.root_rank:
-            try:
-                verdict = ('value', look())
-            except Exception as exc:
-                verdict = ('raised', exc)
-        kind, got = broadcast(verdict, comm)
-        if kind == 'raised':
-            raise got
-        return got
+    @staticmethod
+    def on_root(act):
+        """`on_root(act)`, the module's."""
+        return on_root(act)
 
     def has(self, name):
         """Whether record `name` is in the store."""
@@ -180,13 +194,13 @@ class Store:
     def write(self, name, record, stamp):
         """`record` under `name`, stamped with `stamp` and the provenance;
         rank 0 writes, every rank waits for it."""
-        if self.root_rank:
+        def act():
             write_record(self.path(name), {
                 'stamp': dict(stamp, identity=record_hash(stamp)),
                 'provenance': provenance(), 'medium': self.medium,
                 'record': record})
             _sync_record(self.path(name))
-        self.barrier()
+        self.on_root(act)
 
     def held(self, name):
         """The whole stored tree of `name`: stamp, provenance, record."""
@@ -227,7 +241,7 @@ class Store:
     # ------------------------------------------------------------ others
     def write_xyz(self, name, mol, comment):
         """`mol` as an xyz file in Angstrom, for a reader."""
-        if self.root_rank:
+        def act():
             lines = [str(mol.natm), comment]
             for ia, c in enumerate(mol.atom_coords() * BOHR_TO_ANGSTROM):
                 lines.append(f'{mol.atom_pure_symbol(ia):2s} {c[0]:20.14f} '
@@ -238,29 +252,38 @@ class Store:
             _sync(tmp)
             os.replace(tmp, path)
             _sync(path.parent)
-        self.barrier()
+        self.on_root(act)
 
     def set_aside(self, names, under):
         """Move the files and directories `names` of the run's directory
         into its subdirectory `under` (made by rank 0, every rank waits),
         where the store no longer finds them: nothing is deleted. Returns
         the names moved."""
-        moved = self.on_root(
-            lambda: [n for n in names if (self.dir / n).exists()])
-        if self.root_rank and moved:
-            target = self.dir / under
-            target.mkdir(parents=True, exist_ok=True)
-            for n in moved:
-                os.replace(self.dir / n, target / n)
-            _sync(self.dir)
-        self.barrier()
-        return moved
+        def act():
+            moved = [n for n in names if (self.dir / n).exists()]
+            if moved:
+                target = self.dir / under
+                target.mkdir(parents=True, exist_ok=True)
+                for n in moved:
+                    os.replace(self.dir / n, target / n)
+                _sync(self.dir)
+            return moved
+        return self.on_root(act)
 
     def workdir(self, name):
         """A subdirectory for a program's own files (geomeTRIC's, a force
-        cache); made by rank 0, None on the others."""
+        cache), made by rank 0; its path on every rank."""
         path = self.dir / name
-        if self.root_rank:
-            path.mkdir(exist_ok=True)
-        self.barrier()
+        self.on_root(lambda: path.mkdir(exist_ok=True))
         return path
+
+
+def _sendable(exc):
+    """`exc` itself if it can be sent to the other ranks, else a RuntimeError
+    that names it: an exception that cannot be pickled would fail the
+    broadcast on rank 0 and leave the others waiting."""
+    try:
+        pickle.dumps(exc)
+    except Exception:
+        return RuntimeError(f'rank 0 raised {type(exc).__name__}: {exc}')
+    return exc

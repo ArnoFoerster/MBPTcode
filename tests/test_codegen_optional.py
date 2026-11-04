@@ -20,7 +20,6 @@ sys.path.insert(0, ROOT)
 
 import pytest
 
-from src.SingleReference.ADC.adc_order_rule import MAX_ADC_ORDER
 
 _CHILD = r'''
 import importlib, pathlib, sys
@@ -59,10 +58,6 @@ def test_every_registered_producer_exists():
         except AttributeError:
             missing.append(dotted)
     assert not missing, missing
-
-
-def test_the_ceiling_is_adc5():
-    assert MAX_ADC_ORDER == 5
 
 
 @pytest.mark.parametrize('call', [

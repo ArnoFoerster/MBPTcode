@@ -44,6 +44,7 @@ from src.SingleReference.GW.contour_deformation import (cd_integral_weights,
 from src.SingleReference.GW.real_screening import ExplicitRealScreening
 from src.Base.orbital_spaces import ov_energies
 from src.gradients.gwbse.contour_deformation_adjoint import sigma_cd_backward
+from tests.molecules import WATER
 
 #: Distances from the orbital energy, both sides, from just outside the
 #: residue term's on-contour band (1e-10) to where nothing is singular.
@@ -111,7 +112,7 @@ def test_the_weights_derivative_is_the_closed_form_one(grid):
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.conv_tol = 1e-12

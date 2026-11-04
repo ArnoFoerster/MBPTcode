@@ -64,7 +64,6 @@ import copy
 
 import numpy as np
 from pyscf.data import nist
-from pyscf.x2c import sfx2c1e, x2c
 
 from src.Base.numerics.constants import (HEAVY_ATOM_Z, QDPT_HERMITICITY_TOL,
                                          SOC_MANIFOLD_CONV_TOL)
@@ -77,7 +76,9 @@ from src.SingleReference.LinearResponse.davidson import (
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver, check_normalization)
-from src.gradients.spin_orbit_mean_field import mean_field_term
+from src.Base.pyscf.x2c_spin_orbit import one_electron_term
+from src.Base.pyscf.spin_orbit_mean_field import (TWO_ELECTRON_TERMS,
+                                                  mean_field_term)
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 
 # alpha^2/4, the Breit-Pauli prefactor of the PAULI MATRIX: H_SO =
@@ -126,19 +127,15 @@ def x2c_one_electron(mol):
     is consistent with a scalar-relativistic reference (`sfx2c1e`) and only
     approximately with a non-relativistic one. The mismatch is negligible for
     first-row atoms and is not for a 5d metal.
+
+    Built once over the ranks, the same bits on every rank
+    (`Base.pyscf.x2c_spin_orbit`). Collective under ranks (`current_comm()`);
+    serial where there is none.
     """
-    nao = mol.nao_nr()
-    soc = (x2c.SpinOrbitalX2CHelper(mol).get_hcore(mol)
-           - np.kron(np.eye(2), sfx2c1e.SpinFreeX2CHelper(mol).get_hcore(mol)))
-    h = np.array([soc[:nao, nao:].imag, soc[:nao, nao:].real,
-                  soc[:nao, :nao].imag])
-    # antisymmetric by construction; the X2C decoupling leaves ~1e-11 of noise
-    # on that, and the vanishing diagonal is what lets the interstate density
-    # skip its i = j, a = b mask
-    return 0.5 * (h - h.transpose(0, 2, 1))
+    return one_electron_term(mol)
 
 
-def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
+def soc_operator(mol, dm=None, *, two_electron, one_electron, auxbasis=None):
     """(3, nao, nao) real antisymmetric spin-orbit operator, Hartree.
 
     dm: the ground-state AO density the mean field is built at. Required
@@ -150,9 +147,14 @@ def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
         screening INTO the one-electron term and therefore take
         two_electron=None and need no density).
     two_electron: 'somf' (Neese Eq. 19, J - 3/2 K, exact two-electron
-        integrals), 'amfi' (the same with one-centre blocks only), or None (the
-        one-electron operator alone, for diagnostics only -- it overestimates
-        by about 38%, which is what the two-electron term screens away).
+        integrals), 'ri-somf' (the same operator with its density side
+        fitted in `auxbasis`: nao^2 naux three-centre integrals in place of
+        the nao^4 pass, divided over the ranks), 'amfi' (one-centre blocks
+        only), or None (the one-electron operator alone, for diagnostics only
+        -- it overestimates by about 38%, which is what the two-electron term
+        screens away).
+    auxbasis: the fitting basis of 'ri-somf', None its orbital basis's
+        JK-fitting set (`mean_field_term`).
     """
     if two_electron == 'koseki':
         raise ValueError(
@@ -188,17 +190,20 @@ def soc_operator(mol, dm=None, two_electron='somf', one_electron='x2c'):
                          f"reduction and needs the ground-state density; pass "
                          f"dm=mf.make_rdm1(). Only two_electron=None and "
                          f"one_electron='koseki' do not.")
-    if two_electron not in ('amfi', 'somf'):
-        raise ValueError(f"two_electron={two_electron!r}: 'somf', 'amfi' "
-                         f"or None")
+    if two_electron not in TWO_ELECTRON_TERMS:
+        raise ValueError(f"two_electron={two_electron!r}: one of "
+                         f"{TWO_ELECTRON_TERMS} or None")
     # the mean-field term stays Breit-Pauli whichever one-electron operator
     # is used, which is the standard x2c-plus-mean-field compromise; it is
-    # built once over the ranks (rank 0's, on every rank)
-    return h1 + mean_field_term(mol, dm, two_electron) * SOC_PREFACTOR
+    # built once over the ranks, the same bits on every rank
+    return h1 + mean_field_term(mol, dm, two_electron,
+                                auxbasis=auxbasis) * SOC_PREFACTOR
 
 
-def soc_operator_mo(mf, mol=None, two_electron='somf', one_electron='x2c'):
-    """(3, nmo, nmo) spin-orbit operator in the mean field's orbital basis.
+def soc_operator_mo(mf, mol=None, *, two_electron, one_electron,
+                    auxbasis=None):
+    """(3, nmo, nmo) spin-orbit operator in the mean field's orbital basis
+    (`soc_operator`'s terms; a run passes `declared_operator(numerics)`).
 
     Built once per geometry; every root pair then costs two small contractions.
     """
@@ -211,7 +216,8 @@ def soc_operator_mo(mf, mol=None, two_electron='somf', one_electron='x2c'):
             'heavier than Kr: the two are in different pictures. Build the '
             'reference with .x2c() (or sfx2c1e), or pass '
             "one_electron='breit-pauli'.")
-    h_ao = soc_operator(mol, mf.make_rdm1(), two_electron, one_electron)
+    h_ao = soc_operator(mol, mf.make_rdm1(), two_electron=two_electron,
+                        one_electron=one_electron, auxbasis=auxbasis)
     mo = np.asarray(mf.mo_coeff)
     return np.einsum('xpq,pi,qj->xij', h_ao, mo, mo, optimize=True)
 
@@ -447,20 +453,32 @@ def qdpt_spectrum(h_rel):
     return energies, vectors
 
 
-def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
-                         two_electron='somf', one_electron='x2c'):
+def declared_operator(numerics):
+    """{'two_electron', 'one_electron', 'auxbasis'}: the spin-orbit operator
+    a run declares (`numerics.properties`), as the keywords of
+    `soc_operator(_mo)` and as the records it enters name it ('soc_term'; a
+    record without one holds the exact SOMF with X2C, the pass before the
+    declaration existed)."""
+    p = numerics.properties
+    return {'two_electron': p.soc_two_electron,
+            'one_electron': p.soc_one_electron, 'auxbasis': p.soc_auxbasis}
+
+
+def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None, *,
+                         numerics):
     """|<S_I|H_SO|T_J>| for a singlet and a triplet manifold of the SAME geometry.
 
     The one-call entry, and the only one a caller normally needs:
 
         singlet, triplet = isdf_manifolds(mf, mol, nocc)
-        out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet)
+        out = spin_orbit_couplings(mf, mol, nocc, singlet, triplet,
+                                   numerics=numerics)
         k = marcus_levich_jortner_rate(out['socme'][1, 0], ...)
 
     or, with the manifolds already in hand from any other route,
 
         out = spin_orbit_couplings(mf, mol, nocc, (om_s, X_s, Y_s),
-                                                  (om_t, X_t, Y_t))
+                                   (om_t, X_t, Y_t), numerics=numerics)
 
     `singlet` and `triplet` are (omega, X, Y) triples exactly as any solver in
     the repo returns them -- Davidson or dense, ISDF or DF or full ERIs, gas
@@ -469,10 +487,12 @@ def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
     Two manifolds stamped with different numerics are refused
     (`NumericsMismatch`): a coupling of the vectors of two Casida matrices
     built on different grids or tolerances is not a matrix element of either.
-    A plain triple carries no stamp and is taken as it is.
+    A plain triple carries no stamp and is taken as it is. The operator is the
+    one `numerics` declares (`declared_operator`).
 
     Returns a dict: 'socme' the (n_s + 1, n_t) table in Hartree with the ground
-    state in row 0, 'h_mo' the operator, 'h_rel' the effective relativistic
+    state in row 0, 'h_mo' the operator, 'soc_term' its declaration
+    (`declared_operator`), 'h_rel' the effective relativistic
     Hamiltonian, the two energy arrays and, for manifolds that name them
     (`isdf_manifolds`), 'davidson_flags' {spin: the roots their Davidson left
     unconverged or unconfirmed, `davidson_flags`}, empty when clean.
@@ -480,9 +500,10 @@ def spin_orbit_couplings(mf, mol, nocc, singlet, triplet, nroots=None,
     require_one_stamp((singlet, triplet), 'spin-orbit coupling')
     om_s, x_s, y_s = singlet
     om_t, x_t, y_t = triplet
-    h_mo = soc_operator_mo(mf, mol, two_electron, one_electron)
+    term = declared_operator(numerics)
+    h_mo = soc_operator_mo(mf, mol, **term)
     return {'socme': socme_table(h_mo, nocc, x_s, y_s, x_t, y_t, nroots),
-            'h_mo': h_mo,
+            'h_mo': h_mo, 'soc_term': term,
             'h_rel': qdpt_hamiltonian(h_mo, nocc, om_s, x_s, y_s,
                                       om_t, x_t, y_t, nroots),
             'omega_singlet': np.asarray(om_s, float),

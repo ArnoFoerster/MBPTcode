@@ -31,11 +31,12 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_integrals)
 from tests.generated_runtime import requires_runtime
 from tests import union_space_oracle as CB
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(5)
 
 PYSCF_SYSTEMS = [('LiH', 'Li 0 0 0; H 0 0 1.6'),
-                 ('H2O', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0'),
+                 ('H2O', WATER_RIGHT_ANGLE),
                  ('BeH2', 'Be 0 0 0; H 0 0 1.3; H 0 0 -1.3')]
 PYSCF_METHODS = [('adc(2)', 2, None), ('adc(2)-x', 2, {(1, 1): 1}), ('adc(3)', 3, None)]
 NROOTS = 6

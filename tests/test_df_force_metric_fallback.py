@@ -1,7 +1,9 @@
 """The DF-MP2 force on an auxiliary set with a near-linear dependency.
 
-The energy's fit takes pyscf's eigen-replacement where the Coulomb metric is
-not positive definite; the force has to take the same one, or it raises (a
+The energy's fit takes the eigen-replacement where the Coulomb metric has an
+eigenvalue below the replacement's cut, decided from the spectrum so that it is
+the same on every BLAS (whether a Cholesky factorization of round-off
+eigenvalues fails is not); the force has to take the same one, or it raises (a
 bare Cholesky) or differentiates another fit. Water in 6-31G, correlation fit
 a small even-tempered set carrying one function twice (exponents 1e-9 apart),
 JK fit def2-universal-jkfit: the force is finite and is the five-point
@@ -17,7 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.Base.factorization.distributed_df import metric_factor
+from src.Base.factorization.distributed_df import correlation_metric_mode
+from src.Base.numerics.numerics import Numerics
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as dcft
 from src.gradients.df_factors import mp2_factors
@@ -43,16 +46,18 @@ def _mean_field(mol):
 def _force_and_energy(coords):
     mol = _mol(coords)
     mf = _mean_field(mol)
-    force, (e2, *_) = dcf.mp2_force(mf, mol, 0, AUX)
+    force, (e2, *_) = dcf.mp2_force(mf, mol, 0, AUX, numerics=Numerics())
     return np.asarray(force), mf.e_tot + e2
 
 
-def test_the_planted_set_is_not_positive_definite():
-    mol = _mol(np.array([a[1] for a in ATOM]))
-    auxmol = gto.mole.Mole()
+def test_the_planted_set_takes_the_eigen_replacement_and_a_regular_one_does_not():
     from pyscf import df
-    auxmol = df.addons.make_auxmol(mol, AUX)
-    assert metric_factor(mol, auxmol)[1] == 'eig'
+    mol = _mol(np.array([a[1] for a in ATOM]) * 1.8897261246)
+    planted = df.addons.make_auxmol(mol, AUX)
+    assert correlation_metric_mode(planted) == 'eig'
+    V, X = dcf.whitening(planted)
+    assert X.shape[0] < V.shape[0]
+    assert correlation_metric_mode(df.addons.make_auxmol(mol, 'cc-pvdz-ri')) == 'cd'
 
 
 def test_the_force_on_a_dependent_auxiliary_set_is_finite_and_the_energys_slope():
@@ -74,8 +79,9 @@ def test_the_force_on_a_dependent_auxiliary_set_is_finite_and_the_energys_slope(
 def test_the_tiled_force_on_a_dependent_auxiliary_set_is_the_dense_force():
     mol = _mol(np.array([a[1] for a in ATOM]) * 1.8897261246)
     mf = _mean_field(mol)
-    dense, (e_dense, *_) = dcf.mp2_force(mf, mol, 0, AUX)
-    tiled, (e_tiled, *_) = dcft.mp2_force_tiled(mf, mol, mp2_factors, 0, AUX)
+    dense, (e_dense, *_) = dcf.mp2_force(mf, mol, 0, AUX, numerics=Numerics())
+    tiled, (e_tiled, *_) = dcft.mp2_force_tiled(mf, mol, mp2_factors, 0, AUX,
+                                                 numerics=Numerics())
     assert abs(e_tiled - e_dense) < 1e-10, e_tiled - e_dense
     assert np.abs(np.asarray(tiled) - np.asarray(dense)).max() < 1e-9, \
         np.abs(np.asarray(tiled) - np.asarray(dense)).max()

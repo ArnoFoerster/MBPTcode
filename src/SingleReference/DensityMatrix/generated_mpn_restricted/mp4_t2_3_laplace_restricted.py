@@ -5,7 +5,7 @@
 # generate_mp4_t2_3_laplace_restricted.py (see its docstring);
 # consumed by MPnDensityDriverRestricted.compute_t2_3_laplace.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 from src.Base.utils.grids.grids import minimax_time_grid
 
 

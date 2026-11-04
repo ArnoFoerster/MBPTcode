@@ -268,6 +268,29 @@ def window_blocks(eps, members, window):
     return [tuple(sorted(b)) for b in blocks]
 
 
+def contiguous_runs(block):
+    """`block` cut into its runs of consecutive orbital indices, each a sorted
+    tuple. Indices are the energy order of the mean field a group is decided
+    on, so a run is a contiguous energy window: no orbital outside it lies
+    between two of its members."""
+    out, run = [], []
+    for p in sorted(int(q) for q in block):
+        if run and p != run[-1] + 1:
+            out.append(tuple(run))
+            run = []
+        run.append(p)
+    if run:
+        out.append(tuple(run))
+    return out
+
+
+def contiguous_range(block):
+    """Every orbital index from the lowest of `block` to its highest: the
+    energy window it spans, in the order of the mean field it is read in."""
+    idx = [int(p) for p in block]
+    return tuple(range(min(idx), max(idx) + 1)) if idx else ()
+
+
 def merged_blocks(members, *groupings):
     """The connected blocks of `members` under every grouping given, each a
     sorted tuple; a member no grouping links is a block of its own."""

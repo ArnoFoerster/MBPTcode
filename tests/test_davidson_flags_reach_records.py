@@ -23,8 +23,9 @@ from src.SingleReference.BSE.solve import solve_bse
 from src.photophysics import df_check
 from src.properties import spin_orbit
 from tests.photophysics_cases import run_of
+from tests.molecules import WATER_CS
 
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 STUCK = {'davidson_not_converged': {'roots': [1], 'residuals': [1e-3],
                                     'verdict': 'unconverged'}}
 
@@ -77,10 +78,11 @@ def test_spin_orbit_manifolds_carry_the_flags(water, monkeypatch):
     s, t = spin_orbit.isdf_manifolds(mf, mol, 5)
     assert s.davidson_flags == {}
     assert t.davidson_flags == STUCK
-    out = spin_orbit.spin_orbit_couplings(mf, mol, 5, s, t)
+    out = spin_orbit.spin_orbit_couplings(mf, mol, 5, s, t, numerics=Numerics())
     assert out['davidson_flags'] == {'triplet': STUCK}
     plain = spin_orbit.spin_orbit_couplings(
-        mf, mol, 5, Stamped(tuple(s), 'id'), Stamped(tuple(t), 'id'))
+        mf, mol, 5, Stamped(tuple(s), 'id'), Stamped(tuple(t), 'id'),
+        numerics=Numerics())
     assert plain['davidson_flags'] == {}
 
 

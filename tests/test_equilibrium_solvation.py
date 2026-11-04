@@ -31,6 +31,11 @@ E_ss is the outer-sphere reorganization energy.
      relaxation -- of both charged surfaces match a finite difference of their
      own energies.
 
+Every check runs with the BLAS and OpenMP pools at one thread (`one_thread`):
+OpenBLAS at two threads is not run-to-run deterministic (numpy 2.4's, on the
+nightly CI), and the forces of 6 against their finite differences then land
+1.0e-8..1.3e-8 Ha/Bohr apart on one run and within the bar on the next.
+
 Run as a script (`python tests/test_equilibrium_solvation.py`) or under pytest.
 """
 import os
@@ -64,8 +69,10 @@ from src.properties.vibronic import reorganization_four_point
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight
+from tests.molecules import WATER_CS, WATER_ROUNDED_LOW
+from src.Base.utils.parallel import threads
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 AUX = 'cc-pvdz-ri'
 EPS_INF, EPS_S = 1.776, 78.355
 #: the Born ratio of the equilibrium extra to the optical shift
@@ -131,6 +138,18 @@ def test_unrestricted_reference_per_spin():
     assert level.shape == (2, mol.nao)
     for spin, n in enumerate(uhf.nelec):
         assert level[spin, n - 1] > 0 and level[spin, n] < 0
+
+
+@pytest.fixture(scope='module', autouse=True)
+def one_thread():
+    """The BLAS and OpenMP pools at one thread for the module, its module
+    fixtures included, so its forces repeat their bits run to run on any
+    BLAS."""
+    if threads.threadpool_limits is None:
+        yield
+        return
+    with threads.threadpool_limits(limits=1):
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -295,7 +314,7 @@ def test_whole_surface_gradients(kind):
 
 # Equilibrium solvation of a relaxed neutral excited state (the response at
 # eps_static, `SolventScreening(equilibrium=True)`, `equilibrium_partner`).
-WATER_EQ = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER_EQ = WATER_CS
 #: ethylene stacked over F2 at 3.5 A; ethylene pi -> F2 sigma* is the CT root
 C2H4_F2 = ('C 0.0000 0.6695 0.0000; C 0.0000 -0.6695 0.0000; '
            'H 0.9289 1.2321 0.0000; H -0.9289 1.2321 0.0000; '

@@ -77,9 +77,10 @@ def test_the_drivers_carry_it(tmp_path):
     xyz = tmp_path / 'w.xyz'
     xyz.write_text('3\n\n' + '\n'.join(f'{a} {x} {y} {z}' for a, (x, y, z) in ATOMS) + '\n')
     bar = LOOP_SOLVER_TOL_FRACTION * PHOTOPHYSICS_LOOP_TOL_Q
-    for extra in ([], ['--method', 'gwbse', '--isdf-grid', 'G1']):
-        args = solvated._parse_args(['--xyz', str(xyz), '--basis', 'cc-pvdz', '--solvent',
-                                     'toluene', '--out', str(tmp_path / 'r.json'), *extra])
+    for extra in ([], ['--method', 'gwbse', '--grid-accuracy', 'G1', '--refreeze', '1']):
+        args = solvated._parse_args(['--xyz', str(xyz), '--basis', 'cc-pvdz', '--environment',
+                                     'toluene', '--saddle-check', '1',
+                                     '--out', str(tmp_path / 'r.json'), *extra])
         solvated._resolve_basis(args)
         mol = molecule(ATOMS, basis='cc-pvdz')
         solvated._check_args(args, mol)

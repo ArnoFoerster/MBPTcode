@@ -104,6 +104,7 @@ from src.gradients.gwbse.surface_factory import (potential_energy_surface,
                                                  reference_mean_field)
 from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO / 'tests' / 'baseline_forward_routes.json'
@@ -131,7 +132,7 @@ RECORD_MOVE = (1e-4, 3e-4)
 RETIRED_IN_RECORD = ('RPABSESurface[singlet]',)
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Where (d) evaluates: one hydrogen 0.03 A along y, so the chain runs its
 #: factory, fits and differentiates at a geometry of its own.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'

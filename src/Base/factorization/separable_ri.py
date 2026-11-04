@@ -105,7 +105,7 @@ from pyscf import df, gto
 from pyscf.dft import gen_grid
 
 from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
-                                         AUX_METRIC_INDEFINITE_TOL, LEGACY_R_MAX,
+                                         AUX_METRIC_INDEFINITE_TOL, SINGLE_DESCENT_R_MAX,
                                          AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
                                          METRIC_ROOT_CACHE_BYTES, FIT_ROW_CHUNK_BYTES,
                                          FIT_TRANSPOSE_TILE, FRAME_TURNING_RATE_BAR,
@@ -122,6 +122,7 @@ from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
                                         pure_element)
 from src.Base.factorization.shell_runs import shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block, current_comm,
                                               cyclic_tiles_to_blocks, distributed, lockstep,
@@ -622,7 +623,7 @@ def ao_blocks(mol, nk, n2, naux, block_memory_gb):
     by up to the s-to-f ratio.
     """
     per_mu = (nk * n2 + mol.nao_nr() * naux) * 8
-    max_mu = max(1, int(block_memory_gb * BYTES_PER_GB / max(per_mu, 1)))
+    max_mu = fits(block_memory_gb, per_mu)
     ao_loc = mol.ao_loc_nr()
     blocks, sh0 = [], 0
     for sh in range(1, mol.nbas + 1):
@@ -854,7 +855,7 @@ def fit_M_streaming(mol, auxmol, coords, numerics=None,
     B = np.ascontiguousarray(ao[:, second] * w[None, :])
     S = np.zeros((nk, nk))
     FD = np.zeros((naux, nk))
-    rows = max(1, min(nk, int(block_memory_gb * BYTES_PER_GB / max(2 * nk * 8, 1))))
+    rows = fits(block_memory_gb, 2 * nk * 8, cap=nk)
     # The GEMMs are BLAS's; the Hadamard product, the auxiliary sum, the
     # transpose and the balancing are O(n_k^2) element-wise passes numpy runs
     # on one core, so they run in `row_map`'s threads, each element the same
@@ -1751,11 +1752,6 @@ def fit_M(D, F, numerics=None):
     return scipy.linalg.cho_solve(cho, (F @ Dt.T).T).T * d[None, :]
 
 
-def fit_M_stable(D, F, numerics=None):
-    """`fit_M`, kept as the name the gradient refits call."""
-    return fit_M(D, F, numerics)
-
-
 def build_separable_ri(mol, coords, auxbasis=None, auxmol=None,
                        numerics=None, streaming=True, comm=None, timings=None,
                        with_Z=True):
@@ -2292,14 +2288,14 @@ def _start_radii(counts, r_min, r_max, k):
 
 
 #: Radial search box per element, Bohr, for a multi-start search. The single
-#: geometric descent keeps `LEGACY_R_MAX` so every cached and shipped grid keeps
-#: its key. Second-row values are measured: benzene's 23x exchange gain was
+#: geometric descent searches in `SINGLE_DESCENT_R_MAX`, the box every cached
+#: and shipped grid was searched in. Second-row values are measured: benzene's 23x exchange gain was
 #: found at 5.0, and widening to 16 made it worse. Magnesium's density reaches
 #: ~14 Bohr (its fit error is flat in point count and 8x better at 16, radii
 #: out to 13.7; Mg(OH)2 exchange error 0.72 -> 0.19 mHa/atom); the other
 #: diffuse-valence elements (groups 1-2, period 3) are given the same prior
 #: without a measurement of their own. Published carbon's largest A1 radius,
-#: 5.295, already lies outside the legacy box.
+#: 5.295, already lies outside the single-descent box.
 ELEMENT_R_MAX = {'H': 5.0, 'He': 5.0,
                  'B': 5.0, 'C': 5.0, 'N': 5.0, 'O': 5.0, 'F': 5.0, 'Ne': 5.0,
                  'Li': 16.0, 'Be': 16.0, 'Na': 16.0, 'Mg': 16.0,
@@ -2309,10 +2305,10 @@ ELEMENT_R_MAX = {'H': 5.0, 'He': 5.0,
 
 
 def search_r_max(element, n_start=1, r_max=None):
-    """The box a radii search runs in: explicit, legacy for one descent, else per element."""
+    """The box a radii search runs in: explicit, SINGLE_DESCENT_R_MAX for one descent, else per element."""
     if r_max is not None:
         return float(r_max)
-    return LEGACY_R_MAX if n_start == 1 else ELEMENT_R_MAX.get(element, 12.0)
+    return SINGLE_DESCENT_R_MAX if n_start == 1 else ELEMENT_R_MAX.get(element, 12.0)
 
 
 RADII_TABLE_SCHEMA = 2
@@ -2585,11 +2581,12 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         criterion (the exchange-energy error on a probe) can choose among the local
         minima itself. The cache holds the best by fit error.
 
-    r_max:    None selects the box by `search_r_max`: the legacy 5.0 for a
-        single descent, `ELEMENT_R_MAX[element]` for a multi-start search. The
-        legacy box excludes published carbon's largest A1 radius (5.295) and
-        magnesium's density altogether; it is kept for n_start=1 only so that
-        every existing cached and shipped grid keeps its key.
+    r_max:    None selects the box by `search_r_max`: SINGLE_DESCENT_R_MAX
+        (5.0) for a single descent, `ELEMENT_R_MAX[element]` for a multi-start
+        search. The single-descent box excludes published carbon's largest A1
+        radius (5.295) and magnesium's density altogether; a single descent
+        searches in it because every cached and shipped grid was searched in it,
+        and their keys depend on it.
     """
     l_max_second, regularization = fit_settings(
         numerics, 'l_max_second', 'regularization')

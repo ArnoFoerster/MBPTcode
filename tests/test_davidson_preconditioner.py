@@ -59,8 +59,8 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from tests.test_distributed_fit_mpi import relative, roots_resolution
 from tests.isdf_test_grid import g1, g1_kw
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BENZENE = ('C 1.396 0 0; C 0.698 1.209 0; C -0.698 1.209 0; C -1.396 0 0; '
            'C -0.698 -1.209 0; C 0.698 -1.209 0; H 2.479 0 0; '
            'H 1.240 2.147 0; H -1.240 2.147 0; H -2.479 0 0; '

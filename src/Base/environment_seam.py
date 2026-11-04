@@ -32,7 +32,7 @@ class Environment(Protocol):
     of Duchemin, Guido, Jacquemin and Blase, Chem. Sci. 9, 4430 (2018) Eq. (18).
     That shift is the static approximation to Sigma[W_dressed] - Sigma[W_bare],
 
-    `static_self_energy` is the other channel the
+    `static_self_energy` is the other channel: the
     static COHSEX Sigma^solv of Duchemin, Jacquemin and Blase, J. Chem. Phys.
     144, 164106 (2016) Eqs. (20)-(22), summed over every orbital rather than
     taken on the self-element, for the routes that never form Delta W -- the ADC

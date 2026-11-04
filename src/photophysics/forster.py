@@ -47,15 +47,16 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 
 from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS,
-                                         BOLTZMANN_HARTREE_PER_KELVIN,
                                          BOHR_TO_ANGSTROM,
                                          FORSTER_MIN_POINTS_PER_WIDTH,
                                          FORSTER_POINTS_PER_WIDTH,
                                          GAUSSIAN_FWHM_PER_SIGMA,
                                          MOLAR_ABSORPTION_PER_BOHR2,
+                                         RATE_BAND_GRID_WIDTHS,
                                          SPEED_OF_LIGHT_AU)
 from src.photophysics.rates import vibronic_radiative_rate
-from src.properties.band_shape import VibronicModel
+from src.properties.band_shape import VibronicModel, band_reach
+from src.properties.conformers import boltzmann_weights
 from src.properties.franck_condon import TRAPEZOID
 
 #: <kappa^2> of two dipoles that rotate freely during the transfer.
@@ -98,19 +99,6 @@ class Line:
         return 1.0 if self.strength is None else float(self.strength)
 
 
-def thermal_populations(energies, temperature, degeneracy=None):
-    """Boltzmann populations of initial states at `energies` (Hartree),
-    normalized over the states given; `degeneracy` per state, default 1."""
-    e = np.asarray(energies, float)
-    g = np.ones_like(e) if degeneracy is None else np.asarray(degeneracy,
-                                                              float)
-    kt = BOLTZMANN_HARTREE_PER_KELVIN * float(temperature)
-    if kt <= 0.0:
-        raise ValueError(f'temperature {temperature} K is not positive')
-    w = g * np.exp(-(e - e.min()) / kt)
-    return w / w.sum()
-
-
 def excited_absorption_lines(e_initial, e_final, dipoles, model, temperature,
                              degeneracy=None):
     """The lines of absorption out of thermally populated excited states.
@@ -126,7 +114,7 @@ def excited_absorption_lines(e_initial, e_final, dipoles, model, temperature,
     Only upward transitions, e_f > e_i, are lines: the stimulated emission
     toward lower states is left out (it needs the initial state above the
     final one, which a thermal population of the lowest states rarely has).
-    Populations are Boltzmann over `e_initial` (`thermal_populations`).
+    Populations are Boltzmann over `e_initial` (`conformers.boltzmann_weights`).
     """
     ei, ef = np.atleast_1d(np.asarray(e_initial, float)), \
         np.atleast_1d(np.asarray(e_final, float))
@@ -135,7 +123,7 @@ def excited_absorption_lines(e_initial, e_final, dipoles, model, temperature,
     if mu2.shape != (ei.size, ef.size):
         raise ValueError(f'dipoles give {mu2.shape} pairs; the energies give '
                          f'{(ei.size, ef.size)}')
-    pop = thermal_populations(ei, temperature, degeneracy)
+    pop = boltzmann_weights(ei, temperature, degeneracy)
     lines = []
     for i in range(ei.size):
         for f in range(ef.size):
@@ -193,7 +181,7 @@ def _narrowest_width(donor, acceptor, temperature, sigma_g, lorentzian_fwhm):
 
 
 def overlap_grid(donor, acceptor, temperature, *, gaussian_fwhm,
-                 lorentzian_fwhm, n_widths=12.0,
+                 lorentzian_fwhm, n_widths=RATE_BAND_GRID_WIDTHS,
                  points_per_width=FORSTER_POINTS_PER_WIDTH):
     """Uniform photon-energy grid for the overlap integral, Hartree.
 
@@ -205,11 +193,9 @@ def overlap_grid(donor, acceptor, temperature, *, gaussian_fwhm,
     sigma_g = float(gaussian_fwhm) / GAUSSIAN_FWHM_PER_SIGMA
     lo, hi = np.inf, -np.inf
     for ln in donor:
-        mean, var = ln.model.cumulants(temperature, 'emission')
-        sig = float(np.sqrt(max(var, 0.0) + sigma_g ** 2))
-        reach = n_widths * (sig + float(lorentzian_fwhm))
-        lo = min(lo, ln.energy - mean - reach)
-        hi = max(hi, ln.energy - mean + reach)
+        a, b, _ = band_reach(ln.model, ln.energy, temperature, 'emission',
+                             sigma_g, lorentzian_fwhm, n_widths)
+        lo, hi = min(lo, a), max(hi, b)
     if lo <= 0.0:
         raise ValueError(f'the donor band reaches zero photon energy (lower '
                          f'end {lo:.4g} Ha); pass a grid')

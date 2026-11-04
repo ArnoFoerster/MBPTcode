@@ -29,16 +29,17 @@ from dataclasses import dataclass
 import numpy as np
 from pyscf.grad import rhf as grad_rhf
 
-from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.factorization.isdf_jk import exchange_realization
 from src.environments.pcm_derivatives import reaction_field_fock_skeleton
 from src.Base.pyscf.pyscf_interface import fock_mo, response_kernel
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
-from src.gradients.skeleton_tiles import (exchange_skeleton_by_atoms, fitted_fock_skeleton,
+from src.Base.factorization.shell_runs import functions_to_atoms
+from src.gradients.skeleton_tiles import (exchange_skeleton_tiled, fitted_fock_skeleton,
                                          xc_grid_skeleton)
 from src.gradients.isdf_derivatives import (isdf_fock_partial_exchange,
                                             require_fitted_coulomb)
-from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
-from src.gradients.one_electron import one_electron_skeleton
+from src.gradients.multipliers import (close_lagrangian, lagrangian_skeleton,
+                                       rotation_gradient, solve_orbital_multipliers)
 from src.Base.pyscf.pyscf_interface import (auxmol_of, exchange_channels, rsh_split,
                                             xc_hybrid_coeff)
 
@@ -107,15 +108,15 @@ def fock_partial_Y(mf, gamma, nocc, environment=True):
                              response_kernel(mf, environment=environment))
 
 
-def solve_lambda(mf, Y_E, nocc, numerics=None, verbose=False,
+def solve_lambda(mf, Y_E, nocc, numerics, verbose=False,
                  environment=True, flags=None):
     """Symmetric zero-diagonal Lambda with antisym(Y_E + Y[Lambda]) = 0.
 
     The cubic route's entry to `solve_orbital_multipliers`: the matvec is
     `fock_partial_Y` -- a Coulomb and an exchange build -- instead of the
     four-index tensor, and the orbital energies come from the mean field.
-    numerics: the caller's `Numerics` (the solve's tolerances); flags: a list
-    a solve left short appends its flag to (`multipliers`).
+    numerics: the run's `Numerics` (the solve's tolerances), required;
+    flags: a list a solve left short appends its flag to (`multipliers`).
     """
     return solve_orbital_multipliers(
         lambda Lam: fock_partial_Y(mf, Lam, nocc, environment=environment),
@@ -171,43 +172,63 @@ def fock_partial_skeleton(mf, gamma, nocc, pending=None):
     evaluated by the assembly together with the other terms it holds
     (`held_skeletons`); the value returned leaves them out.
     """
-    is_ks, a_x = xc_hybrid_coeff(mf)
-    if getattr(mf, 'with_df', None) is not None:
-        # An interpolated mean field splits the two halves. Its Coulomb is
-        # fitted and integral-direct, so the fitted skeleton differentiates it.
-        # Its exchange comes from the ISDF factors, which the auxiliary-basis
-        # skeleton knows nothing about.
-        if isinstance(mf.with_df, ISDFJK):
-            require_fitted_coulomb(mf, 'the folded Fock partial skeleton')
-            g = fock_partial_skeleton_df(mf, auxmol_of(mf), gamma, nocc,
-                                         channels=(), coulomb=True)
-            g = g + isdf_fock_partial_exchange(mf, gamma)
-        else:
-            g = fock_partial_skeleton_df(mf, auxmol_of(mf), gamma, nocc,
-                                         channels=exchange_channels(mf),
-                                         pending=pending)
-        return (g + (xc_skeleton(mf, gamma, pending=pending) if is_ks else 0.0)
-                + reaction_field_skeleton(mf, gamma))
-    C = mf.mo_coeff
-    g_ao = C @ (0.5 * (gamma + gamma.T)) @ C.T
-    D = mf.make_rdm1()
-    vj_D = grad_rhf.get_jk(mf.mol, D)[0]
-    vj_g = grad_rhf.get_jk(mf.mol, g_ao)[0]
-    # The Coulomb half is never range-separated and is built once. The exchange
-    # half is one build per channel, so a range-separated hybrid carries its
-    # erf-attenuated term instead of dropping it.
-    t = 2.0 * (np.einsum('ab,xab->xa', g_ao, vj_D, optimize=True)
-               + np.einsum('ab,xab->xa', D, vj_g, optimize=True))
-    grad = np.zeros((mf.mol.natm, 3))
-    for ia, (_, _, p0, p1) in enumerate(mf.mol.aoslice_by_atom()):
-        grad[ia] = t[:, p0:p1].sum(axis=1)
-    for omega, weight in (exchange_channels(mf) if is_ks else [(0.0, 1.0)]):
-        if weight != 0.0:
-            grad = grad + exchange_channel_skeleton(mf, g_ao, D, omega, weight,
-                                                    pending=pending)
+    is_ks, _ = xc_hybrid_coeff(mf)
+    grad = exchange_skeleton(mf, gamma, nocc, pending=pending,
+                             what='the folded Fock partial skeleton')
     if is_ks:
         grad = grad + xc_skeleton(mf, gamma, pending=pending)
     return grad + reaction_field_skeleton(mf, gamma)
+
+
+def exchange_skeleton(mf, gamma, nocc, channels=None, coulomb=True,
+                      pending=None, what='an exchange skeleton'):
+    """(natm, 3) skeleton of the folded Fock partial's two-electron part,
+    Coulomb (where `coulomb`) and the exchange `channels` [(omega, weight)]
+    (None: the reference's own), on the realization mf's SCF built them with
+    (`isdf_jk.exchange_realization`), the one dispatch for every skeleton of
+    this kind:
+
+      * 'isdf': the Coulomb half from the density-fitted skeleton (refused
+        unless the SCF's J is fitted, `require_fitted_coulomb`), the exchange
+        from the ISDF factors (`isdf_fock_partial_exchange`), which the
+        auxiliary-basis skeleton knows nothing about;
+      * 'df': both halves from `fock_partial_skeleton_df`;
+      * 'exact': four-centre Coulomb and one `exchange_channel_skeleton` per
+        channel, so a range-separated hybrid carries its erf-attenuated term.
+
+    pending: as `fock_partial_skeleton`'s, on the 'df' and 'exact' routes.
+    No exchange-correlation and no continuum term: the caller's.
+    """
+    realization = exchange_realization(mf)
+    if realization == 'isdf':
+        require_fitted_coulomb(mf, what)
+        exchange = isdf_fock_partial_exchange(mf, gamma, channels=channels)
+        if not coulomb:
+            return exchange
+        return fock_partial_skeleton_df(mf, auxmol_of(mf), gamma, nocc,
+                                        channels=(), coulomb=True) + exchange
+    if realization == 'df':
+        return fock_partial_skeleton_df(
+            mf, auxmol_of(mf), gamma, nocc, coulomb=coulomb, pending=pending,
+            channels=exchange_channels(mf) if channels is None else channels)
+    if channels is None:
+        channels = exchange_channels(mf) if xc_hybrid_coeff(mf)[0] else [(0.0, 1.0)]
+    C = mf.mo_coeff
+    g_ao = C @ (0.5 * (gamma + gamma.T)) @ C.T
+    D = mf.make_rdm1()
+    grad = np.zeros((mf.mol.natm, 3))
+    if coulomb:
+        vj_D = grad_rhf.get_jk(mf.mol, D)[0]
+        vj_g = grad_rhf.get_jk(mf.mol, g_ao)[0]
+        # The Coulomb half is never range-separated and is built once.
+        t = 2.0 * (np.einsum('ab,xab->xa', g_ao, vj_D, optimize=True)
+                   + np.einsum('ab,xab->xa', D, vj_g, optimize=True))
+        grad = functions_to_atoms(t, mf.mol)
+    for omega, weight in channels:
+        if weight != 0.0:
+            grad = grad + exchange_channel_skeleton(mf, g_ao, D, omega, weight,
+                                                    pending=pending)
+    return grad
 
 
 def xc_skeleton(mf, gamma, weight=1.0, pending=None):
@@ -251,7 +272,7 @@ def held_skeletons(mf, pending):
     grad = 0.0
     for (kind, omega), (g_ao, D) in pending.take_skeletons().items():
         if kind == 'exchange':
-            grad = grad + exchange_skeleton_by_atoms(mf.mol, g_ao, D, omega,
+            grad = grad + exchange_skeleton_tiled(mf.mol, g_ao, D, omega,
                                                      1.0)
         else:
             grad = grad + xc_grid_skeleton(mf.mol, mf.grids, mf._numint,
@@ -259,8 +280,15 @@ def held_skeletons(mf, pending):
     return grad
 
 
-def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False,
-                       numerics=None, pending=None, multiplier=None):
+def fock_partial_of(eps_bar):
+    """The symmetric MO Fock partial of an adjoint: diag(eps_bar) of one on
+    the orbital energies, or the symmetric part of a full (norb, norb) one."""
+    eps_bar = np.asarray(eps_bar, float)
+    return np.diag(eps_bar) if eps_bar.ndim == 1 else 0.5 * (eps_bar + eps_bar.T)
+
+
+def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False, *,
+                       numerics, pending=None, multiplier=None):
     """(natm, 3) of sum_pq gamma_pq dF_pq/dR, with no norb^4 tensor anywhere.
 
     The dense engine's Lagrangian, rebuilt on Coulomb/exchange builds. Fold the
@@ -277,29 +305,23 @@ def eps_chain_gradient(mf, eps_bar, nocc, Y_extra=None, verbose=False,
         of the same target); taken where it serves this right-hand side,
         else Lambda is solved here.
     """
-    C = mf.mo_coeff
-    eps_bar = np.asarray(eps_bar, float)
-    gamma = np.diag(eps_bar) if eps_bar.ndim == 1 else 0.5 * (eps_bar + eps_bar.T)
+    gamma = fock_partial_of(eps_bar)
     Y_E = fock_partial_Y(mf, gamma, nocc)
     if Y_extra is not None:
         Y_E = Y_E + Y_extra
-    if multiplier is not None and multiplier.serves(mf, Y_E):
-        Lam, res = multiplier.lam, multiplier.res
-    else:
-        Lam, res = solve_lambda(mf, Y_E, nocc, numerics=numerics,
-                                verbose=verbose)
-    Y_tot = Y_E + fock_partial_Y(mf, Lam, nocc)
-    Mmat = -0.25 * (Y_tot + Y_tot.T)
-    gamma_tot = gamma + Lam
-    g2 = fock_partial_skeleton(mf, gamma_tot, nocc, pending=pending)
-    g1 = one_electron_skeleton(mf.mol, mf, [C @ gamma_tot @ C.T],
-                               [C @ Mmat @ C.T])[0]
-    return g1 + g2, {'stationarity': np.abs(Y_tot - Y_tot.T).max(),
-                     'multiplier_res': res}
+    solved = (multiplier.lam, multiplier.res) if (
+        multiplier is not None and multiplier.serves(mf, Y_E)) else solve_lambda(
+            mf, Y_E, nocc, numerics, verbose=verbose)
+    c = close_lagrangian(lambda Lam: fock_partial_Y(mf, Lam, nocc), Y_E,
+                         mf.mo_energy, gamma, numerics=numerics, verbose=verbose,
+                         solved=solved)
+    g2 = fock_partial_skeleton(mf, c.gamma, nocc, pending=pending)
+    g1 = lagrangian_skeleton(mf.mol, mf, [c])[0]
+    return g1 + g2, {'stationarity': c.stationarity, 'multiplier_res': c.res}
 
 
-def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False,
-                       numerics=None):
+def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False, *,
+                       numerics):
     """The orbital-relaxed density of a target, gamma + Lambda in the MO basis
     of `mf`: d target / d h = Tr[C (gamma + Lambda) C^T h] for any one-electron
     perturbation h, from the same Fock partial and orbital-rotation gradient
@@ -318,14 +340,12 @@ def relaxed_density_mo(mf, eps_bar, nocc, Y_extra=None, environment=False,
     return gamma + solved.lam, solved.res
 
 
-def relaxed_multiplier(mf, eps_bar, nocc, Y_extra=None, environment=False,
-                       numerics=None):
+def relaxed_multiplier(mf, eps_bar, nocc, Y_extra=None, environment=False, *,
+                       numerics):
     """(gamma, `SolvedMultiplier`) of `relaxed_density_mo`: the MO Fock
     partial and the multiplier solved for it, whose sum is the relaxed
     density."""
-    eps_bar = np.asarray(eps_bar, float)
-    gamma = (np.diag(eps_bar) if eps_bar.ndim == 1
-             else 0.5 * (eps_bar + eps_bar.T))
+    gamma = fock_partial_of(eps_bar)
     Y_E = fock_partial_Y(mf, gamma, nocc, environment=environment)
     if Y_extra is not None:
         Y_E = Y_E + Y_extra
@@ -346,7 +366,7 @@ def exchange_channel_skeleton(mf, g_ao, D, omega, weight, pending=None):
     skeleton is wrong there at any threshold. Four-centre derivative integrals
     have no metric and no such failure.
 
-    `skeleton_tiles.exchange_skeleton_by_atoms` takes both densities through
+    `skeleton_tiles.exchange_skeleton_tiled` takes both densities through
     one direct pass of pyscf's derivative exchange (`pyscf.grad.rhf.get_jk`'s
     K, not `mf.Gradients()`, which on a fitted mean field returns the fitted
     derivative J/K), its rows in fixed shell tiles dealt over the ranks of
@@ -359,7 +379,7 @@ def exchange_channel_skeleton(mf, g_ao, D, omega, weight, pending=None):
     if pending is not None and pending.open:
         pending.hold_skeleton(('exchange', float(omega)), weight * g_ao, D)
         return np.zeros((mf.mol.natm, 3))
-    return exchange_skeleton_by_atoms(mf.mol, g_ao, D, omega, weight)
+    return exchange_skeleton_tiled(mf.mol, g_ao, D, omega, weight)
 
 
 def fock_partial_skeleton_df(mf, auxmol, gamma, nocc, channels=((0.0, 1.0),),

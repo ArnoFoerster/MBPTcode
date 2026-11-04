@@ -6,8 +6,8 @@ derivative-integral tensor fits whole.
 
 The factor provider. The force reads the RI factors of the correlation fit
 (B = X J, X = L^-1, V = L L^T) through one object, which the method hands
-over (`gradients.df_factors.mp2_factors` for MP2, `gradients.adc.fold_factors`
-for an ADC(2) state): `f` the factors
+over (`gradients.df_factors.mp2_factors` for MP2, `DFFactors.of_fold` of the
+fold for an ADC(2) state): `f` the factors
 (`L`, `LT`, `BooP`, `bvv(chunk, p0, p1)`, `eo`, `ev`, `naux`), `no` and `nv`,
 `comm`, the auxiliary `chunks` with this rank's `my_chunks`, their `owners`
 and `chunk_ranges`, `ints(k0, k1)` the (ia|jb) of an occupied tile, and
@@ -60,14 +60,15 @@ every rank count.
 """
 import numpy as np
 from pyscf import df as pyscf_df
-from pyscf.gto.moleintor import getints, make_cintopt
 
 from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FORCE_BLOCK_ARRAYS,
                                          DF_FORCE_BLOCK_GB, DF_FORCE_MP2_TILE_ARRAYS,
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
 from src.Base.numerics.numerics import Numerics, numerics_or_default
-from src.Base.factorization.shell_runs import shell_ranges
+from src.Base.factorization.ao_product_fit import three_centre_block
+from src.Base.factorization.shell_runs import function_atoms, shell_ranges
+from src.gradients.isdf_adjoint_pieces import two_centre_adjoint
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
@@ -75,7 +76,7 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, curre
                                               ordered_chain_sum, ordered_sum, reduce_sum)
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
-from src.gradients.grad_engine import one_electron_skeleton
+from src.gradients.multipliers import lagrangian_skeleton
 from src.gradients.isdf_mean_field import (fitted_force_supported,
                                            mean_field_skeleton_force)
 from src.gradients.skeleton_tiles import fitted_fock_skeleton
@@ -300,17 +301,15 @@ def raw_basis(factors, A, Xw):
 # ----------------------------------------------------------------------
 
 def _int3c(mol, auxmol, intor):
-    """get(shls_slice) of (mu nu|P)-type integrals over shell ranges of mol,
-    mol, auxmol, as [comp,] [P, nu, mu] (C-contiguous)."""
-    pmol = mol + auxmol
-    name = mol._add_suffix(intor)
-    opt = make_cintopt(mol._atm, mol._bas, mol._env, name)
-    nbas = mol.nbas
+    """get(s0, s1, a0, a1) of (mu nu|P)-type integrals on the AO shells
+    [s0, s1) and the auxiliary shells [a0, a1) (`three_centre_block`), as
+    [comp,] [P, nu, mu] (C-contiguous)."""
+    comp = 3 if intor.endswith(('_ip1', '_ip2')) else 1
+    ao_loc = mol.ao_loc_nr()
 
     def get(s0, s1, a0, a1):
-        out = getints(name, pmol._atm, pmol._bas, pmol._env,
-                      (s0, s1, 0, nbas, nbas + a0, nbas + a1), aosym='s1',
-                      cintopt=opt, comp=3 if intor.endswith(('_ip1', '_ip2')) else 1)
+        out = three_centre_block(mol, auxmol, (s0, s1, ao_loc[s0], ao_loc[s1]),
+                                 intor, comp, aux_shells=(a0, a1))
         return out.transpose(0, 3, 2, 1) if out.ndim == 4 else out.transpose(2, 1, 0)
     return get
 
@@ -326,7 +325,9 @@ def on_root(fn, shapes, comm):
     of on every rank, and never concurrently on one molecule (pyscf's
     one-electron derivatives move its rinv origin). A raise in fn() on rank 0
     (a refused input) is broadcast and raised on every rank, so the other
-    ranks do not wait in the lockstep for ever."""
+    ranks do not wait in the lockstep for ever. fn runs in a serial region
+    (`distributed(None)`), so a collective inside it is rank 0's alone and
+    never waits for the ranks that are not running it."""
     rank = 0 if comm is None else comm.Get_rank()
     if rank != 0:
         failed = broadcast(None, comm)
@@ -334,7 +335,8 @@ def on_root(fn, shapes, comm):
             raise failed
         return lockstep(tuple(np.zeros(s) for s in shapes), comm)
     try:
-        out = tuple(np.ascontiguousarray(a, dtype=float) for a in fn())
+        with distributed(None):
+            out = tuple(np.ascontiguousarray(a, dtype=float) for a in fn())
     except Exception as exc:
         broadcast(exc, comm)
         raise
@@ -393,9 +395,7 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
     nao, natm = mol.nao, mol.natm
-    ao_atom = np.zeros(nao, dtype=int)
-    for a, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        ao_atom[p0:p1] = a
+    ao_atom = function_atoms(mol)
     nmu = max(1, int(block_gb * BYTES_PER_GB
                      / (8.0 * DF_FORCE_BLOCK_ARRAYS * nao * width)))
     blocks = shell_ranges(mol.ao_loc, nmu)
@@ -403,10 +403,7 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
     prepared = []
     for fit in fits:
         aux = fit.auxmol
-        aux_atom = np.zeros(aux.nao, dtype=int)
-        for a, (_, _, p0, p1) in enumerate(aux.aoslice_by_atom()):
-            aux_atom[p0:p1] = a
-        prepared.append((fit, shell_ranges(aux.ao_loc, width), aux_atom,
+        prepared.append((fit, shell_ranges(aux.ao_loc, width), function_atoms(aux),
                          _int3c(mol, aux, 'int3c2e_ip1'),
                          _int3c(mol, aux, 'int3c2e_ip2')))
     addends = []
@@ -436,26 +433,17 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
     return ordered_sum(addends, comm, shape=(natm, 3), onto=np.zeros((natm, 3)))
 
 
-def metric_force(auxmol, G2):
-    """-sum Gamma2 dV on the auxiliary centres, (natm, 3)."""
-    v1 = auxmol.intor('int2c2e_ip1', comp=3)
-    t_v = 2.0 * np.einsum('xPQ,PQ->xP', v1, G2, optimize=True)
-    out = np.zeros((auxmol.natm, 3))
-    for a, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        out[a] = t_v[:, q0:q1].sum(axis=1)
-    return out
-
-
 # ----------------------------------------------------------------------
 # the force
 # ----------------------------------------------------------------------
 
 def relaxed_gamma(mf, mol, factors, d, nf, Bc=None, Y_extra=None, numerics=None,
                   flags=None):
-    """(gamma (MO, relaxed, multipliers included), Y) of the factored
-    derivatives d (df_correlation_force.relax on the provider's factors), a
-    collective over its ranks: the Z-vector iterated by rank 0, every rank
-    building its share of each Fock matrix; Bc the core factors when nf."""
+    """The `multipliers.ClosedLagrangian` (MO, relaxed gamma with the
+    multipliers included) of the factored derivatives d
+    (df_correlation_force.relax on the provider's factors), rank 0's on every
+    rank: a collective over its ranks, the Z-vector iterated by rank 0, every
+    rank building its share of each Fock matrix; Bc the core factors when nf."""
     comm = factors.comm
     nmo, nocc = nf + factors.no + factors.nv, mol.nelectron // 2
     YG = orbital_gradient(factors, d, nf, Bc)
@@ -465,8 +453,9 @@ def relaxed_gamma(mf, mol, factors, d, nf, Bc=None, Y_extra=None, numerics=None,
     o, v = slice(nf, nocc), slice(nocc, nmo)
     gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
     with distributed(comm):
-        gamma, Y = dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
-    return lockstep((gamma, Y), comm)
+        closed = dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
+    return closed._replace(**dict(zip(('gamma', 'M', 'Y', 'lam'), lockstep(
+        (closed.gamma, closed.M, closed.Y, closed.lam), comm))))
 
 
 def mp2_density_tiled(mf, mol, factors, frozen=0, auxbasis=None, numerics=None,
@@ -480,7 +469,7 @@ def mp2_density_tiled(mf, mol, factors, frozen=0, auxbasis=None, numerics=None,
     e2, d = mp2_pieces(factors, EE_RI_TILE_GB if tile_gb is None else tile_gb,
                        scaling)
     Bc = factors.core_factors(mol, mf, frozen, auxbasis) if frozen else None
-    gamma, _ = relaxed_gamma(mf, mol, factors, d, frozen, Bc, None, numerics, flags)
+    gamma = relaxed_gamma(mf, mol, factors, d, frozen, Bc, None, numerics, flags).gamma
     return e2, gamma
 
 
@@ -496,7 +485,8 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
     nmo, no = C.shape[1], factors.no
     # the correlation fit: X = L^-1, or the eigen-replacement the factors'
     # fit took where the metric is not positive definite (X^T X = V^+)
-    _, Xw = dcf.whitening(auxmol)
+    with distributed(comm):
+        _, Xw = dcf.whitening(auxmol)
     lockstep(Xw, comm)
     if Xw.shape != (factors.f.naux, auxmol.nao):
         raise ValueError(f'the factors hold {factors.f.naux} auxiliary rows, the '
@@ -504,15 +494,16 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
                          'were made on another metric')
     if nmo != nf + factors.no + factors.nv:
         raise ValueError('the operator does not span the mean field\'s orbitals')
-    gamma, Y = relaxed_gamma(mf, mol, factors, d, nf, Bc, Y_extra, numerics, flags)
-    asym = float(np.max(np.abs(Y - Y.T)))
-    W = 0.25 * (Y + Y.T)
-    gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
-    f1, = on_root(lambda: one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao]),
+    closed = relaxed_gamma(mf, mol, factors, d, nf, Bc, Y_extra, numerics, flags)
+    gamma, asym = closed.gamma, closed.stationarity
+    gamma_ao = C @ gamma @ C.T
+    f1, = on_root(lambda: lagrangian_skeleton(mol, mf, [closed]),
                   [(mol.natm, 3)], comm)
     G2ri = metric_density(factors, d, Xw)
     ri = _RIFit(auxmol, C, nf, no, d, Xw, factors)
-    f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + metric_force(auxmol, G2ri)
+    # -sum Gamma2 dV on the auxiliary centres
+    f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + two_centre_adjoint(auxmol,
+                                                                             -G2ri)
     # the SCF's JK fit
     dcf.jk_fit(mf)                 # refuses a mean field with no JK fit
     auxjk = auxmol_of(mf, mol)

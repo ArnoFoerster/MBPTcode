@@ -31,8 +31,8 @@ from src.gradients.gwbse.static_correction import qp_xc_correction_skeleton
 from src.gradients.isdf_derivatives import one_fit_adjoint
 from src.gradients.mean_field_response import (fock_partial_skeleton,
                                                held_skeletons)
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module')
@@ -55,7 +55,7 @@ def partials(mf, seed=5):
 def counted(monkeypatch):
     """Count the four-centre and grid passes the module makes."""
     calls = {'exchange': 0, 'xc': 0}
-    by_atoms = mean_field_response.exchange_skeleton_by_atoms
+    by_atoms = mean_field_response.exchange_skeleton_tiled
     grid = mean_field_response.xc_grid_skeleton
 
     def exchange(*args, **kwargs):
@@ -66,7 +66,7 @@ def counted(monkeypatch):
         calls['xc'] += 1
         return grid(*args, **kwargs)
 
-    monkeypatch.setattr(mean_field_response, 'exchange_skeleton_by_atoms',
+    monkeypatch.setattr(mean_field_response, 'exchange_skeleton_tiled',
                         exchange)
     monkeypatch.setattr(mean_field_response, 'xc_grid_skeleton', xc)
     return calls

@@ -49,7 +49,7 @@ from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
 from src.photophysics import solvated
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import (ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, H2CO, JKFIT, NF, check,
+from tests.adc_common import (ee_numerics, ADC_TIGHT, ADC_NUMERICS, ATOMS, AUX, H2CO, JKFIT, NF, check,
                               five_point, make_scf_loop, make_scf_tight, molecule)
 from tests.pins import RECORDING_BLAS, matches
 
@@ -174,7 +174,7 @@ def _toluene_scf(mol):
 def test_one_shot_state_specific():
     mol = gto.M(atom=H2CO, basis='cc-pvdz', verbose=0)
     env, sol = _toluene_scf(mol)
-    kw = dict(level='adc2', nroots=1, frozen=2, conv_tol=1e-10, fold=True,
+    kw = dict(level='adc2', nroots=1, frozen=2, numerics=ee_numerics(conv_tol=1e-10), fold=True,
               environment=env, return_fold=True, state_specific='equilibrium',
               ss_density='relaxed')
     ok = True
@@ -208,8 +208,8 @@ def test_one_shot_state_specific():
 def test_driver(tmp_path):
     xyz = tmp_path / 'w.xyz'
     xyz.write_text('3\n\n' + '\n'.join(f'{a} {x} {y} {z}' for a, (x, y, z) in ATOMS) + '\n')
-    argv = ['--xyz', str(xyz), '--basis', '6-31g', '--solvent', 'toluene',
-            '--out', str(tmp_path / 'r.json')]
+    argv = ['--xyz', str(xyz), '--basis', '6-31g', '--environment', 'toluene',
+            '--saddle-check', '1', '--out', str(tmp_path / 'r.json')]
     args = solvated._parse_args(argv + ['--spin-scaling', SCS])
     solvated._resolve_basis(args)
     mol = molecule(ATOMS)
@@ -229,7 +229,7 @@ def test_driver(tmp_path):
     solvated._resolve_basis(plain)
     solvated._check_args(plain, mol)
     assert solvated._settings(plain)['spin_scaling'] is None
-    gw = solvated._parse_args(argv + ['--method', 'gwbse', '--isdf-grid', 'G1',
+    gw = solvated._parse_args(argv + ['--method', 'gwbse', '--grid-accuracy', 'G1',
                                       '--spin-scaling', SCS])
     solvated._resolve_basis(gw)
     with pytest.raises(SystemExit, match='takes no --spin-scaling'):

@@ -23,6 +23,7 @@ method-neutral minimum through the rate table.
     two methods are not mixed in one table.
 """
 import pathlib
+import shlex
 import subprocess
 import sys
 from dataclasses import replace
@@ -35,6 +36,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import Excitation
 from src.Base.utils.record_io import record_hash
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+from tests.adc_common import ee_numerics
 from src.photophysics import cli, stages
 from src.photophysics.declaration import DeclarationRefused, Policies
 from src.photophysics.minimum import (GroundModes, StateMinimum, from_adc2,
@@ -46,10 +48,8 @@ from src.properties.excitations import surface_of
 from src.properties.vibronic import normal_modes
 from tests.photophysics_cases import (REQUIRED, argv, declaration, refusing,
                                       run_in)
+from tests.molecules import WATER
 
-#: Water, its two displaced stand-in minima (Angstrom), small enough for a
-#: dense ADC(2) and an analytic Hessian in seconds.
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 S1_AT = 'O 0 0 0.1273; H 0 0.7872 -0.4892; H 0 -0.7872 -0.4892'
 T1_AT = 'O 0 0 0.1223; H 0 0.7772 -0.4792; H 0 -0.7772 -0.4792'
 
@@ -197,6 +197,15 @@ def test_the_command_line_has_no_default_grid(tmp_path, capsys):
     assert cli.parser().parse_args(full).grid_accuracy == 'G3'
 
 
+def test_the_help_example_is_a_declaration():
+    """The first command line of the help (the module docstring) parses
+    into a `Declaration`: every required option is in it."""
+    lines = cli.__doc__.split('python -m src.photophysics', 1)[1]
+    line = lines.split('\n\n', 1)[0].replace('\\\n', ' ')
+    d = cli.declaration_of(cli.parser().parse_args(shlex.split(line)))
+    assert d.system.name == 'formaldehyde'
+
+
 def drop(full, flag):
     """The command line `full` without `flag` and its value."""
     k = full.index(flag)
@@ -242,9 +251,14 @@ def test_python_m_runs_both_command_lines():
         assert out.returncode == 0, out.stderr[-2000:]
         return out.stdout
     staged, solvated = help_of(), help_of('solvated')
-    assert '--rate-model' in staged and '--solvent SOLVENT' not in staged
+    assert '--rate-model' in staged and '--solvent-arm' not in staged
     assert 'python -m src.photophysics solvated' in solvated
-    assert '--solvent SOLVENT' in solvated and '--rate-model' not in solvated
+    assert '--solvent-arm' in solvated and '--rate-model' not in solvated
+    # the options both take have one name and type (`cli`'s groups)
+    for option in ('--environment ENVIRONMENT', '--grid-accuracy GRID_ACCURACY',
+                   '--refreeze {0,1}', '--saddle-check {0,1}',
+                   '--loop-tol-q LOOP_TOL_Q'):
+        assert option in staged and option in solvated
 
 
 def test_the_default_stages_are_the_rate_model_s(tmp_path):
@@ -272,7 +286,7 @@ def adc2_at(atom, where):
     mp2 = mf.MP2().run()
     omega = {spin: np.asarray(solve_ee_adc(
         mf, level='adc2', nroots=3, spin=spin, fold=True, frozen=1,
-        auxbasis='cc-pvdz-ri', conv_tol=1e-9)[0])
+        auxbasis='cc-pvdz-ri', numerics=ee_numerics(conv_tol=1e-9))[0])
         for spin in ('singlet', 'triplet')}
     rng = np.random.default_rng(len(where))
     return from_adc2(where, mol.atom_coords(), mp2.e_tot, omega['singlet'],

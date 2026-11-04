@@ -18,7 +18,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.Base.numerics.constants import HARTREE_TO_CM
+from src.Base.numerics.constants import HARTREE_TO_CM, UISC_DQ
 from src.Base.declaration import Excitation, GroundState
 from src.properties.excitations import SurfaceSpec, calc_adiabatic_gap
 from src.properties.optimize import relax_ground_state
@@ -73,7 +73,8 @@ logging.disable(logging.NOTSET)
 
 # pyscf's own analytic RHF Hessian
 omega, modes, masses, _ = normal_modes(mf0, mol=mol0)
-v0, promoting = promoting_mode_couplings(mol0, omega, modes, masses, socme_at, 1, 0)
+v0, promoting = promoting_mode_couplings(mol0, omega, modes, masses, socme_at, 1, 0,
+                                         UISC_DQ)
 
 print(f"\nGround-state (Franck-Condon) <S1|H_SO|T1> = {v0 * HARTREE_TO_CM:.4f} "
       f"cm^-1, {len(promoting)} modes:")

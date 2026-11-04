@@ -23,7 +23,8 @@ other arrays. Checks, on every rank:
   * a rank whose operator differs from rank 0's still gets rank 0's verdict
     and arrays: only rank 0 compares the fingerprint
   * a miss gives None on every rank: no file, another key, another
-    fingerprint, a torn file
+    fingerprint, a torn file, a truncated .npz
+  * a write that fails on rank 0 raises on every rank
   * `_read` ran on rank 0 once per load and never elsewhere, and every rank
     made the same number of `lockstep` calls (the collectives paired)
 """
@@ -188,15 +189,36 @@ def run_checks(comm):
         if root:
             with open(os.path.join(mine, 'torn.npz'), 'wb') as f:
                 f.write(b'not an npz')
+            with open(os.path.join(mine, 'block_0.npz'), 'rb') as f:
+                whole = f.read()
+            with open(os.path.join(mine, 'cut.npz'), 'wb') as f:
+                f.write(whole[:len(whole) // 2])
         misses = [('no file', ckpt, 'absent', BLOCK),
                   ('another key', ckpt, 'block_0', dict(BLOCK, n=2)),
                   ('a torn file', ckpt, 'torn', BLOCK),
+                  ('a truncated npz', ckpt, 'cut', BLOCK),
                   ('another fingerprint', moved, 'block_0', BLOCK)]
         for name, c, stage, extra in misses:
             got = c.load(stage, **extra)
             loads += c is ckpt
             seen = comm.allgather(got is None) if comm is not None else [got is None]
             check(f'miss ({name}): None on every rank', all(seen), seen)
+
+        # a write that fails on rank 0 (its directory is a file) raises on
+        # every rank, and the ranks stay paired
+        blocked = os.path.join(mine, 'a_file')
+        if root:
+            open(blocked, 'w').close()
+        unwritable = PartitionCheckpoint(blocked, tag='t')
+        unwritable.bind(Operator(), Orbitals(), EPS, SITES, CT, SETTINGS)
+        try:
+            unwritable.save('guard', extra=SOLVED, **want['guard'])
+            raised = None
+        except RuntimeError as err:
+            raised = str(err)
+        seen = comm.allgather(raised is not None) if comm is not None else [raised is not None]
+        check('failed write on rank 0: raises on every rank', all(seen),
+              (seen, raised))
 
         check('_read on rank 0 only, once per load',
               (reads[0], skew_reads[0], move_reads[0])

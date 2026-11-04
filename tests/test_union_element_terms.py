@@ -56,7 +56,7 @@ def _evaluate(terms, out_idx, pool, extra_args=()):
     """Numerical value of a raw term list as the dense out_idx tensor."""
     src = assemble_block('blk', shape_expr(out_idx), terms, out_idx, '', extra_args=extra_args)
     ns = {}
-    exec('import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n' + src, ns)
+    exec('import numpy as np\nfrom src.Base.utils.cached_einsum import einsum\n' + src, ns)
     fn = ns['blk']
     return fn(**{p: pool[p] for p in inspect.signature(fn).parameters})
 

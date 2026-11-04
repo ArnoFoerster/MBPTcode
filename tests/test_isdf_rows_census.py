@@ -66,8 +66,9 @@ from src.gradients.gwbse.state_model import GWBSEState
 from src.gradients.isdf_derivatives import isdf_exchange_skeleton
 from src.gradients.isdf_mean_field import (isdf_jk_with_force,
                                            isdf_mean_field_gradient)
+from tests.molecules import WATER_C1
 
-H2O_C1 = 'O 0 0.05 0.117; H 0.1 0.757 -0.468; H 0 -0.757 -0.468'
+H2O_C1 = WATER_C1
 NK = 150
 TILE = 40
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src'))

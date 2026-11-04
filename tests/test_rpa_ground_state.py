@@ -113,7 +113,8 @@ def _dense_df_reference(mol, mf):
     A, B, _ = build_rpa_AB(np.asarray(mf.mo_energy, float), eri, nocc)
     qb = RPA(A, B)
     gammaF, Gamma4 = rpa_partials(qb, nocc, mol.nao)
-    g, _ = correlation_gradient(mol, mf, gammaF, Gamma4, eri_mo=eri, auxmol=auxmol)
+    g, _ = correlation_gradient(mol, mf, gammaF, Gamma4, eri_mo=eri, auxmol=auxmol,
+                                numerics=Numerics())
     return qb.e_corr(), g
 
 

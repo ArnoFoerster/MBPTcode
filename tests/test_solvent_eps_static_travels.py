@@ -11,13 +11,14 @@ import pytest
 from pyscf import gto
 
 from src.environments.solvent_screening import SolventScreening, solvent_dielectrics
+from tests.molecules import WATER_ROUNDED
 
 #: A static constant that is not water's table value.
 EPS_STATIC = 50.0
 
 
 def test_eps_static_travels_with_a_solvent_name():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='sto-3g', verbose=0)
     optical, table = solvent_dielectrics('water')
     assert table != pytest.approx(EPS_STATIC)

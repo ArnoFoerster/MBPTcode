@@ -34,8 +34,9 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.diagnostics import adaptive_check
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
+from tests.molecules import WATER_ROUNDED
 
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 TARGETS = (('singlet', 0), ('triplet', 0))
 #: eV; a Pade continuation over re-associated sums. Measured 3e-15 eV; the
 #: double count it guards against is 0.13 eV.

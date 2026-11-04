@@ -32,7 +32,7 @@ so plain Python threads give real parallelism here; the operation is
 memory-bandwidth bound, not flop bound, and a single core cannot saturate the
 memory system.
 
-Measured (nv=24, no=8, 4-permutation term, M1 Max):
+Measured (nv=24, no=8, 4-permutation term, one machine):
     current `coef * a + coef * b + ...`   35.1 ms   (25.7 GB/s, 1 core)
     serial in-place +=/-=                 23.1 ms
     pacc, 8 threads                        8.1 ms   (4.3x, ~92 GB/s)
@@ -40,17 +40,14 @@ Results are bit-identical to the expression form in every case checked
 (max|diff| = 0.0), since the arithmetic performed per element is the same
 sum in the same order.
 
-Thread count comes from CCSDT_ACCUM_THREADS, else OMP_NUM_THREADS, else
-MKL_NUM_THREADS, else os.cpu_count(); set any of them to 1 to get the plain
-serial path back. MKL_NUM_THREADS is honored because pinning just that one is
-the common way to run these solvers single-threaded (amplitudes.py itself sets
-it), and a caller who asked for one BLAS thread does not expect this module to
-quietly spawn ten. Read at call time, not import time, so a caller that pins
-threads after import (as the test sweeps do) still wins.
+Thread count is the process's thread budget (`threads.budget`: OMP_NUM_THREADS,
+else the CPUs this thread may run on); OMP_NUM_THREADS=1 gives the plain serial
+path back. Read at call time, not import time, so a caller that pins threads
+after import (as the test sweeps do) still wins.
 """
-import os
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
+
+from src.Base.utils.parallel.threads import budget, pool
 
 # Below this many elements the thread hand-off costs more than the work saved
 # (measured crossover is around 1e5 on this hardware; 1<<19 is comfortably
@@ -71,31 +68,6 @@ _MIN_PARALLEL_SIZE = 1 << 19
 # divides evenly, and forcing finer chunks there measured 0.93x).
 _FINE_CHUNK_SIZE = 1 << 20
 _MAX_CHUNKS_PER_THREAD = 4
-
-_POOL = None
-_POOL_SIZE = 0
-
-
-def _nthreads():
-    for var in ('CCSDT_ACCUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
-        val = os.environ.get(var)
-        if val:
-            try:
-                return max(1, int(val))
-            except ValueError:
-                pass
-    return max(1, os.cpu_count() or 1)
-
-
-def _pool(n):
-    global _POOL, _POOL_SIZE
-    if _POOL is None or _POOL_SIZE < n:
-        if _POOL is not None:
-            _POOL.shutdown(wait=False)
-        _POOL = ThreadPoolExecutor(n)
-        _POOL_SIZE = n
-    return _POOL
-
 
 def _serial(res, terms):
     for coef, arr in terms:
@@ -119,7 +91,7 @@ def pacc(res, terms):
     if not terms:
         return res
 
-    n = _nthreads()
+    n = budget()
     if (n == 1 or res.size < _MIN_PARALLEL_SIZE or res.ndim == 0
             or res.shape[0] < 2 or any(a.shape != res.shape for _, a in terms)):
         return _serial(res, terms)
@@ -154,5 +126,5 @@ def pacc(res, terms):
                 acc += coef * chunk
         res[lo:hi] += acc
 
-    list(_pool(nchunk).map(work, range(nchunk)))
+    list(pool(nchunk, 'accumulate').map(work, range(nchunk)))
     return res

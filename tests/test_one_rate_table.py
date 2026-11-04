@@ -43,8 +43,9 @@ from src.photophysics.minimum import GroundModes, from_gw_bse_record
 from src.photophysics import rates
 from src.properties.vibronic import huang_rhys_from_displacement
 from tests.pins import RECORDING_BLAS, blas_identity
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 #: Hartree; dyadic so that every energy difference below is exact
 OMEGA = np.array([-0.001, 0.004, 0.0075, 0.012, 0.018])
 #: the modes the tables are handed: the vibrations

@@ -86,9 +86,9 @@ to the excitation, the reaction field of the state's difference density, is
 added after the solve when asked for (ee_ri_density, ee_state_specific).
 """
 import numpy as np
-from pyscf import df as pyscf_df
 from pyscf import lib
 
+from src.Base.factorization.distributed_df import correlation_df
 from src.Base.numerics.constants import (BYTES_PER_GB, EE_RI_AMPLITUDE_CACHE_GB, EE_RI_AUX_CHUNK,
                                          EE_RI_EXCHANGE_ARRAYS, EE_RI_EXCHANGE_CHUNK,
                                          EE_RI_FOLD_DIAG_EXPONENT, EE_RI_FOLD_DIAG_GAP,
@@ -209,9 +209,10 @@ def bare_factors(mol, mf, frozen=0, auxbasis=None, chunk=EE_RI_AUX_CHUNK, comm=N
             raise ValueError('the folded route is density-fitted: give an '
                              'auxbasis, or a DF mean field')
     else:
-        with_df = pyscf_df.DF(mol, auxbasis=auxbasis)
-        with_df.max_memory = mf.max_memory
-        with_df.build()
+        # decided on this rank: the build only asks comm for its place, and a
+        # choice taken from the spectrum splits ranks only within round-off of
+        # the cut (the tiled force refuses factors of another row count)
+        with_df = correlation_df(mol, auxbasis, mf.max_memory)
     nocc = mol.nelectron // 2
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)

@@ -41,11 +41,9 @@ from src.Base.utils.grids.time_frequency import (COSINE_TW, COSINE_WT,
                                                  minimax_points_for_ranges,
                                                  minimax_transform_weights)
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
 E_MIN, E_MAX = 0.4, 40.0
-#: The grid of the pseudo-inverse check: water's own energy range on the
-#: 8-point tau axis and 24-point frequency axis the self-energy tests use.
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 NTAU, NFREQ = 8, 24
 
 

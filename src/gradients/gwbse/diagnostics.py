@@ -269,7 +269,7 @@ def qp_bookkeeping(surface, mol):
         qp_branch_warnings=list(getattr(chain, 'qp_branch_log', [])),
         # quasiparticle-Hamiltonian groups kept with Z outside (0, 1] or
         # carried on short of self-consistency, by group and geometry
-        # (`QuasiparticleSet.log_qp_hamiltonian`)
+        # (`QuasiparticleSet._log_qp_hamiltonian`)
         qp_hamiltonian_warnings=list(getattr(chain, 'qp_hamiltonian_log', [])),
         # explicit roots of pole strength outside (0, 1] at the reference
         # (`_flag_z_outside`), kept as solved

@@ -288,7 +288,7 @@ class GWBSEState:
             F = F + self.chain.excitation_gradient(self.mol, self.mf)[0]
         return lockstep(F), dict(dm_eff=r.dm_eff, lr=[], flags=r.info['flags'])
 
-    def loop_response(self, h, field, numerics=None):
+    def loop_response(self, h, field, numerics):
         """The reference's `HFState.loop_response`, on the mean field of its
         last call (this model's); an excited state has none."""
         if self.spin is not None:

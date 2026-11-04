@@ -22,8 +22,9 @@ from src.gradients.gwbse.state_manifold import StateManifold
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.pins import assert_same
 from tests.reference_scf import rhf_df_jkfit
+from tests.molecules import WATER_ROUNDED
 
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 KEYS = (('singlet', 0), ('triplet', 0))
 
 

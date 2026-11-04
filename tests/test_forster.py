@@ -31,11 +31,12 @@ from src.photophysics.forster import (KAPPA2_ISOTROPIC, Line,
                                       excited_absorption_lines, forster_c6,
                                       forster_radius_from_spectra,
                                       forster_radius_yield, molar_absorption,
-                                      normalized_emission, overlap_grid,
-                                      thermal_populations)
+                                      normalized_emission, overlap_grid)
 from src.properties.band_shape import DisplacedOscillators
+from src.properties.conformers import boltzmann_weights
 from src.properties.franck_condon import TRAPEZOID
 from src.properties.state_moments import excited_transition_dipoles
+from tests.molecules import WATER
 
 EV = 1.0 / HARTREE_TO_EV
 CM = 1.0 / HARTREE_TO_CM
@@ -46,7 +47,7 @@ ROOM = 300.0
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).run(conv_tol=1e-12)
     return mol, mf
@@ -346,7 +347,7 @@ def test_excited_absorption_lines_are_upward_and_thermal():
     lines = excited_absorption_lines(ei, ef, mu, model, ROOM)
     # 2.04 eV lies above 2.00 but below 2.05: five upward pairs
     assert len(lines) == 5
-    pop = thermal_populations(ei, ROOM)
+    pop = boltzmann_weights(ei, ROOM)
     np.testing.assert_allclose(pop.sum(), 1.0)
     np.testing.assert_allclose(pop[1] / pop[0],
                                np.exp(-0.05 * EV / (ROOM * 3.166811563e-6)))

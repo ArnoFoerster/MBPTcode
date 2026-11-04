@@ -513,9 +513,6 @@
  "src/gradients/df_correlation_force_tiled.py::mp2_pieces": [
   "tile_gb"
  ],
- "src/gradients/adc/fold_factors.py::ground_factors": [
-  "tile_gb"
- ],
  "src/gradients/df_correlation_force_tiled.py::prepare": [
   "tile_gb"
  ],

@@ -130,7 +130,8 @@ def test_driver(tmp_path, monkeypatch):
     xyz = tmp_path / 'w.xyz'
     xyz.write_text('3\n\n' + '\n'.join(f'{a} {x} {y} {z}' for a, (x, y, z) in ATOMS) + '\n')
     out = str(tmp_path / 'r.json')
-    argv = ['--xyz', str(xyz), '--basis', '6-31g', '--solvent', 'toluene', '--out', out]
+    argv = ['--xyz', str(xyz), '--basis', '6-31g', '--environment', 'toluene',
+            '--saddle-check', '1', '--out', out]
     mol = molecule(ATOMS)
     lr = {}
     for extra in ([], ['--solvent-arm', 'ss+lr']):
@@ -167,11 +168,12 @@ def test_driver(tmp_path, monkeypatch):
         solvated._start_record(default)
     # the gas phase has no arm
     gas = solvated._parse_args(['--xyz', str(xyz), '--basis', '6-31g',
+                                '--environment', 'gas', '--saddle-check', '1',
                                 '--out', str(tmp_path / 'gas.json')])
     solvated._resolve_basis(gas)
     solvated._check_args(gas, mol)
     assert solvated._start_record(gas)['solvent_arm'] is None
-    gw = solvated._parse_args(argv + ['--method', 'gwbse', '--isdf-grid', 'G1',
+    gw = solvated._parse_args(argv + ['--method', 'gwbse', '--grid-accuracy', 'G1',
                                       '--solvent-arm', 'ss'])
     solvated._resolve_basis(gw)
     with pytest.raises(SystemExit, match='takes no --solvent-arm'):

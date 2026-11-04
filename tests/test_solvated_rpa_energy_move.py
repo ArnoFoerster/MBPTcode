@@ -55,6 +55,7 @@ from src.gradients.rpa.space_time_adjoint import (rpa_energy_and_adjoint,
                                                   rpa_frequency_traces)
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED
 
 
 def same(got, want, quantity='root', unit='1'):
@@ -64,7 +65,7 @@ def same(got, want, quantity='root', unit='1'):
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Hartree. The adiabatic limit and a physical pole energy, so the dispersion
 #: gate sees both ends of g(iw) rather than one point of it.
 POLE_ENERGIES = (1e8, 3.67e-2, 1e-4)

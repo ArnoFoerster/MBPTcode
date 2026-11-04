@@ -27,17 +27,20 @@ from src.Base.numerics.constants import (DUSCHINSKY_SOFT_STIFF_WEIGHT_MAX,
 from src.photophysics.minimum import StateMinimum
 from src.photophysics.rate_chain import RateInputs, RateModel, rate_chain
 from src.photophysics.rate_models import RateRefused
+from src.photophysics.rates import ManifoldGaps
 from src.properties.duschinsky import (CartesianHessian, DuschinskyModel,
                                        displacement_from_minima,
                                        duschinsky_guard, guard_message,
                                        mean_energy_transfer, mode_sets,
                                        soft_stiff_weight, sum_rule_lambda)
+from tests.molecules import WATER_ROUNDED_LOW
 
 DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
                     'dmabn_s1_t1_hessians.npz')
 EV = 1.0 / HARTREE_TO_EV
 CM = 1.0 / HARTREE_TO_CM
 T = 300.0
+STACKED = ManifoldGaps('stacked', None)
 
 
 @pytest.fixture(scope='module')
@@ -57,7 +60,7 @@ def dmabn():
 def rectilinear(hs, ht):
     """The rate chain's model: T1 'ground', S1 'excited', the rectilinear
     J of the two mode sets and the curvilinear K of the minima."""
-    sg, se, j, dev = mode_sets(ht, hs)
+    sg, se, j, dev = mode_sets(ht, hs, 'rectilinear')
     k = displacement_from_minima(sg, se, ht.mol, hs.mol, 'curvilinear')
     return DuschinskyModel(sg.omega, se.omega, j, k, orthogonality=dev), sg
 
@@ -146,7 +149,7 @@ def test_dmabn_rate_chain_refuses_duschinsky_and_runs_displaced(dmabn):
     mol, hs, ht, e_s1, e_t1 = dmabn
     model, sg = rectilinear(hs, ht)
     lam_s = sum_rule_lambda(model, 'absorption')
-    sg_s, se_t, _, _ = mode_sets(hs, ht)
+    sg_s, se_t, _, _ = mode_sets(hs, ht, 'rectilinear')
     k_t = displacement_from_minima(sg_s, se_t, hs.mol, ht.mol, 'curvilinear')
     lam_t = 0.5 * float(np.sum((se_t.omega * k_t) ** 2))
     s1 = minimum('S1', hs.mol.atom_coords(), {'S1': e_s1, 'T1': e_t1 + lam_t})
@@ -156,8 +159,8 @@ def test_dmabn_rate_chain_refuses_duschinsky_and_runs_displaced(dmabn):
     full = replace(RateModel.full('curvilinear', 0.01), coupling='condon',
                    triplets='T1', duschinsky_coordinates='rectilinear')
     with pytest.raises(RateRefused, match='does not describe ISC'):
-        rate_chain(inp, full, T)
-    off = rate_chain(inp, replace(full, duschinsky=False), T)
+        rate_chain(inp, full, T, STACKED)
+    off = rate_chain(inp, replace(full, duschinsky=False), T, STACKED)
     assert off['duschinsky_guard'] is None
     for side in ('ISC', 'RISC'):
         assert off[side]['k_pair'] > 0.0
@@ -169,7 +172,7 @@ def test_water_two_bases_pass_with_their_own_energies():
     accepting basis' energy at both minima. Every test passes."""
     from pyscf import scf
     from pyscf.geomopt import geometric_solver
-    geo = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+    geo = WATER_ROUNDED_LOW
     hess, mols = {}, {}
     for basis in ('sto-3g', '6-31g'):
         mf = scf.RHF(gto.M(atom=geo, basis=basis, verbose=0)).run(
@@ -184,7 +187,7 @@ def test_water_two_bases_pass_with_their_own_energies():
 
     lam = {b: energy(b, a) - energy(b, b)
            for a, b in (('sto-3g', '6-31g'), ('6-31g', 'sto-3g'))}
-    sg, se, j, dev = mode_sets(hess['sto-3g'], hess['6-31g'])
+    sg, se, j, dev = mode_sets(hess['sto-3g'], hess['6-31g'], 'rectilinear')
     k = displacement_from_minima(sg, se, mols['sto-3g'], mols['6-31g'],
                                  'cartesian')
     model = DuschinskyModel(sg.omega, se.omega, j, k, orthogonality=dev)

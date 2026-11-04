@@ -25,6 +25,7 @@ from src.Base.factorization.isdf_jk import canonical_basis, solve_in_span
 from src.Base.factorization.separable_ri import (orbital_density_residual,
                                                  shipped_radii, shipped_radii_lookup)
 from src.SingleReference.GW.space_time import unrefused_separable_factors
+from tests.molecules import WATER
 
 TABLE = pathlib.Path(__file__).resolve().parent.parent / 'src' / 'Base' / \
     'factorization' / 'data' / 'optimized_radii.json'
@@ -67,7 +68,7 @@ def test_water_with_diffuse_shells_is_represented_in_the_span():
             a = 0.03 * 1.15**k
             base = base + [[0, [a, 1.0]], [1, [a, 1.0]]]
         return base
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis={'O': basis('O'), 'H': basis('H')}, verbose=0)
     auxmol = pyscf_df.addons.make_auxmol(mol, 'aug-cc-pvdz-ri')
     radii = {el: shipped_radii_lookup(el, 'aug-cc-pvdz', 'aug-cc-pvdz-ri',

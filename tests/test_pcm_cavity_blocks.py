@@ -20,12 +20,16 @@ from pyscf.solvent.grad import pcm as pcm_grad
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.environments import pcm_derivatives
-from src.environments.pcm_derivatives import (LIBCINT_BLOCK_LIMIT,
-                                              PYSCF_PCM_MAX_MEMORY_MB, cavity_blocks)
-from src.environments.pcm_derivatives import solvation_gradient
+from src.environments.pcm_derivatives import (LIBCINT_BLOCK_LIMIT, PYSCF_PCM_MAX_MEMORY_MB,
+                                              PYSCF_PCM_MIN_BLOCK, bound_pyscf_pcm_blocks,
+                                              cavity_blocks, libcint_block_fits,
+                                              require_pyscf_pcm_hessian_fits,
+                                              solvation_gradient)
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER_ROUNDED
 
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: cavity points per block once the limit is lowered
 POINTS = 7
 
@@ -140,6 +144,59 @@ def test_pyscf_own_pcm_routines_are_bounded_too():
     for comp in (1, 3, 9):
         nk = int(PYSCF_PCM_MAX_MEMORY_MB * .9e6 / 8 / nao ** 2 / comp)
         assert nao * nao * nk * comp <= LIBCINT_BLOCK_LIMIT
+
+
+
+@pytest.mark.parametrize('nao, fits', [(1028, True), (2317, True), (2318, False),
+                                       (2546, False), (5629, False)])
+def test_pyscf_floor_passes_the_limit_above_nao_2317(nao, fits):
+    """pyscf's floor of PYSCF_PCM_MIN_BLOCK points alone: inside libcint's
+    index up to nao 2317, past it from 2318 (the film clusters' 2546-5629).
+    One component is never strided."""
+    assert libcint_block_fits(nao, PYSCF_PCM_MIN_BLOCK, 3) is fits
+    assert libcint_block_fits(nao, PYSCF_PCM_MIN_BLOCK, 9) is fits
+    assert libcint_block_fits(nao, PYSCF_PCM_MIN_BLOCK, 1)
+
+
+def _uhf_in_toluene():
+    mf = scf.UHF(water(max_memory=120000)).PCM()
+    mf.with_solvent.eps = 2.3741
+    mf.with_solvent.lebedev_order = 11
+    bound_pyscf_pcm_blocks(mf.with_solvent)
+    return mf.run(conv_tol=1e-10)
+
+
+def test_a_pyscf_gradient_past_the_floor_runs_on_cavity_blocks(libcint_calls, monkeypatch):
+    """The force of a mean field `fitted_force_supported` does not cover (here
+    UHF) is pyscf's `Gradients()`, whose PCM term is the continuum's `grad`.
+    Once pyscf's block passes the limit that term runs on `cavity_blocks`:
+    no block past the limit, and the force pyscf gives where it fits."""
+    mf = _uhf_in_toluene()
+    calls, limit = libcint_calls
+    calls.clear()
+    blocked = mean_field_skeleton_force(mf)
+    assert calls and max(calls) <= limit, (max(calls), limit)
+    monkeypatch.setattr(pcm_derivatives, 'LIBCINT_BLOCK_LIMIT', 2 ** 31 - 1)
+    calls.clear()
+    whole = mean_field_skeleton_force(mf)
+    assert max(calls) > limit       # pyscf's own block: the whole grid
+    assert np.abs(blocked - whole).max() < 1e-10
+
+
+def test_pyscf_pcm_hessian_past_the_limit_is_refused(monkeypatch):
+    """pyscf's analytic PCM Hessian sizes its blocks itself (at least
+    PYSCF_PCM_MIN_BLOCK points, one atom's points whole): refused once they
+    pass the limit, run below it."""
+    mf = scf.RHF(water()).PCM()
+    mf.with_solvent.eps = 2.3741
+    mf.with_solvent.lebedev_order = 11
+    bound_pyscf_pcm_blocks(mf.with_solvent)
+    assert require_pyscf_pcm_hessian_fits(mf) is mf
+    assert require_pyscf_pcm_hessian_fits(scf.RHF(water())) is not None
+    nao = mf.mol.nao
+    monkeypatch.setattr(pcm_derivatives, 'LIBCINT_BLOCK_LIMIT', nao * nao * POINTS)
+    with pytest.raises(ValueError, match='analytic PCM Hessian'):
+        require_pyscf_pcm_hessian_fits(mf)
 
 
 if __name__ == '__main__':

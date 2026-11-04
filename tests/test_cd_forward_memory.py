@@ -38,6 +38,7 @@ from src.gradients.gwbse import qp_space_time
 from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import CROSS_PATH_RTOL
+from tests.molecules import WATER
 
 #: the synthetic screening: auxiliary size, orbitals, slices, frequencies
 NAUX, NORB, NSLICE, NFREQ_SYNTH = 40, 300, 24, 3
@@ -86,7 +87,7 @@ def test_one_screened_slice_at_a_time():
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

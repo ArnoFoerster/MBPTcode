@@ -33,6 +33,7 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.imaginary_axis import solve_qp_energy_imaginary_axis
 from src.SingleReference.GW.qp_solve import static_exchange_diagonal
 from src.Base.numerics.constants import HARTREE_TO_EV
+from tests.molecules import WATER_CS
 
 
 ETHENE = '''
@@ -95,7 +96,7 @@ def test_a_range_separated_reference_gets_full_range_exchange_back():
     two halves are asserted separately here rather than through their
     difference.
     """
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='sto-3g',
+    mol = gto.M(atom=WATER_CS, basis='sto-3g',
                 verbose=0)
     mf = dft.RKS(mol, xc='lrc-wpbeh')
     mf.conv_tol = 1e-12

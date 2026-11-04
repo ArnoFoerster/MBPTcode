@@ -40,3 +40,25 @@ def test_the_module_runs_from_the_command_line():
     assert out.returncode == 0, out.stderr[-2000:]
     assert 'python -m src.SingleReference.ADC.eeADC' in out.stdout
     assert '--state-specific' in out.stdout
+
+
+def test_a_channel_is_reused_only_under_its_own_settings(tmp_path, capsys):
+    """A rerun into the same --out-dir with more roots, or on another
+    geometry, solves the channel again; the same run reuses it."""
+    xyz = tmp_path / 'water.xyz'
+    xyz.write_text('3\n\nO 0 0 0.1173\nH 0 0.7572 -0.4692\nH 0 -0.7572 -0.4692\n')
+    out = tmp_path / 'run'
+    argv = ['--xyz', str(xyz), '--basis', 'sto-3g', '--auxbasis', 'cc-pvdz-ri',
+            '--jk-auxbasis', 'cc-pvdz-jkfit', '--frozen', '0',
+            '--spins', 'singlet', '--out-dir', str(out)]
+
+    def roots(nroots):
+        assert vertical.main(argv + ['--nroots', str(nroots)]) == 0
+        channel = json.loads((out / 'channel_singlet.json').read_text())
+        return len(channel['omega_eV']), 'singlet: reused' in capsys.readouterr().out
+
+    assert roots(2) == (2, False)
+    assert roots(2) == (2, True)
+    assert roots(3) == (3, False)
+    xyz.write_text('3\n\nO 0 0 0.1273\nH 0 0.7572 -0.4692\nH 0 -0.7572 -0.4692\n')
+    assert roots(3) == (3, False)

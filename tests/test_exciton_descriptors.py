@@ -30,6 +30,7 @@ from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.BSE.solve import solve_bse_df
 from src.SingleReference.LinearResponse.exciton_descriptors import exciton_descriptors
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.molecules import WATER_ROUNDED_LOW
 
 TOL = 1e-10
 
@@ -53,7 +54,7 @@ def orbital_moments(mf, mol):
 
 def main():
     ok = True
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol).run()
     nocc = mol.nelectron // 2

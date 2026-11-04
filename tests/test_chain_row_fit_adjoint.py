@@ -24,7 +24,7 @@ Hartree-Fock at 148 points per atom in tiles of `TILE` points (7 tiles):
       and every adjoint the kernels hand the assembly (eps_bar, X_bar,
       D_bar). The orbital, collocation and fit branches and the forces
       within FIT_REALIZATION_FORCE_TOL, the whole assembly refitting the
-      estimator with `fit_M_stable`. Every rank holds rank 0's force.
+      estimator with `fit_M`. Every rank holds rank 0's force.
   (c) The memory scan at every force (`test_chain_row_fit.watch`): every line
       of every frame under src/ inside the nuclear assembly is traced, and no
       array it names holds the grid by a factor's, the fit's or the test

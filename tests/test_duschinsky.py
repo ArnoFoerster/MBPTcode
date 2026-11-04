@@ -31,8 +31,10 @@ from src.properties.duschinsky import (CartesianHessian, DuschinskyModel,
                                        duschinsky_density, duschinsky_model,
                                        log_correlation, mean_energy_transfer,
                                        read_orca_hessian)
-from src.properties.franck_condon import (TRAPEZOID, log_generating_function,
-                                          bose, fc_weighted_dos)
+from src.properties.franck_condon import (TRAPEZOID, FCTimeGrid,
+                                          log_generating_function, bose,
+                                          fc_weighted_dos)
+from tests.molecules import WATER_ROUNDED_LOW
 
 CM = 1.0 / HARTREE_TO_CM
 EV = 1.0 / HARTREE_TO_EV
@@ -118,14 +120,17 @@ def test_a_reviving_fast_mode_does_not_end_the_time_grid():
         assert rho == pytest.approx(ref, rel=1e-8)
 
 
-def test_band_grid_of_the_displaced_model_is_band_grid():
-    from src.properties.band_shape import band_grid
-    kw = dict(gaussian_fwhm=0.03 * EV, lorentzian_fwhm=0.01 * EV)
-    a = band_grid(S_MODES, MODES, 3.0 * EV, 300.0, **kw)
-    b = vibronic_band_grid(DisplacedOscillators(S_MODES, MODES), 3.0 * EV,
-                           300.0, **kw)
-    assert a[0] == pytest.approx(b[0], rel=1e-12)
-    assert a[-1] == pytest.approx(b[-1], rel=1e-12)
+def test_one_time_grid_reaches_both_integrals():
+    """One `FCTimeGrid` sizes the shifted contour of `fc_weighted_dos` and the
+    real axis of `duschinsky_density` alike: a cap below what the band needs
+    is refused by both."""
+    small = FCTimeGrid(max_points=16)
+    w, s = np.array([1200.0]) * CM, np.array([1.0])
+    with pytest.raises(ValueError, match='cap of 16'):
+        fc_weighted_dos(-0.01, s, w, 300.0, broadening=0.002, time_grid=small)
+    with pytest.raises(ValueError, match='cap of 16'):
+        duschinsky_density(TWO_MODE, 0.0, 300.0, 'emission', broadening=0.002,
+                           time_grid=small)
 
 
 # ------------------------------------------------- brute force: two modes
@@ -297,7 +302,7 @@ def test_branch_continuation_is_what_holds_it(blocks, monkeypatch):
 def water_hessians():
     from pyscf import gto, scf
     from pyscf.geomopt import geometric_solver
-    geo = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+    geo = WATER_ROUNDED_LOW
     out = {}
     for basis in ('sto-3g', '6-31g'):
         mol = gto.M(atom=geo, basis=basis, verbose=0)
@@ -325,7 +330,7 @@ def turned(hess, seed=3):
 
 def test_one_state_against_itself_is_the_identity(water_hessians):
     g = water_hessians['sto-3g']
-    m = duschinsky_model(g, turned(g))
+    m = duschinsky_model(g, turned(g), 'rectilinear')
     assert np.abs(np.abs(m.J) - np.eye(3)).max() < 1e-9
     assert np.abs(m.K).max() < 1e-7
     assert np.abs(m.omega_e - m.omega_g).max() < 1e-12
@@ -333,8 +338,8 @@ def test_one_state_against_itself_is_the_identity(water_hessians):
 
 def test_the_model_does_not_depend_on_the_excited_frame(water_hessians):
     g, e = water_hessians['sto-3g'], water_hessians['6-31g']
-    a = duschinsky_model(g, e)
-    b = duschinsky_model(g, turned(e))
+    a = duschinsky_model(g, e, 'rectilinear')
+    b = duschinsky_model(g, turned(e), 'rectilinear')
     # equal up to the signs of the modes, which are the eigensolver's
     assert np.abs(np.abs(a.J) - np.abs(b.J)).max() < 1e-8
     assert np.abs(np.abs(a.K) - np.abs(b.K)).max() < 1e-7
@@ -344,14 +349,14 @@ def test_the_model_does_not_depend_on_the_excited_frame(water_hessians):
     bad = CartesianHessian(t.mol, e.hessian, e.source)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        c = duschinsky_model(g, bad)
+        c = duschinsky_model(g, bad, 'rectilinear')
     assert np.abs(np.abs(c.J) - np.abs(a.J)).max() > 1e-3
 
 
 def test_water_duschinsky_keeps_the_symmetry_blocks(water_hessians):
     """C2v: the b2 stretch does not mix with the two a1 modes, and the
     displacement is totally symmetric; the a1 pair does rotate."""
-    m = duschinsky_model(water_hessians['sto-3g'], water_hessians['6-31g'])
+    m = duschinsky_model(water_hessians['sto-3g'], water_hessians['6-31g'], 'rectilinear')
     b2 = int(np.argmax(np.abs(m.J[:, 2])))     # the b2 mode is the highest
     a1 = [k for k in range(3) if k != 2]
     assert b2 == 2
@@ -396,8 +401,8 @@ def test_orca_hessian_is_read_as_data(water_hessians, tmp_path):
     from src.properties.optimize import cartesian_hessian
     assert np.abs(read.hessian - cartesian_hessian(e.hessian, 3)).max() < 1e-9
     assert np.abs(read.mol.atom_coords() - e.mol.atom_coords()).max() < 1e-6
-    a = duschinsky_model(water_hessians['sto-3g'], water_hessians['6-31g'])
-    b = duschinsky_model(water_hessians['sto-3g'], read)
+    a = duschinsky_model(water_hessians['sto-3g'], water_hessians['6-31g'], 'rectilinear')
+    b = duschinsky_model(water_hessians['sto-3g'], read, 'rectilinear')
     assert np.abs(b.omega_e - a.omega_e).max() < 1e-9
     assert np.abs(np.abs(b.K) - np.abs(a.K)).max() < 1e-5
     from pyscf import gto
@@ -421,7 +426,7 @@ def test_refusals():
     with pytest.raises(ValueError, match='temperature'):
         duschinsky_density(TWO_MODE, 0.0, 0.0, 'emission', broadening=1e-3)
     with pytest.raises(TypeError, match='Hessian'):
-        duschinsky_model(object(), object())
+        duschinsky_model(object(), object(), 'rectilinear')
 
 
 if __name__ == '__main__':

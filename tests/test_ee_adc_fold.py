@@ -181,11 +181,12 @@ from src.Base.numerics.constants import EE_COUPLING_SLAB_BLOCKS
 from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.SingleReference.ADC.eeADC import ee_r_sigma, ee_r_sigma_df, ee_utils
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB
-from tests.adc_common import check
+from tests.adc_common import check, ee_numerics
 from tests.pins import same_bar
+from tests.molecules import WATER_AT_ORIGIN
 
 HARTREE_TO_EV = 27.211386245988
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 
 
 def water_df(basis='cc-pvdz'):
@@ -266,7 +267,7 @@ def check_folded_operator(mf, eps, B, no):
     # the full solve's lowest singlet: Davidson, since the channel (6365) is far
     # above EE_ADC_DENSE_LIMIT; its residual 1e-10 sits well under every tolerance here
     e_full, Z = solve_ee_adc(mf, level='adc2', nroots=1, df=True, spin='singlet',
-                             conv_tol=1e-10)
+                             numerics=ee_numerics(conv_tol=1e-10))
     w = float(e_full[0])
     matvec, dmatvec, diag_s, embed, restrict = ee_fold.folded_operator(P, w,
                                                                        spin='singlet')
@@ -312,7 +313,7 @@ def check_solve_folded(mf, eps, B, no):
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='adc2', pieces=True)
     for spin in ('singlet', 'triplet'):
         e_full, Z = solve_ee_adc(mf, level='adc2', nroots=3, df=True, spin=spin,
-                                 conv_tol=1e-10)
+                                 numerics=ee_numerics(conv_tol=1e-10))
         res = ee_fold.solve_folded(P, 3, spin=spin)
         res_n = ee_fold.solve_folded(P, 3, spin=spin, solver='newton')
         for r in range(3):
@@ -368,7 +369,7 @@ def check_solve_folded(mf, eps, B, no):
                                                pieces=True)
     res3 = ee_fold.solve_folded(P3, 1, spin='singlet')
     e3, _ = solve_ee_adc(mf3, level='adc2', nroots=1, df=True, spin='singlet',
-                         conv_tol=1e-10)
+                         numerics=ee_numerics(conv_tol=1e-10))
     d = abs(float(res3.omega[0]) - float(e3[0])) * ev
     ok &= check(d < 1e-5 and res3.t1[0] < 1.0,
                 'HeH+ singlet (nocc = nvirt = 1): folded equals the full solve',
@@ -397,7 +398,7 @@ def check_degenerate_set():
     B = DFIntegrals.from_scf(mol, mf).B_aa
     no = mol.nelectron // 2
     e_full, _ = solve_ee_adc(mf, level='adc2', nroots=4, df=True, spin='singlet',
-                             conv_tol=1e-10)
+                             numerics=ee_numerics(conv_tol=1e-10))
     e_full = np.asarray(e_full)
     gaps = np.abs(np.diff(e_full)) * ev
     ok &= check(gaps[0] < 1e-6 and gaps[1] < 1e-6,
@@ -465,7 +466,7 @@ def check_routes_and_channels(mf, eps, B, no):
         ok &= check(d < 1e-7 and b.converged.all(),
                     f'{spin}: Davidson branch equals the dense branch',
                     f'|d| {d:.1e} eV')
-    e_full, _ = solve_ee_adc(mf, level='adc2', nroots=6, df=True, conv_tol=1e-10)
+    e_full, _ = solve_ee_adc(mf, level='adc2', nroots=6, df=True, numerics=ee_numerics(conv_tol=1e-10))
     res = ee_fold.solve_folded(P, 6, spin=None)
     d = float(np.max(np.abs(res.omega - np.asarray(e_full)))) * ev
     ok &= check(d < 1e-5, 'spin=None: six folded roots equal the full solve',
@@ -483,7 +484,7 @@ def check_gf2_solves(mf, eps, B, no):
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, no, level='gf2', pieces=True)
     for spin in ('singlet', 'triplet'):
         e_full, _ = solve_ee_adc(mf, level='gf2', nroots=3, df=True, spin=spin,
-                                 conv_tol=1e-10)
+                                 numerics=ee_numerics(conv_tol=1e-10))
         res = ee_fold.solve_folded(P, 3, spin=spin)
         d = float(np.max(np.abs(res.omega - np.asarray(e_full)))) * ev
         ok &= check(d < 1e-5 and res.converged.all(),
@@ -492,16 +493,16 @@ def check_gf2_solves(mf, eps, B, no):
     mf0 = scf.RHF(mol)
     mf0.conv_tol = 1e-12
     mf0.kernel()
-    e_dense, _ = solve_ee_adc(mf0, level='gf2', nroots=3, df=False, conv_tol=1e-10)
+    e_dense, _ = solve_ee_adc(mf0, level='gf2', nroots=3, df=False, numerics=ee_numerics(conv_tol=1e-10))
     e_exact, _ = solve_ee_adc(mf0, level='gf2', nroots=3, df=True, auxbasis='exact',
-                              conv_tol=1e-10)
+                              numerics=ee_numerics(conv_tol=1e-10))
     d = float(np.max(np.abs(np.asarray(e_dense) - np.asarray(e_exact)))) * ev
     ok &= check(d < 1e-6, 'gf2: dense integral route equals DF with exact factors',
                 f'|d| {d:.1e} eV')
     mf6 = water_df('6-31g')[0]
-    e_sf, _ = solve_ee_adc(mf6, level='gf2', nroots=4, df=True, conv_tol=1e-10)
+    e_sf, _ = solve_ee_adc(mf6, level='gf2', nroots=4, df=True, numerics=ee_numerics(conv_tol=1e-10))
     e_u, _ = solve_ee_adc(mf6.to_uhf(), level='gf2', nroots=4, df=True,
-                          route='unrestricted', conv_tol=1e-10)
+                          route='unrestricted', numerics=ee_numerics(conv_tol=1e-10))
     d = float(np.max(np.abs(np.asarray(e_sf) - np.asarray(e_u)))) * ev
     ok &= check(d < 1e-6, 'gf2: the unrestricted route on an RHF reference equals the '
                 'spin-free one, both channels (6-31G)', f'|d| {d:.1e} eV')
@@ -522,7 +523,7 @@ def check_gf2_solves(mf, eps, B, no):
     e_d, _ = solve_ee_adc(mf_s, level='gf2', nroots=10, route='spinorbital',
                           matrix_free=False)
     e_m, _ = solve_ee_adc(mf_s, level='gf2', nroots=10, route='spinorbital',
-                          dense_limit=0, conv_tol=1e-10)
+                          numerics=ee_numerics(dense_limit=0, conv_tol=1e-10))
     d = float(np.max(np.abs(np.sort(e_m) - np.sort(e_d)))) * ev
     ok &= check(d < 1e-6, 'gf2: the spin-orbital Davidson equals its dense '
                 'supermatrix, ten lowest of both channels (STO-3G)', f'|d| {d:.1e} eV')
@@ -985,7 +986,7 @@ def check_seeding_gap():
     _, _, _, P = ee_r_sigma_df.build_operator(eps, B, mol.nelectron // 2,
                                               level='adc2', pieces=True)
     e_full, _ = solve_ee_adc(mf, level='adc2', nroots=4, df=True, spin='triplet',
-                             conv_tol=1e-10)
+                             numerics=ee_numerics(conv_tol=1e-10))
     e_full = np.asarray(e_full)
     for dense_limit, route in ((2000, 'dense'), (0, 'Davidson')):
         with warnings.catch_warnings(record=True) as caught:
@@ -1625,11 +1626,12 @@ def check_threaded_elementwise():
                  'quotient': (sb.ew(np.true_divide, a, d), a / d),
                  'broadcast, left to NumPy': (sb.ew(np.multiply, a, d[0]), a * d[0])}
         pid = os.getpid()
-        before = {k for k in th._ROW_POOLS if k[0] == pid}
+        before = {k for k in th._POOLS if k[0] == pid and k[1] == 'rows'}
         sb.ew(np.add, a.reshape(2, -1), 1.0)
         sb.ew(np.add, rng.standard_normal((3, 400000)), 1.0)
         sb.ksum(lambda r0, r1: np.zeros(1), 3, sb._KSUM_MIN)
-        pools = {k[1] for k in th._ROW_POOLS if k[0] == pid} - {k[1] for k in before}
+        pools = ({k[2] for k in th._POOLS if k[0] == pid and k[1] == 'rows'}
+                 - {k[2] for k in before})
     finally:
         if keep is None:
             del os.environ['OMP_NUM_THREADS']

@@ -9,9 +9,8 @@ WHAT EACH GATE IS FOR:
   acceptor's energy change of the wrong sign the identity fails.
 - detailed balance: forward over reverse is exp(-dE / k_B T).
 - the classical limit: with only soft modes the rate is the Marcus rate.
-- the linear coupling model: S_k from the gradient difference is the Huang-Rhys
-  factor of the vibronic module for a ground-state initial state, and the
-  spectrum between two excited states reads their difference.
+- the linear coupling model: the spectrum between two excited states reads
+  their gradient difference, and a mode that is not a vibration is refused.
 - the spin weight scales the rate, and the triplet transfer refuses
   transitions that are not T1 -> S0 and S0 -> T1.
 """
@@ -29,7 +28,6 @@ from src.photophysics.transfer_rates import (TTA_SPIN_WEIGHTS, Transition,
                                              dexter_rate, transfer_rate,
                                              transition_from_gradients)
 from src.properties.franck_condon import TRAPEZOID, fc_weighted_dos
-from src.properties.vibronic import huang_rhys_from_gradient
 
 ROOM = 298.15
 CM = 1.0 / HARTREE_TO_CM
@@ -89,14 +87,15 @@ def test_the_linear_coupling_spectrum():
     masses = np.full(natm, 1822.9)
     omega = np.array([400.0, 800.0, 1100.0, 1500.0, 3000.0]) * CM
     g_t, g_s = rng.normal(size=(2, natm, 3)) * 1e-3
-    t = transition_from_gradients('M', 'S0', 'T1', 0.1, omega, modes, masses,
-                                  grad_final=g_t)
-    ref, _ = huang_rhys_from_gradient(g_t, omega, modes, masses)
-    assert np.abs(t.s_k - ref).max() < 1e-14 * ref.max()
     st = transition_from_gradients('M', 'T1', 'S1', 0.05, omega, modes,
                                    masses, grad_initial=g_t, grad_final=g_s)
-    ref, _ = huang_rhys_from_gradient(g_s - g_t, omega, modes, masses)
-    assert np.abs(st.s_k - ref).max() < 1e-14 * ref.max()
+    diff = transition_from_gradients('M', 'T1', 'S1', 0.05, omega, modes,
+                                     masses, grad_final=g_s - g_t)
+    assert np.array_equal(st.s_k, diff.s_k)
+    omega[0] = -50.0 * CM
+    with pytest.raises(ValueError, match='VIBRONIC_MODE_FLOOR_CM'):
+        transition_from_gradients('M', 'S0', 'T1', 0.1, omega, modes, masses,
+                                  grad_final=g_t)
 
 
 def test_spin_weight_and_refusals():

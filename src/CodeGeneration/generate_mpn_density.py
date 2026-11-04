@@ -84,14 +84,15 @@ MAX_RANK = 4  # see module docstring; needed for T4^(2) (MP4's N^(4)/M^(4))
 
 
 def bra_string(rank):
-    """DEPRECATED for rank > 4 -- use bra_ops(). e{rank}(occ ascending..., vir
+    """The pdaggerq e-operator bra, for rank <= 4 only (bra_ops() is the form
+    for every rank). e{rank}(occ ascending..., vir
     DESCENDING...) with pairing (occ[0],vir[0]),(occ[1],vir[1]),... -- same
     convention as T_BRA in generate_restricted_ccsdt.py, generalized to any rank.
 
     pdaggerq REJECTS e5 and above ("only e1, e2, e3, and e4 operators are
     supported"), and the error aborts the process at C++ level, so buffered
-    stdout is lost -- run probes with `python -u`. Kept only so the e-form
-    remains available as the reference bra_ops() is validated against.
+    stdout is lost -- run probes with `python -u`. The e-form is the reference
+    bra_ops() is validated against (tests/test_bra_ops_equivalence.py).
     """
     occ_idx = list(OCC_LETTERS[:rank])
     vir_idx = list(reversed(VIR_LETTERS[:rank]))

@@ -28,9 +28,9 @@ from src.environments.reaction_field import NoMedium
 from src.photophysics import solvated
 from tests.adc_common import ATOMS
 
-ARGS = argparse.Namespace(method='adc2', jk_auxbasis='cc-pvdz-jkfit', xc=None, frozen=1,
-                          auxbasis='cc-pvdz-ri', nroots=3, follow='index', tol_q=1e-9,
-                          tol_energy=1e-11)
+ARGS = argparse.Namespace(method='adc2', jk_auxbasis='cc-pvdz-jkfit', reference=None,
+                          frozen=1, auxbasis='cc-pvdz-ri', nroots=3, track='index',
+                          loop_tol_q=1e-9, loop_tol_energy=1e-11)
 MOL = solvated._mol_of([[a, *xyz] for a, xyz in ATOMS], '6-31g', 4000)
 
 

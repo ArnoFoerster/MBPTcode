@@ -82,10 +82,11 @@ from src.SingleReference.GW.space_time import separable_factors
 from tests.isdf_test_grid import g1, g1_kw, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.blas_bar import assert_same_within
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER_DISTORTED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 #: The state-pair gates' water (tests/test_state_pair_force_distributed_ks.py).
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 #: C1-distorted molecules of the kernel and FD gates
 #: (tests/test_skeleton_tiles.py's).
 GEOMS = {

@@ -93,7 +93,7 @@ import numpy as np
 from src.Base.numerics.constants import (EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR,
                                          NUCLEAR_FD_STEP)
 from src.Base.geometry.geometry import displaced
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.SingleReference.LinearResponse.linear_response import check_normalization
 from src.gradients.state_identity import (aligned_overlap, mo_overlap,
                                           state_overlap)

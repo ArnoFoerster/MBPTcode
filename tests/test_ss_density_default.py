@@ -27,7 +27,7 @@ from src.environments.split_equilibrium import ClassicalStateSpecific
 from src.SingleReference.ADC.eeADC import ee_driver, vertical
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import H2CO, JKFIT
+from tests.adc_common import H2CO, JKFIT, ee_numerics
 from tests.pins import RECORDING_BLAS, matches
 
 
@@ -58,7 +58,7 @@ def solvated():
     return env, env.mean_field(mol, factory)
 
 
-KW = dict(level='adc2', nroots=1, frozen=2, conv_tol=1e-9, fold=True,
+KW = dict(level='adc2', nroots=1, frozen=2, numerics=ee_numerics(conv_tol=1e-9), fold=True,
           spin='singlet')
 
 

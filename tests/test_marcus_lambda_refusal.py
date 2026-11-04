@@ -26,8 +26,9 @@ from src.photophysics import rate_models
 from src.photophysics.minimum import from_gw_bse_record
 from src.photophysics import rates
 from tests.photophysics_cases import gw_bse_props, unit_modes
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 OMEGA = np.array([0.01, 0.02, 0.03])
 #: Hartree: lambda_T = E_T1(R_S1) - E_T1(R_T1), lambda_S = E_S1(R_T1) - E_S1(R_S1)
 LAMBDA_T, LAMBDA_S = 0.025, 0.010

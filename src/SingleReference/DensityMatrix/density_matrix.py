@@ -1,8 +1,8 @@
 import numpy as np
 from pyscf import scf
 
-from src.SingleReference.GW.qp_solve import mean_field_static_operator
-from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
+from src.SingleReference.common.mean_field_operators import mean_field_static_operator
+from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.Base.orbital_spaces import get_occ_virt_indices
@@ -16,11 +16,9 @@ from src.Base.numerics.constants import (
     DEFAULT_BROADENING_ETA,
     DEFAULT_BLOCK_SIZE,
     GW_DENSITY_SPIN_SUM,
-    CPHF_MAX_CYCLE,
-    CPHF_TOL,
     MPN_DENSITY_LAPLACE_NTAU,
 )
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import required_numerics
 from src.Base.pyscf.cphf import solve as cphf_solve
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import (
     MPnDensityDriverUnrestricted)
@@ -119,23 +117,32 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         dgamma_ov = dgamma_ov * spin_sum
         return dgamma_oo, dgamma_ov, dgamma_vv
 
-    def solve_relaxation(self, mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cycle=CPHF_MAX_CYCLE, tol=CPHF_TOL):
+    def solve_relaxation(self, mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics):
         """Solve the CPHF/CPKS Z-vector equation A.X=Y for the ov block; return the full relaxed MO-basis Delta_gamma.
 
         Pass a KS mf for the gKS Hessian, or a bare RHF object sharing mf's
-        orbitals/energies for the TDHF Hessian.
+        orbitals/energies for the TDHF Hessian; numerics as in
+        solve_cphf_relaxation.
         """
-        return solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cycle=max_cycle, tol=tol)
+        return solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics)
 
 
-def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cycle=CPHF_MAX_CYCLE, tol=CPHF_TOL):
+def relaxation_numerics(relax, numerics, where):
+    """`numerics` where `relax` asks for the Z-vector solve, refused there
+    when None (`required_numerics`); not read otherwise."""
+    return required_numerics(numerics, where) if relax else numerics
+
+
+def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics):
     """
     Solve the CPHF/CPKS Z-vector equation A.X=Y for the ov block; return the full relaxed MO-basis Delta_gamma.
 
     Generic over the correction's origin (GW, MP2, ...) -- only the
     spatial-MO oo/ov/vv blocks and a Hessian mean-field object are needed.
     Pass a KS mf for the gKS Hessian, or a bare RHF object sharing mf's
-    orbitals/energies for the TDHF Hessian.
+    orbitals/energies for the TDHF Hessian. numerics: the run's `Numerics`,
+    required; its scf section's multiplier_tol, multiplier_max_iter and
+    multiplier_residual_tol set the solve (src.Base.pyscf.cphf.solve).
     """
     mo_coeff = mf_hess.mo_coeff
     mo_energy = mf_hess.mo_energy
@@ -159,8 +166,7 @@ def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cy
     coupling_ov = orbo.T @ vresp(mo_coeff @ D_corr @ mo_coeff.T) @ orbv
     Y = e_ia * dgamma_ov - 2.0 * coupling_ov
 
-    X_ai = cphf_solve(fvind, e_ia.T, Y.T, numerics=Numerics(
-        scf={'multiplier_tol': tol, 'multiplier_max_iter': max_cycle}))
+    X_ai = cphf_solve(fvind, e_ia.T, Y.T, numerics=numerics)
     relaxed_ov = X_ai.reshape(nv, no).T
 
     dgamma = np.zeros((nmo, nmo))
@@ -171,7 +177,7 @@ def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, max_cy
     return dgamma
 
 
-def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a, dgamma_vv_a, dgamma_oo_b, dgamma_ov_b, dgamma_vv_b, max_cycle=CPHF_MAX_CYCLE, tol=CPHF_TOL, level_shift=0.0):
+def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a, dgamma_vv_a, dgamma_oo_b, dgamma_ov_b, dgamma_vv_b, numerics, level_shift=0.0):
     """Solve the CPHF/CPKS Z-vector equation A.X=Y for the ov blocks (UHF); return the full relaxed MO-basis Delta_gamma for alpha and beta.
 
     The per-spin-channel equation is (D + K) z = D*dgamma_ov - K[dgamma_oo+vv]
@@ -182,10 +188,11 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
     the finite-field dipole sum rule on open shells (both asserted in
     tests/test_uhf_mp2_relaxed_finite_field.py).
 
-    The solve is src.Base.pyscf.cphf.solve (lgmres to tol relative to
-    max(1, |rhs|), at most max_cycle iterations), checked on its true
-    residual; a solve ending above the bar warns (CphfNotConverged) and
-    returns its last iterate (pyscf's lib.krylov alone stops on its
+    The solve is src.Base.pyscf.cphf.solve on `numerics`, the run's, required
+    (lgmres to its scf section's multiplier_tol relative to max(1, |rhs|), at
+    most multiplier_max_iter iterations), checked on its true residual; a
+    solve ending above the bar warns (CphfNotConverged) and returns its last
+    iterate (pyscf's lib.krylov alone stops on its
     linear-dependence test on strongly spin-contaminated references).
     level_shift floors only the PRECONDITIONER's denominators (sign-
     preserving, |e_ia| >= level_shift); the operator keeps the exact e_ia, so
@@ -256,9 +263,7 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
     else:
         floor = h_diag
     X_ai_flat = cphf_solve(lambda x: fvind(np.ravel(x)), h_diag, Y_flat,
-                           numerics=Numerics(scf={'multiplier_tol': tol,
-                                                  'multiplier_max_iter': max_cycle}),
-                           precond=floor)
+                           numerics=numerics, precond=floor)
 
     X_ai_a = X_ai_flat[:nv_a * no_a].reshape(nv_a, no_a)
     X_ai_b = X_ai_flat[nv_a * no_a:].reshape(nv_b, no_b)
@@ -282,14 +287,18 @@ def solve_cphf_relaxation_uhf(mf_hess, nocc_a, nocc_b, dgamma_oo_a, dgamma_ov_a,
 
 
 def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=True,
-                               relax=True, relax_kernel='self', eta=DEFAULT_BROADENING_ETA):
+                               relax=True, relax_kernel='self', eta=DEFAULT_BROADENING_ETA,
+                               numerics=None):
     """Build the total AO 1-particle density matrix gamma = gamma_mf + Delta_gamma^GW, restricted spin only.
 
     polarizability: 'RPA'/'TDHF'/'BSE' screening channel. df: use density
     fitting (default) vs full 4-center ERIs. relax: CPHF/CPKS-relaxed ov
     block (default) vs simple perturbative one. relax_kernel: 'self' (mf's
     own Hessian) or 'tdhf' (bare Hartree + exact-exchange Hessian).
+    numerics: the run's `Numerics`, the Z-vector's (solve_cphf_relaxation);
+    required with relax=True.
     """
+    numerics = relaxation_numerics(relax, numerics, 'compute_gw_density_matrix')
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("compute_gw_density_matrix is currently restricted-spin only.")
 
@@ -325,7 +334,8 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
             mf_hess.mo_occ = mf.mo_occ
         else:
             mf_hess = mf
-        dgamma = solver.solve_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv)
+        dgamma = solver.solve_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
+                                         numerics)
 
     dm_ao = mf.make_rdm1() + mo @ dgamma @ mo.T
     return dm_ao
@@ -433,7 +443,7 @@ def build_dgamma_block(nmo, nocc, oo, ov, vv):
 
 
 def compute_mpn_density_matrix_ao(mf, order, mol=None, nocc=None, relax=True,
-                                  relax_kernel='self'):
+                                  relax_kernel='self', numerics=None):
     """The total AO 1-particle density gamma = gamma_mf + Delta_gamma^(2) [+
     Delta_gamma^(3)] of MP2 (order=2) or MP3 (order=3), from the generated
     MPn density drivers (restricted for RHF, unrestricted for UHF; a UHF
@@ -442,7 +452,8 @@ def compute_mpn_density_matrix_ao(mf, order, mol=None, nocc=None, relax=True,
     relax: the CPHF/CPKS Z-vector solve for the ov block (solve_cphf_relaxation,
     solve_cphf_relaxation_uhf) instead of the direct second(+third)-order
     singles. relax_kernel: 'self' (mf's own Hessian) or 'tdhf' (bare Hartree +
-    exact-exchange Hessian, RHF only).
+    exact-exchange Hessian, RHF only). numerics: the run's `Numerics`, the
+    Z-vector's; required with relax=True.
 
     relax=True at MP3 is NOT a fully relaxed density: the orbitals are relaxed
     by the Schirmer approach, the amplitudes never are. It therefore does NOT
@@ -455,6 +466,7 @@ def compute_mpn_density_matrix_ao(mf, order, mol=None, nocc=None, relax=True,
         raise ValueError(f"order={order}: the AO MPn density is written for MP2 and MP3")
     if relax_kernel not in ('self', 'tdhf'):
         raise ValueError(f"relax_kernel={relax_kernel!r}; expected 'self' or 'tdhf'")
+    numerics = relaxation_numerics(relax, numerics, 'compute_mpn_density_matrix_ao')
     mol = mol if mol is not None else mf.mol
 
     if isinstance(mf, scf.uhf.UHF):
@@ -475,7 +487,7 @@ def compute_mpn_density_matrix_ao(mf, order, mol=None, nocc=None, relax=True,
         mo_a, mo_b = mf.mo_coeff
         if relax:
             dgamma_a, dgamma_b = solve_cphf_relaxation_uhf(
-                mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b)
+                mf, nocc_a, nocc_b, oo_a, ov_a, vv_a, oo_b, ov_b, vv_b, numerics)
         else:
             dgamma_a = build_dgamma_block(mo_a.shape[1], nocc_a, oo_a, ov_a, vv_a)
             dgamma_b = build_dgamma_block(mo_b.shape[1], nocc_b, oo_b, ov_b, vv_b)
@@ -508,15 +520,20 @@ def compute_mpn_density_matrix_ao(mf, order, mol=None, nocc=None, relax=True,
             mf_hess.mo_occ = mf.mo_occ
         else:
             mf_hess = mf
-        dgamma = solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv)
+        dgamma = solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
+                                       numerics)
     return mf.make_rdm1() + mo @ dgamma @ mo.T
 
 
-def compute_mp2_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_kernel='self'):
+def compute_mp2_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_kernel='self',
+                                  numerics=None):
     """compute_mpn_density_matrix_ao at order 2."""
-    return compute_mpn_density_matrix_ao(mf, 2, mol, nocc, relax=relax, relax_kernel=relax_kernel)
+    return compute_mpn_density_matrix_ao(mf, 2, mol, nocc, relax=relax, relax_kernel=relax_kernel,
+                                         numerics=numerics)
 
 
-def compute_mp3_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_kernel='self'):
+def compute_mp3_density_matrix_ao(mf, mol=None, nocc=None, relax=True, relax_kernel='self',
+                                  numerics=None):
     """compute_mpn_density_matrix_ao at order 3 (see its MP3 relaxation caveat)."""
-    return compute_mpn_density_matrix_ao(mf, 3, mol, nocc, relax=relax, relax_kernel=relax_kernel)
+    return compute_mpn_density_matrix_ao(mf, 3, mol, nocc, relax=relax, relax_kernel=relax_kernel,
+                                         numerics=numerics)

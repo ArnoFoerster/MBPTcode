@@ -177,8 +177,8 @@ def main(argv=None):
     say(f'torch process on {f_in}')
     cmd = [sys.executable, os.path.join(HERE, 'torch_oracle.py'), f_in, f_out,
            '--root-mode', args.root_mode, '--newton-steps', str(args.newton_steps)]
-    # the torch process pins itself to one thread (its backward segfaults with two
-    # on this Rosetta stack); the trace flag is passed through
+    # the torch process pins itself to one thread (some torch builds segfault in
+    # backward with two); the trace flag is passed through
     rc = subprocess.run(cmd, env=dict(os.environ, OMP_NUM_THREADS='1',
                                       TORCH_CHAIN_TRACE=os.environ.get(
                                           'TORCH_CHAIN_TRACE', ''))).returncode

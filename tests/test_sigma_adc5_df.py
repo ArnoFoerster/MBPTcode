@@ -27,11 +27,12 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_antisymmetrized_spin_block_eri,
                                             get_density_fitting_coefficients)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(5)
 
 SYSTEMS = [('LiH/sto-3g', 'Li 0 0 0; H 0 0 1.6'),
-           ('H2O/sto-3g', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0')]
+           ('H2O/sto-3g', WATER_RIGHT_ANGLE)]
 LEVELS = ['adc4', 'adc5']
 NVEC = 3
 TOL = 1e-10

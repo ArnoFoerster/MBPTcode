@@ -32,6 +32,8 @@ import scipy.linalg
 
 from src.Base.numerics.constants import BYTES_PER_GB, THREE_CENTER_BLOCK_BYTES
 from src.Base.factorization.sliced_factors import GridTileRows
+from src.Base.factorization.shell_runs import function_atoms
+from src.gradients.isdf_adjoint_pieces import two_centre_rows
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, broadcast_rows,
                                               current_comm, exchange_blocks, lockstep)
 from src.Base.factorization.separable_ri import (ANGULAR_WEIGHTS, fit_settings, KeptIntegrals,
@@ -787,12 +789,7 @@ def _three_centre_rows_adjoint(mol, auxmol, coords, U, X_own, tiles, owners,
     nao, naux, natm = mol.nao_nr(), auxmol.nao_nr(), mol.natm
     ntargets = len(U)
     ao_loc = mol.ao_loc_nr()
-    ao_atom = np.empty(nao, dtype=int)
-    for ia, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        ao_atom[p0:p1] = ia
-    aux_atom = np.empty(naux, dtype=int)
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        aux_atom[q0:q1] = ia
+    ao_atom, aux_atom = function_atoms(mol), function_atoms(auxmol)
     pairs = {}
     for ib, (s0, s1) in enumerate(blocks):
         a0, a1 = ao_loc[s0], ao_loc[s1]
@@ -902,9 +899,7 @@ def _two_centre_rows_adjoints(auxmol, V_bars, block, rank, nranks, comm,
     integrals."""
     naux, natm = auxmol.nao_nr(), auxmol.natm
     aux_loc = auxmol.ao_loc_nr()
-    aux_atom = np.empty(naux, dtype=int)
-    for ia, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        aux_atom[q0:q1] = ia
+    aux_atom = function_atoms(auxmol)
     slabs, sh0 = [], 0
     while sh0 < auxmol.nbas:
         sh1 = sh0 + 1
@@ -924,17 +919,12 @@ def _two_centre_rows_adjoints(auxmol, V_bars, block, rank, nranks, comm,
             broadcast_rows(slab, 0, comm)
             parts.append(slab)
         if rank == s % nranks:
-            with auxmol.with_range_coulomb(omega):
-                v1 = auxmol.intor('int2c2e_ip1', comp=3,
-                                  shls_slice=(sh0, sh1, 0, auxmol.nbas))
             for out, slab in zip(forces, parts):
-                hold('two_centre_slab', slab.nbytes + v1.nbytes)
-                # +(grad P|Q), so the nuclear derivative carries the minus
-                t_P = -2.0 * np.einsum('xPQ,PQ->xP', v1, slab)
+                hold('two_centre_slab', 4 * slab.nbytes)
+                t_P = two_centre_rows(auxmol, slab, (sh0, sh1), omega)
                 f = np.zeros((natm, 3))
                 np.add.at(f, aux_atom[p0:p1], t_P.T)
                 out[s] = f.ravel()
-            del v1
         del parts
     totals = []
     for out in forces:

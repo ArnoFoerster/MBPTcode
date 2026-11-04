@@ -33,6 +33,7 @@ from src.photophysics.declaration import DeclarationRefused
 from src.photophysics.records import StageRefused
 from src.photophysics.stages import run_tadf, vertical
 from tests.photophysics_cases import declaration, run_at_r0, run_in
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 #: meV: the continuation against the pole model on one declaration.
 CONTINUATION_VS_SOP_MEV = 3.0
@@ -44,7 +45,7 @@ SHARED = ('--basis', 'aug-cc-pvdz', '--scf', 'df', '--qp-states', 'admitted',
           '--outside-scissor', 'curve')
 #: Water on a per-element basis, the factors and the ISDF-K mean field each on
 #: 400 pivoted AO-product points.
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 HYBRID = ('--system', 'water', '--atom', WATER, '--basis', 'cc-pvdz',
           '--basis-for', 'O=aug-cc-pvdz', '--scf', 'isdf', '--scf-grid', 'G3',
           '--isdf-test-set', 'ao_products', '--pivot-points', '400',

@@ -42,9 +42,10 @@ from src.SingleReference.GW.qp_solve import (static_exchange_diagonal,
                                              static_exchange_mean_field_matrix)
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 CONTOURS = ('cd', 'laplace', 'sop')
 
 #: How far a contour continuation may sit from the Pade route and from the

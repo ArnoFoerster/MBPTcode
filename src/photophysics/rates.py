@@ -35,6 +35,7 @@ from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS,
                                          GAUSSIAN_FWHM_PER_SIGMA,
                                          HARTREE_TO_CM, HARTREE_TO_EV,
                                          HARTREE_TO_MEV,
+                                         RATE_BAND_GRID_WIDTHS,
                                          RATE_FC_LAMBDA_RATIO_MAX,
                                          RATE_LAMBDA_REMAINDER_MIN_MEV,
                                          RATE_MLJ_N_MAX,
@@ -121,7 +122,7 @@ def golden_rule(coupling, rho_fc):
 
 
 def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
-                               temperature, n_max=50):
+                               temperature, n_max):
     """Marcus-Levich-Jortner rate in s^-1.
 
         rho_FC = sum_n e^-S S^n / n! (4 pi lambda_M k_B T)^-1/2
@@ -148,13 +149,14 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         both: S = sum_k S_k over the high-frequency modes and
         omega_eff = sum_k S_k omega_k / sum_k S_k, their Huang-Rhys-weighted
         first moment.
-    n_max: quanta retained in the Poisson sum.
+    n_max: quanta retained in the Poisson sum (the rate chain's
+        RATE_MLJ_N_MAX); too few to hold the Poisson weight are refused.
     """
     return golden_rule(coupling, mlj_density(delta_e, lambda_m, s_eff,
                                              omega_eff, temperature, n_max))
 
 
-def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max=50):
+def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max):
     """rho_FC of `marcus_levich_jortner_rate`, Hartree^-1: the Poisson sum
     over quanta of the effective mode, each a classical Marcus line of
     width lambda_m (same arguments and sign convention)."""
@@ -347,12 +349,11 @@ def vibronic_radiative_rate(model, e_adiabatic, temperature, *,
                          'all: a Condon model takes `dipole`, a '
                          'Herzberg-Teller model carries its own')
     if energies is None:
-        # 12 widths: E^3 weights the blue tail, which 8 widths leave short
-        # by a few 1e-7 of the rate
+        # E^3 weights the blue tail (RATE_BAND_GRID_WIDTHS)
         energies = vibronic_band_grid(model, e_adiabatic, temperature,
                                       gaussian_fwhm=gaussian_fwhm,
                                       lorentzian_fwhm=lorentzian_fwhm,
-                                      n_widths=12.0)
+                                      n_widths=RATE_BAND_GRID_WIDTHS)
     e = np.asarray(energies, float)
     rho = model.density(e - float(e_adiabatic), temperature, 'emission',
                         broadening=float(gaussian_fwhm)
@@ -509,9 +510,18 @@ def _root_number(name):
     return int(name[1:])
 
 
-def _rms_cm(dv):
-    """Root mean square of |dV/dq_k| over the modes, in cm^-1."""
+def rms_cm(dv):
+    """Root mean square of |dV/dq_k| over the modes (Hartree), in cm^-1."""
     return float(np.sqrt((np.asarray(dv, float) ** 2).mean()) * HARTREE_TO_CM)
+
+
+def effective_mode(s, omega):
+    """(S, omega_eff): the total Huang-Rhys factor of the modes and the
+    S-weighted mean of their frequencies omega, the one mode of the
+    Marcus-Levich-Jortner density (0 where S is 0)."""
+    s = np.asarray(s, float)
+    s_sum = float(s.sum())
+    return s_sum, (float((s * omega).sum() / s_sum) if s_sum > 0 else 0.0)
 
 
 def fc_lambda_guard(lam_rule, lam):
@@ -713,9 +723,8 @@ def rate_table(s1, t1, e0, omega, s_isc, temperature, lambda_env, s_ic=None,
     lam_s = t1.energy[t1.emitter] - e_s1
     s_k = np.asarray(s_isc, float)
     rho = dens.rho_of(s_k)
-    s_sum = float(s_k.sum())
+    s_sum, om_eff = effective_mode(s_k, omega)
     lam_rule = dens.sum_rule(s_k)
-    om_eff = float((s_k * omega).sum() / max(s_sum, 1e-30))
     out = {'temperature_K': temperature,
            'lambda_env_eV': lambda_env * HARTREE_TO_EV,
            'emitter': s_name, 'reservoir': t_name,
@@ -802,9 +811,9 @@ def _crossing_rows(crossings, rho, lam_rule, s_sum, om_eff, temperature):
         channels[name] = {
             'v_condon_cm': v * HARTREE_TO_CM,
             'initial_sublevel_average': average,
-            'dv_dq_rms_by_path_cm': {path: _rms_cm(x) for path, x in
+            'dv_dq_rms_by_path_cm': {path: rms_cm(x) for path, x in
                                      (at.dv_dq_paths or {}).items()},
-            'dv_dq_rms_cm': None if condon else _rms_cm(dv),
+            'dv_dq_rms_cm': None if condon else rms_cm(dv),
             **marcus_rows(v / np.sqrt(average), de, lam, s_sum, om_eff,
                           temperature),
             'fc_lambda': fc,

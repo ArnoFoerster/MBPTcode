@@ -88,10 +88,10 @@ Kaltak, Klimes and Kresse, J. Chem. Theory Comput. 10, 2498 (2014) for the
 minimax quadratures the tables encode.
 Liu et al., Phys. Rev. B 94, 165109 (2016), Eq. 71 for the sine transform.
 """
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (DEFAULT_TAU_TARGET, IR_EPS,
                                          TRANSFORM_FIT_RCOND)
 from src.Base.utils.grids.grids import (load_minimax_tau_data, require_positive_e_min,
@@ -369,7 +369,7 @@ def minimax_transform_weights(kind, tau, omega, e_min, e_max,
                     f"is under-resolved at e_max/e_min = {e_max/e_min:.3g}, so "
                     f"use MORE points; n={n} is tabulated down to "
                     f"e_max/e_min = {floor:.3g} and stretched below that.")
-        warnings.warn(
+        flag('minimax_fit_short',
             f"minimax transform fit reached only {max_error:.2e} at {n} points "
             f"over e_max/e_min = {e_max/e_min:.3g}.{hint}",
             RuntimeWarning, stacklevel=3)

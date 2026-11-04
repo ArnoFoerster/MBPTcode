@@ -144,11 +144,11 @@ the same cycle, and the force and the slow charges are rank 0's. Serially the
 locksteps are no-ops.
 """
 import os
-import warnings
 
 import numpy as np
 from pyscf import lib
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import SOLVATION_LOOP_DIIS_SPACE
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.record_io import read_record, write_record
@@ -416,9 +416,8 @@ def equilibrate(state, field, slow=None, q0=None, numerics=None, log=None,
     text = (f'the solvation loop did not converge in {max_cycle} cycles: last '
             f'max|dq| {dq:.2e} (tol_q {tol_q:.0e}), |dG| {dG_txt:.2e} Ha '
             f'(tol_energy {tol_energy:.0e}); its last cycle is returned')
-    warnings.warn(text, SolvationNotConverged, stacklevel=2)
-    flags = list((r.info or {}).get('flags', [])) + [
-        {'flag': 'solvation_loop_not_converged', 'message': text}]
+    flags = list((r.info or {}).get('flags', []))
+    flag('solvation_loop_not_converged', text, SolvationNotConverged, into=flags)
     return LoopResult(energy=G, state_energy=r.energy, polarization=pol, q=q,
                       dm_eff=r.dm_eff, info=r.info, history=history,
                       converged=False, stopped_early=False, flags=flags)
@@ -429,9 +428,9 @@ def _stopped(r, q, history, cycle):
     `cycle` (module docstring)."""
     text = (f'the solvation loop stopped at cycle {cycle}: the state model '
             'returned no number (NaN energy); G is NaN')
-    warnings.warn(text, SolvationNotConverged, stacklevel=3)
-    flags = list((r.info or {}).get('flags', [])) + [
-        {'flag': 'solvation_loop_stopped', 'message': text}]
+    flags = list((r.info or {}).get('flags', []))
+    flag('solvation_loop_stopped', text, SolvationNotConverged, stacklevel=3,
+         into=flags)
     return LoopResult(energy=np.nan, state_energy=np.nan, polarization=np.nan,
                       q=q, dm_eff=r.dm_eff, info=r.info, history=history,
                       converged=False, stopped_early=False, flags=flags)
@@ -473,9 +472,9 @@ def force(state, field, result, flags=None):
     if not np.isfinite(result.energy):
         return np.full((state.mol.natm, 3), np.nan)
     if not result.converged:
-        warnings.warn('the force of G_eq is taken on a solvation loop that did '
-                      'not converge (its last cycle)', SolvationNotConverged,
-                      stacklevel=2)
+        flag('solvation_force_on_unconverged_loop',
+             'the force of G_eq is taken on a solvation loop that did '
+             'not converge (its last cycle)', SolvationNotConverged, into=flags)
     require_field_lr(state, field)
     F, info = state.force(*field.operator(result.q))
     if flags is not None:
@@ -486,20 +485,23 @@ def force(state, field, result, flags=None):
     return lockstep(np.array(F), check=True)
 
 
-def force_neq(state, ground, field, result, ground_result, flags=None):
+def force_neq(state, ground, field, result, ground_result, flags=None,
+              numerics=None):
     """dG_neq(X | S0)/dR (natm, 3) on a loop `result` of the state in the
     slow charges of the ground state's equilibrium loop `ground_result`
     (`slow_charges` of its relaxed density), both at this geometry (module
     docstring). ground.loop_response(h, field, numerics) -> (natm, 3)
     Tr[h dD_0/dR] of the ground state's loop, its Z-vector solved on the
-    state model's Numerics (`loop_numerics`); flags as for `force`."""
+    loop's Numerics (`loop_numerics`: `numerics`, else the state model's);
+    flags as for `force`."""
     for r in (result, ground_result):
         if not np.isfinite(r.energy):
             return np.full((state.mol.natm, 3), np.nan)
         if not r.converged:
-            warnings.warn('the force of G_neq is taken on a solvation loop that '
-                          'did not converge (its last cycle)',
-                          SolvationNotConverged, stacklevel=2)
+            flag('solvation_force_on_unconverged_loop',
+                 'the force of G_neq is taken on a solvation loop that '
+                 'did not converge (its last cycle)', SolvationNotConverged,
+                 into=flags)
     require_field_lr(state, field)
     d0 = np.asarray(ground_result.dm_eff, float)
     q_s = slow_charges(field, d0)[0]
@@ -517,7 +519,7 @@ def force_neq(state, ground, field, result, ground_result, flags=None):
          - field.response_force(lam, v0, 'fast')
          + field.charge_force(d0, mu)
          + ground.loop_response(field.operator(mu)[0], field,
-                                loop_numerics(state, None)))
+                                loop_numerics(state, numerics)))
     for w, rho_t in info.get('lr', ()):
         F = F + w * field.transition_force(rho_t)
     return lockstep(np.array(F), check=True)

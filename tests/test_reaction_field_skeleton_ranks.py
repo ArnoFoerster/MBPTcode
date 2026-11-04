@@ -91,3 +91,81 @@ def test_the_ranks_share_the_cavity_blocks(counted, ranks):
     for g in out:
         assert np.abs(g - serial).max() <= bar, (np.abs(g - serial).max(), bar)
     assert sum(counted.values()) == once, (sum(counted.values()), once)
+
+
+@pytest.fixture
+def potential_passes(monkeypatch):
+    """The surface cut into tiles of POINTS (`pcm_factorization`), none of
+    them kept between calls (so that each call evaluates its own), and the
+    potential integral tiles (`int3c2e`, the charge solves' own) evaluated
+    inside the skeleton, by thread."""
+    import src.environments.pcm_factorization as pcm_factorization
+    monkeypatch.setattr(pcm_factorization, 'PCM_CAVITY_CACHE_GB', 0.0)
+
+    def few(nao, ngrids, comp=1, budget_gb=None):
+        return [(k0, min(k0 + POINTS, ngrids))
+                for k0 in range(0, ngrids, POINTS)]
+    aux_e2 = pcm_derivatives.pyscf_df.incore.aux_e2
+    n, lock, inside = {}, threading.Lock(), threading.local()
+
+    def count(*a, **kw):
+        if getattr(inside, 'on', False) and str(kw.get('intor', '')) in ('int3c2e', 'int3c2e_sph', 'int3c2e_cart'):
+            with lock:
+                key = threading.get_ident()
+                n[key] = n.get(key, 0) + 1
+        return aux_e2(*a, **kw)
+
+    def skeleton(mf, g):
+        inside.on = True
+        try:
+            return reaction_field_skeleton(mf, g)
+        finally:
+            inside.on = False
+    monkeypatch.setattr(pcm_factorization, 'cavity_blocks', few)
+    monkeypatch.setattr(pcm_derivatives.pyscf_df.incore, 'aux_e2', count)
+    return n, skeleton
+
+
+def tiled_mean_field():
+    """`mean_field` on a continuum whose surface potential is tiled
+    (`factorize_once`), as the distributed SCF leaves it."""
+    from src.environments.pcm_factorization import factorize_once
+    mol = gto.M(atom=ATOMS, basis='cc-pvdz', verbose=0)
+    mf = scf.RHF(mol).PCM()
+    mf.with_solvent.method, mf.with_solvent.eps = 'IEF-PCM', 2.3741
+    factorize_once(mf.with_solvent)
+    mf.conv_tol, mf.verbose = 1e-12, 0
+    return mf.run()
+
+
+@pytest.mark.parametrize('ranks', [2, 3])
+def test_the_ranks_share_the_charge_solves_surface_potential(potential_passes, ranks):
+    """On a tiled continuum the charge solves of the two displaced densities
+    divide their surface tiles over the ranks: together the ranks evaluate
+    each tile as often as the serial skeleton does, not once per rank. The
+    skeleton is the serial one on every rank (bit for bit under the
+    recording BLAS), and the charge cache is left as it was on entry."""
+    counted, skeleton = potential_passes
+    mf = tiled_mean_field()
+    ngrids = mf.with_solvent.surface['grid_coords'].shape[0]
+    assert ngrids > ranks * POINTS, ngrids
+    serial = skeleton(mf, gamma(mf.mo_coeff.shape[1]))
+    once = sum(counted.values())
+    assert once > 0
+    counted.clear()
+
+    def one(comm):
+        mf = tiled_mean_field()
+        mf.with_solvent._get_vind(mf.make_rdm1())
+        before = {k: np.copy(v) for k, v in mf.with_solvent._intermediates.items()
+                  if k in ('q', 'q_sym', 'v_grids')}
+        g = skeleton(mf, gamma(mf.mo_coeff.shape[1]))
+        after = mf.with_solvent._intermediates
+        assert all(np.array_equal(before[k], after[k]) for k in before)
+        return g
+    out = run_simulated(one, ranks)
+    exact = RECORDING_BLAS == blas_identity()
+    bar = 0.0 if exact else CROSS_PATH_RTOL * np.abs(serial).max()
+    for g in out:
+        assert np.abs(g - serial).max() <= bar, (np.abs(g - serial).max(), bar)
+    assert sum(counted.values()) <= once, (sum(counted.values()), once)

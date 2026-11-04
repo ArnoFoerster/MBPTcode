@@ -49,7 +49,7 @@ def scf_in_continuum(mf, h0, continuum):
     return wrapped
 
 
-def loop_density_response(mf, h0, continuum, h_ao, numerics=None):
+def loop_density_response(mf, h0, continuum, h_ao, numerics):
     """(natm, 3) of Tr[h_ao dD_0/dR] for the ground state's loop (module
     docstring): mf its converged mean field in the loop's charges, h0 its
     vacuum core Hamiltonian, continuum the medium's pyscf continuum at

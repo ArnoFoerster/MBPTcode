@@ -32,8 +32,9 @@ from src.SingleReference.ADC.nondyson_restricted import NonDysonRestricted
 from src.SingleReference.ADC.sigma_driver import restricted_class_matvec
 from tests.generated_runtime import requires_mp_numerators, requires_runtime
 from tests.test_nondyson_adc import _spinorb, _distinct
+from tests.molecules import WATER_RIGHT_ANGLE
 
-SYSTEMS = [('LiH', 'Li 0 0 0; H 0 0 1.6'), ('H2O', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0')]
+SYSTEMS = [('LiH', 'Li 0 0 0; H 0 0 1.6'), ('H2O', WATER_RIGHT_ANGLE)]
 LEVELS = [(2, None), (2, {(1, 1): 1}), (3, None), (4, None)]
 TOL = 1e-9
 NROOTS = 6

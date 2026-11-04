@@ -33,10 +33,8 @@ from src.Base.numerics.constants import EE_RI_TILE_GB
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.SingleReference.ADC.eeADC import ee_ri_transition as ert
 from src.SingleReference.ADC.eeADC.ee_follow import flag_unconverged, root_missing
-from src.SingleReference.ADC.eeADC.ee_ri_fold import bare_factors
+from src.SingleReference.ADC.eeADC.ee_ri_fold import SPINS, bare_factors
 from src.gradients.adc.ee_gradient import solve_root
-
-SPINS = ('singlet', 'triplet')
 
 
 class ADC2Spectrum:

@@ -11,6 +11,7 @@ from pyscf import gto, scf
 
 from src.SingleReference.ADC.static_correction import build_static_correction, build_ccsd_static_correction
 from src.Base.pyscf.pyscf_interface import uhf_blockstacked_order
+from tests.molecules import WATER_AT_ORIGIN
 
 
 def interleaved_to_blockstacked_perm(nocc_a, nocc_b, norb):
@@ -21,7 +22,7 @@ def interleaved_to_blockstacked_perm(nocc_a, nocc_b, norb):
 if __name__ == '__main__':
     all_ok = True
 
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12

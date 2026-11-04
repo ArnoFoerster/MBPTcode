@@ -139,6 +139,8 @@ def test_gauche_is_chiral_and_counted_twice():
     assert [g for _, g in groups] == [[0], [1, 2]]
     w = boltzmann_weights([0.0, 0.0], degeneracies=[1, 2])
     assert w == pytest.approx([1.0 / 3.0, 2.0 / 3.0], rel=1e-14)
+    with pytest.raises(ValueError, match='not positive'):
+        boltzmann_weights([0.0, 1e-3], temperature=0.0)
 
 
 def test_symmetry_numbers():

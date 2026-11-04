@@ -25,6 +25,7 @@ from src.Base.numerics.constants import ALLOCATION_MEMORY_FRACTION
 from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.memory import (allocation_max_memory_mb, current_memory_mb,
                                             describe_df_storage, tasks_per_node)
+from tests.molecules import WATER
 
 #: SLURM_* variables the parser reads; cleared before every case so a test
 #: run under an actual allocation does not leak into these, and cleared after
@@ -177,7 +178,7 @@ def water_df():
     far too small a system for the 900-MB-per-.9 threshold `DF.build` gates
     on, so this is the in-core branch."""
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

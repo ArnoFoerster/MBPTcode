@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import ADCSolverRestricted
 from src.SingleReference.ADC.static_correction import (
     build_static_correction,
@@ -38,6 +39,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri, get_two_electron_integrals_chemist, DFIntegrals,
 )
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 pytestmark = requires_runtime(4)
 
@@ -81,8 +83,9 @@ def main():
 
     # --- 3. build_mp2/mp3_static_correction_restricted(B_aa=...), unrelaxed + relaxed ---
     for relax in (False, True):
-        dense2 = build_mp2_static_correction_restricted(mf, relax=relax)
-        df2 = build_mp2_static_correction_restricted(mf, relax=relax, B_aa=dfi_exact.B_aa)
+        dense2 = build_mp2_static_correction_restricted(mf, relax=relax, numerics=Numerics())
+        df2 = build_mp2_static_correction_restricted(mf, relax=relax, B_aa=dfi_exact.B_aa,
+                                                     numerics=Numerics())
         diff = np.max(np.abs(dense2 - df2))
         ok = diff < 1e-9
         all_ok &= ok
@@ -98,7 +101,7 @@ def main():
           f"(max diff={diff:.2e}): {'OK' if ok else 'FAIL'}")
 
     # --- 4. the df= flag wiring on the unified solver ---
-    mol2 = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g', verbose=0)
+    mol2 = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g', verbose=0)
     mf_dense = scf.RHF(mol2).run()
     homo_index = mol2.nelectron // 2 - 1
     mf_df = scf.RHF(mol2).density_fit(auxbasis='cc-pvdz-jkfit').run()

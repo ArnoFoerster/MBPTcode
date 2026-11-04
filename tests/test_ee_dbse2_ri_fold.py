@@ -114,10 +114,11 @@ from src.SingleReference.ADC.eeADC import (ee_dbse2_pieces, ee_dbse2_ri_fold, ee
 from src.SingleReference.ADC.eeADC.ee_ri_fold import RIFactors, aux_chunks, drive
 from src.SingleReference.LinearResponse import linear_response
 from tests.pins import same_bar
+from tests.molecules import WATER_AT_ORIGIN
 
 # the run choice that puts the device paths on the GPU
 ON_GPU = Numerics(layout={'device': 'gpu'})
-WATER = 'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587'
+WATER = WATER_AT_ORIGIN
 HARTREE_TO_EV = 27.211386245988
 KERNELS = ('eq71', 'printed')
 SINGLES = ('eq62', 'eq62+eq59')
@@ -927,7 +928,7 @@ def check_laplace(eps, B, no):
                 'warning naming it',
                 str(caught[0].message)[:70] if caught else 'no warning')
     # the factors once, on the main thread: a from_mo build per simulated rank
-    # segfaults on Snellius's wheel stack
+    # segfaults with some pyscf wheel builds
     bare = RIFactors.from_full(eps_gw, B, no)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', UserWarning)  # emitted on the ranks' threads

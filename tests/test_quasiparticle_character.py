@@ -41,13 +41,14 @@ from src.gradients.state_identity import orbital_fingerprint, track_orbital
 from src.Base.numerics.numerics import numerics_of
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: Li+ bound to the carbonyl oxygen of a planar ethylene carbonate
 EC_LI = '''C 0 0 0; O 0 0 1.195; O 1.09 0 -0.763; O -1.09 0 -0.763;
 C 0.77 0 -2.12; C -0.77 0 -2.12; H 1.25 0.89 -2.55; H 1.25 -0.89 -2.55;
 H -1.25 0.89 -2.55; H -1.25 -0.89 -2.55; Li 0 0 {z}'''
 FRAGMENTS = {'Li': [10], 'EC': list(range(10))}
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 
 
 def _li_ec(z=3.05):

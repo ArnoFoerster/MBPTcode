@@ -29,6 +29,7 @@ The fields:
     walk        the geometry optimizer and the finite-difference steps
     layout      memory and tiling: recorded, not in the identity
     adc         the excitation-energy ADC solve of a state model
+    properties  the spin-orbit operator of the properties pass
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -66,13 +67,17 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          SOLVATION_LOOP_TOL_Q,
                                          SOP_N_POLES, WALK_MAX_CYCLE, WALK_TRUST_BOHR,
                                          WALK_TRUST_MAX_BOHR, WALK_TRUST_MIN_BOHR,
-                                         XC_GRID_LEVEL, XC_GRID_LEVEL_UNRECORDED)
+                                         XC_GRID_LEVEL)
 from src.Base.numerics.constants import (WALK_GROUND_MAX_CYCLE, WALK_GROUND_TRUST_BOHR)
 from src.Base.numerics.constants import EE_ADC_CONV_TOL, LOOP_SOLVER_TOL_FRACTION
+from src.Base.numerics.constants import SOC_ONE_ELECTRON_TERMS, SOC_TWO_ELECTRON_TERMS
 from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
                                          ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                          ORBITAL_MULTIPLIER_TOL)
 from src.Base.utils.record_io import record_hash
+from src.Base.utils.record_compat import (IDENTITY_AT_DEFAULT_OMITTED,
+                                         IDENTITY_OMITTED_AT, NUMERICS_LATER_SECTIONS,
+                                         NUMERICS_RETIRED, numerics_sections_as_read)
 
 
 def _check_fit_points(test_set, pivot_points, section):
@@ -479,18 +484,46 @@ class ADCNumerics:
     dense_limit: Optional[int] = None
 
 
+@dataclass(frozen=True)
+class PropertiesNumerics:
+    """The spin-orbit operator of the properties pass
+    (`properties.spin_orbit`): soc_two_electron, its two-electron term, one
+    of SOC_TWO_ELECTRON_TERMS ('ri-somf' the mean field fitted in
+    soc_auxbasis, 'somf' the exact integral pass it approximates, 'amfi'
+    one-centre blocks); soc_auxbasis, the fitting basis by name, None for the
+    JK-fitting basis of the orbital basis (`jkfit_auxbasis`), named for
+    'ri-somf' alone; soc_one_electron, its one-electron operator, one of
+    SOC_ONE_ELECTRON_TERMS ('x2c' the exact two-component operator,
+    'breit-pauli' its leading term). The fit's tiles are `layout.tile_gb`
+    (None: SOMF_RI_TILE_GB). The section chooses how a property is evaluated, not
+    the surface: it is recorded and not hashed (`IDENTITY_FIELDS`), and each
+    record that holds a spin-orbit table names its term."""
+    soc_two_electron: str = 'ri-somf'
+    soc_auxbasis: Optional[str] = None
+    soc_one_electron: str = 'x2c'
+
+    def __post_init__(self):
+        if self.soc_one_electron not in SOC_ONE_ELECTRON_TERMS:
+            raise ValueError(f'soc_one_electron={self.soc_one_electron!r}: '
+                             f'one of {SOC_ONE_ELECTRON_TERMS}')
+        if self.soc_two_electron not in SOC_TWO_ELECTRON_TERMS:
+            raise ValueError(f'soc_two_electron={self.soc_two_electron!r}: '
+                             f'one of {SOC_TWO_ELECTRON_TERMS}')
+        if self.soc_auxbasis is not None and self.soc_two_electron != 'ri-somf':
+            raise ValueError(
+                f'soc_two_electron={self.soc_two_electron!r} with '
+                f'soc_auxbasis={self.soc_auxbasis!r}: the fitting basis is '
+                "named for 'ri-somf' alone")
+
+
 #: The sections of `Numerics`, by field name.
 SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'qp': QPNumerics, 'quadrature': QuadratureNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
             'walk': WalkNumerics, 'layout': LayoutNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
-            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics}
-
-#: Sections added after records and identities were first written: a record
-#: without one reads its defaults, and one at its defaults leaves the identity
-#: what it was before the section existed.
-LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'adc')
+            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics,
+            'properties': PropertiesNumerics}
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -636,6 +669,16 @@ def numerics_or_default(numerics):
     return Numerics() if numerics is None else numerics
 
 
+def required_numerics(numerics, where):
+    """`numerics`, refused where None: `where` reads its settings off the
+    run's one `Numerics`, and a solve on defaults the run did not declare
+    would disagree with the identity it stamps."""
+    if numerics is None:
+        raise TypeError(f"{where} needs the run's Numerics; there are no "
+                        f"defaults to fall back on")
+    return numerics
+
+
 #: The keywords of the ISDF forward (`space_time.separable_factors`, the BSE
 #: and QP drivers built on it) and the `Numerics` field each one names.
 ISDF_REQUEST_FIELDS = {k: FLAT_FIELDS[k] for k in (
@@ -701,43 +744,14 @@ def numerics_of(choices):
     return Numerics(**sections)
 
 
-#: The sections the identity covers: all but `layout`, which is recorded
-#: and not hashed.
-IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
+#: The sections the identity covers: all but `layout` and `properties`, which
+#: are recorded and not hashed (how a calculation is laid out, and how a
+#: property is evaluated on a surface, choose no surface).
+IDENTITY_FIELDS = tuple(name for name in SECTIONS
+                        if name not in ('layout', 'properties'))
 # declarations that permit a calculation without changing any (the reason is
 # at each field)
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
-# fields left out of the identity at their default: an identity without one
-# is the identity at that default
-IDENTITY_AT_DEFAULT_OMITTED = (('isdf', 'test_set'), ('isdf', 'pivot_points'),
-                              ('solvent', 'loop_force_fraction'),
-                              ('scf', 'test_set'), ('scf', 'pivot_points'))
-# fields that are no declaration of their own, with the one value every
-# object holds and the identity is hashed at; a record naming one at that
-# value is read without it, at any other value refused (the orbital-response solve's tolerances are the scf section's
-# multiplier_* fields)
-IDENTITY_RETIRED = (('scf', 'cphf_tol', 1e-9), ('scf', 'cphf_max_cycle', 100),
-                    ('scf', 'cphf_refinements', 10))
-
-
-def without_retired(values):
-    """`values` ({section: {name: value}}, choices as a record wrote them)
-    without the `IDENTITY_RETIRED` fields: one at the value it always held
-    is dropped, one at any other value refused. Sections it changes are
-    copied; `values` itself is left as it is."""
-    out = dict(values)
-    for section, name, held in IDENTITY_RETIRED:
-        if name not in out.get(section, {}):
-            continue
-        out[section] = dict(out[section])
-        if out[section].pop(name) != held:
-            raise ValueError(f'the record sets {section}.{name}, a retired '
-                             f'field, to another value than {held!r}: '
-                             'the orbital response reads the multiplier_* '
-                             'fields; write those')
-    return out
-
-
 @dataclass(frozen=True)
 class Numerics:
     """Every numerical choice of one calculation (module docstring).
@@ -760,6 +774,7 @@ class Numerics:
     qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
     imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
     adc: ADCNumerics = field(default_factory=ADCNumerics)
+    properties: PropertiesNumerics = field(default_factory=PropertiesNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None
@@ -784,12 +799,9 @@ class Numerics:
 
     @classmethod
     def from_record(cls, record):
-        """The object `to_record` wrote. A record whose scf section names no
-        xc_grid is read on pyscf's default grid (XC_GRID_LEVEL_UNRECORDED)."""
-        sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
-                    else dict(record[name]) for name in SECTIONS}
-        sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
-        sections = without_retired(sections)
+        """The object `to_record` wrote; an older record is read by the rules
+        of `record_compat` (`numerics_sections_as_read`)."""
+        sections = numerics_sections_as_read(record, SECTIONS)
         return cls(**{name: SECTIONS[name](**sections[name])
                       for name in SECTIONS},
                    parent=record.get('parent'),
@@ -803,20 +815,19 @@ class Numerics:
         values = self.values()
         for section, name in IDENTITY_EXCLUDED:
             values[section].pop(name)
-        # a named grid without a test set is the AO-product fit, written so;
-        # the 'duchemin_blase' fit is left out as the field's absence was
-        # before it existed
+        # a named grid without a test set is the AO-product fit, written so
         values['isdf']['test_set'] = self.isdf.test_set_named()
-        if values['isdf']['test_set'] == 'duchemin_blase':
-            values['isdf']['test_set'] = None
+        for section, name, value in IDENTITY_OMITTED_AT:
+            if values[section][name] == value:
+                values[section][name] = None
         for section, name in IDENTITY_AT_DEFAULT_OMITTED:
             default = getattr(SECTIONS[section](), name)
             if values[section][name] == default:
                 values[section].pop(name)
-        for section, name, held in IDENTITY_RETIRED:
+        for section, name, held in NUMERICS_RETIRED:
             values[section][name] = held
         return record_hash({name: values[name] for name in IDENTITY_FIELDS
-                            if name not in LATER_SECTIONS
+                            if name not in NUMERICS_LATER_SECTIONS
                             or values[name] != asdict(SECTIONS[name]())})
 
     def solved_for_the_loop(self, solver):

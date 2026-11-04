@@ -39,8 +39,9 @@ from src.SingleReference.GW.qsGW import qsgw_eigenvalues
 from src.SingleReference.GW.reaction_field import (
     continuum_operator, dressed_factors, environment_quasiparticle_shift)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 AUX = 'cc-pvdz-jkfit'
 
 

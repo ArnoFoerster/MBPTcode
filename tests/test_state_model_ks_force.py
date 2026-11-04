@@ -11,10 +11,11 @@ import numpy as np
 from pyscf import dft, gto
 
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from tests.molecules import WATER
 
 
 def test_a_kohn_sham_state_force_carries_its_grid():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol, xc='lrc-wpbeh').density_fit(auxbasis='cc-pvdz-jkfit')
     mf.grids.level, mf.conv_tol, mf.conv_tol_grad = 1, 1e-12, 1e-9

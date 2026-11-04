@@ -12,12 +12,13 @@ from pyscf import gto, scf, df
 
 from src.SingleReference.ADC import ADCSolverRestricted
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, DFIntegrals
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 if __name__ == '__main__':
     all_ok = True
 
-    for atom, basis in [('H 0 0 0; F 0 0 0.9', 'sto-3g'), ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', '6-31g')]:
+    for atom, basis in [('H 0 0 0; F 0 0 0.9', 'sto-3g'), (WATER_AT_ORIGIN_COARSE, '6-31g')]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()
         nocc = mol.nelectron // 2

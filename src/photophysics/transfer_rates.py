@@ -44,7 +44,7 @@ import numpy as np
 from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
 from src.photophysics.rates import golden_rule, marcus_rate
 from src.properties.franck_condon import fc_weighted_dos
-from src.properties.vibronic import project_coupling
+from src.properties.vibronic import huang_rhys_from_gradient
 
 #: Fraction of the nine spin states of a triplet pair with total spin S:
 #: (2S + 1) / 9.
@@ -94,16 +94,17 @@ def transition_from_gradients(name, initial, final, delta_e, omega, modes,
     of the initial and the final state at the ground-state minimum where
     `omega`, `modes`, `masses` were taken (`vibronic.normal_modes`); None is
     the ground state there (zero gradient). S_k = d_k^2 / (2 omega_k^3) with
-    d_k the projected gradient difference."""
+    d_k the projected gradient difference (`vibronic.huang_rhys_from_gradient`,
+    which refuses a mode that is not a vibration)."""
     if grad_initial is None and grad_final is None:
         raise ValueError(f'{name}: no gradient of either state given')
     natm = len(masses)
     g_i = np.zeros((natm, 3)) if grad_initial is None else grad_initial
     g_f = np.zeros((natm, 3)) if grad_final is None else grad_final
-    d = project_coupling(np.asarray(g_f) - np.asarray(g_i), modes, masses)
     omega = np.asarray(omega, float)
-    return Transition(name, initial, final, float(delta_e),
-                      d ** 2 / (2.0 * omega ** 3), omega, method)
+    s_k, _ = huang_rhys_from_gradient(np.asarray(g_f) - np.asarray(g_i), omega,
+                                      modes, masses)
+    return Transition(name, initial, final, float(delta_e), s_k, omega, method)
 
 
 def transfer_rate(coupling, transitions, temperature, lambda_env=0.0,

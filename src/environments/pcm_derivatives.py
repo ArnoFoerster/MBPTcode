@@ -33,9 +33,12 @@ from pyscf import df as pyscf_df
 from pyscf import gto
 from pyscf.solvent.grad.pcm import (get_dD_dS, get_dF_dA, grad_nuc,
                                     grad_solver)
+from pyscf.solvent.pcm import PCM
 
+from src.Base.environment_seam import attach_cavity_comm, cavity_comm, detach_cavity_comm
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import ordered_sum, partition
-from src.Base.numerics.constants import (BYTES_PER_GB, INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
+from src.Base.numerics.constants import (INT32_MAX, PCM_CAVITY_BLOCK_GB, PCM_CROSS_TERM_STEP,
                                  PCM_DM_CACHE_TOL, PCM_FORCE_DENSITY_SYMMETRY_TOL)
 
 PI = np.pi
@@ -54,6 +57,11 @@ LIBCINT_BLOCK_LIMIT = INT32_MAX
 #: nao^2 / c) cavity points for a comp-c integral (c = 1, 3 or 9), so
 #: nao^2 * nk * comp <= max_memory * 0.9e6 / 8 for all of them.
 PYSCF_PCM_MAX_MEMORY_MB = LIBCINT_BLOCK_LIMIT * 8 / 0.9e6
+
+#: The fewest cavity points pyscf's own PCM routines put in one block, whatever
+#: `max_memory` allows: past nao ~2300 this floor alone passes
+#: LIBCINT_BLOCK_LIMIT.
+PYSCF_PCM_MIN_BLOCK = 400
 
 CPCM = ('C-PCM', 'CPCM', 'COSMO')
 IEFPCM = ('IEF-PCM', 'IEFPCM')
@@ -80,8 +88,7 @@ def cavity_blocks(nao, ngrids, comp=3, budget_gb=PCM_CAVITY_BLOCK_GB):
         raise ValueError(
             f'one cavity point already needs {per_point} integrals, past the '
             f'{LIBCINT_BLOCK_LIMIT} libcint can index in one block')
-    by_memory = int(budget_gb * BYTES_PER_GB / (8.0 * per_point))
-    nk = max(1, min(by_index, by_memory))
+    nk = fits(budget_gb, 8.0 * per_point, cap=by_index)
     return [(k0, min(k0 + nk, ngrids)) for k0 in range(0, ngrids, nk)]
 
 
@@ -109,17 +116,77 @@ def cavity_integrals(mol, surface, p0, p1, intor, cintopt=None):
                                   cintopt=cintopt)
 
 
+def pyscf_pcm_block(pcmobj, comp):
+    """The most cavity points pyscf's own PCM routines put in one comp-`comp`
+    three-centre block of `pcmobj`: int(max_memory * 0.9e6 / 8 / nao^2 /
+    comp) (the memory in use, which they subtract first, only lowers it), never
+    fewer than PYSCF_PCM_MIN_BLOCK and never more than the grid."""
+    nao = pcmobj.mol.nao
+    ngrids = pcmobj.surface['grid_coords'].shape[0]
+    by_memory = int(float(pcmobj.max_memory) * .9e6 / 8 / nao ** 2 / comp)
+    return min(ngrids, max(by_memory, PYSCF_PCM_MIN_BLOCK))
+
+
+def libcint_block_fits(nao, nk, comp):
+    """Whether libcint writes a (comp, nao, nao, nk) three-centre block whole:
+    the stride between components, nao^2 nk, must fit a C int. One component
+    is never strided. Measured with pyscf 2.13.1 at nao 1500: a comp-3 block of
+    2.16e9 integrals per component faults, one of 2.14e9 is right, and so are a
+    comp-9 block of 1.1e9 and a comp-1 block of 2.16e9."""
+    return comp == 1 or int(nao) * int(nao) * int(nk) <= LIBCINT_BLOCK_LIMIT
+
+
+def _bounded_grad(self, dm):
+    """pyscf's `PCM.grad` (the solvation energy's nuclear gradient at fixed
+    density, the term a pyscf `Gradients()` of a solvated mean field adds)
+    while pyscf's own comp-3 blocks fit libcint; past that the same three
+    terms with the potential integrals on `cavity_blocks`
+    (`solvation_gradient`)."""
+    if libcint_block_fits(self.mol.nao, pyscf_pcm_block(self, 3), 3):
+        return type(self).grad(self, dm)
+    return solvation_gradient(self, dm)
+
+
 def bound_pyscf_pcm_blocks(pcmobj):
-    """Cap `pcmobj.max_memory` at PYSCF_PCM_MAX_MEMORY_MB and return it.
+    """Cap `pcmobj.max_memory` at PYSCF_PCM_MAX_MEMORY_MB, give it a gradient
+    that stays inside libcint's index (`_bounded_grad`), and return it.
 
     For the PCM routines pyscf runs itself -- the reaction-field gradient of a
     pyscf `Gradients()` object, the PCM Hessian -- whose cavity blocks this
     module does not plan. Their block sizes come from `max_memory` only; below
-    the cap no block passes LIBCINT_BLOCK_LIMIT, unless pyscf's floor of 400
-    points does it alone (nao above ~1300).
+    the cap no block passes LIBCINT_BLOCK_LIMIT, unless pyscf's floor of
+    PYSCF_PCM_MIN_BLOCK points does it alone (nao above ~2300). Past that the
+    gradient runs on `cavity_blocks`, and the Hessian is refused
+    (`require_pyscf_pcm_hessian_fits`).
     """
     pcmobj.max_memory = min(float(pcmobj.max_memory), PYSCF_PCM_MAX_MEMORY_MB)
+    if not getattr(pcmobj, '_bounded_grad', False):
+        pcmobj.grad = _bounded_grad.__get__(pcmobj)
+        pcmobj._bounded_grad = True
     return pcmobj
+
+
+def require_pyscf_pcm_hessian_fits(mf):
+    """Refuse pyscf's analytic Hessian of `mf` when its continuum's cavity
+    blocks would pass libcint's index: the comp-9 and comp-3 blocks it sizes
+    by `max_memory` (at least PYSCF_PCM_MIN_BLOCK points each) and the comp-9
+    blocks of one atom's points it takes whole. Past nao ~2300 libcint would
+    fault or write outside the block. A mean field without a pyscf PCM passes."""
+    pcm = getattr(mf, 'with_solvent', None)
+    if not isinstance(pcm, PCM):
+        return mf
+    if not pcm.surface:
+        pcm.build()
+    nao = pcm.mol.nao
+    per_atom = max((p1 - p0 for p0, p1 in pcm.surface['gslice_by_atom']), default=0)
+    nk = max(pyscf_pcm_block(pcm, 9), pyscf_pcm_block(pcm, 3), per_atom)
+    if not libcint_block_fits(nao, nk, 9):
+        raise ValueError(
+            f"pyscf's analytic PCM Hessian would hand libcint a cavity block of "
+            f"{nao * nao * nk} integrals per component (nao {nao}, {nk} points), "
+            f'past the {LIBCINT_BLOCK_LIMIT} it can index; take the Hessian '
+            f'from finite differences of the force or from another program')
+    return mf
 
 
 def potential_integral_gradient(pcmobj, dm, q_sym=None, budget_gb=PCM_CAVITY_BLOCK_GB,
@@ -355,15 +422,36 @@ def reaction_field_fock_skeleton(pcmobj, dm, gamma_ao,
     (t/2) B[gamma, gamma] behind, so this costs two solver gradients.
 
     The PCM charge cache is restored to `dm` on return, since pyscf's pieces
-    leave it holding the charges of the last density they were given.
+    leave it holding the charges of the last density they were given: from
+    the cache as it was on entry where that cache was taken at `dm` itself
+    (the same bits a recomputation gives), by one more charge solve
+    otherwise.
 
     With `comm` (every rank calling) both solver gradients divide their cavity
-    blocks over the ranks (`solvation_gradient`): the same bits at every rank
-    count.
+    blocks over the ranks (`solvation_gradient`), and a continuum that splits
+    its surface points (`environments.pcm_factorization.tile_cavity`) gets
+    `comm` for the charge solves of the two displaced densities, so their
+    surface potential is divided over the ranks too: the same bits at every
+    rank count.
     """
     g = np.asarray(gamma_ao, float)
     g = 0.5 * (g + g.T)
-    grad = (solvation_gradient(pcmobj, dm + step * g, comm=comm)
-            - solvation_gradient(pcmobj, dm - step * g, comm=comm)) / (2.0 * step)
-    pcmobj._get_vind(dm)
+    entry = dict(pcmobj._intermediates) if pcmobj._intermediates else {}
+    cached = entry.get('dm')
+    at_dm = (cached is not None and np.size(cached) == np.size(dm)
+             and np.array_equal(np.reshape(cached, np.shape(dm)), dm))
+    split = (comm is not None and comm.Get_size() > 1
+             and cavity_comm(pcmobj) is None)
+    if split:
+        attach_cavity_comm(pcmobj, comm)
+    try:
+        grad = (solvation_gradient(pcmobj, dm + step * g, comm=comm)
+                - solvation_gradient(pcmobj, dm - step * g, comm=comm)) / (2.0 * step)
+        if at_dm:
+            pcmobj._intermediates.update(entry)
+        else:
+            pcmobj._get_vind(dm)
+    finally:
+        if split:
+            detach_cavity_comm(pcmobj)
     return grad

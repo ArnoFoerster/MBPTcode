@@ -30,9 +30,10 @@ from src.SingleReference.ADC.eeADC import (ee_utils, ee_equations as pe,
                                      ee_spin_blocks as psb,
                                      ee_u_sigma_full as pus,
                                      ee_r_sigma as prs, ee_r_sigma_df as pdf)
+from tests.molecules import WATER_AT_ORIGIN
 
 ATOMS = ['H 0 0 0; F 0 0 0.917', 'Li 0 0 0; H 0 0 1.6',
-         'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+         WATER_AT_ORIGIN,
          'Be 0 0 0; H 0 0 1.34; H 0 0 -1.34']
 LEVELS = ['adc1', 'adc2', 'adc2x', 'adc3']
 

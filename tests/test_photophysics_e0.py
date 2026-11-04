@@ -17,7 +17,7 @@ import pytest
 from pyscf import gto
 
 from src.Base.declaration import Excitation, GroundState, QPStates
-from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.numerics import Numerics, numerics_of
 from src.gradients.gwbse.state_manifold import StateManifold
 from src.photophysics import stages
 from src.properties.excitations import SurfaceSpec, surface_of
@@ -76,7 +76,7 @@ def test_the_record_stores_the_evaluation_s_e0(rpa, monkeypatch):
     monkeypatch.setattr(stages, 'spin_vibronic_coupling',
                         lambda *a, **k: {'v0': 0.0, 'v0_vector': None,
                                          'dv_cart': None, 'paths': {}})
-    props = stages.geometry_properties(rpa, S0, T0, n)
+    props = stages.geometry_properties(rpa, S0, T0, n, numerics=Numerics())
     assert props['e0'] == rpa.e0 != rpa.mf.e_tot
     for name in props['energy']:
         assert props['e0'] + props['omega'][name] == props['energy'][name]

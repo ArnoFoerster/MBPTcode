@@ -266,11 +266,6 @@ DF_EXCHANGE_METRIC_FLOOR = 1e-12
 AMB_PROBE_TOL = 1e-6
 AMB_PROBE_SIGN_TOLS = (1e-2, 1e-3, 1e-4)
 
-# CPHF/CPKS Z-vector solve of a ground-state correlated density
-# (GWDensityMatrixSolver.solve_relaxation): its lgmres tolerance (relative to
-# max(1, |rhs|)) and iteration ceiling, src.Base.pyscf.cphf.solve.
-CPHF_MAX_CYCLE = 100
-CPHF_TOL = 1e-9
 # The static correction's relaxed density on the tighter tolerance of a
 # correlated force.
 CORRELATION_CPHF_TOL = 1e-10
@@ -391,8 +386,7 @@ ISDF_PIVOT_CANDIDATES = 1024
 # its fold reads change by one ulp per element: 1e-9 of a 0.1 Ha/Bohr force.
 # A fit adjoint formed from single solves of the Gram matrix (cond ~ 2e8)
 # carries such a change to ~1e-12 on water/cc-pVDZ, whole fit and row fit
-# alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8
-# (tests/test_fit_adjoint_stability.py).
+# alike; applying G^-1 twice to an (nk, nk) product would carry it to ~1e-8.
 FIT_ADJOINT_ULP_RESPONSE_MAX = 1e-10
 
 # How far, in Ha/Bohr and Ha, a composed force and its energy over ranks may
@@ -422,7 +416,7 @@ RANK_SPLIT_ENERGY_TOL = 5e-12
 CONVERGED_SCF_FORCE_TOL = 1e-9
 
 # How far a force may move between two realizations of the one ISDF fit
-# (the replicated fit_M_stable and the tiled row fit, or the fit with its
+# (the replicated fit_M and the tiled row fit, or the fit with its
 # arithmetic re-associated). Both solve the Gram matrix of cond ~ 2e8, so
 # they agree in D only to cond(G) u ~ 3e-8 relative, in its near-null space;
 # a force reads D through branches below 1 Ha/Bohr here, so it moves by at
@@ -773,7 +767,7 @@ THREE_CENTER_BLOCK_BYTES = 2 << 30
 SKELETON_AUX_TILE = 32
 
 # AO functions per tile of the four-centre exchange skeleton's derivative pass
-# (`gradients.skeleton_tiles.exchange_skeleton_by_atoms`): runs of consecutive
+# (`gradients.skeleton_tiles.exchange_skeleton_tiled`): runs of consecutive
 # shells, tile t rank t % size's, so each rank's rows interleave every part of
 # the molecule (a screened row's cost differs between atoms by far more than
 # its AO count says), and the tiles' (natm, 3) addends are added in tile order.
@@ -974,6 +968,15 @@ MOLAR_ABSORPTION_PER_BOHR2 = ((BOHR_TO_ANGSTROM * 1e-8) ** 2 * AVOGADRO
 # the peak: 2e-7 at 20 points, 1e-5 at 8.
 FORSTER_POINTS_PER_WIDTH = 20
 FORSTER_MIN_POINTS_PER_WIDTH = 8
+# A photon-energy grid built from a vibronic model's cumulants
+# (`band_shape.vibronic_band_grid`) reaches BAND_GRID_WIDTHS standard
+# deviations (plus the Lorentzian FWHM) beyond each band's mean and resolves the
+# narrowest width by BAND_GRID_POINTS_PER_WIDTH points. A rate integral reaches
+# RATE_BAND_GRID_WIDTHS: its E^3 (radiative) or overlap weight puts weight in a
+# tail that BAND_GRID_WIDTHS leaves short by a few 1e-7 of the rate.
+BAND_GRID_WIDTHS = 8.0
+BAND_GRID_POINTS_PER_WIDTH = 20
+RATE_BAND_GRID_WIDTHS = 12.0
 # FWHM of a Gaussian per standard deviation, 2 sqrt(2 ln 2).
 GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
 # Exponent F below which a Franck-Condon density e^F times its bell integral is
@@ -981,6 +984,18 @@ GAUSSIAN_FWHM_PER_SIGMA = math.sqrt(8.0 * math.log(2.0))
 # margin of e^40 for a bell prefactor 1/sqrt(2 pi F''), which only a band
 # narrower than 1e-17 Hartree could exceed.
 FC_UNDERFLOW_EXPONENT = -748.0
+# The real-time Franck-Condon integrals (src/properties/franck_condon.py,
+# duschinsky.py): points per period of the fastest phase, the first window in
+# widths of the band (t_decay over its standard deviation), and the cap on a
+# grid's points (`FCTimeGrid`); the fraction of its largest |G| below which
+# the integrand at a window's ends counts as decayed; the windows tried, each
+# twice the last; and the fewest points of a grid over [-t_max, t_max].
+FC_DT_PER_PERIOD = 24
+FC_T_DECAY = 9.0
+FC_MAX_POINTS = 1 << 20
+FC_DECAYED_FRACTION = 1e-10
+FC_WINDOWS = 13
+FC_MIN_POINTS = 33
 
 # Largest |H_ixjy - H_jyix| a finite-difference Hessian (src/properties/
 # hessian.py) may carry before it is refused, relative to its own largest
@@ -998,8 +1013,8 @@ HESSIAN_FD_NOISE_REL = 1e-5
 
 # Range the asymmetry ratio between steps 2h and h must fall in above the
 # noise floor: h^2 truncation gives 4 (3.85 on formaldehyde's G3 ISDF grid). A
-# surface still rough on the step's scale gives less (2.38 on its 148-point
-# grid).
+# surface still rough on the step's scale gives less (2.38 on a coarser grid of
+# the same molecule).
 HESSIAN_FD_STEP_RATIO = (2.5, 6.0)
 
 # Level of ISDF_GRID_ACCURACY ('GH', see there) a finite-difference Hessian of
@@ -1339,6 +1354,9 @@ GIT_PROVENANCE_TIMEOUT = 10.0
 # so on two or three threads there is nothing to win and the entry cost of
 # the wrap is all that is left -- which is what this gates.
 BLAS_WRAP_MIN_THREADS = 4
+# Threads the einsum's operand copies run on at most (`threaded_copies`): more copy
+# threads than this gain nothing over it.
+THREADED_COPY_MAX_THREADS = 32
 
 
 # Fraction of the job allocation's memory that `Base.utils.parallel.memory.
@@ -1554,6 +1572,13 @@ MPI_COUNT_MAX = INT32_MAX
 # nodes ran 36 times slower than into one reused buffer. 128 MiB a thread.
 MPI_STAGE_DOUBLES = 2 ** 24
 
+# Seconds between two looks at a pending non-blocking barrier by a rank that
+# waits while another rank of its node computes alone (`on_root_with_node_cpus`).
+# A blocking MPI wait spins a core per waiting rank; this one sleeps, so the
+# computing rank has the node's cores. A latency knob only: the wait ends at
+# most this long after the computation.
+NODE_IDLE_POLL_S = 0.01
+
 # Relative Coulomb-energy error above which the ISDF-K mean field
 # (`Base.factorization.isdf_jk.ISDFJK.check`) warns that its grid is weak, on the first density the SCF
 # asks about: benzene/cc-pVDZ on `optimize_atomic_radii`'s default single
@@ -1561,13 +1586,27 @@ MPI_STAGE_DOUBLES = 2 ** 24
 # by 129 eV, while K stays good to 5e-3.
 ISDF_JK_CHECK_TOL = 1e-3
 
-# Fraction of what max_memory leaves that the distributed ISDF-K SCF
+# Fraction of max_memory that the distributed ISDF-K SCF
 # (`Base.factorization.distributed_isdf_jk`) lets this rank's rows of Z take, for the two
 # operators a range-separated functional asks for; above it Z's blocks are
 # formed per K build from G = M^T V instead ('factored'). The serial ISDFJK's
-# 'auto' mode takes a third, and so does this: the SCF's own buffers, the
-# DFT grid and the fit's peak need the rest. Rank 0's decision.
+# 'auto' mode takes a third for its whole Z, and so does this: the SCF's own
+# buffers, the DFT grid and the fit's peak need the rest. Read from the budget,
+# not from what the process holds at the moment, so one input always takes one
+# mode; rank 0's decision.
 ISDF_SCF_KERNEL_MEMORY_FRACTION = 0.33
+
+# The serial ISDFJK's row block when `layout.block` is None: the Hadamard
+# argument and, factored, the rebuilt Z rows (2 x b x M doubles) take
+# ISDF_JK_BLOCK_MEMORY_FRACTION of max_memory, at least ISDF_JK_BLOCK_MIN_MB,
+# and the block has at least ISDF_JK_BLOCK_MIN_ROWS rows. Read from the budget,
+# never from what the process holds at the moment, so one input always takes
+# the same blocks and the same bits.
+ISDF_JK_BLOCK_MEMORY_FRACTION = 0.25
+
+ISDF_JK_BLOCK_MIN_MB = 200
+
+ISDF_JK_BLOCK_MIN_ROWS = 16
 
 # Auxiliary functions per slab of the metric V (or its attenuated form) that
 # the distributed ISDF-K SCF evaluates at a time to form G = M^T V: a slab is
@@ -1686,6 +1725,20 @@ SCREENED_CHUNK_BYTES = 2 << 30
 # memory and the GEMM shapes, never a number beyond the summation order.
 EE_RI_TILE_GB = 8.0
 
+# Working set, in GB, of one tile of the density-fitted spin-orbit mean field
+# (`Base.pyscf.spin_orbit_mean_field`, two_electron='ri-somf'): a block of the
+# spin-orbit three-centre integrals or of the fitted occupied half-transform.
+# It moves the memory and the GEMM shapes, and the summation order with them.
+SOMF_RI_TILE_GB = 1.0
+
+# The two-electron terms of the spin-orbit mean-field operator: 'somf' the
+# exact integral pass, 'ri-somf' the same operator with its density side
+# fitted in a named auxiliary basis, 'amfi' its one-centre blocks alone.
+SOC_TWO_ELECTRON_TERMS = ('somf', 'ri-somf', 'amfi')
+# The one-electron operators a run may declare: 'x2c' the exact two-component
+# operator, 'breit-pauli' its leading term.
+SOC_ONE_ELECTRON_TERMS = ('x2c', 'breit-pauli')
+
 # Spin-component scaling (c_os, c_ss) of the doubles in ADC(2): SCS (Grimme,
 # J. Chem. Phys. 118, 9095 (2003); Hellweg, Gruen and Haettig, Phys. Chem.
 # Chem. Phys. 10, 4119 (2008)) and SOS (Jung, Lochan, Dutoi and Head-Gordon,
@@ -1799,9 +1852,15 @@ WALK_TRUST_MIN_BOHR = 2e-3
 # A trial step refused because a frozen orbital group MIXED with orbitals
 # outside it (`ConventionsLost` naming them) is not a step too long: the walk
 # refreezes the conventions at the last accepted geometry with those orbitals
-# absorbed into the group and retries the step at the same radius. At most
-# WALK_CONVENTION_REFREEZES_MAX such refreezes per walk; past them, or when
-# absorbing grows nothing, the refusal is an ordinary rejected step.
+# absorbed into the group and retries the step at the same radius; a refusal
+# of that retry, before any step is accepted, refreezes again and retries at
+# WALK_STEP_SHRINK times the radius. At most WALK_CONVENTION_REFREEZES_MAX
+# such refreezes per walk; past them, or when absorbing grows nothing, the
+# refusal is an ordinary rejected step. A refreeze that moves the energy at
+# the last accepted geometry by more than REFREEZE_TOL_MEV is a new surface,
+# not the old one continued: the walk starts a new round there (the walk's
+# starting radius and Hessian), at most WALK_CONVENTION_REFREEZES_MAX rounds;
+# a jump past them ends the walk, flagged (`optimize`).
 WALK_CONVENTION_REFREEZES_MAX = 4
 
 # The walk's step cap and its trust radius (Bohr, the norm of the 3N-vector
@@ -1875,6 +1934,10 @@ QP_SUBSPACE_TOL = 1e-13
 
 QP_SUBSPACE_MAX_ITER = 200
 
+# The Newton steps a group that stopped above QP_SUBSPACE_TOL takes once more
+# to report how far it is from self-consistency (the size of that step, Ha).
+QP_SUBSPACE_PROBE_STEPS = 1
+
 # A group of more orbitals than QP_SUBSPACE_DENSE_MAX is solved without its
 # n^2 x n^2 Jacobian: Newton's equation (1 - J) dH = residual by GMRES on the
 # operator J (batched products over the poles, QP_SUBSPACE_POLE_CHUNK at a
@@ -1894,12 +1957,11 @@ QP_SUBSPACE_GMRES_MAXITER = 100
 QP_SUBSPACE_POLE_CHUNK = 256
 
 # The QP-set reverse pass (`gradients.gwbse.qp_space_time.QPSetPass`) joins each
-# state's B_p_bar terms in frequency order, the running sum handed from the
-# owner of one frequency to the next (`ordered_chain_sum`, one collective of
-# every rank per hand-over). Consecutive states of one slice owner are chained
-# together as one stacked sum, up to this many GB a rank (the busiest rank's
-# share of their terms, stacked, and the running sums), so one hand-over
-# carries several states: fewer collectives, the same additions and bits.
+# state's B_p_bar terms in frequency order (`ordered_sliced_sum`, two
+# collectives of every rank per sum). Consecutive states of one slice owner are
+# summed together as one stacked sum, up to this many GB a rank (the busiest
+# rank's share of their terms, stacked, sliced and packed, and the sums), so one
+# sum carries several states: fewer collectives, the same additions and bits.
 QP_CHAIN_BATCH_GB = 0.5
 
 # Interior samples of an interval between neighbouring poles that no bound
@@ -1981,8 +2043,8 @@ IR_EPS = 1e-10
 DAVIDSON_ACTION_SYMMETRY_TOL = 1e-8
 
 # What a pin recorded under one BLAS may miss by under another, per quantity
-# class (tests/pins.py; bitwise under the recording BLAS). Measured on a
-# cluster's MKL 2025.3 against a workstation's MKL 2021.4/SSE4.2 + Accelerate.
+# class (tests/pins.py; bitwise under the recording BLAS). Measured between MKL
+# 2025.3, MKL 2021.4 (SSE4.2) and Accelerate.
 # Energies, Ha: up to 1.4e-12 (water RPABSESurface[singlet]; mean fields 6e-14
 # to 4e-13); a pole strength not read off a continuation holds to the same
 # number, dimensionless.
@@ -2012,7 +2074,7 @@ PIN_CROSS_BLAS_ROOT_BAR = 2e-10
 # Two computations of one number on the recording machine (two solves, two
 # routes, a run and an archived tree's run) are not bitwise: a BLAS reduction
 # taken in another order reproduces only to an ulp (1.1e-16 Ha, one ulp of a
-# 0.689 Ha operand, measured in one run in five on a cluster node). They are held
+# 0.689 Ha operand, measured in one run in five). They are held
 # to this many ulp of the larger of their magnitude and one unit (`same_bar`
 # of tests/pins.py): the unit floor because a
 # difference of O(1) operands keeps their ulps, not its own. 8 ulp: a few
@@ -2239,10 +2301,6 @@ EE_RI_EXCHANGE_CHUNK = 128
 EE_RI_EXCHANGE_ARRAYS = 3
 # (kt, nv, no, nv) arrays alive in one occupied tile of a folded product
 EE_RI_FOLD_TILE_ARRAYS = 5
-# ... in one occupied tile of the RI difference density (`eeADC.ee_ri_density`)
-# and in one virtual tile of its vv pass
-EE_RI_DENSITY_OCC_TILE_ARRAYS = 9
-EE_RI_DENSITY_VIRT_TILE_ARRAYS = 6
 # ... in one occupied tile of the RI transition densities
 # (`eeADC.ee_ri_transition`) besides the two doubles of every root, in one of
 # their virtual tiles, and in one tile of their ground row's second-order pass
@@ -2570,6 +2628,13 @@ PCM_CAVITY_MIN_TILES = 32
 # The flop count does not depend on it; at nao 1090 a force block is 46 cavity
 # points.
 PCM_CAVITY_BLOCK_GB = 0.5
+# The memory (GB) a rank may keep its cavity tiles' potential integrals in
+# between the continuum's calls at one geometry
+# (src.environments.pcm_factorization): the SCF cycles and the response
+# solves evaluate the same (nao, nao, k) tiles in every call, twice per
+# cycle. Tiles past the budget are evaluated again each time, so the
+# integrals and the bits do not depend on it.
+PCM_CAVITY_CACHE_GB = 2.0
 
 # Folded ADC(2) nuclear force (src.gradients.adc.ee_gradient)
 # eigenvalue tolerance (Hartree) of the root whose force is taken
@@ -2683,9 +2748,10 @@ DAVIDSON_DENOMINATOR_FLOOR = 1e-8
 THOLE_FACTOR = 2.5874
 MIN_SITE_SEPARATION = 1e-6
 
-# Bohr. The box of the single-descent ISDF radius search, kept so every cached
-# and shipped grid keeps its key (`separable_ri.ELEMENT_R_MAX`).
-LEGACY_R_MAX = 5.0
+# Bohr. The box of the single-descent ISDF radius search; every cached and
+# shipped grid was searched in it, so their keys depend on it
+# (`separable_ri.ELEMENT_R_MAX` is the multi-start box).
+SINGLE_DESCENT_R_MAX = 5.0
 
 # Laplace quadrature points of the fused rank>=3 amplitudes in the MP3/MP4
 # densities (DensityMatrix drivers, ADC static corrections).
@@ -2700,12 +2766,12 @@ MPN_DENSITY_LAPLACE_NTAU = 6
 EE_ADC_DENSE_LIMIT = 2000
 EE_FOLD_DENSE_LIMIT = 64
 # (no, nj, nv, nv) slab blocks one slab of the restricted DF ADC(2) coupling
-# kernel holds at once (ee_r_sigma_df; the traced peak of
-# tests/test_ee_adc_fold.py), what slab_plan budgets the slab width with.
+# kernel holds at once (ee_r_sigma_df; the traced peak of a slab), what
+# slab_plan budgets the slab width with.
 EE_COUPLING_SLAB_BLOCKS = 11
 # (nk, nv, nm) slab blocks one slab of the GW fold's eq 66 kernel holds at once
-# (ee_gw_pieces; the traced peak of tests/test_ee_gw_fold.py), what slab_plan
-# budgets the slab width with.
+# (ee_gw_pieces; the traced peak of a slab), what slab_plan budgets the slab
+# width with.
 EE_GW_SLAB_BLOCKS = 3
 # The Laplace grid target of the GW and dBSE2 folds' kernel_laplace:
 # max |1 - x sum_t w_t exp(-τ_t x)| on its range scaled to [1, R]

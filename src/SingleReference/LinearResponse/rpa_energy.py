@@ -24,7 +24,7 @@ from pyscf import scf as pyscf_scf
 
 from src.Base.declaration import GroundState
 from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
-from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.factorization.isdf_jk import interpolated_exchange
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
@@ -198,7 +198,7 @@ def reference_energy(mf, mol=None):
     with_df = getattr(mf, 'with_df', None)
     if with_df is not None:
         hf = hf.density_fit(auxbasis=with_df.auxbasis)
-    if isinstance(with_df, ISDFJK):
+    if interpolated_exchange(mf):
         # the SCF's own factors: a new fit would carry its own interpolation
         hf.with_df = with_df
     e_hf = lockstep(float(hf.energy_tot(dm=dm)))

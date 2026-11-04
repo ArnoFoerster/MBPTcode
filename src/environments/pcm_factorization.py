@@ -32,22 +32,32 @@ the tiles (`owned_blocks`, as the force does), so it holds one tile at a time
 and the integrals cost about 1 / n of a cycle. The tiles depend on the cavity
 and the basis alone (PCM_CAVITY_BLOCK_GB, libcint's index bound; a cavity past
 one tile is cut into at least PCM_CAVITY_MIN_TILES), and the reaction-field
-matrix is added tile by tile in tile order (`ordered_sum`), so the result is the
+matrix is added tile by tile in tile order (`ordered_sum`; over ranks on element
+slices, `ordered_sliced_sum`), so the result is the
 same bits at every rank count. Every rank enters both calls
 at the same point of the loop there, which is what the reduction needs;
 outside that block the tiles run replicated.
+
+A rank keeps the tiles it evaluates, up to PCM_CAVITY_CACHE_GB, for as long as
+the cavity and the basis are the ones they were evaluated at: every SCF cycle
+and every response solve asks for the same integrals, the potential and the
+reaction-field matrix once each per call. A kept tile is the array libcint
+wrote, so the bits do not depend on what is kept.
 """
 import numpy as np
 import scipy.linalg
 
 from src.Base.environment_seam import cavity_comm
-from src.Base.numerics.constants import PCM_CAVITY_BLOCK_GB, PCM_CAVITY_MIN_TILES
-from src.Base.utils.parallel.mpi_grid import ordered_sum, reduce_sum
+from src.Base.numerics.constants import (BYTES_PER_GB, PCM_CAVITY_BLOCK_GB, PCM_CAVITY_CACHE_GB,
+                                         PCM_CAVITY_MIN_TILES)
+from src.Base.utils.parallel.mpi_grid import ordered_sliced_sum, ordered_sum, reduce_sum
 from src.environments.pcm_derivatives import (cavity_blocks, cavity_cintopt, cavity_integrals,
                                               owned_blocks)
 
 #: Attribute the factorization is cached under, on the PCM object itself.
 _CACHE = '_cached_pcm_lu'
+#: Attribute the kept cavity tiles live under (`_kept_tiles`).
+_TILES = '_kept_cavity_tiles'
 
 
 def _factorization(obj, K):
@@ -125,14 +135,44 @@ def _cavity_share(self, nao):
     return [tiles[k] for k in owned_blocks(len(tiles), comm)], comm
 
 
+def _geometry(self):
+    """What a tile's integrals depend on: the AO basis and its centres, the
+    surface points and their exponents."""
+    mol, surface = self.mol, self.surface
+    return (mol._atm, mol._bas, mol._env, surface['grid_coords'], surface['charge_exp'])
+
+
+def _kept_tiles(self):
+    """{index: integrals} this rank keeps for the current cavity and basis;
+    emptied when either changed since the tiles were evaluated."""
+    now = _geometry(self)
+    kept = vars(self).get(_TILES)
+    if kept is None or len(kept['at']) != len(now) or not all(
+            np.array_equal(a, b) for a, b in zip(kept['at'], now)):
+        kept = {'at': tuple(np.array(a, copy=True) for a in now), 'tiles': {}, 'bytes': 0}
+        setattr(self, _TILES, kept)
+    return kept
+
+
 def _cavity_integrals(self, tiles):
     """(index, (p0, p1), (nao, nao, p1 - p0) potential integrals) for each
-    tile: pyscf's `_get_v` block, one tile at a time."""
+    tile: pyscf's `_get_v` block, one tile at a time, kept for the next call
+    while the rank's kept tiles stay within PCM_CAVITY_CACHE_GB."""
+    kept = _kept_tiles(self)
     int3c2e = self.mol._add_suffix('int3c2e')
-    cintopt = cavity_cintopt(self.mol, int3c2e)
+    cintopt = None
     for index, (p0, p1) in tiles:
-        yield index, (p0, p1), cavity_integrals(self.mol, self.surface, p0, p1,
-                                                int3c2e, cintopt)
+        v_nj = kept['tiles'].get(index)
+        if v_nj is None:
+            if cintopt is None:
+                cintopt = cavity_cintopt(self.mol, int3c2e)
+            v_nj = cavity_integrals(self.mol, self.surface, p0, p1, int3c2e, cintopt)
+            if kept['bytes'] + v_nj.nbytes <= PCM_CAVITY_CACHE_GB * BYTES_PER_GB:
+                v_nj.setflags(write=False)
+                kept['tiles'][index] = v_nj
+                kept['bytes'] += v_nj.nbytes
+        yield index, (p0, p1), v_nj
+        v_nj = None
 
 
 def _get_v(self, dms):
@@ -152,7 +192,8 @@ def _get_v(self, dms):
 def _get_vmat(self, q):
     """pyscf's `PCM._get_vmat` (the charges' potential on the basis,
     (nset, nao, nao)): each tile's term, added onto zero in tile order over
-    all ranks' tiles (`ordered_sum`), which with one tile is pyscf's bits."""
+    all ranks' tiles (`ordered_sum`, `ordered_sliced_sum`), which with one
+    tile is pyscf's bits."""
     nao = self.mol.nao
     ngrids = self.surface['grid_coords'].shape[0]
     q = q.reshape(-1, ngrids)
@@ -162,7 +203,13 @@ def _get_vmat(self, q):
         terms.append((index, np.stack([-np.einsum('ijL,L->ij', v_nj, q[i, p0:p1])
                                        for i in range(q.shape[0])])))
     shape = (q.shape[0], nao, nao)
-    return ordered_sum(terms, comm, shape=shape, onto=np.zeros(shape))
+    if comm is None:
+        return ordered_sum(terms, comm, shape=shape, onto=np.zeros(shape))
+    # over ranks each rank receives a slice of every tile's term, not every
+    # term whole: the same additions in tile order onto zero
+    ntiles = len(cavity_tiles(nao, ngrids))
+    owners = [k % comm.Get_size() for k in range(ntiles)]       # `owned_blocks`
+    return ordered_sliced_sum(dict(terms), owners, comm, np.zeros(shape))
 
 
 def tile_cavity(with_solvent):

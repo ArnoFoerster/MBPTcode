@@ -88,8 +88,8 @@ transition densities between them (ground to excited, singlet to triplet,
 triplet to triplet) come from `gradients.adc.ee_spectrum.adc2_spectrum`. The
 densities are built one occupied tile at a time and split over MPI ranks, so
 they run at the size the fold does. `properties.transition_moments
-.spectrum_properties` turns them into the spin-orbit table (SOMF + X2C
-operator), the transition dipoles and the oscillator strengths, and
+.spectrum_properties` turns them into the spin-orbit table (the operator the
+numerics declare, RI-SOMF with X2C by default), the transition dipoles and the oscillator strengths, and
 `photophysics.minimum.from_adc2_spectrum` hands them to the rate layer.
 SCS-ADC(2) (`MP2State` with `spin_scaling='scs'`) gives energies and
 geometries only: spin-component scaling breaks spin-rotation symmetry, so
@@ -115,7 +115,7 @@ mol = gto.M(atom='C 0 0 0; O 0 0 1.205; H 0 0.94 -0.587; H 0 -0.94 -0.587',
             basis='cc-pvdz', verbose=0)
 spec = adc2_spectrum(MP2State(HFState(mol, make_scf), frozen=2,
                               auxbasis='cc-pvdz-ri', numerics=Numerics()), 3)
-props = spectrum_properties(spec, 3)
+props = spectrum_properties(spec, 3, numerics=Numerics())
 print(props['socme'] * 219474.63, 'cm-1')   # rows S0, S1, S2, S3; columns T1-T3
 ```
 

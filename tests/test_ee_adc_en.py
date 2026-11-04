@@ -30,9 +30,10 @@ from src.SingleReference.ADC.base import (ADCSolverRestricted,
                                           ADCSolverUnrestricted)
 from src.SingleReference.EpsteinNesbet import (epstein_nesbet_shift,
                                                validate_en_dress)
+from tests.molecules import WATER_AT_ORIGIN
 
 ATOMS = ['H 0 0 0; F 0 0 0.917', 'Li 0 0 0; H 0 0 1.6',
-         'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587']
+         WATER_AT_ORIGIN]
 DRESS = [{'hh': True, 'pp': True}, {'hh': True}, {'pp': True},
          {'hh': True, 'pp': True, 'hp': True}]
 

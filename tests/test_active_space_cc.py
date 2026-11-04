@@ -97,8 +97,7 @@ def test_the_dispatcher_solves_a_downfolded_hamiltonian():
     mf = scf.RHF(mol).run(conv_tol=1e-12, conv_tol_grad=1e-9)
     g_eff, space = build_effective_hamiltonian(mol, mf, 1, 3, max_pt_order=2,
                                                max_vertex=2, spin_free=True)
-    args = (g_eff, space['n_orbs'], space['n_elec_active'], space['act_idx'],
-            space['act_occ_idx'], space['act_vir_idx'])
+    args = (g_eff, space['n_orbs'], space['n_elec_active'])
     eri = g_eff[2].transpose(0, 2, 1, 3)
     assert np.max(np.abs(eri - eri.transpose(1, 0, 2, 3))) > 1e-3   # not eightfold
     e_fci = solve('pyscf_fci', *args, spin_free=True)[0]
@@ -117,8 +116,7 @@ def test_paired_electrons_give_the_singlet_where_a_triplet_lies_lower():
     g_eff, space = build_effective_hamiltonian(mol, mf, 1, 3, max_pt_order=3,
                                                max_vertex=2, spin_free=True,
                                                shift=-0.5)
-    args = (g_eff, space['n_orbs'], space['n_elec_active'], space['act_idx'],
-            space['act_occ_idx'], space['act_vir_idx'])
+    args = (g_eff, space['n_orbs'], space['n_elec_active'])
     h1, eri, norb, nelec = _spatial_active_hamiltonian(
         g_eff, space['n_orbs'], space['n_elec_active'], True, True, 'ccsdtq')
     fci_solver = PyscfFCISolver()
@@ -203,7 +201,7 @@ def test_refusals(h4):
         CoupledClusterSolver(order=4).roots(h1, eri, norb, nelec, spin=2)
 
     g_eff = {1: h1, 2: eri.transpose(0, 2, 1, 3)}
-    args = (norb, nelec, None, None, None)
+    args = (norb, nelec)
     three_body = {**g_eff, 3: np.full((norb,) * 6, 1e-3)}
     for name in ('ccsdt', 'ccsdtq'):
         with pytest.raises(ValueError, match='one- and two-body'):
@@ -212,6 +210,9 @@ def test_refusals(h4):
     non_hermitian = {1: h1, 2: (eri + x - x.transpose(1, 0, 3, 2)).transpose(0, 2, 1, 3)}
     with pytest.raises(ValueError, match='needs a Hermitian Hamiltonian'):
         solve('ccsdt', non_hermitian, *args, spin_free=True, symmetrize=False)
+    # one state, refused rather than truncated or padded
+    with pytest.raises(ValueError, match='at most 1 root'):
+        solve('ccsdt', g_eff, *args, spin_free=True, nroots=2)
 
 
 def test_an_unconverged_iteration_warns_flags_and_keeps_its_energy(h4, monkeypatch):

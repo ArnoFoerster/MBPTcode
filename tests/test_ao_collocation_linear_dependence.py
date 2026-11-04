@@ -29,8 +29,9 @@ from src.SingleReference.GW.space_time import (_ao_collocation,
                                                solve_qp_energy_space_time)
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1, g1_numerics
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 #: Drops the four overlap eigenvalues of water/aug-cc-pVDZ below it.
 LINDEP = 3e-2
 

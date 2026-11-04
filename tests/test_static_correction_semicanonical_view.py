@@ -21,6 +21,7 @@ from pyscf import dft, gto
 
 from src.SingleReference.ADC.static_correction import (_ks_semicanonical_setup,
                                                        _ks_semicanonical_setup_uhf)
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -49,7 +50,7 @@ def direct_veff_matches(view, mf):
 
 def check_the_restricted_view():
     """Water, RKS PBE0: _ks_semicanonical_setup's view on the direct path."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = dft.RKS(mol)
     mf.xc = 'pbe0'

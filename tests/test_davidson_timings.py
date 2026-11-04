@@ -74,6 +74,7 @@ from src.SingleReference.LinearResponse.block_actions import (ACTION_PIECES,
 from src.SingleReference.LinearResponse.trial_space import SUBSPACE_PIECES
 from tests.isdf_test_grid import g1
 from tests.pins import THREAD_CAPS, assert_archive_same
+from tests.molecules import WATER
 
 SIZES = [2, 3]
 NROOTS = 3
@@ -169,7 +170,7 @@ np.savez({out!r}, eps=np.asarray(info['eps']), coords=np.asarray(factors[3]))
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

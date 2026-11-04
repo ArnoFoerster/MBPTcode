@@ -47,7 +47,9 @@ from scipy.sparse.linalg import LinearOperator, minres
 from src.Base.numerics.constants import (FRAGMENT_PM_CONV_TOL, FRAGMENT_PM_CONV_TOL_GRAD,
                                          FRAGMENT_PM_POLISH_MAX,
                                          LOCALIZED_ASSIGNMENT_FLOOR)
-from src.Base.pyscf.pyscf_interface import fock_mo, occupied_count
+from src.Base.numerical_flags import flag
+from src.Base.pyscf.pyscf_interface import fock_mo
+from src.Base.orbital_spaces import occupied_count
 from src.Base.utils.linear_algebra.krylov import root_driven_solve
 
 POPULATION_SCHEMES = ('lowdin', 'iao')
@@ -105,9 +107,13 @@ def population_tensor(mol, fragments, scheme='lowdin', orbocc=None, s=None):
         raise ValueError(f'scheme must be one of {POPULATION_SCHEMES}, got '
                          f'{scheme!r}')
 
-    def pops(mol_, mo_coeff, method=None):
+    def pops(mol_, mo_coeff, method=None, mode=None, **_):
+        # pyscf >= 2.14 asks the cost function's populations with mode='pop':
+        # the diagonal (nfrag, n), taken off the same matrices, so the cost is
+        # the one older pyscf takes from the full tensor.
         c = frame @ np.asarray(mo_coeff, float)
-        return np.stack([c[r].T @ c[r] for r in rows])
+        full = np.stack([c[r].T @ c[r] for r in rows])
+        return np.einsum('kii->ki', full) if mode == 'pop' else full
     return pops
 
 
@@ -127,6 +133,10 @@ def _localize(mol, orbitals, pops, start=None, conv_tol=FRAGMENT_PM_CONV_TOL):
     pm = lo.pipek.PipekMezey(mol, orbitals if start is None
                              else orbitals @ start)
     pm.atomic_pops = pops
+    # pyscf >= 2.14 builds the gradient and Hessian from `pop_method` unless
+    # it is None, which tells it the populations are `atomic_pops`; older
+    # pyscf hands `pop_method` to `pops`, which does not read it
+    pm.pop_method = None
     pm.exponent = 2
     pm.conv_tol = conv_tol
     pm.conv_tol_grad = FRAGMENT_PM_CONV_TOL_GRAD
@@ -142,6 +152,11 @@ def _localize(mol, orbitals, pops, start=None, conv_tol=FRAGMENT_PM_CONV_TOL):
     pm.mo_coeff = c_loc
     grad = float(np.linalg.norm(pm.get_grad(np.eye(n))))
     return u, grad
+
+
+class LocalizationStepNotConverged(RuntimeWarning):
+    """A Pipek-Mezey Newton step whose MINRES solve stopped short (its last
+    iterate taken as the step)."""
 
 
 def _newton_polish(pm, c_loc, tol=FRAGMENT_PM_CONV_TOL_GRAD, maxiter=8):
@@ -168,7 +183,15 @@ def _newton_polish(pm, c_loc, tol=FRAGMENT_PM_CONV_TOL_GRAD, maxiter=8):
             x = np.linalg.lstsq(0.5 * (h + h.T), -g, rcond=1e-12)[0]
         else:
             op = LinearOperator((npar, npar), matvec=h_op, dtype=float)
-            x = minres(op, -g, rtol=1e-6, maxiter=500)[0]
+            x, info = minres(op, -g, rtol=1e-6, maxiter=500)
+            if info != 0:
+                # the step is MINRES's last iterate; the Newton goes on, and
+                # the stationarity it ends at is reported (`pm_gradient`)
+                flag('fragment_localization_step_not_converged',
+                     f'the MINRES solve of a Pipek-Mezey Newton step ended '
+                     f'with info={info} on {npar} rotation parameters; its '
+                     f'last iterate is taken as the step',
+                     LocalizationStepNotConverged)
         c_loc = c_loc @ pm.extract_rotation(x)
     return c_loc
 

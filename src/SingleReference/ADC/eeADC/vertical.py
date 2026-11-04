@@ -39,8 +39,10 @@ the relaxed densities only).
 
 Frozen core by default: the 1s shell of every atom past He (and the 2s2p shell
 past Ne). Restartable: the SCF density is kept in scf.npz and each finished
-spin channel in channel_<spin>.json; a rerun reuses both (a channel of another
-medium is solved again). --estimate-only
+spin channel in channel_<spin>.json; a rerun reuses both. A channel is reused
+only when every setting it is a function of (`channel_key`: geometry, charge,
+bases, frozen core, roots, tolerances, medium, state-specific mode and
+density, spin scaling) is the run's; any other channel is solved again. --estimate-only
 prints the problem's size, the memory the operator holds and the floating
 point work of one product, and exits.
 
@@ -69,7 +71,7 @@ from src.Base.numerics.numerics import Numerics
 from src.Base.utils.record_io import code_id
 from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
 from src.environments.medium import CAVITY_CONVENTIONS, describe, parse as parse_medium
-from src.Base.utils.parallel.mpi_grid import (distributed, grid_comm,
+from src.Base.utils.parallel.mpi_grid import (broadcast, distributed, grid_comm,
                                               lockstep_mean_field)
 from src.Base.utils.parallel.threads import blas_threads, openmp_threads
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
@@ -217,6 +219,28 @@ def main(argv=None):
         return run(args, comm)
 
 
+def channel_key(args, nfrozen, env):
+    """Every setting a spin channel's roots are a function of, as the
+    channel file holds it (JSON): a stored channel is reused only when its
+    key is this one, compared whole."""
+    return json.loads(json.dumps(dict(
+        level='adc2', xyz_sha256=sha256(args.xyz), charge=args.charge,
+        basis=args.basis, auxbasis=args.auxbasis,
+        jk_auxbasis=args.jk_auxbasis, frozen=nfrozen, nroots=args.nroots,
+        conv_tol=args.conv_tol, scf_conv_tol=args.scf_conv_tol,
+        scf_conv_tol_grad=args.scf_conv_tol_grad,
+        state_specific=args.state_specific, ss_density=args.ss_density,
+        spin_scaling=args.spin_scaling, medium=describe(env))))
+
+
+def _stored_channel(path):
+    """The channel file at path, or None where there is none."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh)
+
+
 def run(args, comm):
     rank = 0 if comm is None else comm.Get_rank()
     root = rank == 0
@@ -295,26 +319,27 @@ def run(args, comm):
     say(json.dumps({'scf': record['scf']}), flush=True)
 
     channels = {}
+    settings = channel_key(args, nfrozen, env)
     for spin in args.spins:
         path = os.path.join(args.out_dir, f'channel_{spin}.json')
-        if os.path.isfile(path):
-            with open(path) as fh:
-                stored = json.load(fh)
-            if (stored.get('state_specific', 'off') == args.state_specific
-                    and stored.get('ss_density', 'unrelaxed') == args.ss_density
-                    and stored.get('spin_scaling', 'none') == args.spin_scaling
-                    # a channel that records no medium is reused
-                    and stored.get('medium', describe(env)) == describe(env)):
+        # rank 0 reads it: every rank reuses the channel or none does
+        stored = broadcast(_stored_channel(path) if root else None, comm)
+        if stored is not None:
+            if stored.get('key') == settings:
                 channels[spin] = stored
                 say(f'{spin}: reused {path}', flush=True)
                 continue
+            say(f'{spin}: {path} was solved with other settings; solving '
+                'again', flush=True)
         t = time.time()
         e, _, res = solve_ee_adc(mf, mol, level='adc2', spin=spin,
                                  nroots=args.nroots, fold=True, frozen=nfrozen,
                                  auxbasis=args.auxbasis, environment=env,
-                                 conv_tol=args.conv_tol, return_fold=True,
-                                 tile_gb=args.tile_gb,
-                                 numerics=Numerics(layout={'device': args.device}),
+                                 return_fold=True,
+                                 numerics=Numerics(
+                                     adc={'conv_tol': args.conv_tol},
+                                     layout={'device': args.device,
+                                             'tile_gb': args.tile_gb}),
                                  state_specific=args.state_specific,
                                  ss_density=args.ss_density,
                                  spin_scaling=(None if args.spin_scaling == 'none'
@@ -337,7 +362,7 @@ def run(args, comm):
                   wall_s=time.time() - t, peak_rss_gb=peak_rss_gb(),
                   state_specific=args.state_specific,
                   ss_density=args.ss_density,
-                  spin_scaling=args.spin_scaling, medium=describe(env))
+                  spin_scaling=args.spin_scaling, medium=describe(env), key=settings)
         if args.state_specific != 'off':
             ch['ss_shifts_eV'] = {m: (np.asarray(v) * HARTREE_TO_EV).tolist()
                                   for m, v in res.ss_shifts.items()}

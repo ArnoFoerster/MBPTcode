@@ -87,8 +87,8 @@ from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1, duchemin_blase,
 from tests.pins import (RECORDING_BLAS, THREAD_CAPS_WITHOUT_OMP,
                         assert_archive_same, assert_same, bitwise_arrays,
                         matches)
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'

@@ -20,6 +20,7 @@ from src.SingleReference.GW.auxiliary_bosons import (ab_basis, ab_bosons,
                                                      exact_bosons,
                                                      exact_from_factors)
 from src.SingleReference.GW.sum_over_poles import sigma_sop
+from tests.molecules import WATER_ROUNDED
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -131,7 +132,7 @@ def test_a_core_state_is_reached_by_the_bosons_and_by_the_fit():
     from src.SingleReference.GW.sum_over_poles import (compressible,
                                                        qp_energy_sop,
                                                        sop_from_wc)
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)

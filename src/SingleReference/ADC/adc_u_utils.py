@@ -3,7 +3,7 @@ denominators, the EN-dressed T2^(1) builder + its u1 shift (the
 production open-shell EN route), and the matrix-free ingredient set."""
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.DensityMatrix.generated_mpn import (
     mpn_density_pieces as mpn_gen)
 from src.SingleReference.DensityMatrix.mpn_density_driver import (

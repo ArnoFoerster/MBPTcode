@@ -23,6 +23,7 @@ from pyscf import gto, scf, df
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri, DFIntegrals
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 def _max_diff(blocks_a, blocks_b):
@@ -34,7 +35,7 @@ if __name__ == '__main__':
 
     # ---------------- RHF ----------------
     for atom, basis in [('H 0 0 0; F 0 0 0.9', 'sto-3g'), ('H 0 0 0; Li 0 0 1.6', 'sto-3g'),
-                       ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', '6-31g')]:
+                       (WATER_AT_ORIGIN_COARSE, '6-31g')]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()
         nocc = mol.nelectron // 2

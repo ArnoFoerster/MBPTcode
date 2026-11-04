@@ -33,6 +33,7 @@ from src.Base.factorization.separable_ri import (orbital_density_residual,
 from src.SingleReference.GW.space_time import (separable_factors,
                                                 unrefused_separable_factors)
 from src.SingleReference.BSE.solve import solve_bse_df, solve_bse_isdf
+from tests.molecules import WATER
 
 #: The extra diffuse shells: first exponent, ratio, count.
 EXTRA = (0.03, 1.15, 4)
@@ -59,7 +60,7 @@ def _basis(element):
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis={'O': _basis('O'), 'H': _basis('H')}, verbose=0)
     auxmol = pyscf_df.addons.make_auxmol(mol, 'aug-cc-pvdz-ri')
     radii = {el: shipped_radii_lookup(el, 'aug-cc-pvdz', 'aug-cc-pvdz-ri',

@@ -41,7 +41,7 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
 from src.environments.environment import environment_label
 from src.Base.environment_seam import NoEnvironment, resolve_environment
 from src.Base.geometry.geometry import elements_of
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.Base.utils.parallel.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
@@ -495,8 +495,10 @@ def build_excited_chain(row, setup):
 
 
 def build_dense_rpa(row, setup):
-    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings."""
-    return row.cls(setup.mol, setup.scf_factory), {}
+    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings
+    but the orbital-response solve of its force (`numerics_read_by`)."""
+    return row.cls(setup.mol, setup.scf_factory,
+                   numerics=numerics_read_by(row, setup.numerics)), {}
 
 
 def build_dense_bse(row, setup):
@@ -517,7 +519,8 @@ def build_dense_bse(row, setup):
         kw['auxbasis'] = setup.numerics.isdf.auxbasis
     surface = row.cls(setup.mol, variant, setup.excitation.root - 1,
                       qp_orbs=setup.qp_explicit, filter_z=False,
-                      scf=setup.scf_factory, spin=setup.excitation.spin, **kw)
+                      scf=setup.scf_factory, spin=setup.excitation.spin,
+                      numerics=numerics_read_by(row, setup.numerics), **kw)
     return surface, {}
 
 
@@ -531,7 +534,8 @@ def build_dense_qp(row, setup):
             "'space-time', 'isdf').")
     surface = row.cls(setup.mol, setup.scf_factory,
                       charge_change=setup.excitation.charge_change,
-                      screening='rpa', orbital=setup.excitation.orbital)
+                      screening='rpa', orbital=setup.excitation.orbital,
+                      numerics=numerics_read_by(row, setup.numerics))
     return surface, {}
 
 

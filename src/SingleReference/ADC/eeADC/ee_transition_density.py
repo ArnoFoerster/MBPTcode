@@ -103,7 +103,7 @@ import numpy as np
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
 from src.SingleReference.ADC.eeADC import ee_r_sigma_df as _df
-from src.SingleReference.ADC.eeADC import ee_ri_density as _rd
+from src.SingleReference.ADC.eeADC import ee_ri_tiles as _rd
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_utils
 
@@ -332,7 +332,7 @@ def flat_state(v, no, nv, level='adc2', parity=None):
 def fold_state(op, y, omega, t1):
     """(u1, u2) spin-blocked of one root of the folded operator `op`
     (ee_ri_fold.RIFoldADC2): the singles sqrt(t1) y and the doubles rebuilt
-    from them (ee_ri_density.root_doubles), together the unit full
+    from them (ee_ri_tiles.root_doubles), together the unit full
     eigenvector, in the paper scaling; a spin-component scaled operator's
     doubles carry sqrt(c) of their pair class (module docstring). The
     doubles are held whole: the route of molecules whose o^2 v^2 fits in
@@ -369,24 +369,3 @@ def factors_of(op):
     for c, (p0, p1) in enumerate(op.chunks):
         B[p0:p1, no:, no:] = f.bvv(c, p0, p1).transpose(1, 0, 2)
     return B
-
-
-def spin_free_transition_density(eps, V, no, vl, vr, level='adc2',
-                                 parity_l=None, parity_r=None, terms=False):
-    """`transition_density` of two full eigenvectors of the dense spin-free
-    route on the full integrals V (eps, V, level, parity as
-    ee_density.spin_free_difference_density)."""
-    nv = len(eps) - no
-    ref = reference_from_integrals(eps, V, no, level, ground=False)
-    return transition_density(ref, flat_state(vl, no, nv, level, parity_l),
-                              flat_state(vr, no, nv, level, parity_r), terms)
-
-
-def spin_free_ground_transition_density(eps, V, no, v, level='adc2',
-                                        parity=None, terms=False):
-    """`ground_transition_density` of one full eigenvector of the dense
-    spin-free route on the full integrals V."""
-    nv = len(eps) - no
-    ref = reference_from_integrals(eps, V, no, level, ground=True)
-    return ground_transition_density(ref, flat_state(v, no, nv, level, parity),
-                                     terms)

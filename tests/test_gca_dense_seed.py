@@ -17,11 +17,12 @@ import numpy as np
 import pytest
 from pyscf import gto
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.geometry.geometry import molecule_at
 from src.gradients.gwbse.dense_surfaces import QuasiparticleSurface, tight_rhf
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: Bohr along the stretch: a far probe, then a geometry near the reference
 FAR, NEAR = 0.6, -0.02
 INNER_VALENCE = 1
@@ -43,7 +44,7 @@ def test_root_at_a_geometry_is_independent_of_the_call_history(geometries,
     mol, far, near, mf_far, mf_near = geometries
 
     def surface():
-        return QuasiparticleSurface(mol, tight_rhf, -1, orbital=orbital)
+        return QuasiparticleSurface(mol, tight_rhf, -1, orbital=orbital, numerics=Numerics())
 
     alone = surface().quasiparticle_energy(near, mf_near)
     walked = surface()

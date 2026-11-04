@@ -18,11 +18,12 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
 from src.Base.numerical_flags import collecting
 from src.SingleReference.BSE import bse_upfolded as B
 from src.Base.numerics.constants import HARTREE_TO_EV
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 SPINS = ('singlet', 'triplet')
 
 
-def _case(basis='sto-3g', atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'):
+def _case(basis='sto-3g', atom=WATER_AT_ORIGIN_COARSE):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     mf = scf.RHF(mol).run()
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
@@ -107,7 +108,7 @@ def test_screening_matrix_is_the_repo_direct_rpa_casida_matrix():
     already builds that for the GW module, so compare rather than trust."""
     from src.SingleReference.LinearResponse.linear_response import (
         LinearResponseSolver)
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g',
                 verbose=0)
     mf = scf.RHF(mol).run()
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
@@ -159,7 +160,7 @@ def test_driver_end_to_end_with_gw_energies():
     """The full path: GW quasiparticle energies -> upfolded BSE."""
     from src.SingleReference.BSE.bse_upfolded import (solve_bse_upfolded,
                                                       qp_energies)
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g',
                 verbose=0)
     mf = scf.RHF(mol).run()
     e_qp = qp_energies(mf)
@@ -220,7 +221,7 @@ def test_the_upfolded_flags_reach_an_enclosing_collecting_block():
 def test_df_picks_the_integrals_and_size_only_the_solver(monkeypatch):
     """df=True puts the fitted integrals in every block on both paths, so the
     dense and the matrix-free solve return the same roots."""
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
                 verbose=0)
     mf = scf.RHF(mol).density_fit().run()
     w_dense, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
@@ -258,3 +259,13 @@ def test_the_dense_solve_flags_a_dropped_root(monkeypatch):
         w, _ = B.solve_dense(None, None, None, 1, 1, nroots=2, flags=flags)
     assert [f['flag'] for f in flags] == ['upfolded_bse_dropped_roots']
     assert np.allclose(w, [1.0, 2.0])
+
+
+def test_missing_quasiparticle_energies_are_refused():
+    """The GW quasiparticle energies are an input: without them the solve is
+    refused, never run on the mean-field eigenvalues in their place."""
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
+                verbose=0)
+    mf = scf.RHF(mol).run()
+    with pytest.raises(ValueError, match='e_qp=qp_energies'):
+        B.solve_bse_upfolded(mf, mol, nroots=2)

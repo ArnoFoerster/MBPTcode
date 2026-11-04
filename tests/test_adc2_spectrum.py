@@ -46,6 +46,10 @@ from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
 from src.photophysics.minimum import from_adc2, from_adc2_spectrum
 from src.properties import spin_orbit, transition_moments
+
+# the exact SOMF with X2C, which the tables here were recorded with
+SOMF = Numerics().derive('the exact operator the tables were recorded with',
+                         properties={'soc_two_electron': 'somf'})
 from tests.adc_common import H2CO, check
 
 FROZEN = 2
@@ -168,7 +172,7 @@ def check_scs(mol, spec):
                 and m.energy['T1'] == scs.energy('triplet', 0),
                 'an SCS-ADC(2) minimum carries its energies and no spin-orbit table')
     for what, call in (('an SCS-ADC(2) spectrum to from_adc2_spectrum',
-                        lambda: from_adc2_spectrum(scs, 'R0', N_STATES)),
+                        lambda: from_adc2_spectrum(scs, 'R0', N_STATES, numerics=SOMF)),
                        ('an SCS-ADC(2) minimum with a spin-orbit table',
                         lambda: from_adc2('R0', mol.atom_coords(), scs.e0, [0.1], [0.1],
                                           socme=np.zeros((2, 1)), method='scs-adc2'))):
@@ -177,8 +181,8 @@ def check_scs(mol, spec):
             ok &= check(False, f'{what} is refused')
         except ValueError as exc:
             ok &= check('not well-defined for spin-orbit' in str(exc) and 'splits the sublevels' in str(exc), f'{what} is refused', str(exc)[:60])
-    props = transition_moments.spectrum_properties(spec, N_STATES)
-    m = from_adc2_spectrum(spec, 'R0', N_STATES)
+    props = transition_moments.spectrum_properties(spec, N_STATES, numerics=SOMF)
+    m = from_adc2_spectrum(spec, 'R0', N_STATES, numerics=SOMF)
     ok &= check(m.method == 'adc2' and np.array_equal(m.socme, props['socme'])
                 and np.array_equal(m.dipole, props['dipole'])
                 and m.energy['T1'] == spec.energy('triplet', 0),
@@ -193,7 +197,7 @@ def run():
         warnings.simplefilter('ignore', RuntimeWarning)
         mol = gto.M(atom=H2CO, basis='cc-pvdz', verbose=0)
         spec = adc2_spectrum(mp2_model(mol), N_STATES)
-        props = transition_moments.spectrum_properties(spec, N_STATES)
+        props = transition_moments.spectrum_properties(spec, N_STATES, numerics=SOMF)
         ok = check(spec.flags == [] and props['flags'] == [],
                    'a clean spectrum carries no flags, and its properties none',
                    str(spec.flags))

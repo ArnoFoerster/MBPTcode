@@ -70,9 +70,10 @@ from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.blas_bar import assert_same_within
 from tests.pins import assert_same
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 MAX_MEMORY = 4000
 S0, S1, T0, T1 = ('singlet', 0), ('singlet', 1), ('triplet', 0), ('triplet', 1)
 #: serial against ranked on the row fit and the fixed-order reductions
@@ -148,7 +149,8 @@ def property_block(solvent=None):
                       couplings=((S0, S1), (T0, T1)))
     nocc = mol.nelectron // 2
     soc = spin_orbit_couplings(ev.mf, ev.mol, nocc, ev.spectrum['singlet'],
-                               ev.spectrum['triplet'], nroots=2)
+                               ev.spectrum['triplet'], nroots=2,
+                               numerics=spec.numerics)
     sv = spin_vibronic_coupling(ev, soc['h_mo'], S0, T0, singlet_paths=(S1,),
                                 triplet_paths=(T1,))
     return {'force': ev.gradient[S0], 'omega': np.array([ev.omega[k] for k in

@@ -149,6 +149,7 @@ from tests.test_mpi_routes import (ROW_NTAU, ROW_PERMUTATIONS, ROW_TILE_GB,
                                    sweep_owners)
 from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER, WATER_ROUNDED
 
 NTAU, NFREQ = 8, 24
 REL = 1e-11
@@ -167,7 +168,7 @@ SIZES = [2, 3]
 #: reduction of the set route on one state.
 MANY = [8, 16]
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Rank counts of the grid-row gates, on the routes script's ROW_TILE_GB
 #: (water's 444 points in 16 chi0 tiles and 4 self-energy blocks, 16 block
 #: pairs) and its ROW_NTAU tau points: at 2 every rank owns whole points, at
@@ -180,7 +181,7 @@ ROW_SIZES = [2, 3, 8, 32, 64]
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

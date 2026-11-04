@@ -4,7 +4,7 @@
 # tensor materialized. Produced by generate_mp4_t1_4_laplace_
 # restricted.py; consumed by compute_t1_4_laplace.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 from src.Base.utils.grids.grids import minimax_time_grid
 
 

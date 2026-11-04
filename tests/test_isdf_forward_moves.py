@@ -35,7 +35,7 @@ Each gate rejects a perturbation:
     the rebuilt fit              M from `fit_M_streaming`          yes
 
 The whole-form `isdf_exchange_skeleton` refits M rather than taking the mean
-field's own: `fit_adjoint` reverses `fit_M_stable` on an explicit test set,
+field's own: `fit_adjoint` reverses `fit_M` on an explicit test set,
 while the SCF's M comes from `fit_M_streaming`, another realization. On
 water/cc-pVDZ, where the pair screen keeps every pair, the two fit matrices
 differ by 1.1e-8 relative in the fit's near-null space, and substituting one
@@ -234,20 +234,20 @@ def test_the_frame_continuation_is_a_no_op_at_its_own_reference():
 
 def test_the_skeletons_fit_from_the_mean_field_moves_the_force(monkeypatch):
     """Two realizations of the fit inside one adjoint: `fit_adjoint`
-    reverses `fit_M_stable` on an explicit test set; `fit_M_streaming`
+    reverses `fit_M` on an explicit test set; `fit_M_streaming`
     realizes the same estimator otherwise, and substituting it moves the
     Hartree-Fock skeleton force below the reproducibility floor."""
     mf = interpolated(None)
     reference = isdf_exchange_skeleton(mf, fit='replicated')
     streaming = mf.with_df.M               # what the SCF itself fitted
-    stable = derivatives.fit_M_stable
+    stable = derivatives.fit_M
     rebuilt = {}
 
     def substituted(D, F, regularization):
         rebuilt['M'] = stable(D, F, regularization)
         return streaming
 
-    monkeypatch.setattr(derivatives, 'fit_M_stable', substituted)
+    monkeypatch.setattr(derivatives, 'fit_M', substituted)
     moved = isdf_exchange_skeleton(mf, fit='replicated')
     monkeypatch.undo()
 

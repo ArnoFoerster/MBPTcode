@@ -76,9 +76,9 @@ def test_budget_reaches_the_state_models(monkeypatch):
         monkeypatch.setattr(module, 'tiled_force_route', lambda route, mol: True)
     atoms = [[a, *xyz] for a, xyz in ATOMS]
     mol = solvated._mol_of(atoms, '6-31g', 1234)
-    args = argparse.Namespace(method='adc2', jk_auxbasis='cc-pvdz-jkfit', xc=None,
-                              frozen=1, auxbasis='cc-pvdz-ri', nroots=3, follow='index')
-    args.tol_q, args.tol_energy = 1e-9, 1e-11
+    args = argparse.Namespace(method='adc2', jk_auxbasis='cc-pvdz-jkfit', reference=None,
+                              frozen=1, auxbasis='cc-pvdz-ri', nroots=3, track='index')
+    args.loop_tol_q, args.loop_tol_energy = 1e-9, 1e-11
     _, make_state = solvated._factories(args, 'gas', {'numerics': solvated.adc2_numerics(args)})
     h = np.zeros((mol.nao, mol.nao))
     for kind in ('S0', 'singlet'):

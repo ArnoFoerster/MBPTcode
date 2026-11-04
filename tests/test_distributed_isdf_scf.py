@@ -101,10 +101,10 @@ from tests.test_distributed_isdf_scf_mpi import memory_faults, tile_addends
 from tests.test_force_serial_shaped import racing_dgemm
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
 #: Anthracene, the idealized D2h acene of three rings (C-C 1.40, C-H

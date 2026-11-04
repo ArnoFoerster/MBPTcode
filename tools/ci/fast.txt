@@ -23,6 +23,7 @@ pytest test_auxiliary_bosons.py
 pytest test_auxiliary_bosons_move.py
 script test_base.py
 pytest test_blas_single_threaded.py
+pytest test_spread_over.py
 pytest test_block_action_trims.py
 script test_block_cyclic_transfer.py
 script test_bn_unrestricted_excitations.py
@@ -82,6 +83,7 @@ pytest test_environment.py
 pytest test_environment_cache.py
 pytest test_environment_guards.py
 pytest test_eom_left_right_pairing.py
+pytest test_exchange_realization.py
 pytest test_exchange_skeleton_split.py
 pytest test_fitted_exchange_columns.py
 pytest test_fitted_exchange_conditioning.py
@@ -103,6 +105,7 @@ pytest test_hessian_checkpoint_stamp.py
 pytest test_hybrid_basis.py
 pytest test_imaginary_axis_gw_dft.py
 pytest test_imports.py
+pytest test_import_has_no_side_effects.py
 pytest test_inside_scissor_static_term.py
 pytest test_isdf_block_action_rows.py
 pytest test_isdf_fit_timings.py
@@ -110,11 +113,12 @@ pytest test_isdf_fit_two_realizations.py
 pytest test_isdf_force_hook.py
 pytest test_isdf_grid_keywords.py
 pytest test_isdf_jk_gradient_guard.py
+pytest test_isdf_jk_memory_independent.py
 pytest test_isdf_one_grid_call.py
 pytest test_isdf_pcm_force.py
 pytest test_isdf_refuses_cartesian.py
 pytest test_isdf_rows_census.py
-pytest test_legacy_defaults_and_aliases.py
+pytest test_chain_defaults_and_keys.py
 pytest test_matsubara_ir.py
 pytest test_metallic_grid_wiring_quick.py
 pytest test_metric_root_cache.py
@@ -189,6 +193,7 @@ pytest test_range_separated_refusal.py
 pytest test_reaction_field.py
 pytest test_reaction_field_adjoint.py
 pytest test_reaction_field_skeleton_ranks.py
+pytest test_record_compat.py
 pytest test_record_names_map.py
 pytest test_refactor_baseline.py
 pytest test_refreeze_carries_settings.py
@@ -232,6 +237,7 @@ pytest test_space_time_shared_kernel.py
 pytest test_spin_adapt.py
 pytest test_spin_orbit.py
 pytest test_spin_orbit_ranks.py
+pytest test_spin_orbit_ri.py
 pytest test_spin_vibronic_model.py
 pytest test_state_manifold.py
 pytest test_state_model_ks_force.py
@@ -245,6 +251,7 @@ pytest test_sum_over_poles.py
 pytest test_sum_over_poles_move.py
 pytest test_surface_abc.py
 pytest test_fragment_surface_fixes.py
+pytest test_population_tensor_pyscf_modes.py
 pytest test_walk_state_release.py
 pytest test_surface_mean_field.py
 pytest test_surface_protocol.py
@@ -338,6 +345,7 @@ pytest test_gca_refreeze_one_scf.py
 pytest test_gca_views_own_keys.py
 pytest test_geometric_step_failed_retry.py
 pytest test_walk_convention_events.py
+pytest test_walk_refreeze_self_consistent.py
 pytest test_ground_reads_numerics.py
 pytest test_ground_state_residual_force.py
 pytest test_ground_surface_stands_on_excited_numerics.py
@@ -374,7 +382,7 @@ pytest test_refreeze_keeps_the_numerics.py
 pytest test_refreeze_start_fails_loudly.py
 pytest test_refrozen_walk_trust.py
 pytest test_relax_keywords.py
-pytest test_retired_modes.py
+pytest test_refused_qp_modes.py
 pytest test_root_following_commit.py
 pytest test_root_following_displaced_core.py
 pytest test_root_following_refusal.py
@@ -515,6 +523,7 @@ script test_bse2_static_kernel.py
 pytest test_qp_hamiltonian_group_span.py
 pytest test_qp_hamiltonian_large_group.py
 pytest test_qp_group_lockstep.py
+pytest test_qb_and_localization_flags.py
 pytest test_duschinsky_guard.py
 pytest test_curvilinear_duschinsky.py
 pytest test_duschinsky_soft_modes.py

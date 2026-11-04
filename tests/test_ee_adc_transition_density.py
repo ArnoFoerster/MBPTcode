@@ -55,7 +55,7 @@ from src.SingleReference.ADC.eeADC import (ee_density, ee_equations, ee_fold,
                                            ee_transition_density, ee_u_dense_full,
                                            ee_utils)
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import H2CO, WATER_C2V, WATER_ORIGIN, check
+from tests.adc_common import H2CO, WATER_C2V, WATER_ORIGIN, check, ee_numerics
 from tests.exact_isr_pp_oracle import build
 
 LIH = 'Li 0 0 0; H 0 0 1.6'
@@ -71,6 +71,27 @@ def rhf(atom, basis):
     mf.conv_tol_grad = 1e-9
     mf.kernel()
     return mf
+
+
+def spin_free_transition_density(eps, V, no, vl, vr, level='adc2',
+                                 parity_l=None, parity_r=None):
+    """`transition_density` of two full eigenvectors of the dense spin-free
+    route on the full integrals V (eps, V, level, parity as
+    ee_density.spin_free_difference_density)."""
+    nv = len(eps) - no
+    ref = etd.reference_from_integrals(eps, V, no, level, ground=False)
+    return etd.transition_density(ref, etd.flat_state(vl, no, nv, level, parity_l),
+                                  etd.flat_state(vr, no, nv, level, parity_r))
+
+
+def spin_free_ground_transition_density(eps, V, no, v, level='adc2', parity=None,
+                                        terms=False):
+    """`ground_transition_density` of one full eigenvector of the dense
+    spin-free route on the full integrals V."""
+    nv = len(eps) - no
+    ref = etd.reference_from_integrals(eps, V, no, level, ground=True)
+    return etd.ground_transition_density(ref, etd.flat_state(v, no, nv, level,
+                                                             parity), terms)
 
 
 def worst(err):
@@ -175,7 +196,7 @@ def check_spin_free():
         mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff, eri)
     amps = ee_utils.mp_amplitudes(np.repeat(eps, 2), g, 2 * no, 2 * nmo, order=3)
     t2, p0 = amps['t2_1'], ee_utils.mp_density2(amps)
-    roots = {s: solve_ee_adc(mf, level='adc2', spin=s, nroots=3, conv_tol=1e-10)[1]
+    roots = {s: solve_ee_adc(mf, level='adc2', spin=s, nroots=3, numerics=ee_numerics(conv_tol=1e-10))[1]
              for s in PARITY}
     for sl in PARITY:
         for sr in PARITY:
@@ -183,7 +204,7 @@ def check_spin_free():
             for i in range(3):
                 for j in range(3):
                     vl, vr = roots[sl][:, i], roots[sr][:, j]
-                    c, s = etd.spin_free_transition_density(
+                    c, s = spin_free_transition_density(
                         eps, V, no, vl, vr, 'adc2', PARITY[sl], PARITY[sr])
                     l1, l2 = spin_orbital_vector(vl, PARITY[sl], no, nv)
                     r1, r2 = spin_orbital_vector(vr, PARITY[sr], no, nv)
@@ -200,7 +221,7 @@ def check_spin_free():
     for s in PARITY:
         err, other = 0.0, 0.0
         for k in range(3):
-            c, sp = etd.spin_free_ground_transition_density(
+            c, sp = spin_free_ground_transition_density(
                 eps, V, no, roots[s][:, k], 'adc2', PARITY[s])
             u1, u2 = spin_orbital_vector(roots[s][:, k], PARITY[s], no, nv)
             G = etd.assemble(etd.ground_transition_terms(
@@ -226,7 +247,7 @@ def check_pyscf(atom, nroots=3):
     V = get_two_electron_integrals_chemist(mol, mf, representation='spatial'
                                            ).transpose(0, 2, 1, 3)
     e, Z = solve_ee_adc(mf, level='adc2', spin='singlet', nroots=nroots,
-                        conv_tol=1e-10)
+                        numerics=ee_numerics(conv_tol=1e-10))
     a = adc.ADC(mf)
     a.method, a.method_type, a.conv_tol, a.tol_residual = 'adc(2)', 'ee', 1e-12, 1e-10
     a.approx_trans_moments = False
@@ -236,7 +257,7 @@ def check_pyscf(atom, nroots=3):
     err, miss = 0.0, 0.0
     for k in range(nroots):
         j = int(np.argmin(np.abs(ep - e[k])))
-        charge, _ = etd.spin_free_ground_transition_density(
+        charge, _ = spin_free_ground_transition_density(
             eps, V, no, Z[:, k], 'adc2', +1, terms=True)
         for drop, store in (((), 'err'), (('vo_t2',), 'miss')):
             mu = np.einsum('xpq,pq->x', r, etd.assemble(charge, no, nv, drop=drop))
@@ -282,7 +303,7 @@ def check_fold(atom, nroots=3):
     states = {}
     for spin in PARITY:
         _, Z = solve_ee_adc(mf, level='adc2', df=True, spin=spin, nroots=nroots,
-                            conv_tol=1e-10)
+                            numerics=ee_numerics(conv_tol=1e-10))
         op = ee_ri_fold.RIFoldADC2(F, spin)
         r = ee_fold.solve_folded(op.pieces(), nroots, spin=spin, tol_omega=1e-11,
                                  tol_residual=1e-10, dense_limit=0, solver='newton')

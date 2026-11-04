@@ -45,17 +45,17 @@ from src.environments.solvent_screening import (SolventScreening,
                                                 detach_solvent_screening)
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.isdf_derivatives import (dfactor_adjoint,
-                                            dfactor_adjoint_gauges)
+from src.gradients.isdf_derivatives import dfactor_adjoint_gauges
 from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
                                                         reaction_field_shift,
                                                         static_screening)
 from src.properties.characters import ct_character, roots
 from tests.isdf_test_grid import g1_numerics, duchemin_blase
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Ethylene stacked over F2 at 3.5 A -- the standard cheap donor/acceptor pair.
 #: The ethylene pi -> F2 sigma* root is the charge-transfer one; ethylene's own
 #: pi -> pi* and F2's sigma -> sigma* are local.
@@ -292,8 +292,8 @@ def test_one_fit_and_one_static_screening_serve_both_gauges(water):
 
     one = dfactor_adjoint_gauges(mol, auxmol, crd,
                                  [(d_bar, env), (d_bar_bare, None)], **kw)
-    two = (dfactor_adjoint(mol, auxmol, crd, d_bar, environment=env, **kw)
-           + dfactor_adjoint(mol, auxmol, crd, d_bar_bare, environment=None, **kw))
+    two = (dfactor_adjoint_gauges(mol, auxmol, crd, [(d_bar, env)], **kw)
+           + dfactor_adjoint_gauges(mol, auxmol, crd, [(d_bar_bare, None)], **kw))
     scale = float(np.abs(two).max())
     err = float(np.abs(one - two).max())
     ok = check(err < 1e-11 * scale,
