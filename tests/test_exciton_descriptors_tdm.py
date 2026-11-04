@@ -19,7 +19,10 @@ Water, 6-31G. Checks:
   4. on the RI fold (ee_ri_transition) at sqrt(2) times the alpha block, two
      singlets and two triplets: the singles block alone has Omega = T1, every
      root holds 0.95 <= (1 - T1) + Omega <= 1 and Z_HE >= PR_NTO; the density
-     without the sqrt(2) / 2 scaling breaks the first bound.
+     without the sqrt(2) / 2 scaling breaks the upper bound.
+  5. a 1TDM on the active columns of mo_coeff gives the descriptors of the
+     same 1TDM padded with zeros on all columns; the wrong columns do not; a
+     zero 1TDM raises ValueError.
 
 Run: python tests/test_exciton_descriptors_tdm.py
 """
@@ -222,12 +225,42 @@ def check_fold():
     return ok
 
 
+def check_active_and_guard():
+    """Check 5."""
+    print('\n=== 5. active orbitals and the zero-norm guard ===')
+    ok = True
+    mf = rhf(WATER_ORIGIN, '6-31g')
+    mol, C = mf.mol, mf.mo_coeff
+    nmo = C.shape[1]
+    g = np.random.default_rng(3).standard_normal((2, nmo - NF, nmo - NF))
+    pad = np.zeros((2, nmo, nmo))
+    pad[:, NF:, NF:] = g
+    act = exciton_descriptors_tdm(mol, C[:, NF:], g)
+    full = exciton_descriptors_tdm(mol, C, pad)
+    err = max_diff(act, full, [k for k in act if k != 'nto_weights'])
+    n = nmo - NF                         # the padded 1TDM adds NF zero weights
+    err = max(err, float(np.abs(act['nto_weights'] - full['nto_weights'][:, :n]).max()),
+              float(np.abs(full['nto_weights'][:, n:]).max()))
+    ok &= check(err < 1e-12, 'active columns equal the zero-padded full 1TDM',
+                f'max |d| {err:.1e}')
+    wrong = exciton_descriptors_tdm(mol, C[:, :-NF], g)
+    off = float(np.abs(wrong['d_exc'] - act['d_exc']).max())
+    ok &= check(off > 1e-6, 'the wrong columns move d_exc', f'max |d| {off:.1e}')
+    try:
+        exciton_descriptors_tdm(mol, C, np.concatenate([pad, np.zeros((1, nmo, nmo))]))
+        ok &= check(False, 'a zero 1TDM raises ValueError')
+    except ValueError as e:
+        ok &= check('zero 1TDM' in str(e), 'a zero 1TDM raises ValueError', str(e))
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     ok = check_xy_reduction()
     ok &= check_nto()
     ok &= check_pyscf()
     ok &= check_fold()
+    ok &= check_active_and_guard()
     return ok
 
 

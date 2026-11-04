@@ -258,6 +258,9 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
 
     # c_n = sum_pq gamma_npq gamma_npq
     c_n = np.einsum('npq,npq->n', gamma, gamma)
+    if np.any(c_n == 0.0):
+        raise ValueError('a root with a zero 1TDM: the charge part of an Ms = 0 '
+                         'triplet and the spin part of a singlet vanish')
 
     def one_particle(b):
         # hole:     sum_pqr gamma_npq b_xpr gamma_nrq
