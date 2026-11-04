@@ -23,6 +23,12 @@ The same on a mean-field surface (water/STO-3G Hartree-Fock, which writes
 no record: the walk goes on on the surface it is handed), and through
 geomeTRIC, which restarts from the last accepted geometry and reaches the
 same minimum to its convergence criteria.
+
+Every walk here runs with the BLAS and OpenMP pools at one thread
+(`one_thread`): OpenBLAS at two threads is not run-to-run deterministic
+(numpy 2.4's, on the nightly CI), two uninterrupted walks then already end
+~5e-9 Bohr apart, and the bitwise resume claim is about the checkpoint, not
+the library.
 """
 
 import numpy as np
@@ -38,6 +44,7 @@ from src.properties.optimize import relax
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.photophysics_cases import run_of
+from src.Base.utils.parallel import threads
 
 #: The walk's thresholds: GEOM_OPT_CONV ten times looser.
 LOOSE = {k: 10.0 * v for k, v in GEOM_OPT_CONV.items()}
@@ -48,6 +55,17 @@ SAME = 1e-10
 #: Bohr / Ha: how close a restarted geomeTRIC walk must land, within the
 #: reach of the GAU criteria both walks converge to.
 GEOMETRIC_SAME = (1e-2, 1e-6)
+
+
+@pytest.fixture(autouse=True)
+def one_thread():
+    """The BLAS and OpenMP pools at one thread for every walk of this module,
+    so a walk repeats its bits run to run on any BLAS."""
+    if threads.threadpool_limits is None:
+        yield
+        return
+    with threads.threadpool_limits(limits=1):
+        yield
 
 
 class Killed(Exception):

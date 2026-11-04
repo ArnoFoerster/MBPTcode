@@ -79,6 +79,7 @@ optional third-party one.
 | fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
 | the fragment-diabatic BSE with the quasiparticle Hamiltonian: A_eff does not depend on how a degenerate group's orbitals rotate into each other, the same pair solved diagonally is refused, the root gradient through the partition is the chain's, the element gradients match finite differences (Tamm-Dancoff and full) | `test_fragment_diabatic_qp_hamiltonian` (about 14 minutes) |
 | fragment-diabatic ADC(2) (singlets and triplets) and its analytic gradient | `test_fragment_adc2` |
+| the fragment population callback answers pyscf's full-tensor and `mode='pop'` (2.14) calls with the same localization cost | `test_population_tensor_pyscf_modes` |
 | the fragment partition's checkpoint over ranks: rank 0 reads, every rank gets its verdict and arrays bit for bit | `test_fragment_checkpoint_ranks` (thread-ranks under pytest; `mpirun -n 2` as a script) |
 | the triplet fragment partition (GW-BSE and ADC(2)) and the triplet-triplet (Dexter) coupling with its gradient | `test_fragment_triplet_transfer` |
 | triplet-triplet annihilation: the triplet-pair configuration model against full CI; golden-rule transfer rates between molecules | `test_tta_coupling`, `test_transfer_rates` |

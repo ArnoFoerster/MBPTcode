@@ -31,6 +31,11 @@ E_ss is the outer-sphere reorganization energy.
      relaxation -- of both charged surfaces match a finite difference of their
      own energies.
 
+Every check runs with the BLAS and OpenMP pools at one thread (`one_thread`):
+OpenBLAS at two threads is not run-to-run deterministic (numpy 2.4's, on the
+nightly CI), and the forces of 6 against their finite differences then land
+1.0e-8..1.3e-8 Ha/Bohr apart on one run and within the bar on the next.
+
 Run as a script (`python tests/test_equilibrium_solvation.py`) or under pytest.
 """
 import os
@@ -65,6 +70,7 @@ from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_df_ri_1e12, rhf_tight
 from tests.molecules import WATER_CS, WATER_ROUNDED_LOW
+from src.Base.utils.parallel import threads
 
 WATER = WATER_ROUNDED_LOW
 AUX = 'cc-pvdz-ri'
@@ -132,6 +138,18 @@ def test_unrestricted_reference_per_spin():
     assert level.shape == (2, mol.nao)
     for spin, n in enumerate(uhf.nelec):
         assert level[spin, n - 1] > 0 and level[spin, n] < 0
+
+
+@pytest.fixture(scope='module', autouse=True)
+def one_thread():
+    """The BLAS and OpenMP pools at one thread for the module, its module
+    fixtures included, so its forces repeat their bits run to run on any
+    BLAS."""
+    if threads.threadpool_limits is None:
+        yield
+        return
+    with threads.threadpool_limits(limits=1):
+        yield
 
 
 @pytest.fixture(scope='module')

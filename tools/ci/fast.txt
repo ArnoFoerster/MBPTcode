@@ -251,6 +251,7 @@ pytest test_sum_over_poles.py
 pytest test_sum_over_poles_move.py
 pytest test_surface_abc.py
 pytest test_fragment_surface_fixes.py
+pytest test_population_tensor_pyscf_modes.py
 pytest test_walk_state_release.py
 pytest test_surface_mean_field.py
 pytest test_surface_protocol.py

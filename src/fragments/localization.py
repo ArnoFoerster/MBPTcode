@@ -107,9 +107,13 @@ def population_tensor(mol, fragments, scheme='lowdin', orbocc=None, s=None):
         raise ValueError(f'scheme must be one of {POPULATION_SCHEMES}, got '
                          f'{scheme!r}')
 
-    def pops(mol_, mo_coeff, method=None):
+    def pops(mol_, mo_coeff, method=None, mode=None, **_):
+        # pyscf >= 2.14 asks the cost function's populations with mode='pop':
+        # the diagonal (nfrag, n), taken off the same matrices, so the cost is
+        # the one older pyscf takes from the full tensor.
         c = frame @ np.asarray(mo_coeff, float)
-        return np.stack([c[r].T @ c[r] for r in rows])
+        full = np.stack([c[r].T @ c[r] for r in rows])
+        return np.einsum('kii->ki', full) if mode == 'pop' else full
     return pops
 
 
@@ -129,6 +133,10 @@ def _localize(mol, orbitals, pops, start=None, conv_tol=FRAGMENT_PM_CONV_TOL):
     pm = lo.pipek.PipekMezey(mol, orbitals if start is None
                              else orbitals @ start)
     pm.atomic_pops = pops
+    # pyscf >= 2.14 builds the gradient and Hessian from `pop_method` unless
+    # it is None, which tells it the populations are `atomic_pops`; older
+    # pyscf hands `pop_method` to `pops`, which does not read it
+    pm.pop_method = None
     pm.exponent = 2
     pm.conv_tol = conv_tol
     pm.conv_tol_grad = FRAGMENT_PM_CONV_TOL_GRAD
