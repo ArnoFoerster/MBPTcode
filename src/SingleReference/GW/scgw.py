@@ -975,7 +975,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
 
     # These settings should be put in the documentation
     A_window = kwargs.get('A_window') or 0.5
-    A_range = kwargs.get('A_range') or [eps_F[chemcore(mol)] - A_window , 2 * mu - eps_F[chemcore(mol)] + A_window]
+    A_range = kwargs.get('A_range') or [eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] - A_window , 2 * mu - eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] + A_window]
 
     w_real = np.arange(A_range[0], A_range[1], w_step)
     pade_max_order = 24
