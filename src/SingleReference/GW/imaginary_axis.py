@@ -4,7 +4,9 @@ The RPA screened interaction W(i omega) on a minimax or Gauss-Legendre grid,
 the correlation self-energy by numerical convolution over that grid
 (`self_energy_imaginary_axis`), and its continuation to the real axis by Pade
 (`solve_qp_energy_imaginary_axis`), restricted and unrestricted, at T = 0 or
-at a finite temperature.
+at a finite temperature. And the full-matrix Sigma_c,pq(mu + i w) of the GW
+density (`correlation_self_energy_matrix_imaginary_axis`), whose inner
+integral goes through a Lorentzian fit of W_c rather than that quadrature.
 """
 import time as _time
 
@@ -12,7 +14,9 @@ import numpy as np
 
 from pyscf import scf
 
-from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
+from src.Base.environment_seam import NoEnvironment, environment_of
+from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, GW_DENSITY_W_FIT_HIGH,
+                                         GW_DENSITY_W_FIT_LOW, GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
 from src.Base.utils.grids.matsubara import (beta_from_mf, ir_continuation_order,
@@ -64,6 +68,98 @@ def self_energy_imaginary_axis(df_coeff, eps, nocc, p_state, freq_points, freq_w
             sigma[iq] += freq_weights[k] * np.sum((Gp + Gm) * w_pm[k])
     sigma *= -1.0 / (2.0 * np.pi)
     return sigma
+
+
+def screened_pair_weights(df_coeff, W):
+    """w^m_pq(i w') = sum_PQ B_P,pm (W - I)_PQ B_Q,qm, as (nmo, nmo, nmo)
+    indexed [m, p, q]: the full-matrix weight of the GW convolution at one
+    W-grid point (`self_energy_imaginary_axis` takes its diagonal p = q)."""
+    flat = df_coeff.reshape(df_coeff.shape[0], -1)
+    WC = (W @ flat - flat).reshape(df_coeff.shape)
+    return np.einsum('Ppm,Pqm->mpq', df_coeff, WC, optimize=True)
+
+
+def lorentzian_fit_matrix(freq_points, poles, tikhonov):
+    """P (len(poles), len(freq_points)): the Tikhonov-regularized least-squares
+    fit f(i w') ~ sum_l A_l 2 Omega_l/(w'^2 + Omega_l^2) of samples f_k = f(i w'_k),
+    A = P f. Columns normalized; `tikhonov` relative to the largest singular
+    value squared (lambda = 0 is rank-deficient for overlapping poles)."""
+    F = 2.0 * poles[None, :] / (np.asarray(freq_points)[:, None] ** 2 + poles[None, :] ** 2)
+    norm = np.linalg.norm(F, axis=0)
+    U, s, Vt = np.linalg.svd(F / norm, full_matrices=False)
+    filt = s / (s ** 2 + tikhonov * s[0] ** 2)
+    return ((Vt.T * filt) @ U.T) / norm[:, None]
+
+
+def one_pole_convolution(eps_mu, poles, query_freqs):
+    """K (nquery, npoles, nmo): the exact convolution of G_m with one even
+    Lorentzian,
+        -(1/2pi) int dw' 1/(i(w + w') - e_m) 2 Omega/(w'^2 + Omega^2)
+            = -1/(i w - e_m - sign(e_m) Omega),
+    e_m = eps_m - mu nonzero (mu inside the gap)."""
+    e = np.asarray(eps_mu)[None, None, :]
+    return -1.0 / (1j * np.atleast_1d(query_freqs)[:, None, None]
+                   - e - np.sign(e) * np.asarray(poles)[None, :, None])
+
+
+def self_energy_matrix_imaginary_axis(df_coeff, eps_mu, freq_points, W_grid, query_freqs,
+                                      poles, tikhonov):
+    """The full correlation self-energy Sigma_c,pq(i*query_freqs), complex
+    (nquery, nmo, nmo), per spin channel, with the inner w' integral done
+    through a Lorentzian fit of W_c = W - I on the W grid:
+
+        W_c(i w') ~ sum_l A_l 2 Omega_l/(w'^2 + Omega_l^2),  A_l = sum_k P_lk W_c(i w'_k),
+        Sigma_pq(i w) = sum_k sum_m M_km(w) w^m_pq(i w'_k),
+        M_km(w) = sum_l P_lk K(e_m, Omega_l, w)
+
+    (`lorentzian_fit_matrix`, `one_pole_convolution`, `screened_pair_weights`).
+    The fit only changes the inner weights, so A is never formed. Unlike the
+    QP route's plain quadrature (`self_energy_imaginary_axis`) it integrates the
+    sharp G_m(i(w + w')) exactly. eps_mu and query_freqs share an origin:
+    eps - mu gives Sigma(mu + i*w). Streams over the W grid: nfreq naux nmo^3.
+    """
+    df_coeff = np.asarray(df_coeff)
+    nmo = df_coeff.shape[1]
+    P = lorentzian_fit_matrix(freq_points, poles, tikhonov)
+    M = np.einsum('lk,qlm->kqm', P, one_pole_convolution(eps_mu, poles, query_freqs))
+    sigma = np.zeros((M.shape[1], nmo, nmo), dtype=complex)
+    for k in range(len(freq_points)):
+        sigma += np.einsum('qm,mpr->qpr', M[k], screened_pair_weights(df_coeff, W_grid[k]),
+                           optimize=True)
+    return sigma
+
+
+def correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
+    """(Sigma_c,pq(mu + i*query_freqs), mu) of a restricted gas-phase mean
+    field at T = 0. The three-index object of all orbitals (the mean field's
+    density fit, or the exact integrals' decomposition without one) and the
+    RPA W(i w') on the minimax grid of `numerics.imagfreq.nfreq` points over
+    the particle-hole window, as `solve_qp_energy_imaginary_axis` builds them;
+    the correlation part W - I only; mu the mid-gap. The inner integral is the
+    Lorentzian fit of `self_energy_matrix_imaginary_axis`, its poles
+    log-spaced over [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span],
+    one per W-grid point, regularized by GW_DENSITY_W_FIT_TIKHONOV."""
+    where = 'correlation_self_energy_matrix_imaginary_axis'
+    require_closed_shell_or_unrestricted(mf, where, mol=mol)
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError(f'{where} is restricted-spin only.')
+    if not isinstance(environment_of(mf), NoEnvironment):
+        raise NotImplementedError(f'{where} is gas phase only; mf carries an environment.')
+    if beta_from_mf(mf) is not None:
+        raise NotImplementedError(f'{where} is T = 0 only; mf is thermally smeared.')
+    nfreq = numerics.imagfreq.nfreq
+    eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
+    df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+    lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted',
+                              eta=DEFAULT_BROADENING_ETA)
+    e_min, e_max, mu = particle_hole_window(eps, nocc)
+    freq_points, _ = minimax_frequency_grid(nfreq, e_min, e_max)
+    W_grid = lr.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
+    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min, GW_DENSITY_W_FIT_HIGH * e_max,
+                         len(freq_points))
+    sigma = self_energy_matrix_imaginary_axis(df_coeff, eps - mu, freq_points, W_grid,
+                                              query_freqs, poles, GW_DENSITY_W_FIT_TIKHONOV)
+    return sigma, mu
 
 
 def _unrestricted_screening(mol, mf, nocc, states, spin):

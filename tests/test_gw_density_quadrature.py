@@ -74,7 +74,7 @@ def test_gwdensity_section_defaults_and_identity():
     now = Numerics().to_record()
     old = {k: v for k, v in now.items() if k != 'gwdensity'}
     assert Numerics.from_record(old).identity() == Numerics().identity()
-    assert (Numerics(gwdensity={'nfreq': 48}).identity()
+    assert (Numerics(gwdensity={'nfreq': GWDensityNumerics().nfreq + 16}).identity()
             != Numerics().identity())
 
 

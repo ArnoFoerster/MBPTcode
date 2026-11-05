@@ -28,8 +28,21 @@ DF_MO_BLOCK = 200
 IMAGFREQ_NFREQ = 20
 
 # Outer imaginary-frequency points of the GW density's dynamic integral
-# (`GW.density_matrix`); a provisional size until its grid study settles it.
-GW_DENSITY_NFREQ = 32
+# (`GW.density_matrix`), Gauss-Legendre by default. Set by the grid study of
+# tests/test_gw_density_imagfrequency.py: with the exact Sigma, 32 points
+# leave 1.8e-5 on PBE0 water/cc-pVDZ, 48 leave 7.5e-7.
+GW_DENSITY_NFREQ = 48
+
+# The Lorentzian fit of W_c(i w') on the W grid of the GW density's
+# imaginary-frequency Sigma (`GW.imaginary_axis.self_energy_matrix_imaginary_axis`):
+# one pole 2 Omega/(w'^2 + Omega^2) per W-grid point, the Omega log-spaced over
+# [LOW * gap, HIGH * span] of the particle-hole window, and a Tikhonov
+# regularization relative to the largest singular value squared of the
+# (column-normalized) design matrix. Fixed, not user settings: lambda = 0 is
+# rank-deficient and fragile; 1e-10 vs 1e-8 moves the density < 1e-6.
+GW_DENSITY_W_FIT_LOW = 0.5
+GW_DENSITY_W_FIT_HIGH = 2.0
+GW_DENSITY_W_FIT_TIKHONOV = 1e-10
 
 # Lorentzian broadening for self-energy denominators / spectral functions.
 DEFAULT_BROADENING_ETA = 1e-3

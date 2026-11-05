@@ -22,6 +22,11 @@ from src.SingleReference.DensityMatrix.density_matrix import (
     solve_cphf_relaxation,
     relaxation_numerics,
 )
+from src.SingleReference.GW.imaginary_axis import (
+    correlation_self_energy_matrix_imaginary_axis)
+from src.Base.environment_seam import NoEnvironment, environment_of
+from src.Base.numerics.numerics import required_numerics
+from src.Base.utils.grids.matsubara import beta_from_mf
 
 #: The restricted spin sum: the spatial density is twice each channel's.
 SPIN_SUM = 2.0
@@ -157,7 +162,12 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     polarizability: 'RPA'/'TDHF'/'BSE' screening channel. df: use density
     fitting (default) vs full 4-center ERIs.
     mode: how the unrelaxed Delta_gamma^GW is obtained; 'casida' (the
-    analytic pole sum). 'imagfrequency' and 'space-time' are not implemented yet.
+    analytic pole sum) or 'imagfrequency' (N^4: the full Sigma_c,pq(mu + i w)
+    of the imaginary-axis QP route on the outer grid `numerics.gwdensity`,
+    `imagfrequency_unrelaxed_blocks`). 'space-time' is not implemented yet.
+    The numerical modes take RPA screening on a density-fitted three-index
+    object (df=True) of a gas-phase, T = 0 mean field only, and always need
+    numerics.
     relaxation: what is done with its ov block, always including the static
     gKS term (`static_ov_term`), which is relaxed with the rest:
       'none'    -- unrelaxed Delta_gamma^GW;
@@ -166,8 +176,9 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
                    energies and mf's own J/K backend (`hf_kernel_mean_field`);
       'zvector' -- (default) the Z-vector solve with mf's own gKS kernel.
     Both coincide on an HF reference.
-    numerics: the run's `Numerics`, the relaxation's (solve_cphf_relaxation);
-    required unless relaxation='none'.
+    numerics: the run's `Numerics`, the relaxation's (solve_cphf_relaxation)
+    and the numerical modes' grids; required unless mode='casida' and
+    relaxation='none'.
     auxbasis, screen_r_cut: the space-time mode's; refused with any other mode.
     """
     mode = _choice(mode, MODES, 'mode')
@@ -175,28 +186,35 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     for name, value in (('auxbasis', auxbasis), ('screen_r_cut', screen_r_cut)):
         if value is not None and mode != 'space-time':
             raise ValueError(f"{name} is a 'space-time' mode setting; got mode={mode!r}.")
-    if mode != 'casida':
+    if mode == 'space-time':
         raise NotImplementedError(f"compute_gw_density_matrix mode={mode!r} is not implemented yet.")
-    numerics = relaxation_numerics(relaxation != 'none', numerics, 'compute_gw_density_matrix')
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("compute_gw_density_matrix is currently restricted-spin only.")
+    if mode == 'casida':
+        numerics = relaxation_numerics(relaxation != 'none', numerics,
+                                       'compute_gw_density_matrix')
+    else:
+        numerics = required_numerics(numerics, f"compute_gw_density_matrix mode={mode!r}")
+        _refuse_numerical_mode(mf, mode, polarizability, df)
 
     mol = mol if mol is not None else mf.mol
     nocc = nocc if nocc is not None else mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
     nmo = len(eps)
 
-    if df:
-        df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
-        eri_chemist = None
+    if mode == 'imagfrequency':
+        blocks = imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics)
     else:
-        df_coeff = None
-        eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-
-    solver = GWDensityMatrixSolver(eps, df_coeff=df_coeff, eri_chemist=eri_chemist, eta=eta)
-    dgamma_oo, dgamma_ov, dgamma_vv = (
-        SPIN_SUM * block for block in
-        solver.compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability))
+        if df:
+            df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+            eri_chemist = None
+        else:
+            df_coeff = None
+            eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+        blocks = GWDensityMatrixSolver(
+            eps, df_coeff=df_coeff, eri_chemist=eri_chemist, eta=eta
+        ).compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability)
+    dgamma_oo, dgamma_ov, dgamma_vv = (SPIN_SUM * block for block in blocks)
 
     mo = mf.mo_coeff
     if relaxation == 'none':
@@ -207,11 +225,39 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
         dgamma[nocc:, :nocc] = dgamma_ov.T
     else:
         mf_hess = hf_kernel_mean_field(mf) if relaxation == 'dyson' else mf
-        dgamma = solver.solve_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
-                                         numerics)
+        dgamma = solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
+                                       numerics)
 
     dm_ao = mf.make_rdm1() + mo @ dgamma @ mo.T
     return dm_ao
+
+
+def _refuse_numerical_mode(mf, mode, polarizability, df):
+    """The numerical modes' restrictions, each refused by name."""
+    where = f"compute_gw_density_matrix mode={mode!r}"
+    if str(polarizability).upper() != 'RPA':
+        raise NotImplementedError(f"{where} screens with RPA only; got "
+                                  f"polarizability={polarizability!r}.")
+    if not df:
+        raise NotImplementedError(f"{where} needs a three-index object; df=False "
+                                  "(four-centre integrals) is not supported.")
+    if not isinstance(environment_of(mf), NoEnvironment):
+        raise NotImplementedError(f"{where} is gas phase only; mf carries an "
+                                  f"environment ({type(environment_of(mf)).__name__}).")
+    if beta_from_mf(mf) is not None:
+        raise NotImplementedError(f"{where} is T = 0 only; mf is thermally smeared.")
+
+
+def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
+    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW on the
+    imaginary axis: the dynamic blocks of the full Sigma_c,pq(mu + i w)
+    (`correlation_self_energy_matrix_imaginary_axis`, already per spin, so no
+    w-normalization) on the outer grid, plus the closed-form static ov term."""
+    points, weights = outer_frequency_grid(eps, nocc, numerics)
+    sigma, mu = correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, points,
+                                                              numerics)
+    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
+    return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
 
 
 def outer_frequency_grid(eps, nocc, numerics):
