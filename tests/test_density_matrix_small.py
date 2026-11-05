@@ -22,13 +22,13 @@ if __name__ == '__main__':
     nocc = mol.nelectron // 2
 
     for polarizability in ['RPA', 'BSE']:
-        for relax in [False, True]:
-            dm = compute_gw_density_matrix(mf, mol, polarizability=polarizability, df=True, relax=relax,
-                                           numerics=Numerics())
+        for relaxation in ['none', 'zvector']:
+            dm = compute_gw_density_matrix(mf, mol, polarizability=polarizability, df=True,
+                                           relaxation=relaxation, numerics=Numerics())
             n = np.trace(dm @ S)
             ok = abs(n - nelec) < 1e-6
             all_ok &= ok
-            print(f"polarizability={polarizability:4s} relax={relax!s:5s}: N={n:.8f} (expect {nelec}) {'OK' if ok else 'FAIL'}")
+            print(f"polarizability={polarizability:4s} relaxation={relaxation:7s}: N={n:.8f} (expect {nelec}) {'OK' if ok else 'FAIL'}")
 
     # Charge conservation at the block level: trace(oo) = -trace(vv) is exact
     # by construction (see GWDensityMatrixSolver.compute_unrelaxed_blocks),
@@ -42,10 +42,10 @@ if __name__ == '__main__':
     print(f"trace(dgamma_oo) == -trace(dgamma_vv): {'OK' if ok else 'FAIL'} "
           f"(sum={np.trace(dgamma_oo) + np.trace(dgamma_vv):.2e})")
 
-    # relax=False vs relax=True must differ only in the ov block (oo/vv blocks
+    # relaxation='none' vs 'zvector' must differ only in the ov block (oo/vv blocks
     # come from the same compute_unrelaxed_blocks call either way).
-    dm_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=False)
-    dm_relaxed = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True,
+    dm_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relaxation='none')
+    dm_relaxed = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relaxation='zvector',
                                            numerics=Numerics())
     ok = not np.allclose(dm_lin, dm_relaxed, atol=1e-8)
     all_ok &= ok

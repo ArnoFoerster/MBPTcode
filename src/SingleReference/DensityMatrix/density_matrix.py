@@ -1,5 +1,6 @@
 import numpy as np
 from pyscf import scf
+from pyscf.df import df_jk
 
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
@@ -19,6 +20,41 @@ def relaxation_numerics(relax, numerics, where):
     """`numerics` where `relax` asks for the Z-vector solve, refused there
     when None (`required_numerics`); not read otherwise."""
     return required_numerics(numerics, where) if relax else numerics
+
+
+def hf_kernel_mean_field(mf):
+    """A bare RHF carrying a restricted `mf`'s orbitals, energies and
+    occupations and its J/K backend, so that its `gen_response` is the HF
+    kernel J - K/2 on `mf`'s own integrals: the Hessian object of an
+    HF-kernel relaxation (`solve_cphf_relaxation`) on a gKS reference.
+
+    The backend is the one `mf` builds J and K with: exact four-centre
+    integrals where `mf` has no `with_df`; the same `with_df` object
+    (density fit or ISDF-K, `isdf_jk`) where `mf` is a pyscf density-fitted
+    mean field. Any other backend is refused rather than replaced by exact
+    integrals. Only the kernel changes: no exchange-correlation kernel, full
+    exact exchange (no fraction, no range separation)."""
+    if isinstance(mf, (scf.uhf.UHF, scf.rohf.ROHF)) or not isinstance(mf, scf.hf.RHF):
+        raise TypeError('hf_kernel_mean_field takes a restricted closed-shell '
+                        f'mean field, got {type(mf).__name__}')
+    with_df = getattr(mf, 'with_df', None)
+    if with_df is None:
+        hf = scf.RHF(mf.mol)
+    elif isinstance(mf, df_jk._DFHF):
+        hf = scf.RHF(mf.mol).density_fit()
+        hf.with_df = with_df
+        hf.only_dfj = mf.only_dfj
+    else:
+        raise TypeError(
+            f'hf_kernel_mean_field cannot reproduce the J/K backend of {type(mf).__name__} '
+            f'(with_df {type(with_df).__name__}): only exact integrals and pyscf '
+            'density fitting (DF or ISDF-K via isdf_jk) are carried over; exact '
+            'integrals are not substituted for a fitted interaction.')
+    hf.max_memory = mf.max_memory
+    hf.mo_coeff = mf.mo_coeff
+    hf.mo_energy = mf.mo_energy
+    hf.mo_occ = mf.mo_occ
+    return hf
 
 
 def solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics):

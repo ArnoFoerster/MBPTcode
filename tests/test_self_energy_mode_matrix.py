@@ -33,8 +33,8 @@ def build_density_corrections(mf, mol):
     mycc = cc.CCSD(mf_hf).run()
     dm_ccsd = mf_hf.mo_coeff @ mycc.make_rdm1() @ mf_hf.mo_coeff.T
 
-    dm_gw_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=False)
-    dm_gw_rel = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True,
+    dm_gw_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relaxation='none')
+    dm_gw_rel = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relaxation='zvector',
                                           numerics=Numerics())
 
     return {

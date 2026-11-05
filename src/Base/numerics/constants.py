@@ -281,9 +281,6 @@ QP_Z_DERIV_STEP = 1e-3
 # mixture of spin states, which no correction downstream undoes.
 UHF_SPIN_CONTAMINATION_WARN = 0.1
 
-# spin factor
-GW_DENSITY_SPIN_SUM = 4.0
-
 # Singlet/triplet factor on the bare exchange kernel of a Casida/BSE problem:
 # kappa (ia|jb) with kappa = 2 for a singlet and 0 for a triplet.
 KAPPA = {'singlet': 2.0, 'triplet': 0.0}
