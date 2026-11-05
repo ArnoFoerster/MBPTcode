@@ -38,7 +38,7 @@ def _model():
 
 def _blocks_and_matrix():
     sigma = _model()
-    numerics = GWDensityNumerics(nfreq=200)
+    numerics = Numerics(gwdensity={'nfreq': 200})
     points, weights = outer_frequency_grid(EPS, NOCC, numerics)
     sig = np.array([sigma(1j * w) for w in points])
     oo, ov, vv = dynamic_density_blocks(EPS, sig, points, weights, NOCC)
@@ -79,16 +79,16 @@ def test_gwdensity_section_defaults_and_identity():
 
 
 def test_outer_grid_choices():
-    n = GWDensityNumerics().nfreq
-    points, weights = outer_frequency_grid(EPS, NOCC, GWDensityNumerics())
+    n = Numerics().gwdensity.nfreq
+    points, weights = outer_frequency_grid(EPS, NOCC, Numerics())
     assert len(points) == len(weights) == n and np.all(points > 0)
     size = minimax_supported_sizes()[0]
     points, _ = outer_frequency_grid(
-        EPS, NOCC, GWDensityNumerics(nfreq=size, grid='minimax'))
+        EPS, NOCC, Numerics(gwdensity={'nfreq': size, 'grid': 'minimax'}))
     assert len(points) == size
     unsupported = max(minimax_supported_sizes()) + 1
     with pytest.raises(ValueError, match='supported sizes'):
         outer_frequency_grid(
-            EPS, NOCC, GWDensityNumerics(nfreq=unsupported, grid='minimax'))
+            EPS, NOCC, Numerics(gwdensity={'nfreq': unsupported, 'grid': 'minimax'}))
     with pytest.raises(ValueError, match='simpson'):
-        outer_frequency_grid(EPS, NOCC, GWDensityNumerics(grid='simpson'))
+        outer_frequency_grid(EPS, NOCC, Numerics(gwdensity={'grid': 'simpson'}))

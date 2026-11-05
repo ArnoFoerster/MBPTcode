@@ -219,7 +219,7 @@ def outer_frequency_grid(eps, nocc, numerics):
     density, by `numerics.gwdensity`: 'gauss_legendre' (w0 the gap-scaled
     one when None) or 'minimax' (a tabulated size, over the particle-hole
     window of `eps`)."""
-    cfg = numerics.gwdensity if hasattr(numerics, 'gwdensity') else numerics
+    cfg = numerics.gwdensity
     if cfg.grid == 'gauss_legendre':
         w0 = gap_scaled_w0(eps, nocc) if cfg.w0 is None else cfg.w0
         return gauss_legendre_grid(cfg.nfreq, w0)
