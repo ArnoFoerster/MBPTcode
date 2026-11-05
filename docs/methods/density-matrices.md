@@ -63,7 +63,10 @@ build `mf` with the ISDF J/K. `auxbasis` and `screen_r_cut` belong to the
 space-time route and are refused with the other modes; `screen_r_cut` is what
 realizes the O(N³) scaling and is not forced on.
 
-**Numerics.** The two numerical modes require `numerics`. The inner
+**Numerics.** `numerics` is required for both numerical modes and for any
+`relaxation` other than `'none'`, so the default call (`'casida'` with
+`'zvector'`) needs it too: only `mode='casida', relaxation='none'` runs without
+one. The inner
 integrals use the existing sections: `imagfreq` for W, and `isdf`,
 `quadrature` and `layout` for the space-time route (the ISDF grid is named
 there, as for `solve_qp_energy_space_time`). The outer frequency integral of
@@ -80,9 +83,9 @@ correction) at the default outer grid; `'space-time'` against
 `'imagfrequency'` agrees to 1.4e-5 on the finest ISDF grid tested.
 
 **Scope.** The numerical modes take RPA screening (`polarizability='RPA'`),
-`df=True`, a closed-shell restricted reference, the gas phase and zero
-temperature; anything else raises `NotImplementedError` (or `TypeError` for a
-missing `numerics`). UHF/UKS references are refused in all modes.
+density fitting (`df=True`, the default), a closed-shell restricted reference,
+the gas phase and zero temperature; anything else raises `NotImplementedError`.
+A missing `numerics` where it is required (see above) raises `TypeError`. UHF/UKS references are refused in all modes.
 
 **Changes from earlier versions.**
 - The GW density lives in `src.SingleReference.GW.density_matrix`, not in the
