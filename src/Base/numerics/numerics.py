@@ -47,7 +47,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
-                                         EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ,
+                                         EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ, GW_DENSITY_NFREQ,
                                          QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE, QSGW_DM_TOL,
                                          QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
                                          GL_FREQUENCY_SCALE,
@@ -469,6 +469,18 @@ class ImagFreqNumerics:
 
 
 @dataclass(frozen=True)
+class GWDensityNumerics:
+    """The outer imaginary-frequency integral of the GW density matrix
+    (`GW.density_matrix`): nfreq points of its quadrature on omega >= 0; grid,
+    'gauss_legendre' (scaled to the gap) or 'minimax' (a tabulated size,
+    scaled to the particle-hole window); w0, the Gauss-Legendre energy scale,
+    Hartree, None for half the gap."""
+    nfreq: int = GW_DENSITY_NFREQ
+    grid: str = 'gauss_legendre'
+    w0: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class ADCNumerics:
     """The excitation-energy ADC solve of a state model
     (`gradients.adc.ee_state_model.ADC2State`, `eeADC.solve.solve_ee_adc`):
@@ -522,7 +534,8 @@ SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
             'walk': WalkNumerics, 'layout': LayoutNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
-            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics,
+            'imagfreq': ImagFreqNumerics,
+            'gwdensity': GWDensityNumerics, 'adc': ADCNumerics,
             'properties': PropertiesNumerics}
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
@@ -773,6 +786,7 @@ class Numerics:
     evgw: EvGWNumerics = field(default_factory=EvGWNumerics)
     qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
     imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
+    gwdensity: GWDensityNumerics = field(default_factory=GWDensityNumerics)
     adc: ADCNumerics = field(default_factory=ADCNumerics)
     properties: PropertiesNumerics = field(default_factory=PropertiesNumerics)
     parent: Optional[str] = None

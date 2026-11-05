@@ -65,6 +65,7 @@ script test_davidson_symmetric.py
 pytest test_davidson_triplet.py
 pytest test_declaration.py
 script test_density_matrix_small.py
+pytest test_gw_density_quadrature.py
 pytest test_gw_density_relaxation.py
 pytest test_docs_parallel_example.py
 pytest test_df_check.py

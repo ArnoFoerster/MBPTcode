@@ -27,6 +27,10 @@ DF_MO_BLOCK = 200
 # (`GW.imaginary_axis`): its W(i omega) quadrature, minimax by default.
 IMAGFREQ_NFREQ = 20
 
+# Outer imaginary-frequency points of the GW density's dynamic integral
+# (`GW.density_matrix`); a provisional size until its grid study settles it.
+GW_DENSITY_NFREQ = 32
+
 # Lorentzian broadening for self-energy denominators / spectral functions.
 DEFAULT_BROADENING_ETA = 1e-3
 
