@@ -8,7 +8,7 @@ from pyscf import gto, scf, cc, df
 
 from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.qp_energy import calc_qp_energy
-from src.SingleReference.DensityMatrix.density_matrix import compute_gw_density_matrix
+from src.SingleReference.GW.density_matrix import compute_gw_density_matrix
 
 # The 6 self-energy variants requested: GW under each of the 3 screening
 # choices (RPA/TDHF/BSE, all vertex_mode='GW'), plus the two vertex-corrected

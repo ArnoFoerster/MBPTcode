@@ -1,4 +1,6 @@
-"""Correlated 1-RDMs (MPn, GW) for use as static-correction inputs in GW and ADC.
+"""Correlated MPn 1-RDMs for use as static-correction inputs in GW and ADC, plus the
+method-neutral orbital-relaxation tools (CPHF Z-vector). The GW density lives in
+SingleReference.GW.density_matrix.
 
 The GENERATED pipelines are canonical
 and power ALL MPn production entry points:

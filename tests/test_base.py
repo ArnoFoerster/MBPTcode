@@ -8,7 +8,7 @@ import numpy as np
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.GW.self_energy import SelfEnergySolver
-from src.SingleReference.DensityMatrix.density_matrix import GWDensityMatrixSolver
+from src.SingleReference.GW.density_matrix import GWDensityMatrixSolver
 
 if __name__ == '__main__':
     all_ok = True
