@@ -22,8 +22,9 @@ from src.SingleReference.BSE import solve as bse_module
 from src.SingleReference.BSE.solve import (_check_route_kwargs,
                                                     solve_bse, solver_choice)
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-jkfit'
 NROOTS = 3
 #: Hartree. BSE@G0W0 on water/cc-pVDZ RHF, integrals='df' in the Coulomb-fitting

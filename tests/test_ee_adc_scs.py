@@ -22,7 +22,8 @@ the second-order singles block and in the folded coupling. Checks:
   4. over 2 and 3 simulated MPI ranks a scaled operator's set-up, products and
      roots are the serial ones to a few ulp.
   5. solve_ee_adc(fold=True, spin_scaling='scs') gives the operator's roots;
-     refusals: an unknown name, without fold, at ADC(1), with state_specific.
+     refusals: an unknown name, without fold, at ADC(1), with state_specific
+     on the unrelaxed density (a scaled root has none).
   6. with CuPy importable, the GPU doubles kernel equals the CPU path to 1e-10
      (scaled, singlets and triplets).
 
@@ -42,7 +43,7 @@ from src.Base.pyscf.pyscf_interface import DFIntegrals, get_orbital_energies
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold, ee_u_dense_full, ee_utils
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import WATER_ORIGIN, check, rhf_df
+from tests.adc_common import WATER_ORIGIN, check, rhf_df, ee_numerics
 from tests.pins import RECORDING_BLAS, matches, same_solution
 
 # the run choice that puts the device paths on the GPU
@@ -192,7 +193,7 @@ def check_driver(mf, F):
     ok = True
     for spin in ee_ri_fold.SPINS:
         e, _ = solve_ee_adc(mf, level='adc2', spin=spin, nroots=3, fold=True,
-                            conv_tol=1e-10, spin_scaling='scs')
+                            numerics=ee_numerics(conv_tol=1e-10), spin_scaling='scs')
         ref = fold_roots(F, spin, ADC2_SPIN_SCALING['scs'])
         ok &= check(np.abs(np.asarray(e) - ref).max() < 1e-8,
                     f'{spin}: solve_ee_adc spin_scaling=scs', f'{e}')
@@ -200,7 +201,7 @@ def check_driver(mf, F):
                       (dict(fold=False, spin_scaling='scs'), 'without fold'),
                       (dict(fold=True, level='adc1', spin_scaling='scs'), 'at ADC(1)'),
                       (dict(fold=True, spin_scaling='scs', state_specific='vertical'),
-                       'with state_specific')):
+                       'with state_specific on the unrelaxed density')):
         args = dict(level='adc2', spin='singlet', nroots=1)
         args.update(kw)
         try:

@@ -19,12 +19,12 @@ from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
 from src.SingleReference.BSE.quasi_boson_bse import BSEqb
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 NORB, NOCC = 9, 4
 #: Ha. Two associations of one (A + B)^-1 contraction on water/STO-3G; an
 #: eta-broadened chi0 built from the four-index direct term sits 3.0e-8 away.
 FOUR_INDEX_ROUNDOFF = 1e-12
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def spectrum(seed=3):

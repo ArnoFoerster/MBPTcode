@@ -29,9 +29,10 @@ from src.environments.solvent_screening import SolventScreening
 from src.gradients.evaluation import geometry_hash
 from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: A BLYP hybrid with 22 % exact exchange: the fraction that puts the HOMO-1
 #: root of the solvated surface within 1e-3 Ha of eps_(HOMO-2).
 XC = '0.22*HF + 0.78*B88, LYP'

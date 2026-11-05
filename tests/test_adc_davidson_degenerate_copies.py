@@ -39,6 +39,7 @@ from pyscf import gto, scf
 
 from src.Solvers.davidson import solve_symmetric
 from src.SingleReference.ADC.base import ADCSolverUnrestricted
+from tests.molecules import WATER_RIGHT_ANGLE
 
 K = 6
 TOL = 1e-10
@@ -47,7 +48,7 @@ TOL = 1e-10
 @pytest.fixture(scope='module')
 def water_ip():
     """(diagonal, dense matrix) of the H2O/sto-3g ADC(3) IP block."""
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.96 0 0', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_RIGHT_ANGLE, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     s = ADCSolverUnrestricted(mf, level='adc3', matrix_free=False)
     n = s.norb + s.dimensions(s.nocc)['n2h1p']

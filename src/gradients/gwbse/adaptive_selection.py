@@ -22,6 +22,7 @@ from src.SingleReference.GW.qp_selection import (AdaptivePartition,
                                                  capped_why,
                                                  casida_instability,
                                                  degenerate_blocks,
+                                                 window_blocks,
                                                  error_terms,
                                                  first_order_weights,
                                                  frontier_residual,
@@ -98,7 +99,7 @@ class QuasiparticleSelection:
         promoted = {}
         for side in ([p for p in partition.candidates if p < self.chain.nocc],
                      [p for p in partition.candidates if p >= self.chain.nocc]):
-            for group in degenerate_blocks(eps, side, QP_HAMILTONIAN_WINDOW):
+            for group in window_blocks(eps, side, QP_HAMILTONIAN_WINDOW):
                 holes = [p for p in group
                          if p not in explicit and p not in set(barred)]
                 if len(group) < 2 or not holes:

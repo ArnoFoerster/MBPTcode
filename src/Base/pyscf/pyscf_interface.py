@@ -1,7 +1,6 @@
 """pyscf adapters: MO-basis integrals (four-index and density-fitted, with an
 attached environment's dressing), spin-orbital embeddings, the orbital
 response kernel and checks on the reference."""
-import warnings
 import weakref
 
 import numpy as np
@@ -9,19 +8,27 @@ from pyscf import scf, ao2mo, lib
 from pyscf import df as pyscf_df
 from pyscf.scf import stability as scf_stability
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import environment_of
+from src.Base.pyscf.cphf import ResponseKernel
 
 #: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
 _FOCK_MO_CACHE = weakref.WeakKeyDictionary()
 
 
-def response_kernel(mf, environment=True):
+def response_kernel(mf, environment=True, comm=None):
     """G(x) = dV_eff/dD . x for this mean field, cached on it.
 
     pyscf's `gen_response` is this operator: `vj - 0.5 vk` on Hartree-Fock,
-    with f_xc and the hybrid scaling on a Kohn-Sham reference.
+    with f_xc and the hybrid scaling on a Kohn-Sham reference. On a
+    density-fitted Hartree-Fock reference with no continuum that responds,
+    it is `cphf.ResponseKernel`, the fit's J - K/2 in fixed auxiliary blocks
+    over comm's ranks (default none: serial), which also builds the
+    exchange of an occupied-virtual density from its occupied
+    half-transforms (`factored`): the one kernel of every orbital response
+    on such a reference, a correlation force's Z-vector included.
 
     A continuum must respond here, and pyscf gates that on
     `equilibrium_solvation`, default False: right for a vertical excitation,
@@ -38,7 +45,8 @@ def response_kernel(mf, environment=True):
 
     Cached because a Z-vector solve calls this inside its matvec; a mean field
     is immutable for one gradient and a displaced geometry gets a new object,
-    so the cache cannot go stale. pyscf's closure holds the mean field, so the
+    so the cache cannot go stale (the fitted kernel, which holds the occupied
+    orbitals, is kept only while the mean field holds the same orbital array). pyscf's closure holds the mean field, so the
     cache is a reference cycle: an abandoned mean field (its integrals, grids,
     xc kernel and the fit cached weakly on its Mole) is freed only by the
     cyclic collector, which `FactorChain.mean_field` runs before each new
@@ -49,6 +57,14 @@ def response_kernel(mf, environment=True):
     the SCF's tiles, f_xc on each rank's block of the grid, one reduction.
     """
     key = '_cached_response_kernel' + ('' if environment else '_gas')
+    if _fitted_hartree_fock(mf, environment, comm):
+        # it holds the occupied orbitals: kept while the mean field holds the
+        # same orbital array and the ranks are the same
+        held = getattr(mf, key + '_fit', None)
+        if held is None or held[0] is not comm or held[1] is not mf.mo_coeff:
+            held = (comm, mf.mo_coeff, ResponseKernel(mf, comm))
+            setattr(mf, key + '_fit', held)
+        return held[2]
     with distributed_fock(mf, build=False) as handles:
         # pyscf's closure holds the numint it was made with and that
         # numint's f_xc on its grid: one made serially is not the ranks' own
@@ -70,6 +86,18 @@ def response_kernel(mf, environment=True):
         with distributed_fock(mf, build=False):
             return fn(x)
     return distributed_response
+
+
+def _fitted_hartree_fock(mf, environment, comm):
+    """Whether `response_kernel` takes `cphf.ResponseKernel` for mf: a
+    Hartree-Fock reference whose J and K are pyscf's density fit, with no
+    continuum responding in this kernel; serially (comm None) only where no
+    distributed SCF left its handles, whose slices then build G instead."""
+    if hasattr(mf, 'xc') or type(getattr(mf, 'with_df', None)) is not pyscf_df.DF:
+        return False
+    if environment and hasattr(mf, 'with_solvent'):
+        return False
+    return comm is not None or getattr(mf, '_distributed', None) is None
 
 
 def fock_mo(mf):
@@ -177,12 +205,12 @@ def unrestricted_reference_diagnostics(mf, who):
            'spin_contaminated': bool(s2 - exact
                                      > UHF_SPIN_CONTAMINATION_WARN)}
     if out['spin_contaminated']:
-        warnings.warn(
+        flag('uhf_spin_contaminated',
             f'{who}: the unrestricted reference is spin-contaminated, <S^2> = '
             f'{s2:.4f} against S(S+1) = {exact:.4f}; its quasiparticle energies '
             f'describe a mixture of spin states.', RuntimeWarning, stacklevel=3)
     if not stable:
-        warnings.warn(
+        flag('uhf_reference_unstable',
             f'{who}: the unrestricted reference is internally UNSTABLE -- a '
             f'lower UHF solution exists (pyscf.scf.stability.uhf_internal); '
             f'the quasiparticle energies start from a saddle point.',
@@ -227,11 +255,6 @@ def require_closed_shell_or_unrestricted(mf, who, mol=None):
             f'orbitals doubly occupied and the rest empty -- or an unrestricted '
             f'one; this one has spin {mol.spin} and {off} occupations off that '
             f'pattern. Run an open shell as UHF/UKS.')
-
-
-def occupied_count(mf):
-    """The closed-shell occupied count of the mean field `mf`."""
-    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))
 
 
 def get_orbital_energies(mf, representation='spatial'):

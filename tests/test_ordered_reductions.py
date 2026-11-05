@@ -13,17 +13,22 @@ defects are shown to move the bits of the sums; under the recording BLAS
 their 1e-12 moves also lie far outside the few-ulp bar:
 
   * the helpers on random addends, owners round-robin (`ordered_sum`) and in
-    consecutive runs (`ordered_chain_sum`), and the planted defect -- rank
-    1's first addend moved by MOVE -- fails both;
+    consecutive runs (`ordered_chain_sum`, broadcast or kept by one root
+    rank), and the planted defect -- rank 1's first addend moved by MOVE --
+    fails both; `ordered_sliced_sum` is `ordered_chain_sum` bit for bit at
+    1, 2, 3, 5 and 8 ranks, owners in runs or round-robin, from a nonzero
+    `onto`, with and without a root;
   * the sites that use them, every call recorded and compared with the
-    serial run's: chi0(0) of the static screening and the screened
-    interaction W itself (`static_screening_matrix`), the dRPA correlation
+    serial run's: the dRPA correlation
     energy's frequency sum (`rpa_correlation_energy_space_time`), the
-    quasiparticle set's eps_bar (gathered) and B_p_bar (chained) frequency
-    sums (`qp_set_gradient`), the fitted Fock skeleton's (natm, 3) tile sum
+    quasiparticle set's eps_bar (gathered) and B_p_bar (sliced and gathered
+    to the slice's owner, the one rank that holds the call's result) frequency sums
+    (`qp_set_gradient`), the fitted Fock skeleton's (natm, 3) tile sum
     (`fitted_fock_skeleton`) and the Davidson trial space's pair-tile joins
     (`PairRows.join`); the screened diagonal's tile chain is gated in
-    tests/test_davidson_preconditioner.py;
+    tests/test_davidson_preconditioner.py, and chi0(0) of the static
+    screening, which sums its grid tiles in order along its own chain, with
+    W itself in tests/test_gw_tiles_distributed.py;
   * each site fails when the helper it calls moves the largest element of
     rank 1's first addend by MOVE.
 
@@ -47,14 +52,14 @@ from src.gradients import skeleton_tiles  # noqa: E402
 from src.Base.utils.parallel import mpi_grid  # noqa: E402
 from src.Base.utils.grids.grids import gauss_legendre_grid  # noqa: E402
 from src.Base.utils.parallel.mpi_grid import (
-    current_comm, distributed, ordered_chain_sum, ordered_sum)
+    current_comm, distributed, ordered_chain_sum, ordered_sliced_sum, ordered_sum)
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid  # noqa: E402
 from src.SingleReference.GW.space_time import separable_factors  # noqa: E402
 from src.SingleReference.LinearResponse import space_time  # noqa: E402
 from src.SingleReference.LinearResponse import trial_space  # noqa: E402
 from src.SingleReference.LinearResponse.space_time import (  # noqa: E402
-    rpa_correlation_energy_space_time, static_screening_matrix)
+    rpa_correlation_energy_space_time)
 from src.SingleReference.LinearResponse.trial_space import PairRows  # noqa: E402
 from src.gradients.gwbse import qp_space_time  # noqa: E402
 from src.gradients.gwbse.qp_space_time import qp_set_gradient  # noqa: E402
@@ -93,15 +98,19 @@ def water():
                 grid=grid, mu=0.5 * (eps[nocc - 1] + eps[nocc]))
 
 
-def recording(monkeypatch, module, name, plant=False):
+def recording(monkeypatch, module, name, plant=False, stacked=False):
     """Every call of `module.<name>` (an ordered sum) logged per rank as
     (call number, result copy); with `plant`, the largest element of rank
-    1's first addend moved by MOVE before the sum."""
+    1's first addend moved by MOVE before the sum. stacked: the call sums
+    several states' terms as one stacked array, which states share a call
+    following their slices' owners and so the rank count; each state is
+    logged as its own entry, so the serial run and every rank count compare
+    state for state."""
     real = getattr(mpi_grid, name)
     log = {}
 
     def wrapped(terms, *args, **kwargs):
-        comm = args[1] if name == 'ordered_chain_sum' else args[0]
+        comm = args[1] if name in ('ordered_chain_sum', 'ordered_sliced_sum') else args[0]
         rank = 0 if comm is None else comm.Get_rank()
         if plant and rank == 1 and terms:
             if name == 'ordered_sum':
@@ -117,7 +126,13 @@ def recording(monkeypatch, module, name, plant=False):
                 a.flat[np.abs(a).argmax()] *= 1 + MOVE
                 terms[k] = a
         out = real(terms, *args, **kwargs)
-        log.setdefault(rank, []).append(np.array(out, copy=True))
+        if stacked:
+            log.setdefault(rank, []).extend(
+                [None] * np.shape(args[2])[0] if out is None
+                else [np.array(x, copy=True) for x in out])
+        else:
+            log.setdefault(rank, []).append(None if out is None
+                                            else np.array(out, copy=True))
         return out
 
     monkeypatch.setattr(module, name, wrapped)
@@ -125,10 +140,12 @@ def recording(monkeypatch, module, name, plant=False):
 
 
 def same_calls(ref, got):
-    """Every call's result the serial run's to a few ulp, call for call."""
+    """Every call's result the serial run's to a few ulp, call for call; a
+    call whose result one root rank keeps is None on the others."""
     return len(ref) == len(got) and all(
-        a.shape == b.shape
-        and matches(b, a, RECORDING_BLAS, unit='1', quantity='root')
+        b is None or (a.shape == b.shape
+                      and matches(b, a, RECORDING_BLAS, unit='1',
+                                  quantity='root'))
         for a, b in zip(ref, got))
 
 
@@ -136,7 +153,14 @@ def bitwise_calls(ref, got):
     """Every call's result the serial run's bits, call for call: what a
     planted move must break."""
     return len(ref) == len(got) and all(
-        a.shape == b.shape and np.array_equal(a, b) for a, b in zip(ref, got))
+        b is None or (a.shape == b.shape and np.array_equal(a, b))
+        for a, b in zip(ref, got))
+
+
+def every_call_held(ref, log, size):
+    """Every call's result is held by at least one rank."""
+    return all(any(log.get(r, [None] * len(ref))[c] is not None
+                   for r in range(size)) for c in range(len(ref)))
 
 
 # ----------------------------------------------------------------- helpers
@@ -157,17 +181,53 @@ def test_the_helpers_are_the_one_rank_sum(size):
     owners = [r for r in range(size)
               for _ in range(*mpi_grid.contiguous_block(n, r, size))]
 
+    root = size - 1
+
     def rank(comm):
         r = comm.Get_rank()
         mine = [(k, terms[k]) for k in range(r, n, size)]
         chain = {k: terms[k] for k in range(n) if owners[k] == r}
         return (ordered_sum(mine, comm, onto=onto),
-                ordered_chain_sum(chain, owners, comm, onto))
+                ordered_chain_sum(chain, owners, comm, onto),
+                ordered_chain_sum(chain, owners, comm, onto, root=root))
 
-    for a, b in run_simulated(rank, size):
+    for r, (a, b, c) in enumerate(run_simulated(rank, size)):
         assert_same(a, serial, unit='1', quantity='root', label='ordered_sum')
         assert_same(b, serial, unit='1', quantity='root',
                     label='ordered_chain_sum')
+        assert np.array_equal(b, c) if r == root else c is None, r
+
+
+@pytest.mark.parametrize('size', [1, 2, 3, 5, 8])
+@pytest.mark.parametrize('layout', ['runs', 'round-robin'])
+def test_the_sliced_sum_is_the_chain_bit_for_bit(size, layout):
+    """`ordered_sliced_sum` adds the same terms in the same order element by
+    element as `ordered_chain_sum`: equal arrays, not a few ulp, on every
+    rank, onto a nonzero start, broadcast or kept by one root."""
+    rng = np.random.default_rng(10 + size)
+    n = 23
+    terms = [rng.standard_normal((3, 7, 5)) * 10.0 ** rng.integers(-8, 8)
+             for _ in range(n)]
+    onto = rng.standard_normal((3, 7, 5))
+    owners = ([r for r in range(size)
+               for _ in range(*mpi_grid.contiguous_block(n, r, size))]
+              if layout == 'runs' else [k % size for k in range(n)])
+    root = size // 2
+
+    def rank(comm):
+        r = comm.Get_rank()
+        mine = {k: terms[k] for k in range(n) if owners[k] == r}
+        return (ordered_chain_sum(mine, owners, comm, onto),
+                ordered_sliced_sum(mine, owners, comm, onto),
+                ordered_chain_sum(mine, owners, comm, onto, root=root),
+                ordered_sliced_sum(mine, owners, comm, onto, root=root))
+
+    for r, (chain, sliced, chain_at, sliced_at) in enumerate(run_simulated(rank, size)):
+        assert np.array_equal(chain, sliced), r
+        if r == root:
+            assert np.array_equal(chain_at, sliced_at), r
+        else:
+            assert chain_at is None and sliced_at is None, r
 
 
 def test_a_moved_addend_fails_both_helpers():
@@ -198,10 +258,6 @@ def test_a_moved_addend_fails_both_helpers():
 
 
 # ------------------------------------------------------------------- sites
-def chi0_static(w):
-    return static_screening_matrix(w['X'], w['D'], w['eps'], w['nocc'])
-
-
 def rpa_energy(w):
     return rpa_correlation_energy_space_time(w['X'], w['D'], w['eps'],
                                              w['nocc'], w['grid'], mu=w['mu'])
@@ -237,25 +293,23 @@ def pair_joins(w):
     return [rows.join(mine, (2, 6, 4)) for _ in range(3)]
 
 
-# chi0(0) is patched where it lives: static_screening_matrix is in
-# LinearResponse/space_time.py and calls space_time.ordered_chain_sum; the
-# davidson's ordered_chain_sum is its block-action B chain, not chi0.
 SITES = {
-    'chi0(0)': (chi0_static, space_time, 'ordered_chain_sum'),
     'E_c': (rpa_energy, space_time, 'ordered_sum'),
     'qp_set eps_bar': (qp_set, qp_space_time, 'ordered_sum'),
-    'qp_set B_p_bar': (qp_set, qp_space_time, 'ordered_chain_sum'),
+    'qp_set B_p_bar': (qp_set, qp_space_time, 'ordered_sliced_sum'),  # stacked
     'fitted skeleton': (skeleton, skeleton_tiles, 'ordered_sum'),
     'trial-space joins': (pair_joins, trial_space, 'ordered_sum'),
 }
 
+#: sites whose sums stack several states per call (`recording`, stacked)
+STACKED = ('qp_set B_p_bar',)
 
 @pytest.mark.parametrize('site', list(SITES))
 def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
     """Every call of the site's ordered sum, at 2, 3, 5 and 8 ranks, every
     rank, the serial call to a few ulp; chi0(0)'s W and E_c themselves too."""
     run, module, name = SITES[site]
-    log = recording(monkeypatch, module, name)
+    log = recording(monkeypatch, module, name, stacked=site in STACKED)
     with distributed(None):
         ref_out = run(water)
     ref = log.pop(0)
@@ -265,7 +319,8 @@ def test_every_site_is_the_one_rank_sum(water, monkeypatch, site):
         outs = run_simulated(lambda comm: run(water), size)
         for r in range(size):
             assert same_calls(ref, log.get(r, [])), (site, size, r)
-        if site in ('chi0(0)', 'E_c'):
+        assert every_call_held(ref, log, size), (site, size)
+        if site == 'E_c':
             for out in outs:
                 assert_same(out, ref_out, unit='1', quantity='root',
                             label=(site, size))
@@ -278,12 +333,13 @@ def test_every_site_fails_a_moved_addend(water, monkeypatch, site):
     """Rank 1's first addend moved by MOVE at the site: some call is no
     longer the serial one."""
     run, module, name = SITES[site]
-    log = recording(monkeypatch, module, name)
+    log = recording(monkeypatch, module, name, stacked=site in STACKED)
     with distributed(None):
         run(water)
     ref = log.pop(0)
     monkeypatch.undo()
-    log = recording(monkeypatch, module, name, plant=True)
+    log = recording(monkeypatch, module, name, plant=True,
+                    stacked=site in STACKED)
     run_simulated(lambda comm: run(water), 3)
     assert not all(bitwise_calls(ref, log.get(r, [])) for r in range(3)), site
 

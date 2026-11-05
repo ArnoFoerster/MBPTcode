@@ -15,6 +15,7 @@ from src.Base.factorization.distributed_isdf_jk import DistributedISDFJK
 from src.Base.factorization.isdf_jk import isdf_jk
 from src.Base.numerics.numerics import Numerics
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 class Placed(Exception):
@@ -39,7 +40,7 @@ def grid_call(build, monkeypatch):
 @pytest.mark.parametrize('runtime_radii', [False, True])
 def test_serial_and_distributed_builds_place_one_grid(runtime_radii, monkeypatch):
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='cc-pvdz', verbose=0)
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='cc-pvdz', verbose=0)
     numerics = Numerics().derive('a run-time grid', isdf={'runtime_radii': runtime_radii}) \
         if runtime_radii else Numerics()
     mf = scf.RHF(mol)

@@ -49,9 +49,10 @@ from src.properties.spin_orbit import chain_manifolds
 from src.gradients.surface import surface_mean_field
 from src.properties.vibronic import relax_state
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 GRID_ACCURACY = 'G1'
 MAX_MEMORY = 4000
 S0, S1, T0, T1 = ('singlet', 0), ('singlet', 1), ('triplet', 0), ('triplet', 1)
@@ -148,7 +149,7 @@ def coupling_before(chain, m, n):
     goo, gvv = state_to_state_density(chain.nocc, xn[:, m], yn[:, m],
                                       xn[:, n], yn[:, n])
     return (num / diags['gap']
-            + configuration_coupling(mol, mf, chain.nocc, goo, gvv))
+            + configuration_coupling(mol, mf, chain.nocc, goo, gvv, chain.settings))
 
 
 @pytest.mark.parametrize('case', ['hf-davidson-grid', 'production'])

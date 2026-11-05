@@ -3,7 +3,7 @@
 import numpy as np
 from src.Base.utils.parallel.threads import blas_single_threaded, row_map
 from src.Base.pyscf.pyscf_interface import spin_index
-from src.SingleReference.GW.transition_amplitudes import AmplitudeGenerator
+from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
                                          QSGW_BLOCK_ELEMS, QSGW_SRG_QUAD_TOL,

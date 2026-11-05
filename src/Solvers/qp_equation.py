@@ -13,7 +13,6 @@ business: a sum of known poles brackets its roots between neighbouring poles
 (`SampledEquation`). No root is found by a Newton from a seed or by a dense
 eigensolve; Newton steps only refine inside a bracket, which bounds them.
 """
-import warnings
 from typing import NamedTuple
 
 import numpy as np
@@ -352,8 +351,8 @@ def _note_branch(got, label, tol, out):
                    no_root=not np.isfinite(got.w), z_outside=z_outside(got))
         return
     if flipped:
-        warnings.warn(branch_warning(label, got), RuntimeWarning,
-                      stacklevel=3)
+        flag('qp_branch_flipped', branch_warning(label, got), RuntimeWarning,
+             stacklevel=3)
 
 
 def branch_warning(label, got):

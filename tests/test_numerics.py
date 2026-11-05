@@ -3,8 +3,8 @@
 What is pinned here: its record round-trips, any choice changes its
 identity, provenance does not, `derive` writes down its parent, the change
 and the reason, and its defaults are the chain's own -- a second default is
-exactly the inconsistency the object exists to remove. Memory and layout are recorded and not
-hashed, and a bar is no choice.
+exactly the inconsistency the object exists to remove. Memory and layout, and the
+properties pass's evaluation, are recorded and not hashed, and a bar is no choice.
 """
 from dataclasses import FrozenInstanceError, fields
 
@@ -62,6 +62,8 @@ def test_every_choice_moves_the_identity(section, name):
         other = 'sop'
     if (section, name) == ('isdf', 'fit'):
         other = 'rows'
+    if (section, name) in (('isdf', 'test_set'), ('scf', 'test_set')):
+        other = 'ao_products'
     if (section, name) == ('layout', 'z_mode'):
         other = 'dense'
     if (section, name) == ('bse', 'preconditioner'):
@@ -72,11 +74,20 @@ def test_every_choice_moves_the_identity(section, name):
         other = 0.5
     if (section, name) == ('qp', 'select'):
         other = QPStates('adaptive')
+    if (section, name) == ('solvent', 'loop_force_fraction'):
+        other = 1.0 / 3.0
+    if (section, name) == ('properties', 'soc_two_electron'):
+        other = 'amfi'
+    if (section, name) == ('properties', 'soc_auxbasis'):
+        other = 'cc-pvtz-jkfit'
+    if (section, name) == ('properties', 'soc_one_electron'):
+        other = 'breit-pauli'
     changed = base.derive('test', **{section: {name: other}})
     assert record_hash(changed.values()) != record_hash(base.values())
-    if section == 'layout' or (section, name) in IDENTITY_EXCLUDED:
-        # the layout, and a declaration that permits a calculation without
-        # changing any (`IsdfNumerics.runtime_radii`)
+    if section in ('layout', 'properties') or (section, name) in IDENTITY_EXCLUDED:
+        # the layout, how a property is evaluated on a surface, and a
+        # declaration that permits a calculation without changing any
+        # (`IsdfNumerics.runtime_radii`)
         assert (section not in IDENTITY_FIELDS
                 or (section, name) in IDENTITY_EXCLUDED)
         assert changed.identity() == base.identity(), (section, name)
@@ -162,3 +173,28 @@ def test_numerics_of_maps_the_flat_names():
 def test_a_bar_is_no_choice():
     """O5: the orbital residual bound is a constant, not a choice."""
     assert not hasattr(IsdfNumerics(), 'orbital_tol')
+
+
+#: identities written before the orbital-response fields cphf_tol, cphf_max_cycle and cphf_refinements retired
+RETIRED_FIELD_IDENTITIES = {
+    'default': ({}, 'e6f716b5f3c99e8f25935d7854b7b9fdfb2c65b763a46434d3722475d0a6ad5d'),
+    'adc': (dict(adc={'conv_tol': 1e-12}, solvent={'loop_tol_q': 1e-9}),
+            '3ac19fe4ebc366ecfcc64768d8bd4cb694f1f76459630868595bca7b7bf25f27'),
+    'scf': (dict(scf={'conv_tol': 1e-10, 'multiplier_tol': 3e-9}),
+            'a6d42338baab7ac1337021c2a1fe0b2e7b49d9e0796e00660c3134572538517a'),
+}
+
+
+@pytest.mark.parametrize('case', sorted(RETIRED_FIELD_IDENTITIES))
+def test_a_retired_field_keeps_every_identity(case):
+    """A record written while the scf section held the cphf_* fields reads back to the same identity; one that
+    set a retired field to another value than it always held is refused."""
+    given, written = RETIRED_FIELD_IDENTITIES[case]
+    n = Numerics(**given)
+    assert n.identity() == written
+    old = n.to_record()
+    old['scf'].update(cphf_tol=1e-9, cphf_max_cycle=100, cphf_refinements=10)
+    assert Numerics.from_record(old).identity() == written
+    old['scf']['cphf_tol'] = 1e-12
+    with pytest.raises(ValueError, match='retired'):
+        Numerics.from_record(old)

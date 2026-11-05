@@ -3,7 +3,7 @@
 # DF/RI twins of the t2_1/t1_2/t2_2/t3_2/t1_3 numerators: B_aa/B_bb in place of
 # g_aaaa/g_abab/g_bbbb; every other piece is reused from mpn_density_pieces_restricted.
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 
 def t2_1_aaaa_numerator_df(B_aa, B_bb, d_aa, o, v, nv, no):

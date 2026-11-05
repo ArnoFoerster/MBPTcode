@@ -39,7 +39,7 @@ from pyscf import gto, scf
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, NUCLEAR_FD_STEP,
+from src.Base.numerics.constants import (NUCLEAR_FD_STEP,
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.Base.declaration import Excitation, GroundState, QPStates
@@ -59,8 +59,8 @@ from src.gradients.rpa.space_time_adjoint import (chi0_backward,
 from src.properties.excitations import SurfaceSpec, surface_of
 from tests.test_chain_row_fit import TILE, molecule
 from tests.test_chain_sliced_factors import H2O
-from tests.isdf_test_grid import g1
-from tests.pins import RECORDING_BLAS, matches
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
+from tests.pins import RECORDING_BLAS, isdf_gradient_bar, matches
 
 SIZES = (1, 2, 3, 5, 8)
 ULP = np.finfo(float).eps
@@ -198,7 +198,7 @@ def test_fit_adjoint_and_y_read_tiles_bitwise():
     ranks (two layouts)."""
     mol = molecule(H2O)
     with distributed(None):
-        fac = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux, nao = len(crd), aux.nao_nr(), mol.nao
     rng = np.random.default_rng(3)
@@ -253,7 +253,7 @@ def ladder_chain(mol):
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf',
                        qp_states=QPStates(kind='frontier'),
-                       numerics=numerics_of({'sliced': True, 'fit': 'rows',
+                       numerics=numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'sliced': True, 'fit': 'rows',
                                  'fit_block': CHAIN_BLOCK,
                                  'tile_gb': CHAIN_TILE_GB,
                                  'bse_adjoint': 'grid'}))
@@ -348,7 +348,7 @@ def test_the_ranked_force_is_the_tau_split_and_one_ranks():
         d_one = float(np.abs(new[0] - one).max())
         lines.append(f'{size} ranks: |F - tau split| {d_old:.1e}, '
                      f'|F - one rank| {d_one:.1e}')
-        assert max(d_old, d_one) < ISDF_GRADIENT_FLOOR, lines
+        assert max(d_old, d_one) < isdf_gradient_bar(), lines
     assert np.abs(one).max() > 1e-3
     print('\n' + '; '.join(lines))
 
@@ -372,7 +372,7 @@ def test_the_ranked_force_follows_its_energy():
 
     diff = run_simulated(rank, 2)[0]
     print(f'\n2 ranks: analytic - FD {np.array2string(diff, precision=2)}')
-    assert np.abs(diff).max() < ISDF_GRADIENT_FLOOR, diff
+    assert np.abs(diff).max() < isdf_gradient_bar(), diff
 
 
 class AdjointCensus:

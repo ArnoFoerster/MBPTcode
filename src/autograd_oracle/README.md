@@ -14,14 +14,16 @@ the swap-in step below runs the torch adjoints through that same assembly.
 
 ## Run
 
-    python -m src.autograd_oracle.gate_factors                    # cc-pVDZ water in PCM(water), singlet S1
-    python -m src.autograd_oracle.gate_factors --gas              # gas-phase control
-    python -m src.autograd_oracle.gate_factors --target qp        # HOMO quasiparticle
-    python -m src.autograd_oracle.gate_factors --target qp --qp-offset -4   # O 1s: residues above the gap
-    python -m src.autograd_oracle.gate_factors --tda --spin triplet
-    python -m src.autograd_oracle.gate_factors --root-mode ift    # IFT instead of unrolled Newton
-    python -m src.autograd_oracle.gate_factors --fd 0,2 --h 1e-3  # + a four-point FD of one component
-    python -m src.autograd_oracle.gate_factors --basis sto-3g --auxbasis cc-pvdz-ri
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2            # cc-pVDZ water in PCM(water), singlet S1
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --gas      # gas-phase control
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --target qp  # HOMO quasiparticle
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --target qp --qp-offset -4  # O 1s: residues above the gap
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --tda --spin triplet
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --root-mode ift  # IFT instead of unrolled Newton
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --fd 0,2 --h 1e-3  # + a four-point FD of one component
+    python -m src.autograd_oracle.gate_factors --grid-accuracy G2 --basis sto-3g --auxbasis cc-pvdz-ri
+
+`--grid-accuracy` is required, because no ISDF grid is a default; these examples use G2.
 
 `TORCH_CHAIN_TRACE=1` stamps every stage of the torch forward.
 
@@ -42,13 +44,12 @@ the swap-in step below runs the torch adjoints through that same assembly.
 `gate_factors.py` (pyscf, production) writes the factors, the frozen
 conventions and the captured production adjoints to an `.npz`
 (`frozen.py`); `torch_oracle.py` (numpy + torch only) reads it, prints the
-comparison and writes its adjoints back. The split is forced by the platform:
-on an x86_64 Python under Rosetta on an arm64 Mac, the
-torch build
+comparison and writes its adjoints back. The split is forced by some torch
+builds, which
 
-* segfaults in the backward pass with two intra-op threads (3/3) and never
-  with one (3/3) -- `torch_oracle.py` pins itself to one thread;
-* deadlocks the interpreter's normal exit when pyscf's ISDF integrals and
+* segfault in the backward pass with two intra-op threads and never with
+  one -- `torch_oracle.py` pins itself to one thread;
+* deadlock the interpreter's normal exit when pyscf's ISDF integrals and
   torch have both run in one process -- both scripts end with `os._exit`.
 
 Neither is a property of the chain. The torch side reads only the `.npz`, so
@@ -76,7 +77,7 @@ total force sums to 6.8e-15 over the atoms. 103 s for the 36 displaced chains.
 
 ## The nuclear layer too: autograd from the coordinates
 
-No test runs this layer (about 2.5 minutes on a workstation); it is a manual gate.
+No test runs this layer (a few minutes on a single machine); it is a manual gate.
 
 `gate_nuclear.py` / `torch_nuclear_oracle.py` / `torch_nuclear.py` /
 `torch_integrals.py` (`python -m src.autograd_oracle.gate_nuclear`). Omega(R) and E_0(R) as ONE torch graph from the nuclear
@@ -95,7 +96,7 @@ PCM gradient or any hand-written adjoint:
   two dielectric constants; DF-RHF Fock with the reaction field; the converged
   density as an implicit fixed point (`SCFFixedPoint`: dense dg/dD by autograd,
   one transposed solve, the cotangent pushed through g onto the integrals);
-  one generalized eigensolve for (eps, C); the ISDF fit (`fit_M_stable`) and
+  one generalized eigensolve for (eps, C); the ISDF fit (`fit_M`) and
   the metric roots in both gauges; then `torch_chain.forward`.
 
 Every stage pins at round-off at the reference geometry (Fock 1e-14, cavity

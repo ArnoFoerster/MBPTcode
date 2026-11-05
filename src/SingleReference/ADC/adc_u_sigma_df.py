@@ -3,7 +3,7 @@ matvec term is a rank<=3 B-factor chain (no 4-index intermediate
 anywhere); the production open-shell path."""
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 from src.SingleReference.ADC.adc_utils import g_block_df
 from src.SingleReference.ADC.adc_u_utils import (
     assemble_operator, u2_denominators, u1_dressing_shift,

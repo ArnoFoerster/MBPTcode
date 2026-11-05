@@ -26,7 +26,7 @@ scaling discussion).
 """
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.ADC.eeADC import ee_utils, ee_u_dense_full as _dense
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 

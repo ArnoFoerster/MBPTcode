@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from src.Base.utils.record_io import record_hash
-from src.photophysics import stages
+from src.photophysics import stages, walks
 from src.Base.geometry.geometry import molecule_at
 from src.properties.optimize import nudge_vector, surface_record
 from src.gradients.gwbse.surface_factory import reference_mean_field
@@ -64,7 +64,7 @@ def test_a_walked_stage_resumes_at_the_saddle_check(tmp_path, monkeypatch):
     def saddle_check(final, mol, walk, verbose=False, cache_dir=None):
         seen.update(final=final, mol=mol, cache_dir=cache_dir)
         raise Stop
-    monkeypatch.setattr(stages, 'saddle_check', saddle_check)
+    monkeypatch.setattr(walks, 'saddle_check', saddle_check)
     with pytest.raises(Stop):
         stages.s1_minimum(run)
     assert np.array_equal(seen['mol'].atom_coords(), minimum.atom_coords())

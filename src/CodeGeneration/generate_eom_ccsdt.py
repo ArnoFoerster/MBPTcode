@@ -28,7 +28,7 @@ from src.CodeGeneration.codegen_common import (
 OUT_DIR = os.path.join(CC_OUT_DIR, 'generated_eom')
 
 _IMPORTS = ("import numpy as np\n\n"
-            "from ..cached_einsum import einsum\n"
+            "from src.Base.utils.cached_einsum import einsum\n"
             "from ..parallel_accum import pacc\n")
 _HEADER = generated_header('generate_eom_ccsdt.py', "See that module's docstring for the equations/conventions.")
 

@@ -31,9 +31,9 @@ re-solved. That is the gate; the rest pins the pieces it is made of.
   7. solve_ee_adc(ss_density='relaxed'): e = omega + the relaxed shift; the
      unrelaxed shifts and both dipole changes are recorded; the relaxed SS
      shift is smaller in magnitude than the unrelaxed one (formaldehyde
-     cc-pVDZ toluene, singlet and triplet); unrelaxed is the default (two
+     cc-pVDZ toluene, singlet and triplet); relaxed is the default (two
      solves: to a few ulp, `matches` of tests/pins.py); refusals
-     (unknown density, relaxed without state_specific).
+     (unknown density, unrelaxed without state_specific).
   8. over simulated MPI ranks (2 and 3, one occupied orbital per tile) the
      pieces and the relaxed density are the serial ones to a few ulp.
   9. a check that can fail: the pieces with the B^P_ab derivative (the
@@ -51,14 +51,49 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as rd
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import (FD_STEP_DENSITY, H2CO, five_point, JKFIT, SCF_GRAD_TIGHT,
+from tests.adc_common import (ee_numerics, FD_STEP_DENSITY, H2CO, five_point, JKFIT, SCF_GRAD_TIGHT,
                               SCF_MAX_CYCLE, WATER_C2V, check, converge_newton)
 from tests.pins import RECORDING_BLAS, matches
+
+
+def dense_phi(inp, y, omega, spin, level='adc2', rf=None, scaling=None):
+    """Phi = y^T A_eff(omega) y from whole tensors (module docstring); rf a
+    TransitionReactionField or None; scaling (c_os, c_ss) of SCS-ADC(2) or
+    None."""
+    eo, ev, L, Boo, Bvv = inp
+    no, nv = eo.size, ev.size
+    y = np.asarray(y, float).reshape(no, nv)
+    singlet = spin == 'singlet'
+    phi = float(np.sum(y * y * (ev[None, :] - eo[:, None])))
+    c = np.einsum('iaP,ia->P', L, y)
+    ex = np.einsum('ia,ijP,abP,jb->', y, Boo, Bvv, y)
+    phi += (2.0 * c @ c - ex) if singlet else -ex
+    if rf is not None and singlet:
+        q = rf.V.T @ y.ravel()
+        phi += 2.0 * q @ (rf.Q @ q)
+    if level == 'adc1':
+        return phi
+    I = np.einsum('iaP,jbP->iajb', L, L)
+    D = rd.doubles_denominator(eo, ev)
+    tau = rd.singlet_pairs(I, I.transpose(rd.PAIR), scaling) / D
+    x_oo = 0.5 * np.einsum('kdic,kdjc->ij', I, tau)
+    x_vv = 0.5 * np.einsum('kalc,kblc->ab', I, tau)
+    xo, xv = x_oo + x_oo.T, x_vv + x_vv.T
+    if singlet:
+        K, T = 2.0 * I - I.transpose(rd.PAIR), tau
+    else:
+        K, T = -I.transpose(rd.PAIR), rd.triplet_pairs(I, I.transpose(rd.PAIR), scaling) / D
+    Ky = np.einsum('iakc,kc->ia', K, y)
+    Ty = np.einsum('iakc,kc->ia', T, y)
+    phi += float(np.sum(y * (xo @ y + y @ xv)) - np.sum(Ky * Ty))
+    R, H, _ = rd._dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling)
+    return phi + float(np.sum(R * H))
 
 
 def gas_scf(mol, h1=None, dm0=None):
@@ -99,7 +134,7 @@ def analytic(mol, mf, spin, level, frozen, env=None, pcm_response=False,
         pc.Xvv = np.zeros_like(pc.Xvv)
     Bc = rd.core_factors(mol, mf, frozen) if frozen else None
     D = rd.relaxed_density(pc, op, mf, mol, frozen, t1, Bc=Bc, env=env,
-                           pcm_response=pcm_response)
+                           pcm_response=pcm_response, numerics=Numerics())
     C = np.asarray(mf.mo_coeff)
     return C @ D @ C.T
 
@@ -113,7 +148,7 @@ def check_phi():
     for level in ('adc1', 'adc2'):
         for spin in ('singlet', 'triplet'):
             op, w, y, _, rf = root(mol, mf, spin, level, env=env)
-            phi = rd.dense_phi(rd.dense_inputs(op), y, w, spin, level, rf)
+            phi = dense_phi(rd.dense_inputs(op), y, w, spin, level, rf)
             Ay = op.apply(y[:, None], None if level == 'adc1' else np.array([w]))[0]
             d = abs(phi - y @ Ay[:, 0])
             ok &= check(d < 1e-12, f'{level} {spin}: dense Phi is y^T A_eff y',
@@ -138,7 +173,7 @@ def check_derivatives():
             def at(s):
                 arrs = [a.copy() for a in inp]
                 arrs[k][idx] += s
-                return rd.dense_phi(tuple(arrs), y, w, spin)
+                return dense_phi(tuple(arrs), y, w, spin)
             return (at(h) - at(-h)) / (2.0 * h)
 
         Gvv = np.einsum('ka,kbP->abP', pc.y, pc.Xvv.reshape(no, nv, -1))
@@ -273,11 +308,11 @@ def check_driver():
     ok = True
     mol = gto.M(atom=H2CO, basis='cc-pvdz', verbose=0)
     env, sol = _toluene(mol)
-    kw = dict(level='adc2', nroots=1, frozen=2, conv_tol=1e-9, fold=True,
+    kw = dict(level='adc2', nroots=1, frozen=2, numerics=ee_numerics(conv_tol=1e-9), fold=True,
               environment=env, return_fold=True, state_specific='vertical')
     for spin in ('singlet', 'triplet'):
         e, _, res = solve_ee_adc(sol, spin=spin, ss_density='relaxed', **kw)
-        e_u, _, res_u = solve_ee_adc(sol, spin=spin, **kw)
+        e_u, _, res_u = solve_ee_adc(sol, spin=spin, ss_density='unrelaxed', **kw)
         ok &= check(np.array_equal(e, res.omega + res.ss_shifts['vertical']),
                     f'{spin}: e = omega + the relaxed shift')
         # two solves of the state: its shift to a few ulp
@@ -291,13 +326,13 @@ def check_driver():
                     f'{su * 27211.386:+.1f} meV; d mu_z relaxed {mr[2]:+.3f}, '
                     f'unrelaxed {mu[2]:+.3f} a.u.')
     e_d, _ = solve_ee_adc(sol, spin='singlet', **dict(kw, return_fold=False))
-    e_x, _ = solve_ee_adc(sol, spin='singlet', ss_density='unrelaxed',
+    e_x, _ = solve_ee_adc(sol, spin='singlet', ss_density='relaxed',
                           **dict(kw, return_fold=False))
     ok &= check(matches(e_d, e_x, RECORDING_BLAS, quantity='root'),
-                'unrelaxed is the default (two solves: to a few ulp)')
+                'relaxed is the default (two solves: to a few ulp)')
     for label, args in (('an unknown density', dict(kw, ss_density='orbital')),
-                        ('relaxed without state_specific',
-                         dict(kw, state_specific='off', ss_density='relaxed'))):
+                        ('unrelaxed without state_specific',
+                         dict(kw, state_specific='off', ss_density='unrelaxed'))):
         try:
             solve_ee_adc(sol, spin='singlet', **args)
             ok &= check(False, f'{label} raises')
@@ -321,7 +356,7 @@ def check_ranks():
             o = ee_ri_fold.RIFoldADC2(f, spin, reaction_field=rf, tile_gb=1e-9,
                                       threads=1, comm=comm)
             p = rd.tiled_pieces(o, y, w, tile_gb=1e-9)
-            D = rd.relaxed_density(p, o, sol, mol, 1, t1, Bc=Bc, env=env)
+            D = rd.relaxed_density(p, o, sol, mol, 1, t1, Bc=Bc, env=env, numerics=Numerics())
             return [p.g_oo, p.g_vv, p.GL, p.Goo, p.Xvv, D]
 
         ser = run(None)

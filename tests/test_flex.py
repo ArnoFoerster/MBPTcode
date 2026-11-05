@@ -42,6 +42,7 @@ from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.riccati import channel_corrections_from_amplitudes
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -50,7 +51,7 @@ def check(ok, label, detail=''):
 
 
 def build(basis='6-31g'):
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=basis, verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-12
@@ -156,7 +157,7 @@ def check_qp(eps, B, nocc):
 
 def check_closed_form(basis='6-31g'):
     ok = True
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=basis, verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-12

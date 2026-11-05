@@ -83,12 +83,12 @@ from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
 from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from tests.test_distributed_fit_mpi import roots_resolution
-from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1
+from tests.isdf_test_grid import TEST_GRID_LEVEL, counts_at, g1, duchemin_blase, DUCHEMIN_BLASE_FIT
 from tests.pins import (RECORDING_BLAS, THREAD_CAPS_WITHOUT_OMP,
                         assert_archive_same, assert_same, bitwise_arrays,
                         matches)
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
             'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; H 0.0 -0.923 -1.238')
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
@@ -197,7 +197,7 @@ def ethylene():
 def row_factors(mol, mf, block=TILE):
     """The row fit in whatever region the caller is in."""
     return separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows',
-                             fit_block=block, counts=g1(mol))
+                             fit_block=block, counts=g1(mol), numerics=duchemin_blase())
 
 
 def one_rank(mol, mf, block=TILE):
@@ -232,7 +232,7 @@ def observables(mf, mol, nocc, factors):
         window = np.array([nocc - 1, nocc])
         qp = solve_qp_energy_space_time(mf, mol, nocc, window, factors=factors)
         W = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
-        om, _, _, info = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+        om, _, _, info = solve_bse_isdf(mf, mol, nocc, numerics=duchemin_blase(Numerics(bse={'nroots': NROOTS})),
                                         factors=factors, progress=False)
     return ({'D': factors[1], 'qp': qp, 'W0': W, 'bse': om},
             roots_resolution(info['eps'], nocc, om))
@@ -316,7 +316,7 @@ def test_row_fit_within_the_realization_tolerance(case, block, request):
     FIT_REALIZATION_OBSERVABLE_REL_TOL."""
     mol, mf, nocc = request.getfixturevalue(case)
     with distributed(None):
-        old = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
+        old = separable_factors(mf, mol, auxbasis=AUXBASIS, counts=g1(mol), numerics=duchemin_blase())
     new = one_rank(mol, mf, block)
     ref, resolution = observables(mf, mol, nocc, old)
     got = observables(mf, mol, nocc, new)[0]
@@ -356,7 +356,7 @@ def test_consumers_on_row_factors_are_the_one_rank_fits(water, size):
         out = []
         for fac in (part, whole):
             qp = solve_qp_energy_space_time(mf, mol, nocc, window, factors=fac)
-            om = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}), factors=fac,
+            om = solve_bse_isdf(mf, mol, nocc, numerics=duchemin_blase(Numerics(bse={'nroots': NROOTS})), factors=fac,
                                 progress=False)[0]
             out.append((qp, om))
         return out
@@ -374,7 +374,7 @@ def test_unknown_fit_is_refused(water):
     mol, mf, _ = water
     with distributed(None):
         with pytest.raises(ValueError, match='rows'):
-            separable_factors(mf, mol, auxbasis=AUXBASIS, fit='cyclic', counts=g1(mol))
+            separable_factors(mf, mol, auxbasis=AUXBASIS, fit='cyclic', counts=g1(mol), numerics=duchemin_blase())
 
 
 @pytest.mark.parametrize('size', [1, 2, 3, 8])
@@ -498,7 +498,7 @@ def test_shell_block_holds_the_kept_pairs(ethylene, size):
     widest = max(mol.ao_loc_nr()[s + 1] - mol.ao_loc_nr()[s]
                  for s in range(mol.nbas) if mol.bas_angular(s) <= 2)
     for pair_tol in (ISDF_FIT_PAIR_TOL, 1e-2):
-        numerics = Numerics(isdf={'pair_tol': pair_tol})
+        numerics = Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'pair_tol': pair_tol})
 
         def rank(comm):
             fit = fit_M_streaming(mol, auxmol, coords, fit='rows',

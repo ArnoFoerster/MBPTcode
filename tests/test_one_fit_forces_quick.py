@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.Base.numerics.constants import ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL
+from src.Base.numerics.constants import ISDF_ROW_FORCE_ENERGY_TOL
 from src.Base.factorization.distributed_df import distributed_mean_field
 from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
 from src.Base.utils.parallel.mpi_grid import distributed
@@ -38,7 +38,7 @@ from tests.test_one_fit_forces_follow_their_energy import (BAR, MF_COMPONENTS,
                                                            ROW_FIT, SCF_STEPS,
                                                            STEP, TILE,
                                                            isdf_scf, molecule)
-from tests.pins import assert_same
+from tests.pins import assert_same, isdf_gradient_bar
 
 NAME = 'formaldehyde'
 SIZE = 3
@@ -70,7 +70,7 @@ def test_the_chain_force_follows_its_energy_along_a_direction(route):
     print(f'\n{route} {NAME}: serial {miss:.1e}, rows at {SIZE} '
           f'{rows_miss:.1e}, apart {apart:.1e} Ha/Bohr')
     assert abs(rows_miss) < BAR, rows_miss
-    assert apart < ISDF_GRADIENT_FLOOR, apart
+    assert apart < isdf_gradient_bar(), apart
 
 
 def test_the_isdf_k_mean_field_force_follows_its_energy_along_a_direction():
@@ -113,7 +113,7 @@ def test_the_isdf_k_mean_field_force_follows_its_energy_along_a_direction():
     print(f'\n{NAME}/HF ISDF-K mean field: serial {miss:.1e}, {SIZE} ranks '
           f'{dd.along(out[0], d) - fd:.1e}, apart {apart:.1e}')
     assert abs(dd.along(out[0], d) - fd) < ISDF_ROW_FORCE_ENERGY_TOL
-    assert apart < ISDF_GRADIENT_FLOOR, apart
+    assert apart < isdf_gradient_bar(), apart
 
 
 if __name__ == '__main__':

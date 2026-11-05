@@ -18,9 +18,10 @@ from src.Base.numerics.constants import SCF_DIFFERENTIABLE_GRAD_TOL, SCF_TIGHT_C
 from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 def scf_factory(mol):

@@ -5,7 +5,8 @@ spectrum, the relaxed S1 and T1 and the rate table -- is a function of what is
 declared here and of nothing else. The declaration holds
 
     system      the molecule (atoms in Angstrom) and its basis
-    physics     E_0 and its functional, the environment, the BSE kernel,
+    physics     E_0 and its functional, the environment and how a state is
+                solvated in it (`solvent_scheme`), the BSE kernel,
                 the states followed, the quasiparticle set, temperature and
                 lambda_env, the rate model the records feed and the gap
                 rule of its state manifold
@@ -27,20 +28,41 @@ what each stage's record is a function of (a stage that reads no policy is
 not invalidated by changing it), and the checkpoint store refuses a record
 whose stamp is not the one the reading declaration makes.
 """
+import hashlib
+import pathlib
 from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
-from src.Base.numerics.constants import RESIDUE_ROUTES_ALL
+from src.Base.numerics.constants import (CONTINUATION_ROUTE,
+                                         ISDF_DEFAULT_TEST_SET,
+                                         RESIDUE_ROUTES_ALL,
+                                         STATE_MODEL_SCF_GRAD_TOL)
+from src.Base.basis.basis_map import atom_elements, basis_keys
 from src.Base.declaration import KERNELS, QPStates
 from src.Base.numerics.numerics import Numerics
+from src.environments.solvent_vocabulary import (GAS, SCHEME_B, SCHEME_B_BARE,
+                                                 SOLVENT_SCHEMES)
 from src.Base.utils.record_io import record_hash
+from src.environments.medium import parse as parse_medium
 from src.photophysics.rates import MANIFOLD_GAP_RULES
 
 #: Where the relaxed states stand in a continuum.
 RELAXED_SOLVATION = ('equilibrium', 'nonequilibrium')
 #: The S0 Hessian's routes: pyscf's analytic Hessian of a density-fitted twin,
-#: or central differences of the declared mean field's force.
-HESSIAN_ROUTES = ('analytic-df', 'numerical')
+#: central differences of the declared mean field's force, or a Hessian
+#: computed elsewhere at R0 and read from its file (`ExternalHessian`).
+HESSIAN_ROUTES = ('analytic-df', 'numerical', 'external')
+#: What the vertical stage computes besides the energies: 'all' (the
+#: oscillator strengths and transition dipoles, the spin-orbit table, the
+#: Condon element and every derivative coupling a rate reads) or 'energies'
+#: (the energies, oscillator strengths and transition dipoles alone).
+PROPERTY_SETS = ('all', 'energies')
+#: The stages a run declaring properties 'energies' can take: the rest walk
+#: excited states for, or read, the couplings it does not compute.
+ENERGY_STAGES = ('s0', 'hess', 'vert')
+#: Where R0 comes from: the ground-state walk from the input geometry, or the
+#: input geometry itself.
+R0_ROUTES = ('walk', 'input')
 #: The geometry optimizers (`properties.optimize.relax`).
 ENGINES = ('auto', 'cartesian', 'geometric')
 #: How each SCF is finished.
@@ -48,19 +70,24 @@ SCF_FINISH = ('diis', 'newton')
 #: E_0 under the excited state: E_KS of the reference ('dft'), or
 #: E_HF + E_c^dRPA on it ('rpa').
 GROUNDS = ('dft', 'rpa')
-#: How the self-energy's real-axis residues are taken on the chain: the two
-#: of the one vocabulary (`RESIDUE_ROUTES_ALL`) a production run declares,
-#: the pole model first (the default).
-RESIDUES = ('sop', 'explicit')
+#: How the self-energy reaches the real axis on the chain: the three of the
+#: one vocabulary (`RESIDUE_ROUTES_ALL`) a production run declares, the pole
+#: model first (the default), then the explicit residues and the analytic
+#: continuation (CONTINUATION_ROUTE), which has no adjoint and so serves the
+#: energy stages alone (`CONTINUATION_STAGES`).
+RESIDUES = ('sop', 'explicit', CONTINUATION_ROUTE)
 if not set(RESIDUES) <= set(RESIDUE_ROUTES_ALL):
     raise ImportError(f'declaration residues {RESIDUES} leave the one '
                       f'vocabulary {RESIDUE_ROUTES_ALL}')
+#: The stages a run on the continuation can take: the ground state, its
+#: Hessian and the vertical energies. Every other walks an excited state or
+#: reads a derivative the continuation has no adjoint for.
+CONTINUATION_STAGES = ('s0', 'hess', 'vert')
 #: The mean-field routes of the production chain.
 SCF_ROUTES = ('isdf', 'df')
-#: What the gas phase is called.
-GAS = 'gas'
 #: The fields that admit None ('Class.field'); every other is required.
-OPTIONAL = ('Policies.far_start', 'Declaration.hessian_numerics')
+OPTIONAL = ('Policies.far_start', 'Policies.external_hessian',
+            'Policies.tda_t1_minimum', 'Declaration.hessian_numerics')
 
 
 class DeclarationRefused(ValueError):
@@ -70,10 +97,27 @@ class DeclarationRefused(ValueError):
 @dataclass(frozen=True)
 class System:
     """The molecule: a name (the store's directory), the pyscf atom string
-    in Angstrom, and the orbital basis."""
+    in Angstrom, and the orbital basis: one name, or a per-element or
+    per-atom map in the canonical form of `basis_map.molecule_basis` (every
+    element, or every symbol and atom label, of the atom string named; no
+    'default'), which every stamp carries whole with the labelled atoms."""
     name: str
     atom: str
-    basis: str
+    basis: object
+
+    def __post_init__(self):
+        if isinstance(self.basis, dict):
+            labels = set(basis_keys(self.atom))
+            keys = (labels,) if any('@' in k for k in labels) else \
+                (set(atom_elements(self.atom)), labels)
+            if set(self.basis) not in keys or not all(
+                    isinstance(v, str) for v in self.basis.values()):
+                raise DeclarationRefused(
+                    f'a per-element or per-atom basis names a set for exactly '
+                    f'the elements ({atom_elements(self.atom)}) or the symbols '
+                    f'and labels ({sorted(labels)}) of the molecule, each by '
+                    f'name: got {self.basis!r} (basis_map.molecule_basis '
+                    f'builds it)')
 
 
 @dataclass(frozen=True)
@@ -87,6 +131,35 @@ class FarStart:
         """The digest every record of a walk from this start carries
         (`record_hash` of the atom string)."""
         return record_hash(self.atom)
+
+
+@dataclass(frozen=True)
+class TdaMinimum:
+    """The T1 minimum of the same run on the Tamm-Dancoff kernel (Angstrom,
+    the atom order of the input, as a pyscf atom string): where a full-BSE
+    scheme-B run takes its T1 single point when its own T1 walk stops at the
+    triplet instability (`stages.t1_minimum`)."""
+    atom: str
+
+    def sha256(self):
+        """The digest the record of a single point there carries."""
+        return record_hash(self.atom)
+
+
+@dataclass(frozen=True)
+class ExternalHessian:
+    """The S0 Hessian at R0 computed elsewhere: an ORCA .hess file
+    (`properties.duschinsky.read_orca_hessian`), declared by its path and
+    the sha256 of its content (`of`), which the hess stage checks again; its
+    geometry must be R0's (`stages.ground_modes`)."""
+    path: str
+    sha256: str
+
+    @classmethod
+    def of(cls, path):
+        """The declaration of the file at `path`, its content hashed now."""
+        path = pathlib.Path(path).resolve()
+        return cls(str(path), hashlib.sha256(path.read_bytes()).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -106,6 +179,11 @@ class Policies:
         stage's geometry (`df_check.check_stage`); the rate refuses a failed
         one.
     hessian: the S0 Hessian's route (HESSIAN_ROUTES).
+    external_hessian: the `ExternalHessian` of the 'external' route, else
+        None.
+    tda_t1_minimum: a scheme-B full-BSE run's `TdaMinimum` (refused
+        elsewhere): the T1 single point of a triplet walk stopped by the full
+        kernel's instability; None leaves such a walk unrelaxed and flagged.
     relaxed_solvation: in a continuum, where the relaxed states and their
         walks stand (RELAXED_SOLVATION); the vertical stage is
         non-equilibrium either way.
@@ -113,6 +191,12 @@ class Policies:
         density.
     engine: the walk's optimizer (ENGINES).
     scf_finish: 'diis', or second-order steps at the end ('newton').
+    properties: PROPERTY_SETS, what the vertical stage computes besides the
+        energies; 'energies' skips the spin-orbit table and every coupling
+        (a vertical of a large cluster, where the spin-orbit pass dominates).
+    r0: R0_ROUTES, where R0 comes from: 'walk' relaxes the ground state from
+        the input geometry (the s0 stage), 'input' takes the input geometry
+        as it is (a frame of a film or a trajectory), with no SCF.
     """
     nudge_bohr: float
     far_start: Optional[FarStart]
@@ -124,6 +208,10 @@ class Policies:
     scf_warm_start: bool
     engine: str
     scf_finish: str
+    external_hessian: Optional[ExternalHessian]
+    tda_t1_minimum: Optional[TdaMinimum]
+    r0: str = 'walk'
+    properties: str = 'all'
 
 
 @dataclass(frozen=True)
@@ -156,8 +244,13 @@ class Declaration:
 
     ground: GROUNDS, E_0 under the excited state.
     reference: the Kohn-Sham functional of the mean field and of E_0.
-    environment: 'gas', a solvent of pyscf's SMD table, or
-        'EPS:EPS_STATIC'.
+    environment: 'gas' or a continuum as `src.environments.medium.parse`
+        reads it: a solvent of pyscf's SMD table, 'eps=EPS_S,n2=N2', or the
+        older 'N2:EPS_STATIC', each optionally ',cavity=NAME'.
+    solvent_scheme: SOLVENT_SCHEMES, how every state of the run stands in the
+        environment: 'gas' in the gas phase and only there; in a continuum
+        'scheme-a' or a scheme-B one (SCHEME_B). One scheme per run:
+        every record holds it and a record of another scheme is refused.
     kernel: KERNELS. singlet, triplet: the emitting singlet and the triplet
         reservoir, 1 = lowest. n_states: the roots of each spin every
         evaluation reports, above both followed states.
@@ -187,6 +280,7 @@ class Declaration:
     ground: str
     reference: str
     environment: str
+    solvent_scheme: str
     kernel: str
     singlet: int
     triplet: int
@@ -203,9 +297,11 @@ class Declaration:
     def __post_init__(self):
         refuse_missing(self)
         refuse_choices(self)
+        refuse_environment(self)
         refuse_states(self)
         refuse_grids(self)
         refuse_hessian_numerics(self)
+        refuse_scheme(self)
 
     # --------------------------------------------------------------- reads
     @property
@@ -218,6 +314,21 @@ class Declaration:
         """What the relaxed states stand in: 'gas', or the continuum's
         mode."""
         return GAS if self.gas else self.policies.relaxed_solvation
+
+    @property
+    def scheme_b(self):
+        """Whether every state stands in the state-specific loop."""
+        return self.solvent_scheme in SCHEME_B
+
+    @property
+    def scheme_b_noneq(self):
+        """Whether the excited states walk and stand in S0's slow charges."""
+        return SCHEME_B.get(self.solvent_scheme) == 'nonequilibrium'
+
+    @property
+    def scheme_b_lr(self):
+        """Whether a scheme-B singlet carries the linear-response term."""
+        return self.scheme_b and self.solvent_scheme not in SCHEME_B_BARE
 
     @property
     def environment_dir(self):
@@ -233,9 +344,19 @@ class Declaration:
 
     @property
     def mean_field_name(self):
-        """The mean field's route and, for ISDF-K, its grid."""
+        """The mean field's route and, for ISDF-K, its grid and a declared
+        fit (`scf_fit`): the test set and the pivoted points."""
         scf = self.numerics.scf
-        return 'DF jkfit' if scf.route == 'df' else f'ISDF-K {scf.grid_level}'
+        if scf.route == 'df':
+            return 'DF jkfit'
+        fit = scf_fit(self.numerics)
+        if fit is None:
+            return f'ISDF-K {scf.grid_level}'
+        test_set, points = fit
+        count = ('' if test_set != 'ao_products' else
+                 ' on the default count of pivoted points' if points is None
+                 else f' on {points} pivoted points')
+        return f'ISDF-K {scf.grid_level}, {test_set} fit{count}'
 
     def to_record(self):
         """The declaration as plain values (`record_io`), numerics by their
@@ -258,6 +379,19 @@ class Declaration:
         out['hessian_numerics'] = (None if self.hessian_numerics is None
                                    else self.hessian_numerics.identity())
         return record_hash(out)
+
+
+def scf_fit(numerics):
+    """(test_set, pivot_points) the ISDF-K mean field is fitted on, or None
+    for its level's tabulated fit (and for a density-fitted one): the mean
+    field's own declaration (`ScfNumerics.test_set`, `pivot_points`; the
+    parent is the --scf-grid level's), a pivot count alone meaning the
+    AO-product fit. The factors' fit (`IsdfNumerics`) never reaches it."""
+    scf = numerics.scf
+    if scf.route != 'isdf' or (scf.test_set is None
+                               and scf.pivot_points is None):
+        return None
+    return (scf.test_set or ISDF_DEFAULT_TEST_SET, scf.pivot_points)
 
 
 def refuse_missing(obj):
@@ -284,6 +418,15 @@ def choose(name, value, allowed):
         raise DeclarationRefused(f'{name}={value!r} not in {allowed}')
 
 
+def refuse_environment(d):
+    """Refuse an environment that names no medium (`medium.parse`): an unknown
+    solvent, a medium with only one of its two constants, an unknown cavity."""
+    try:
+        parse_medium(d.environment)
+    except ValueError as err:
+        raise DeclarationRefused(f'environment {d.environment!r}: {err}') from err
+
+
 def refuse_choices(d):
     """Refuse a named choice outside its allowed values, and a part of the
     wrong kind."""
@@ -301,8 +444,24 @@ def refuse_choices(d):
            RELAXED_SOLVATION)
     choose('policies.hessian', p.hessian, HESSIAN_ROUTES)
     choose('policies.engine', p.engine, ENGINES)
+    choose('policies.r0', p.r0, R0_ROUTES)
+    choose('policies.properties', p.properties, PROPERTY_SETS)
     choose('policies.scf_finish', p.scf_finish, SCF_FINISH)
+    choose('solvent_scheme', d.solvent_scheme, SOLVENT_SCHEMES)
     choose('numerics.scf.route', d.numerics.scf.route, SCF_ROUTES)
+    if d.numerics.qp.residue_route == CONTINUATION_ROUTE:
+        if d.qp_states.kind == 'adaptive':
+            raise DeclarationRefused(
+                f'qp_states adaptive with residues {CONTINUATION_ROUTE!r}: the '
+                'selection budgets the pole model against the continuation, '
+                'which here solves the set itself; declare admitted, frontier, '
+                'valence or all')
+        if d.numerics.qp.hamiltonian:
+            raise DeclarationRefused(
+                f'numerics.qp.hamiltonian with residues {CONTINUATION_ROUTE!r}: '
+                "the quasiparticle Hamiltonian's groups are solved on the pole "
+                "model's poles, which the continuation does not build "
+                '(--no-qp-hamiltonian)')
     cut = d.numerics.span.cut
     if cut is not None and not 0 < cut < 1:
         raise DeclarationRefused(
@@ -350,7 +509,16 @@ def refuse_grids(d):
 
 def refuse_hessian_numerics(d):
     """Refuse Hessian numerics the route does not read, or that are neither
-    the run's numerics nor derived from them."""
+    the run's numerics nor derived from them, and an external Hessian file
+    on another route or none on the external one."""
+    external = d.policies.external_hessian
+    if (d.policies.hessian == 'external') != (external is not None):
+        raise DeclarationRefused(
+            'policies.external_hessian is the file of the external Hessian '
+            'route and of no other: declare both or neither')
+    if external is not None and not isinstance(external, ExternalHessian):
+        raise DeclarationRefused('policies.external_hessian is an '
+                                 'ExternalHessian')
     if d.policies.hessian != 'numerical':
         if d.hessian_numerics is not None:
             raise DeclarationRefused('hessian_numerics is read by the '
@@ -366,3 +534,63 @@ def refuse_hessian_numerics(d):
         raise DeclarationRefused(
             'hessian_numerics is neither numerics nor derived from them (its '
             'parent is not numerics.identity())')
+
+
+#: What scheme B does not run, each with the reason (`refuse_scheme`).
+SCHEME_B_REFUSES = (
+    (lambda d: d.ground != 'dft',
+     'ground: the loop\'s E_0 is the reference\'s energy in its charges (dft)'),
+    (lambda d: d.numerics.scf.route != 'df',
+     'numerics.scf.route: the loop converges a density-fitted mean field (df)'),
+    (lambda d: d.numerics.span.cut is not None,
+     'numerics.span.cut: the loop solves every SCF in the full basis'),
+    (lambda d: d.numerics.scf.conv_tol_grad > STATE_MODEL_SCF_GRAD_TOL,
+     f'numerics.scf.conv_tol_grad: a state model\'s SCF converges to '
+     f'{STATE_MODEL_SCF_GRAD_TOL:.0e} or tighter'),
+    (lambda d: d.numerics.solvent.loop_tol_energy < d.numerics.scf.conv_tol,
+     'numerics.solvent.loop_tol_energy: below the SCF\'s conv_tol the loop\'s G '
+     'cannot settle and every loop runs to its cycle cap'),
+    (lambda d: d.policies.far_start is not None,
+     'policies.far_start: a far start\'s chain is not a loop\'s surface'),
+    (lambda d: d.policies.df_check,
+     'policies.df_check: scheme B has no density-fitted route to check '
+     'against (its forces are gated against their own differences)'),
+    (lambda d: d.policies.scf_finish != 'diis',
+     'policies.scf_finish: the state model converges its SCF by DIIS'),
+    (lambda d: d.policies.relaxed_solvation != SCHEME_B[d.solvent_scheme],
+     'policies.relaxed_solvation: scheme-b-eq(-bare) declares the relaxed '
+     'states in equilibrium, scheme-b-noneq(-bare) in non-equilibrium'),
+    (lambda d: d.qp_states.kind in ('admitted', 'adaptive')
+     or (d.qp_states.kind == 'valence' and d.qp_states.filter_z),
+     'qp_states: every scheme-B surface (each vertical, each refreeze) '
+     'builds its own chain, and a set selected at the geometry it is built '
+     'at differs from surface to surface; declare one fixed by orbital '
+     'index (frontier, valence without the Z filter, or all)'),
+    (lambda d: not isinstance(d.rate_model, TadfModel),
+     'rate_model: the UISC stage rebuilds chains outside the loop'),
+    (lambda d: d.numerics.qp.residue_route == CONTINUATION_ROUTE,
+     f'numerics.qp.residue_route: every loop cycle takes a relaxed density, '
+     f'whose reverse pass {CONTINUATION_ROUTE!r} does not have'),
+)
+
+
+def refuse_scheme(d):
+    """Refuse a solvent scheme that does not match the environment, and under
+    scheme B every choice the loop does not run (SCHEME_B_REFUSES); a TDA T1
+    minimum where it is not read."""
+    if d.gas != (d.solvent_scheme == GAS):
+        raise DeclarationRefused(
+            f'solvent_scheme={d.solvent_scheme!r} in environment '
+            f'{d.environment!r}: \'gas\' is the scheme of the gas phase, '
+            f'and of it alone')
+    if d.policies.tda_t1_minimum is not None and not (
+            d.scheme_b and d.kernel == 'bse'):
+        raise DeclarationRefused(
+            'policies.tda_t1_minimum: the Tamm-Dancoff T1 minimum is the T1 '
+            'single point of a scheme-B run on the full BSE whose triplet walk '
+            'stops at the instability; no other run reads it')
+    if not d.scheme_b:
+        return
+    for refused, why in SCHEME_B_REFUSES:
+        if refused(d):
+            raise DeclarationRefused(f'{d.solvent_scheme}: {why}')

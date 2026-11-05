@@ -28,6 +28,8 @@ The fields:
                 solvation loop's convergence
     walk        the geometry optimizer and the finite-difference steps
     layout      memory and tiling: recorded, not in the identity
+    adc         the excitation-energy ADC solve of a state model
+    properties  the spin-orbit operator of the properties pass
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -40,8 +42,7 @@ from typing import Optional
 
 from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          BSE_DAVIDSON_NROOTS, BSE_FORCE_MAX_CYCLE,
-                                         BSE_SOLVERS, CD_NTAU, CPHF_MAX_CYCLE,
-                                         CPHF_REFINEMENTS, CPHF_TOL,
+                                         BSE_SOLVERS, CD_NTAU,
                                          DAVIDSON_GUESS_FACTOR,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
@@ -54,6 +55,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DAVIDSON_PRECONDITIONERS,
                                          FIT_REALIZATIONS, ISDF_FIT_L_MAX_SECOND,
                                          ISDF_FIT_PAIR_TOL, ISDF_FIT_REGULARIZATION,
+                                         ISDF_DEFAULT_TEST_SET, ISDF_TEST_SETS,
                                          NUCLEAR_FD_STEP,
                                          OUTSIDE_SCISSOR_MODES,
                                          QP_DEGENERACY_TOL, ROOT_FOLLOWING,
@@ -65,12 +67,36 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          SOLVATION_LOOP_TOL_Q,
                                          SOP_N_POLES, WALK_MAX_CYCLE, WALK_TRUST_BOHR,
                                          WALK_TRUST_MAX_BOHR, WALK_TRUST_MIN_BOHR,
-                                         XC_GRID_LEVEL, XC_GRID_LEVEL_UNRECORDED)
+                                         XC_GRID_LEVEL)
 from src.Base.numerics.constants import (WALK_GROUND_MAX_CYCLE, WALK_GROUND_TRUST_BOHR)
+from src.Base.numerics.constants import EE_ADC_CONV_TOL, LOOP_SOLVER_TOL_FRACTION
+from src.Base.numerics.constants import SOC_ONE_ELECTRON_TERMS, SOC_TWO_ELECTRON_TERMS
 from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
                                          ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                          ORBITAL_MULTIPLIER_TOL)
 from src.Base.utils.record_io import record_hash
+from src.Base.utils.record_compat import (IDENTITY_AT_DEFAULT_OMITTED,
+                                         IDENTITY_OMITTED_AT, NUMERICS_LATER_SECTIONS,
+                                         NUMERICS_RETIRED, numerics_sections_as_read)
+
+
+def _check_fit_points(test_set, pivot_points, section):
+    """Refuse an ISDF fit's test_set outside ISDF_TEST_SETS, a pivot_points
+    that is not a positive count, and pivoted points for the
+    'duchemin_blase' fit, which on pivoted points binds the same spurious BSE
+    root as on the tabulated grid on augmented bases. `section` prefixes the
+    setting names in the message."""
+    if test_set is not None and test_set not in ISDF_TEST_SETS:
+        raise ValueError(f'{section}test_set={test_set!r} not in '
+                         f'{ISDF_TEST_SETS}')
+    if pivot_points is None:
+        return
+    if int(pivot_points) != pivot_points or pivot_points < 1:
+        raise ValueError(f'{section}pivot_points={pivot_points!r}: a '
+                         'positive point count')
+    if test_set == 'duchemin_blase':
+        raise ValueError(f"{section}pivot_points selects points for "
+                         "test_set='ao_products', not 'duchemin_blase'")
 
 
 @dataclass(frozen=True)
@@ -92,6 +118,28 @@ class IsdfNumerics:
         'replicated' (`FrozenFactorization`). Its tile edge and the layout
         over ranks are `LayoutNumerics`; the bound on the factors' orbital
         residual is a bar (ISDF_ORBITAL_RESIDUAL_TOL), not a choice.
+    test_set: what the fit is trained on, one of ISDF_TEST_SETS:
+        'duchemin_blase' (every AO times the low-l AOs plus the auxiliary
+        functions) or 'ao_products' (every AO product in the Coulomb metric,
+        `ao_product_fit`), which also represents the near-null AO
+        combinations of an augmented basis. For the factors, None is
+        'ao_products' (ISDF_DEFAULT_TEST_SET) wherever a grid is named -- a
+        level, counts or radii -- and, handed a factorization without
+        naming a grid, takes that one's (`test_set_named`); their
+        'duchemin_blase' fit is reached only by naming it. The ISDF-K mean
+        field (`isdf_jk.ISDFJK`) keeps 'duchemin_blase' unless a test set is
+        named: pivoted points move smoothly along a walk only inside
+        `isdf_jk.frozen_frames`. Both realizations of the fit realize
+        either.
+    pivot_points: the points of the 'ao_products' fit, hard-pivoted from
+        the level's (or counts') atomic grid with every sub-shell's radii
+        ISDF_PIVOT_PARENT_FACTOR times as dense, by the pivoted Cholesky
+        factorization of its Gram matrix (`ao_product_fit.pivoted_points`);
+        None takes `ao_product_fit.pivot_count` of the molecule and its
+        parent. Refused beside test_set='duchemin_blase'. The identity
+        leaves out test_set at 'duchemin_blase' (and with no grid named)
+        and pivot_points at None: an identity without them is one at those
+        values.
     runtime_radii: True declares a grid the shipped radii table holds no
         row for, re-optimized at run time (`runtime_atomic_radii`); False
         refuses one (`UntabulatedISDFGrid`). Not part of `identity`: where a
@@ -110,10 +158,28 @@ class IsdfNumerics:
     regularization: float = ISDF_FIT_REGULARIZATION
     fit: Optional[str] = None
     runtime_radii: bool = False
+    test_set: Optional[str] = None
+    pivot_points: Optional[int] = None
 
     def __post_init__(self):
         if self.fit is not None and self.fit not in FIT_REALIZATIONS:
             raise ValueError(f'fit={self.fit!r} not in {FIT_REALIZATIONS}')
+        _check_fit_points(self.test_set, self.pivot_points, '')
+
+    def grid_named(self):
+        """Whether this section names an interpolation grid: a level,
+        counts or radii."""
+        return not (self.level is None and self.counts is None
+                    and self.radii is None)
+
+    def test_set_named(self, grid_named=None):
+        """The test set this section asks for: its own, else
+        ISDF_DEFAULT_TEST_SET where a grid is named (`grid_named`, this
+        section's own where None), else None (no opinion)."""
+        if self.test_set is not None:
+            return self.test_set
+        named = self.grid_named() if grid_named is None else grid_named
+        return ISDF_DEFAULT_TEST_SET if named else None
 
 
 @dataclass(frozen=True)
@@ -122,14 +188,15 @@ class ScfNumerics:
     route's auxiliary basis or ISDF-K grid level, pyscf's
     exchange-correlation grid level of a Kohn-Sham one (xc_grid,
     XC_GRID_LEVEL), and its convergence; and
-    the orbital response of that mean field (`src.Base.pyscf.cphf.solve`):
-    the true residual its solution reaches (cphf_tol), the Krylov cycles of
-    one solve (cphf_max_cycle) and the rounds of solving again for the
-    residual left (cphf_refinements); and the orbital-response (Z-vector)
-    solve of every gradient (`src.gradients.multipliers`): its lgmres
-    tolerance (multiplier_tol), iteration ceiling (multiplier_max_iter) and
-    the true residual it must reach (multiplier_residual_tol), each relative
-    to max(1, |rhs|)."""
+    the orbital-response (Z-vector) solve of every relaxed density and every
+    gradient (`src.Base.pyscf.cphf.solve`, which `src.gradients.multipliers`
+    wraps): its lgmres tolerance (multiplier_tol), iteration ceiling
+    (multiplier_max_iter) and the true residual it must reach
+    (multiplier_residual_tol), each relative to max(1, |rhs|). On the
+    ISDF-K route, its own fit apart from the factors': test_set (None, the
+    level's tabulated fit; or one of ISDF_TEST_SETS) and pivot_points (the
+    AO-product fit's points pivoted from the grid_level's parent; a count
+    alone means 'ao_products')."""
     route: Optional[str] = None
     auxbasis: Optional[str] = None
     grid_level: Optional[str] = None
@@ -138,12 +205,18 @@ class ScfNumerics:
     conv_tol: float = SCF_DIFFERENTIABLE_CONV_TOL
     conv_tol_grad: float = SCF_DIFFERENTIABLE_GRAD_TOL
     max_cycle: int = SCF_MAX_CYCLE
-    cphf_tol: float = CPHF_TOL
-    cphf_max_cycle: int = CPHF_MAX_CYCLE
-    cphf_refinements: int = CPHF_REFINEMENTS
     multiplier_tol: float = ORBITAL_MULTIPLIER_TOL
     multiplier_max_iter: int = ORBITAL_MULTIPLIER_MAX_ITER
     multiplier_residual_tol: float = ORBITAL_MULTIPLIER_RESIDUAL_TOL
+    test_set: Optional[str] = None
+    pivot_points: Optional[int] = None
+
+    def __post_init__(self):
+        _check_fit_points(self.test_set, self.pivot_points, 'scf ')
+        if (self.test_set, self.pivot_points) != (None, None) and \
+                self.route not in (None, 'isdf'):
+            raise ValueError(f'scf test_set and pivot_points are the ISDF-K '
+                             f'fit\'s; route {self.route!r} has none')
 
 
 @dataclass(frozen=True)
@@ -164,7 +237,9 @@ class QPNumerics:
         QPStates('adaptive') to select the set out of those candidates at
         the first forward.
     residue_route: how the real-axis residues of Sigma^c are taken
-        ('explicit', 'laplace', 'sop', or 'none' where there are none).
+        ('explicit', 'laplace', 'sop', or 'none' where there are none), or
+        'pade' (CONTINUATION_ROUTE): the set's energies by the analytic
+        continuation of Sigma^c(i.omega), with no residues and no adjoint.
     scissor: 'calibrate' freezes a shift for each set member the pole model
         does not admit, from its root at the reference geometry; None keeps
         those on the fallback route.
@@ -293,7 +368,11 @@ class SolventNumerics:
     is the environment's and is hashed through it. The self-consistent
     solvation loop (`src.environments.solvation_loop.equilibrate`) stops when the
     largest change of an induced charge is below loop_tol_q (e) and the
-    change of G below loop_tol_energy (Ha), within loop_max_cycle cycles."""
+    change of G below loop_tol_energy (Ha), within loop_max_cycle cycles.
+    loop_force_fraction: a walk's loop (`src.gradients.solvated_surface`)
+    stops instead at the first cycle whose estimated force error is at most
+    this fraction of the walk's current gradient; None runs every loop to
+    its tolerances."""
     cavity_scale: Optional[float] = None
     discretization: Optional[object] = None
     reaction_field: Optional[object] = None
@@ -301,6 +380,13 @@ class SolventNumerics:
     loop_tol_q: float = SOLVATION_LOOP_TOL_Q
     loop_tol_energy: float = SOLVATION_LOOP_TOL_ENERGY
     loop_max_cycle: int = SOLVATION_LOOP_MAX_CYCLE
+    loop_force_fraction: Optional[float] = None
+
+    def __post_init__(self):
+        f = self.loop_force_fraction
+        if f is not None and not 0.0 < f < 1.0:
+            raise ValueError(f'loop_force_fraction={f}: a fraction of the gradient '
+                             'in (0, 1), or None')
 
 
 @dataclass(frozen=True)
@@ -382,18 +468,62 @@ class ImagFreqNumerics:
     nfreq: int = IMAGFREQ_NFREQ
 
 
+@dataclass(frozen=True)
+class ADCNumerics:
+    """The excitation-energy ADC solve of a state model
+    (`gradients.adc.ee_state_model.ADC2State`, `eeADC.solve.solve_ee_adc`):
+    conv_tol, its eigenvalue tolerance, Hartree; residual_tol, the roots'
+    residual, None for the bar of their energies alone (sqrt(conv_tol
+    EE_FOLD_RESIDUAL_GAP), at least conv_tol: a root's error goes as its
+    residual squared), set where a density is read off the roots
+    (`Numerics.solved_for_the_loop`); dense_limit, the singles size below which
+    the fold is solved densely (None: EE_FOLD_DENSE_LIMIT). Its RI tiles are
+    `layout.tile_gb` (None: EE_RI_TILE_GB)."""
+    conv_tol: float = EE_ADC_CONV_TOL
+    residual_tol: Optional[float] = None
+    dense_limit: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class PropertiesNumerics:
+    """The spin-orbit operator of the properties pass
+    (`properties.spin_orbit`): soc_two_electron, its two-electron term, one
+    of SOC_TWO_ELECTRON_TERMS ('ri-somf' the mean field fitted in
+    soc_auxbasis, 'somf' the exact integral pass it approximates, 'amfi'
+    one-centre blocks); soc_auxbasis, the fitting basis by name, None for the
+    JK-fitting basis of the orbital basis (`jkfit_auxbasis`), named for
+    'ri-somf' alone; soc_one_electron, its one-electron operator, one of
+    SOC_ONE_ELECTRON_TERMS ('x2c' the exact two-component operator,
+    'breit-pauli' its leading term). The fit's tiles are `layout.tile_gb`
+    (None: SOMF_RI_TILE_GB). The section chooses how a property is evaluated, not
+    the surface: it is recorded and not hashed (`IDENTITY_FIELDS`), and each
+    record that holds a spin-orbit table names its term."""
+    soc_two_electron: str = 'ri-somf'
+    soc_auxbasis: Optional[str] = None
+    soc_one_electron: str = 'x2c'
+
+    def __post_init__(self):
+        if self.soc_one_electron not in SOC_ONE_ELECTRON_TERMS:
+            raise ValueError(f'soc_one_electron={self.soc_one_electron!r}: '
+                             f'one of {SOC_ONE_ELECTRON_TERMS}')
+        if self.soc_two_electron not in SOC_TWO_ELECTRON_TERMS:
+            raise ValueError(f'soc_two_electron={self.soc_two_electron!r}: '
+                             f'one of {SOC_TWO_ELECTRON_TERMS}')
+        if self.soc_auxbasis is not None and self.soc_two_electron != 'ri-somf':
+            raise ValueError(
+                f'soc_two_electron={self.soc_two_electron!r} with '
+                f'soc_auxbasis={self.soc_auxbasis!r}: the fitting basis is '
+                "named for 'ri-somf' alone")
+
+
 #: The sections of `Numerics`, by field name.
 SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'qp': QPNumerics, 'quadrature': QuadratureNumerics,
             'bse': BSENumerics, 'solvent': SolventNumerics,
             'walk': WalkNumerics, 'layout': LayoutNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
-            'imagfreq': ImagFreqNumerics}
-
-#: Sections added after records and identities were first written: a record
-#: without one reads its defaults, and one at its defaults leaves the identity
-#: what it was before the section existed.
-LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq')
+            'imagfreq': ImagFreqNumerics, 'adc': ADCNumerics,
+            'properties': PropertiesNumerics}
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -401,6 +531,7 @@ FLAT_FIELDS = {
     'basis': 'isdf.basis', 'auxbasis': 'isdf.auxbasis',
     'counts': 'isdf.counts', 'n_start': 'isdf.n_start',
     'radii': 'isdf.radii', 'fit': 'isdf.fit',
+    'test_set': 'isdf.test_set', 'pivot_points': 'isdf.pivot_points',
     'sliced': 'layout.sliced', 'fit_block': 'layout.fit_block',
     'tile_gb': 'layout.tile_gb',
     'ntau_gw': 'quadrature.ntau_gw', 'ntau_w': 'quadrature.ntau_w',
@@ -538,6 +669,16 @@ def numerics_or_default(numerics):
     return Numerics() if numerics is None else numerics
 
 
+def required_numerics(numerics, where):
+    """`numerics`, refused where None: `where` reads its settings off the
+    run's one `Numerics`, and a solve on defaults the run did not declare
+    would disagree with the identity it stamps."""
+    if numerics is None:
+        raise TypeError(f"{where} needs the run's Numerics; there are no "
+                        f"defaults to fall back on")
+    return numerics
+
+
 #: The keywords of the ISDF forward (`space_time.separable_factors`, the BSE
 #: and QP drivers built on it) and the `Numerics` field each one names.
 ISDF_REQUEST_FIELDS = {k: FLAT_FIELDS[k] for k in (
@@ -603,14 +744,14 @@ def numerics_of(choices):
     return Numerics(**sections)
 
 
-#: The sections the identity covers: all but `layout`, which is recorded
-#: and not hashed.
-IDENTITY_FIELDS = tuple(name for name in SECTIONS if name != 'layout')
+#: The sections the identity covers: all but `layout` and `properties`, which
+#: are recorded and not hashed (how a calculation is laid out, and how a
+#: property is evaluated on a surface, choose no surface).
+IDENTITY_FIELDS = tuple(name for name in SECTIONS
+                        if name not in ('layout', 'properties'))
 # declarations that permit a calculation without changing any (the reason is
 # at each field)
 IDENTITY_EXCLUDED = (('isdf', 'runtime_radii'),)
-
-
 @dataclass(frozen=True)
 class Numerics:
     """Every numerical choice of one calculation (module docstring).
@@ -632,6 +773,8 @@ class Numerics:
     evgw: EvGWNumerics = field(default_factory=EvGWNumerics)
     qsgw: QsGWNumerics = field(default_factory=QsGWNumerics)
     imagfreq: ImagFreqNumerics = field(default_factory=ImagFreqNumerics)
+    adc: ADCNumerics = field(default_factory=ADCNumerics)
+    properties: PropertiesNumerics = field(default_factory=PropertiesNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None
@@ -656,12 +799,9 @@ class Numerics:
 
     @classmethod
     def from_record(cls, record):
-        """The object `to_record` wrote. A record whose scf section names no
-        xc_grid was written before the field existed, on pyscf's default
-        grid (XC_GRID_LEVEL_UNRECORDED), and is read as that."""
-        sections = {name: dict(record.get(name, {})) if name in LATER_SECTIONS
-                    else dict(record[name]) for name in SECTIONS}
-        sections['scf'].setdefault('xc_grid', XC_GRID_LEVEL_UNRECORDED)
+        """The object `to_record` wrote; an older record is read by the rules
+        of `record_compat` (`numerics_sections_as_read`)."""
+        sections = numerics_sections_as_read(record, SECTIONS)
         return cls(**{name: SECTIONS[name](**sections[name])
                       for name in SECTIONS},
                    parent=record.get('parent'),
@@ -675,9 +815,43 @@ class Numerics:
         values = self.values()
         for section, name in IDENTITY_EXCLUDED:
             values[section].pop(name)
+        # a named grid without a test set is the AO-product fit, written so
+        values['isdf']['test_set'] = self.isdf.test_set_named()
+        for section, name, value in IDENTITY_OMITTED_AT:
+            if values[section][name] == value:
+                values[section][name] = None
+        for section, name in IDENTITY_AT_DEFAULT_OMITTED:
+            default = getattr(SECTIONS[section](), name)
+            if values[section][name] == default:
+                values[section].pop(name)
+        for section, name, held in NUMERICS_RETIRED:
+            values[section][name] = held
         return record_hash({name: values[name] for name in IDENTITY_FIELDS
-                            if name not in LATER_SECTIONS
+                            if name not in NUMERICS_LATER_SECTIONS
                             or values[name] != asdict(SECTIONS[name]())})
+
+    def solved_for_the_loop(self, solver):
+        """This Numerics with the state solver a solvation loop drives --
+        solver 'adc', the ADC roots (adc.residual_tol), or 'bse', the BSE roots
+        (bse.conv_tol, a residual) -- converged to LOOP_SOLVER_TOL_FRACTION of
+        the loop's charge tolerance where it is looser (derived, the reason
+        written down); unchanged where it is already that tight. The charges
+        answer the state's density, whose error is linear in the roots'
+        residual. Only the named solver's section moves: a realization refuses
+        a setting it does not read."""
+        bar = LOOP_SOLVER_TOL_FRACTION * self.solvent.loop_tol_q
+        if solver == 'adc':
+            loose = self.adc.residual_tol is None or self.adc.residual_tol > bar
+            change = {'adc': {'residual_tol': bar}}
+        elif solver == 'bse':
+            loose = self.bse.conv_tol > bar
+            change = {'bse': {'conv_tol': bar}}
+        else:
+            raise ValueError(f"solver={solver!r}: the loop drives 'adc' or 'bse' roots")
+        if not loose:
+            return self
+        return self.derive('the state solver a solvation loop drives converges below '
+                           'its charge tolerance', **change)
 
     def derive(self, reason, **sections):
         """Other numerics for another task, written down: `sections` maps a

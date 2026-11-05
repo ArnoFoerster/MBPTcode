@@ -16,7 +16,7 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.numerics.constants import (HESSIAN_ASYMMETRY_WORST, NUCLEAR_FD_STEP,
-                                         PIN_CROSS_BLAS_GRADIENT_BAR)
+                                         ISDF_GRADIENT_FLOOR)
 from src.properties.hessian import HessianAsymmetric, surface_hessian
 from src.gradients.mean_field_surface import MeanFieldSurface
 from tests.blas_bar import assert_same_within
@@ -49,7 +49,7 @@ class Recorded(Counted):
 
 #: Hessian bar on a BLAS other than the pin files': a force's class bar over
 #: the central difference's 2 * step.
-BAR = PIN_CROSS_BLAS_GRADIENT_BAR / (2 * NUCLEAR_FD_STEP)
+BAR = ISDF_GRADIENT_FLOOR / (2 * NUCLEAR_FD_STEP)
 
 
 def water():

@@ -50,6 +50,18 @@ X_ci / (e_i - e_c), whose f_ci enters gamma. The relaxed density is
 spin-summed, in the full MO basis (frozen core included). Its h-contraction
 is d omega / d h for any symmetric one-electron h.
 
+SPIN-COMPONENT SCALING. SCS-ADC(2) (ee_ri_fold, `scaling` (c_os, c_ss))
+scales the MP1 amplitudes of M2 and the doubles' coupling by spin class.
+Phi keeps its form: tau = [(c_os + c_ss) I - c_ss I~] / D (both channels'
+x_oo, x_vv; the singlet's T), the triplet's T = [(c_ss - c_os) I - c_ss I~] / D,
+K bare, and the doubles weight R (_dense_doubles) and the doubles' Fock block
+(_dense_dd: c_os on the opposite-spin, c_ss on the same-spin part) scaled.
+Phi_D stays a symmetric quadratic form in H, so dPhi_D/dH is still 2 R; the
+amplitude adjoints are those of the scaled amplitudes. The triplet is the
+Ms = 0 component (spin-component scaling is not spin-rotation invariant), the
+component Turbomole's spin-adapted triplet is. Every scaled formula reduces to
+the unscaled arithmetic bit for bit at c_os = c_ss = 1.
+
 THE CONTINUUM. The ground state is the SCF relaxed in PCM(eps_static); in the
 PTE convention its surface charges q0 are FROZEN when the orbitals respond,
 so the CPHF kernel carries no reaction field (`pcm_response=False`, the
@@ -64,20 +76,19 @@ tensor whole) and the orbital response shared with the tiled route
 (`relaxed_density`).
 """
 import numpy as np
-from pyscf import lib, scf
-from pyscf import df as pyscf_df
+from pyscf import lib
 
-from src.Base.numerics.constants import (CORRELATION_CPHF_TOL, CPHF_MAX_CYCLE,
-                                         DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.factorization.distributed_df import correlation_df
+from src.Base.numerics.constants import DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_TILE_GB
 from src.Base.pyscf import cphf
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, ordered_chain_sum,
                                               reduce_sum)
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
-                                                      doubles_denominator,
-                                                      tile_amplitude_fock)
-from src.SingleReference.ADC.eeADC.ee_ri_density import (Pass, oo_contract, tile_ranges,
-                                                     vv_contract)
+                                                      doubles_denominator, singlet_pairs,
+                                                      spin_weights, tile_amplitude_fock,
+                                                      triplet_pairs)
+from src.SingleReference.ADC.eeADC.ee_ri_tiles import (Pass, oo_contract, tile_ranges,
+                                                   vv_contract)
 # symmetrize is also read from here (df_correlation_force_tiled: erd.symmetrize)
 from src.SingleReference.ADC.eeADC.ee_utils import symmetrize
 
@@ -123,57 +134,40 @@ def dense_inputs(op):
             np.ascontiguousarray(f.Boo), np.ascontiguousarray(Bvv))
 
 
-def dense_phi(inp, y, omega, spin, level='adc2', rf=None):
-    """Phi = y^T A_eff(omega) y from whole tensors (module docstring); rf a
-    TransitionReactionField or None."""
-    eo, ev, L, Boo, Bvv = inp
-    no, nv = eo.size, ev.size
-    y = np.asarray(y, float).reshape(no, nv)
-    singlet = spin == 'singlet'
-    phi = float(np.sum(y * y * (ev[None, :] - eo[:, None])))
-    c = np.einsum('iaP,ia->P', L, y)
-    ex = np.einsum('ia,ijP,abP,jb->', y, Boo, Bvv, y)
-    phi += (2.0 * c @ c - ex) if singlet else -ex
-    if rf is not None and singlet:
-        q = rf.V.T @ y.ravel()
-        phi += 2.0 * q @ (rf.Q @ q)
-    if level == 'adc1':
-        return phi
-    I = np.einsum('iaP,jbP->iajb', L, L)
-    D = doubles_denominator(eo, ev)
-    tau = (2.0 * I - I.transpose(PAIR)) / D
-    x_oo = 0.5 * np.einsum('kdic,kdjc->ij', I, tau)
-    x_vv = 0.5 * np.einsum('kalc,kblc->ab', I, tau)
-    xo, xv = x_oo + x_oo.T, x_vv + x_vv.T
-    if singlet:
-        K, T = 2.0 * I - I.transpose(PAIR), tau
-    else:
-        K, T = -I.transpose(PAIR), -I.transpose(PAIR) / D
-    Ky = np.einsum('iakc,kc->ia', K, y)
-    Ty = np.einsum('iakc,kc->ia', T, y)
-    phi += float(np.sum(y * (xo @ y + y @ xv)) - np.sum(Ky * Ty))
-    R, H, _ = _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet)
-    return phi + float(np.sum(R * H))
-
-
-def _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet):
+def _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling=None):
     """(R, H, w): H_kcld = sum_P Bt_kcP L_ldP, R the code's doubles weight
     (ee_ri_fold._doubles_tile), w = 1/(omega - D)."""
     Bt = np.einsum('kiP,ic->kcP', Boo, y) - np.einsum('ka,acP->kcP', y, Bvv)
     H = np.einsum('kcP,ldP->kcld', Bt, L)
     w = 1.0 / (omega - doubles_denominator(eo, ev))
+    return _doubles_weight(H, H.transpose(SWAP), w, singlet, scaling), H, w
+
+
+def _doubles_weight(H, HT, w, singlet, scaling):
+    """R of the doubles' pair tensor H and its swap HT (H^T_kcld = H_ldkc):
+    singlet w [(c_os + c_ss) G - c_ss G~], G = H + H^T; triplet
+    w [(c_os + c_ss) H + (c_ss - c_os) H^T - c_ss S~], S = H + H^T, which is
+    ee_ri_fold's c_os (H - H^T) + c_ss (S - S~) and 2 H - S~ unscaled."""
+    c_os, c_ss = spin_weights(scaling)
     if singlet:
-        G = H + H.transpose(SWAP)
-        R = w * (2.0 * G - G.transpose(PAIR))
+        G = H + HT
+        R = (c_os + c_ss) * G
+        R -= c_ss * G.transpose(PAIR)
     else:
-        S = H + H.transpose(SWAP)
-        R = w * (2.0 * H - S.transpose(PAIR))
-    return R, H, w
+        G = np.ascontiguousarray((H + HT).transpose(PAIR))          # S~
+        R = (c_os + c_ss) * H
+        R += (c_ss - c_os) * HT
+        R -= c_ss * G
+    del G
+    R *= w
+    return R
 
 
-def _dense_dd(H, w, singlet):
+def _dense_dd(H, w, singlet, scaling=None):
     """The doubles' Fock derivative (oo, vv), spin-summed, Phi-level: the
-    oo_dd and vv_dd terms of ee_ri_density at unit singles weight."""
+    oo_dd and vv_dd terms of ee_ri_density at unit singles weight; scaled,
+    c_ss on the same-spin (W) and c_os on the opposite-spin (Z) part."""
+    c_os, c_ss = spin_weights(scaling)
     scale = 1.0 / (2.0 * np.sqrt(2.0))
     if singlet:
         Z = scale * w * (H + H.transpose(SWAP))
@@ -182,15 +176,16 @@ def _dense_dd(H, w, singlet):
         Z = scale * w * (H - H.transpose(SWAP))
         S = H + H.transpose(SWAP)
         W = scale * w * (S - S.transpose(PAIR))
-    oo = -2.0 * (np.einsum('kbia,kbja->ij', W, W)
-                 + 2.0 * np.einsum('kbia,kbja->ij', Z, Z))
-    vv = 2.0 * (np.einsum('iajc,ibjc->ab', W, W)
-                + 2.0 * np.einsum('iajc,ibjc->ab', Z, Z))
+    oo = -2.0 * (c_ss * np.einsum('kbia,kbja->ij', W, W)
+                 + 2.0 * (c_os * np.einsum('kbia,kbja->ij', Z, Z)))
+    vv = 2.0 * (c_ss * np.einsum('iajc,ibjc->ab', W, W)
+                + 2.0 * (c_os * np.einsum('iajc,ibjc->ab', Z, Z)))
     return 2.0 * oo, 2.0 * vv
 
 
-def dense_pieces(inp, y, omega, spin, level='adc2', rf=None):
-    """Pieces of dPhi (module docstring) from whole tensors."""
+def dense_pieces(inp, y, omega, spin, level='adc2', rf=None, scaling=None):
+    """Pieces of dPhi (module docstring) from whole tensors; scaling (c_os,
+    c_ss) of SCS-ADC(2) or None, the operator's (RIFoldADC2.scs)."""
     eo, ev, L, Boo, Bvv = inp
     no, nv, naux = eo.size, ev.size, L.shape[2]
     y = np.asarray(y, float).reshape(no, nv)
@@ -209,12 +204,12 @@ def dense_pieces(inp, y, omega, spin, level='adc2', rf=None):
     if level == 'adc2':
         I = np.einsum('iaP,jbP->iajb', L, L)
         D = doubles_denominator(eo, ev)
-        tau = (2.0 * I - I.transpose(PAIR)) / D
+        tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
         ro, rv = y @ y.T, y.T @ y
         if singlet:
             K, T = 2.0 * I - I.transpose(PAIR), tau
         else:
-            K, T = -I.transpose(PAIR), -I.transpose(PAIR) / D
+            K, T = -I.transpose(PAIR), triplet_pairs(I, I.transpose(PAIR), scaling) / D
         Ky = np.einsum('iakc,kc->ia', K, y)
         Ty = np.einsum('iakc,kc->ia', T, y)
         # explicit dPhi_2/dI (tau, T, K held)
@@ -228,23 +223,23 @@ def dense_pieces(inp, y, omega, spin, level='adc2', rf=None):
         if singlet:
             Ltau = Ltau + LT
         lam = 0.5 * (Ltau + Ltau.transpose(SWAP)) / D
-        A += 2.0 * lam - lam.transpose(PAIR)
+        A += singlet_pairs(lam, lam.transpose(PAIR), scaling)
         o, v = amplitude_fock(lam, tau)
         g_oo, g_vv = g_oo + o, g_vv + v
         if not singlet:
             lt = 0.5 * (LT + LT.transpose(SWAP)) / D
-            A -= lt.transpose(PAIR)
+            A += triplet_pairs(lt, lt.transpose(PAIR), scaling)
             o, v = amplitude_fock(lt, T)
             g_oo, g_vv = g_oo + o, g_vv + v
         GL += np.einsum('kcld,ldP->kcP', A + A.transpose(SWAP), L)
         # Phi_D
-        R, H, w = _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet)
+        R, H, w = _dense_doubles(L, Boo, Bvv, eo, ev, y, omega, singlet, scaling)
         Bt = np.einsum('kiP,ic->kcP', Boo, y) - np.einsum('ka,acP->kcP', y, Bvv)
         Gam = np.einsum('kcld,ldP->kcP', R, L)
         GL += 2.0 * np.einsum('kcld,kcP->ldP', R, Bt)
         Goo += 2.0 * np.einsum('kcP,ic->kiP', Gam, y)
         Xvv -= 2.0 * Gam
-        o, v = _dense_dd(H, w, singlet)
+        o, v = _dense_dd(H, w, singlet, scaling)
         g_oo, g_vv = g_oo + o, g_vv + v
     sym = lambda X: 0.5 * (X + X.T)
     return Pieces(sym(g_oo), sym(g_vv), GL.reshape(no * nv, naux), Goo,
@@ -267,7 +262,8 @@ def tiled_pieces(op, y, omega, tile_gb=EE_RI_TILE_GB):
     contractions that would need another tile's first index are moved onto
     this tile's: the amplitude adjoint's swap partner through the one-index
     transformed factor (rho_o L), and the occupied Fock block through the
-    swap symmetry of the adjoint and the amplitudes."""
+    swap symmetry of the adjoint and the amplitudes. The spin-component
+    scaling is the operator's (op.scs)."""
     f, no, nv, naux = op.f, op.no, op.nv, op.f.naux
     singlet = op.spin == 'singlet'
     y = np.asarray(y, float).reshape(no, nv)
@@ -303,7 +299,8 @@ def tiled_pieces(op, y, omega, tile_gb=EE_RI_TILE_GB):
     for t, (k0, k1) in mine:
         I = _tile_ints(op, k0, k1)
         D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
-        T = (2.0 * I - I.transpose(PAIR)) / D if singlet else -I.transpose(PAIR) / D
+        T = (singlet_pairs if singlet else triplet_pairs)(I, I.transpose(PAIR),
+                                                          op.scs) / D
         Ty[k0:k1] = (T.reshape((k1 - k0) * nv, -1) @ y.ravel()).reshape(k1 - k0, nv)
     reduce_sum(Ty, comm)
     # the doubles' dressed factor, every rank
@@ -349,9 +346,11 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
     blk = {'g_oo': np.zeros((no, no)), 'g_vv': np.zeros((nv, nv))}
     kt = k1 - k0
     r0, r1 = k0 * nv, k1 * nv
+    scaling = op.scs
+    c_os, c_ss = spin_weights(scaling)
     I = _tile_ints(op, k0, k1)
     D = doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
-    tau = (2.0 * I - I.transpose(PAIR)) / D
+    tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
     # explicit dPhi_2/dI and the amplitude adjoints (dense_pieces)
     A = (np.einsum('kdjc,ij->kdic', tau, ro, optimize=True)
          + np.einsum('kblc,ab->kalc', tau, rv, optimize=True))
@@ -368,15 +367,15 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
         Lt += LT
     lam = 0.5 * Lt / D
     del Lt
-    A += 2.0 * lam - lam.transpose(PAIR)
+    A += singlet_pairs(lam, lam.transpose(PAIR), scaling)
     o, v = tile_amplitude_fock(lam, tau)
     blk['g_oo'] += o
     blk['g_vv'] += v
     del lam
     if not singlet:
         lt = 0.5 * LT / D
-        A -= lt.transpose(PAIR)
-        o, v = tile_amplitude_fock(lt, -I.transpose(PAIR) / D)
+        A += triplet_pairs(lt, lt.transpose(PAIR), scaling)
+        o, v = tile_amplitude_fock(lt, triplet_pairs(I, I.transpose(PAIR), scaling) / D)
         blk['g_oo'] += o
         blk['g_vv'] += v
         del lt
@@ -389,14 +388,7 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
     # the doubles (ee_ri_fold._doubles_tile's R)
     H, HT = op.pair(BtT, k0, k1)
     w = 1.0 / (omega - D)
-    if singlet:
-        G = H + HT
-        R = w * (2.0 * G - G.transpose(PAIR))
-        del G
-    else:
-        S = H + HT
-        R = w * (2.0 * H - S.transpose(PAIR))
-        del S
+    R = _doubles_weight(H, HT, w, singlet, scaling)
     R2 = R.reshape(kt * nv, -1)
     Gam = R2 @ L                                          # rows of the tile
     term += 2.0 * (R2.T @ BtR[r0:r1])
@@ -415,8 +407,8 @@ def _tile_terms(op, k0, k1, y, omega, ro, rv, Ty, Ky, roL, BtT, BtR, rows):
         W = scale * w * (S - S.transpose(PAIR))
         del S
     del H, HT, w, D
-    blk['g_oo'] += -4.0 * (oo_contract(W, W) + 2.0 * oo_contract(Z, Z))
-    blk['g_vv'] += 4.0 * (vv_contract(W, W) + 2.0 * vv_contract(Z, Z))
+    blk['g_oo'] += -4.0 * (c_ss * oo_contract(W, W) + 2.0 * (c_os * oo_contract(Z, Z)))
+    blk['g_vv'] += 4.0 * (c_ss * vv_contract(W, W) + 2.0 * (c_os * vv_contract(Z, Z)))
     del Z, W
     return term, blk
 
@@ -436,9 +428,7 @@ def core_factors(mol, mf, frozen, auxbasis=None):
     if auxbasis is None:
         with_df = mf.with_df
     else:
-        with_df = pyscf_df.DF(mol, auxbasis=auxbasis)
-        with_df.max_memory = mf.max_memory
-        with_df.build()
+        with_df = correlation_df(mol, auxbasis, mf.max_memory)
     C = np.asarray(mf.mo_coeff)
     Cc, Ca = C[:, :frozen], C[:, frozen:]
     out = []
@@ -493,26 +483,18 @@ def lr_potential(env, mol, C, q):
     return C.T @ U @ C
 
 
-def _gas_jk(mf):
-    """get_jk of mf's interaction without any continuum: the JK the SCF
-    Fock matrix is built from (density fitting included)."""
-    m = scf.RHF(mf.mol)
-    if getattr(mf, 'with_df', None) is not None:
-        m = m.density_fit(auxbasis=mf.with_df.auxbasis)
-        m.with_df = mf.with_df
-    return m.get_jk
-
-
 def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
-                    env=None, pcm_response=False, tol=CORRELATION_CPHF_TOL,
-                    max_cycle=CPHF_MAX_CYCLE):
+                    env=None, pcm_response=False, numerics=None, flags=None):
     """Delta rho_rel (nmo, nmo), the full MO basis of mf (frozen core
     included), spin-summed, times t1: d omega / d h_pq. Bc core_factors when
     frozen; back_vv as in orbital_gradient (default: the operator's own B_vv
     back-transformation, a collective over its ranks); env the continuum of
     the reaction field (its potentials for pc.lr); pcm_response adds mf's
     continuum (its eps, the static one of a solvated SCF) to the orbital
-    response (module docstring)."""
+    response (module docstring). The orbital response is the force's solve
+    (cphf.solve), its tolerances from `numerics`, the run's one object; a
+    short solve flagged into `flags`. Under ranks a collective: rank 0
+    iterates."""
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)
     nmo = C.shape[1]
@@ -537,11 +519,12 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
         zc = Xco / (eps[None, nf:nocc] - eps[:nf, None])
         G[:nf, nf:nocc] += 0.5 * zc
         G[nf:nocc, :nf] += 0.5 * zc.T
-    get_jk = _gas_jk(mf)
+    # mf's own interaction without any continuum (its JK fit included), the
+    # one kernel of the P term and of the orbital response below
+    kernel = cphf.ResponseKernel(mf)
     Co, Cv = C[:, :nocc], C[:, nocc:]
     P = C @ G @ C.T
-    vj, vk = get_jk(mol, P, hermi=1)
-    v = 4.0 * vj - 2.0 * vk
+    v = 4.0 * kernel(P)
     pcm = None
     if pcm_response:
         pcm = getattr(mf, 'with_solvent', None)
@@ -550,20 +533,20 @@ def relaxed_density(pc, op, mf, mol, frozen, t1, Bc=None, back_vv=None,
         v = v + 4.0 * pcm._B_dot_x(P)
     X = X + Cv.T @ v @ Co
 
+    # the response of a rotation density Co (Cv z)^T + its transpose, from
+    # the occupied half-transforms of the same fit (ResponseKernel.factored)
     def fvind(z):
         z = z.reshape(nocc_v)
-        dm = Cv @ z @ Co.T
-        dm = dm + dm.T
-        vj, vk = get_jk(mol, dm, hermi=1)
-        v = 2.0 * vj - vk
+        v = 2.0 * kernel.factored(Cv @ z)
         if pcm is not None:
-            v = v + 2.0 * pcm._B_dot_x(dm)
+            dm = Cv @ z @ Co.T
+            v = v + 2.0 * pcm._B_dot_x(dm + dm.T)
         return (Cv.T @ v @ Co).ravel()
 
     nocc_v = (nmo - nocc, nocc)
     e_ai = eps[nocc:, None] - eps[None, :nocc]
-    z = cphf.solve(fvind, e_ai, -X, numerics=Numerics(
-        scf={'cphf_tol': tol, 'cphf_max_cycle': max_cycle})).reshape(nocc_v)
+    z = cphf.solve(fvind, e_ai, -X, numerics=numerics,
+                   flags=flags).reshape(nocc_v)
     G[nocc:, :nocc] += 0.5 * z
     G[:nocc, nocc:] += 0.5 * z.T
     return t1 * G

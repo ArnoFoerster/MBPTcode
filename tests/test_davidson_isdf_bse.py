@@ -57,9 +57,10 @@ from src.Base.numerics.constants import (BSE_DAVIDSON_CONV_TOL, HARTREE_TO_EV,
 from src.Base.numerics.numerics import numerics_of
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.GW.space_time import unrefused_separable_factors
+from tests.molecules import WATER
 
 GEOMETRIES = {
-    'water': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    'water': WATER,
     'benzene': """
         C  0.000  1.396  0.000
         C  1.209  0.698  0.000

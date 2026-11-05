@@ -11,6 +11,31 @@ at the integral chokepoints. A continuum without `eps_static` models only the
 optical response around a bare ground state; `env.mean_field` refuses it
 unless that limit is declared (`frozen_polarization=True`).
 
+**Any medium, one cavity.** A run names its medium once
+(`src.environments.medium`): a solvent of pyscf's SMD table by name, or any
+other dielectric, a host film for instance, by its static constant and n²,
+both required. The cavity is one named convention for every method and every
+part of the run, the ground-state SCF, the linear-response term, the
+state-specific loop and the forces: `bondi-1.2` (modified Bondi radii × 1.2,
+pyscf's and Q-Chem's default, and the default here), `uff-1.1` (UFF radii ×
+1.1, Gaussian's) or `cosmo` (the COSMO-optimized radii of Klamt et al.,
+unscaled, which refuses an element it has no radius for). Records and resume
+keys carry both constants and the convention.
+
+```python
+from pyscf import gto
+from src.environments.medium import parse
+
+mol = gto.M(atom='O 0 0 0; H 0 .757 .587; H 0 -.757 .587', basis='cc-pvdz')
+medium = parse('eps=5.0,n2=2.89,label=film', cavity='uff-1.1')
+env = medium.screening(mol)        # the SolventScreening every loop reads
+print(medium.record())
+```
+
+The command-line drivers take the same spec: `--environment` of
+`python -m src.photophysics solvated` and of the vertical ADC(2) driver,
+each with `--cavity`.
+
 Inside GW the reaction field is then Duchemin, Guido, Jacquemin and Blase,
 Chem. Sci. 9, 4430 (2018), Eq. (18): the
 self-polarization of the orbital carrying the added charge in the *screened*
@@ -90,7 +115,10 @@ equilibrium-solvated state a surface that `optimize.relax` can walk: the
 solvated S1 and T1 minima of an emitter, and with them solvated emission and
 adiabatic energies. A GW-BSE state keeps one excited-state chain along the
 whole walk and refreezes at the minimum as the gas-phase walks do
-([properties](properties.md)). The force reads the relaxed density the loop
+([properties](properties.md)). Each chain, a vertical energy's too, is built
+on the mean field converged in the ground state's equilibrium charges at its
+geometry: the chain fixes its orbital conventions there, and diffuse frontier
+orbitals that rotate in the reaction field stay matched to them. The force reads the relaxed density the loop
 already converged, and a GW-BSE state model asked again at the same geometry
 and field returns its stored answer instead of solving again. `python -m
 src.photophysics solvated` runs all of this for one molecule

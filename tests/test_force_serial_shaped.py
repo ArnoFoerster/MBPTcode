@@ -74,7 +74,7 @@ from src.Base.numerics.constants import (FIT_REALIZATION_ENERGY_TOL,
                                          FIT_REALIZATION_FORCE_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
-from src.Base.numerics.numerics import numerics_of
+from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep_mean_field
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.gwbse.dense_surfaces import DenseRPASurface
@@ -83,13 +83,13 @@ from src.gradients.mean_field_surface import mean_field_force
 from src.SingleReference.LinearResponse.rpa_energy import reference_energy
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import pin_bar, recorded_blas
+from tests.molecules import WATER
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINS_BLAS = recorded_blas(os.path.join(REPO, 'tests', 'one_fit_pins.json'))
 SIZES = [2, 3, 8]
 #: The rank counts (c) runs at: its gate is (a)'s and (b)'s together.
 ALL_SIZES = [3, 8]
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: One hydrogen 0.03 A along y, where a surface fits and differentiates anew.
 WATER_DISPLACED = 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4692'
 #: A typical compute node's pyscf OpenMP thread count (`lib.num_threads()`).
@@ -392,7 +392,7 @@ def race_rank(comm):
     # unfitted, the integrals of the dense route's exact (pq|rs): its force
     # is refused on a density-fitted mean field (the orbital response would
     # be built from other integrals than the SCF's)
-    g, e, _ = DenseRPASurface(mol, exact_scf).total_gradient(here)
+    g, e, _ = DenseRPASurface(mol, exact_scf, numerics=Numerics()).total_gradient(here)
     out['dense dRPA force'] = np.asarray(g)
     out['dense dRPA energy'] = np.atleast_1d(e)
     return out

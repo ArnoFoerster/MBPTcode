@@ -81,6 +81,7 @@ from src.properties.excitations import (SurfaceSpec, calc_adiabatic_excitation,
 from src.gradients.gwbse.surface_factory import Realization, compare_surfaces
 from src.properties.vibronic import adiabatic_gap
 from tests.reference_scf import rhf_tight
+from tests.molecules import WATER_ROUNDED_LOW
 
 SINGLET = Excitation('singlet')
 TRIPLET = Excitation('triplet')
@@ -118,7 +119,7 @@ def loose_walk(max_cycle):
 
 def water():
     """The one geometry every surface below is built at."""
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    return gto.M(atom=WATER_ROUNDED_LOW,
                  basis='cc-pvdz', verbose=0)
 
 

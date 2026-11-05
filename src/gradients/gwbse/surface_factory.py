@@ -30,7 +30,8 @@ from typing import Optional, Tuple
 import numpy as np
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BSE_SOLVERS, RESIDUE_ROUTES_ALL,
+from src.Base.numerics.constants import (BSE_SOLVERS, CONTINUATION_ROUTE,
+                                         RESIDUE_ROUTES_ALL,
                                          OUTSIDE_TREATMENTS,
                                          SURFACE_GRID_ACCURACY)
 from src.Base.numerics.numerics import (SECTIONS, Numerics, numerics_or_default,
@@ -40,7 +41,7 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
 from src.environments.environment import environment_label
 from src.Base.environment_seam import NoEnvironment, resolve_environment
 from src.Base.geometry.geometry import elements_of
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.Base.utils.parallel.mpi_grid import lockstep_mean_field
 from src.SingleReference.GW.qp_states import resolve_qp_states
@@ -296,7 +297,7 @@ def resolve_grid(mol, numerics):
     than resolved to either side (`separable_factors`' rule).
     """
     isdf = numerics.isdf
-    basis = isdf.basis or str(mol.basis)
+    basis = isdf.basis or mol.basis
     auxbasis = isdf.auxbasis or paired_auxbasis(basis)
     elements = elements_of(mol)
     counts, n_start = isdf.counts, isdf.n_start
@@ -494,8 +495,10 @@ def build_excited_chain(row, setup):
 
 
 def build_dense_rpa(row, setup):
-    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings."""
-    return row.cls(setup.mol, setup.scf_factory), {}
+    """E_HF + E_c^dRPA on the dense quasi-boson route. It holds no settings
+    but the orbital-response solve of its force (`numerics_read_by`)."""
+    return row.cls(setup.mol, setup.scf_factory,
+                   numerics=numerics_read_by(row, setup.numerics)), {}
 
 
 def build_dense_bse(row, setup):
@@ -516,7 +519,8 @@ def build_dense_bse(row, setup):
         kw['auxbasis'] = setup.numerics.isdf.auxbasis
     surface = row.cls(setup.mol, variant, setup.excitation.root - 1,
                       qp_orbs=setup.qp_explicit, filter_z=False,
-                      scf=setup.scf_factory, spin=setup.excitation.spin, **kw)
+                      scf=setup.scf_factory, spin=setup.excitation.spin,
+                      numerics=numerics_read_by(row, setup.numerics), **kw)
     return surface, {}
 
 
@@ -530,7 +534,8 @@ def build_dense_qp(row, setup):
             "'space-time', 'isdf').")
     surface = row.cls(setup.mol, setup.scf_factory,
                       charge_change=setup.excitation.charge_change,
-                      screening='rpa', orbital=setup.excitation.orbital)
+                      screening='rpa', orbital=setup.excitation.orbital,
+                      numerics=numerics_read_by(row, setup.numerics))
     return surface, {}
 
 
@@ -805,6 +810,12 @@ def resolve_residues(residues, row):
     """The residue backend the row will run, or None where it has none."""
     if residues not in RESIDUE_ROUTES:
         raise ValueError(f'residues {residues!r} not in {RESIDUE_ROUTES}')
+    if residues == CONTINUATION_ROUTE and row.excitation != 'Excitation':
+        raise TypeError(
+            f'{row.cls.__name__} does not read residues={residues!r}: the '
+            'analytic continuation solves the quasiparticle set of a neutral '
+            "excitation's chain; a charged state's root is the contour's "
+            "(residues 'sop', 'explicit' or 'laplace').")
     if row.reads_residues:
         return residues
     if residues != 'explicit':

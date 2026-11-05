@@ -20,6 +20,7 @@ from src.SingleReference.GW.auxiliary_bosons import (ab_basis, ab_bosons,
                                                      exact_bosons,
                                                      exact_from_factors)
 from src.SingleReference.GW.sum_over_poles import sigma_sop
+from tests.molecules import WATER_ROUNDED
 
 EPS = np.array([-0.90, -0.62, -0.35, 0.18, 0.44, 0.83, 1.25, 1.70])
 NOCC = 3
@@ -105,8 +106,20 @@ def test_amplitudes_are_squared_couplings_in_the_sop_layout(n_bosons):
     assert np.all(amp >= 0.0), 'squared couplings cannot be negative'
 
 
-def test_a_core_state_is_reached_where_a_fit_is_not():
-    """The one real advantage over the fitted route, on the real thing."""
+#: How far from the contour (meV) the AB route and the fitted pole model may
+#: put water's oxygen 1s. Measured: AB 4e-5 meV; the fit, whose least squares
+#: eliminates the amplitudes, 0.30 meV at M = 12 and 3.9 meV at M = 24 (4.8
+#: meV under another BLAS). A fit that ran the full least squares instead lost
+#: two directions to its rank cut there and missed the state by 106 eV at
+#: M = 24, which this bar fails.
+CORE_STATE_BAR_MEV = 10.0
+
+
+def test_a_core_state_is_reached_by_the_bosons_and_by_the_fit():
+    """Water's oxygen 1s, many gaps outside the compression wall, against the
+    contour: the AB route and the fitted pole model at M = 12 and 24 both land
+    within CORE_STATE_BAR_MEV. Eq. (27) still excludes the state from the
+    production route; this is the fit's conditioning, not that guard."""
     pyscf = pytest.importorskip('pyscf')
     from pyscf import gto, scf
     from src.Base.numerics.constants import HARTREE_TO_MEV
@@ -119,7 +132,7 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     from src.SingleReference.GW.sum_over_poles import (compressible,
                                                        qp_energy_sop,
                                                        sop_from_wc)
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)
@@ -137,10 +150,11 @@ def test_a_core_state_is_reached_where_a_fit_is_not():
     assert not ok and reach > 10.0, f'the 1s should be far outside: {reach}'
     poles, amp = ab_from_factors(bp, c_ov, d)
     w_ab, _ = qp_energy_sop(p, amp, poles, eps, nocc)
-    assert abs(w_ab - w_cd) * HARTREE_TO_MEV < 5.0, (
+    assert abs(w_ab - w_cd) * HARTREE_TO_MEV < CORE_STATE_BAR_MEV, (
         f'AB on the core state: {(w_ab - w_cd) * HARTREE_TO_MEV:.1f} meV')
-    sop_poles, sop_amp = sop_from_wc(wc, nu, eps, nocc, n_poles=24)
-    w_sop, _ = qp_energy_sop(p, sop_amp, sop_poles, eps, nocc)
-    assert abs(w_sop - w_cd) * HARTREE_TO_MEV > 100.0, (
-        'the fitted route is supposed to FAIL here; if it stopped failing, the '
-        'wall has moved and the guard needs re-measuring')
+    for n_poles in (12, 24):
+        sop_poles, sop_amp = sop_from_wc(wc, nu, eps, nocc, n_poles=n_poles)
+        w_sop, _ = qp_energy_sop(p, sop_amp, sop_poles, eps, nocc)
+        assert abs(w_sop - w_cd) * HARTREE_TO_MEV < CORE_STATE_BAR_MEV, (
+            f'the {n_poles}-pole fit on the core state: '
+            f'{(w_sop - w_cd) * HARTREE_TO_MEV:.1f} meV')

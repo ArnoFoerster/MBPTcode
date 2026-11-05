@@ -13,16 +13,20 @@ import numpy as np
 
 from src.Base.factorization.sliced_factors import SlicedFactors
 from src.Base.step_failed import StepFailed
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (QP_BLOCK_CORRECTION_TOL, QP_HAMILTONIAN_WINDOW,
-                                         CD_NFREQ, CD_NFREQ_SOP)
+                                         QP_SUBSPACE_PROBE_STEPS, CD_NFREQ,
+                                         CD_NFREQ_SOP, CONTINUATION_ROUTE)
 from src.Base.utils.parallel.mpi_grid import lockstep
 from src.SingleReference.GW.contour_deformation import (cd_frequency_grid,
                                                         cd_grid_range,
                                                         static_term)
-from src.SingleReference.GW.qp_selection import (ac_quasiparticle_shifts,
-                                                 degenerate_blocks,
+from src.SingleReference.GW.qp_selection import (ac_quasiparticle_roots,
+                                                 ac_quasiparticle_shifts,
+                                                 contiguous_runs,
                                                  merged_blocks,
                                                  true_degenerate_blocks,
+                                                 window_blocks,
                                                  window_edge_holes)
 from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               calibrate_scissor_tiers,
@@ -31,6 +35,7 @@ from src.SingleReference.GW.qp_states import (calibrate_scissor,
                                               is_quasiparticle_root,
                                               nearest_probe)
 from src.gradients.gwbse.static_correction import qp_xc_correction_matrix
+from src.SingleReference.GW.qp_solve import add_reaction_field
 from src.SingleReference.GW.reaction_field import (offdiagonal_reaction_field,
                                                    pair_densities)
 from src.SingleReference.GW.sum_over_poles import (pole_denominators,
@@ -98,6 +103,72 @@ class QPHamiltonian:
         return ((o, self.h[np.ix_(o, o)]),
                 (v - nocc, self.h[np.ix_(v, v)]))
 
+    def coupled_pairs(self):
+        """(norb, norb) booleans, symmetric: the orbital pairs inside one
+        group, whose element of H is solved as a matrix element."""
+        out = np.zeros(self.h.shape, bool)
+        for _, _, p, q in self.pairs:
+            out[p, q] = out[q, p] = True
+        return out
+
+    def one_body_adjoint(self, nocc, terms):
+        """(norb, norb) adjoint of sum w s^T K t on H's off-diagonal elements,
+        symmetric, zero outside the coupled pairs: K's one-body part is
+        A_ia,jb += delta_ij H_ab - delta_ab H_ij on the X and on the Y half
+        alike. terms: [(x_s, y_s, x_t, y_t, w)], each amplitude (nocc, nvir).
+        An element zero by symmetry here keeps its seed: it still has a
+        derivative along a displacement that breaks the symmetry."""
+        out = np.zeros_like(self.h)
+        for xs, ys, xt, yt, w in terms:
+            out[nocc:, nocc:] += w * (xs.T @ xt + ys.T @ yt)
+            out[:nocc, :nocc] -= w * (xs @ xt.T + ys @ yt.T)
+        return np.where(self.coupled_pairs(), 0.5 * (out + out.T), 0.0)
+
+
+class QPContinuationFailed(RuntimeWarning):
+    """The analytic continuation of a quasiparticle-set member failed
+    numerically; it carries its nearest solved member's correction."""
+
+
+@dataclass(eq=False)
+class ContinuedRoots:
+    """The continuation's roots of one forward (`continued_set_solve`): the
+    mean field, factors and Eq. (18) array they were solved on, the orbitals
+    `states`, their roots without Eq. (18), Z, and the failures
+    ({orbital: 'Class: message'})."""
+
+    mf: object
+    x_mo: object
+    d_sigma: object
+    env: object
+    states: np.ndarray
+    roots: np.ndarray
+    z: np.ndarray
+    failed: dict
+
+    def serves(self, mf, x_mo, d_sigma, env, states):
+        """Whether `continuation_shifts` of `states` on these inputs is this
+        solve: the same objects, every state among the solved."""
+        return (mf is self.mf and x_mo is self.x_mo
+                and d_sigma is self.d_sigma and env is self.env
+                and set(np.asarray(states, int).tolist())
+                <= set(self.states.tolist()))
+
+    def shifts(self, states, mf):
+        """`continuation_shifts`' ({p: a_p}, {p: Z_p}, failures) of `states`,
+        a_p the root with Eq. (18) added, less eps_p (as
+        `ac_quasiparticle_shifts`)."""
+        states = np.asarray(states, int)
+        at = {int(p): i for i, p in enumerate(self.states)}
+        pos = [at[int(p)] for p in states]
+        roots = add_reaction_field(self.roots[pos].copy(), self.env, states)
+        eps = np.asarray(mf.mo_energy, float)
+        return ({int(p): float(w) - float(eps[p])
+                 for p, w in zip(states, roots)},
+                {int(p): float(v) for p, v in zip(states, self.z[pos])},
+                {int(p): why for p, why in self.failed.items()
+                 if int(p) in set(states.tolist())})
+
 
 class QuasiparticleRootLost(StepFailed):
     """A quasiparticle-Hamiltonian group has nothing to stand on at a
@@ -105,6 +176,17 @@ class QuasiparticleRootLost(StepFailed):
     frozen, or its Newton ended on a non-finite H. A pole strength outside
     (0, 1] or a Newton that stopped short of QP_SUBSPACE_TOL on a finite H is
     not one: warned about and logged (`qp_hamiltonian_log`)."""
+
+
+def _group_solve(e0, amp, d, seed, **kw):
+    """(H, Newton steps, converged) of one group (`subspace_hamiltonian`),
+    rank 0's on every rank. A group of at most QP_SUBSPACE_DENSE_MAX orbitals
+    is solved on each rank's own arithmetic, so its H, its step count and its
+    verdict can differ between ranks; every later decision (a warning, a
+    frozen seed, one more step) is taken from rank 0's."""
+    h, it, ok = subspace_hamiltonian(e0, amp, d, seed, **kw)
+    return lockstep((np.ascontiguousarray(h, float), int(it), bool(ok)),
+                    check=True)
 
 
 class QuasiparticleSet:
@@ -379,8 +461,18 @@ class QuasiparticleSet:
     def _frozen_qp_subspaces(self, eps, routes):
         """The set's subspaces of two or more orbitals the quasiparticle
         Hamiltonian couples, as orbital tuples: neighbours on one side of the
-        gap closer than QP_HAMILTONIAN_WINDOW, joined with the subspaces
+        gap, all within QP_HAMILTONIAN_WINDOW of the lowest of their group
+        (`window_blocks`: a band is never chained into one group), joined with the subspaces
         carried from the surface this one was refrozen from.
+
+        A GROUP IS A CONTIGUOUS ENERGY WINDOW: every orbital between two of
+        its members (in the energy order of this forward's mean field) is a
+        member, and a group is cut where one is not (`contiguous_runs`). The
+        frozen conventions match a group by its span (`FrozenConventions.at`),
+        and an orbital inside a group's window but outside the group is the
+        one most likely to rotate into it: at a fixed geometry the reaction
+        field of a solvation loop does that between two cycles. A cut group
+        is listed in `qp_subspace_record['cut']` with the orbitals between.
 
         Decided at the first forward of a set, the reference geometry's, and
         frozen with it. Generous on purpose: inside a subspace H is invariant
@@ -398,10 +490,6 @@ class QuasiparticleSet:
         key = tuple(int(p) for p in self.chain.resolved.qp_set)
         subspaces = self.chain.resolved.qp_subspaces
         if subspaces is None or subspaces[0] != key:
-            groups = []
-            for side in ([p for p in key if p < self.chain.nocc],
-                         [p for p in key if p >= self.chain.nocc]):
-                groups += degenerate_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
             before = self.chain.resolved.carried_subspaces
             carried = {int(p) for b in before for p in b}
             # a carried member the explicit set no longer holds leaves its
@@ -411,18 +499,21 @@ class QuasiparticleSet:
                         'reason': 'not in the explicit set',
                         'remaining': [int(q) for q in b if q in set(key)]}
                        for b in before for p in b if int(p) not in set(key)]
-            kept = []
-            for b in merged_blocks(key, groups, before):
-                if len(b) < 2:
-                    continue
+            kept, cut = [], []
+            for b in self._window_subspaces(key, eps):
                 pole = tuple(p for p in b if routes.get(p) == 'sop')
+                runs = [r for r in contiguous_runs(pole) if len(r) > 1]
                 dropped += [{'orbital': p, 'subspace': list(b),
                              'route': routes.get(p), 'carried': p in carried,
                              'reason': 'off the pole model',
-                             'remaining': list(pole) if len(pole) > 1 else []}
+                             'remaining': [p for r in runs for p in r]}
                             for p in b if p not in pole]
-                if len(pole) > 1:
-                    kept.append(pole)
+                if len(runs) > 1 or (runs and len(runs[0]) < len(pole)):
+                    cut.append({'subspace': list(pole),
+                                'runs': [list(r) for r in runs],
+                                'between': [p for p in range(pole[0], pole[-1])
+                                            if p not in pole]})
+                kept += runs
             if dropped:
                 warnings.warn(
                     f'quasiparticle Hamiltonian: orbitals '
@@ -432,10 +523,52 @@ class QuasiparticleSet:
                     f'{[d["route"] for d in dropped]})',
                     RuntimeWarning, stacklevel=3)
             self.chain.conventions.freeze_subspaces(self.chain.resolved, key, tuple(kept), {
+                'rule': 'complete linkage: every orbital of a group within '
+                        'the window of the group\'s lowest; a group is a '
+                        'contiguous energy window, cut where an orbital '
+                        'between its members is not solved in it',
+                'window_Ha': float(QP_HAMILTONIAN_WINDOW),
+                'sizes': [len(b) for b in kept],
+                'spans_Ha': [float(max(eps[p] for p in b) - min(eps[p] for p in b))
+                             for b in kept],
                 'subspaces': [list(b) for b in kept],
                 'carried': [list(b) for b in self.chain.resolved.carried_subspaces],
-                'dropped': dropped})
+                'dropped': dropped, 'cut': cut})
         return self.chain.resolved.qp_subspaces[1]
+
+    def _window_subspaces(self, key, eps):
+        """The subspaces of two or more of the set `key` before any member
+        leaves for another route: complete linkage within
+        QP_HAMILTONIAN_WINDOW on each side of the gap (`window_blocks`),
+        joined with the carried subspaces, each cut into its contiguous runs
+        (an orbital outside the set between two members cuts the group)."""
+        groups = []
+        for side in ([p for p in key if p < self.chain.nocc],
+                     [p for p in key if p >= self.chain.nocc]):
+            groups += window_blocks(eps, side, QP_HAMILTONIAN_WINDOW)
+        return [r for b in merged_blocks(
+            key, groups, self.chain.resolved.carried_subspaces)
+            for r in contiguous_runs(b) if len(r) > 1]
+
+    def _forward_pairs(self, eps, states):
+        """(i, j) positions into `states` of every pair the quasiparticle
+        Hamiltonian can ask for at this forward, in its own orientation, so
+        the set solve's frequency pass takes their contractions on the same
+        solves (`qp_set_gradient`'s wc_pairs): the frozen subspaces' pairs,
+        or before the freeze the subspaces `_frozen_qp_subspaces` cuts its
+        groups from. Members that leave a group keep the order of the rest,
+        so every pair `qp_hamiltonian` forms is one of these. None without a
+        quasiparticle Hamiltonian, or for a solve of part of the set."""
+        key = tuple(int(p) for p in self.chain.resolved.qp_set)
+        if (not self.chain.qp_hamiltonian
+                or tuple(int(p) for p in states) != key):
+            return ()
+        frozen = self.chain.resolved.qp_subspaces
+        subspaces = (frozen[1] if frozen is not None and frozen[0] == key
+                     else self._window_subspaces(key, eps))
+        pos = {p: i for i, p in enumerate(key)}
+        return [(pos[p], pos[q]) for b in subspaces
+                for a, p in enumerate(b) for q in b[a + 1:]]
 
     def qp_hamiltonian(self, mf, eps, ws, route_out, continuum=None):
         """The `QPHamiltonian` of this forward, or None where the set has no
@@ -618,7 +751,7 @@ class QuasiparticleSet:
                     f'frozen')
             order = sorted(of)
             k = [order.index(p) for p in group]
-            h, it, ok = subspace_hamiltonian(e0, amp, d, whole[np.ix_(k, k)])
+            h, it, ok = _group_solve(e0, amp, d, whole[np.ix_(k, k)])
             if not ok:
                 self._unconverged_group(group, of, e0, amp, d, h, it)
             return h, it
@@ -626,14 +759,14 @@ class QuasiparticleSet:
         fresh = seed is None
         if fresh:
             seed = e0 - np.diag(np.diag(e0)) + np.diag(roots)
-        h, it, ok = subspace_hamiltonian(e0, amp, d, seed)
+        h, it, ok = _group_solve(e0, amp, d, seed)
         if fresh and not ok:
             # the reference H frozen as it ended, so the seed is still the
             # reference geometry's convention
             self._unconverged_group(group, group, e0, amp, d, h, it)
         if fresh:
             self.chain.conventions.freeze_group_seed(view, group, h)
-            h, it, ok = subspace_hamiltonian(e0, amp, d, h)
+            h, it, ok = _group_solve(e0, amp, d, h)
         if not ok:
             self._unconverged_group(group, group, e0, amp, d, h, it)
         return h, it
@@ -649,8 +782,9 @@ class QuasiparticleSet:
             raise QuasiparticleRootLost(
                 f'the quasiparticle Hamiltonian of group {list(group)} ended '
                 f'non-finite after {it} Newton steps')
-        step = float(np.abs(subspace_hamiltonian(e0, amp, d, h, max_iter=1)[0]
-                            - h).max())
+        probe = _group_solve(e0, amp, d, h,
+                             max_iter=QP_SUBSPACE_PROBE_STEPS)[0]
+        step = float(np.abs(probe - h).max())
         self._log_qp_hamiltonian('not_self_consistent', group, of,
                                  newton_steps=it, last_step=step)
 
@@ -694,21 +828,13 @@ class QuasiparticleSet:
             return None
         no = self.chain.nocc
         nv = len(shared.eps) - no
-        out = np.zeros_like(qp_h.h)
-        for bra, ket, wt in (((n, n, 1.0),) if m is None else
-                             ((m, n, 0.5), (n, m, 0.5))):
-            xm = solution.x[:, bra].reshape(no, nv)
-            ym = solution.y[:, bra].reshape(no, nv)
-            xk = solution.x[:, ket].reshape(no, nv)
-            yk = solution.y[:, ket].reshape(no, nv)
-            out[no:, no:] += wt * (xm.T @ xk + ym.T @ yk)
-            out[:no, :no] -= wt * (xm @ xk.T + ym @ yk.T)
-        # the coupled pairs alone: an element zero by symmetry here still
-        # has a derivative along a displacement that breaks it
-        coupled = np.zeros(out.shape, bool)
-        for _, _, p, q in qp_h.pairs:
-            coupled[p, q] = coupled[q, p] = True
-        return np.where(coupled, 0.5 * (out + out.T), 0.0)
+
+        def amp(k):
+            return (solution.x[:, k].reshape(no, nv),
+                    solution.y[:, k].reshape(no, nv))
+        return qp_h.one_body_adjoint(no, [
+            (*amp(bra), *amp(ket), wt) for bra, ket, wt in
+            (((n, n, 1.0),) if m is None else ((m, n, 0.5), (n, m, 0.5)))])
 
     def qp_hamiltonian_backward(self, qp_h, h_bar, eqp_bar, eps):
         """(positions of the groups' members in the set, eps_bar, pair
@@ -809,7 +935,8 @@ class QuasiparticleSet:
                 grid.wt, states, weights, mu=mu,
                 xc_correction=xc_correction, route_out=route_out,
                 tape=tape, rows_block=rows_block, timer=self.chain.timer,
-                pairs=pairs, **self.qp_kw())
+                pairs=pairs, wc_pairs=self._forward_pairs(eps, states),
+                **self.qp_kw())
             tape = route_out.get('tape', tape)
             if whole_set:
                 self._flag_z_outside(route_out, states)
@@ -832,6 +959,83 @@ class QuasiparticleSet:
             'z': None if z_of is None else
             {int(p): float(z) for p, z in zip(states, z_of)}}
         return out, route_out
+
+    def continued_set_solve(self, mol, mf, x_mo, d_sigma, eps, xc_correction,
+                            env):
+        """((eps^QP values, None), route_out) of the set by the analytic
+        continuation (residue_route CONTINUATION_ROUTE): each member's root
+        of w = eps_p + <p|Sigma_x - v_xc|p> + Re Sigma_c(w), Sigma_c the Pade
+        continuation of the space-time Sigma_c(i.omega) screened bare on this
+        chain's factors (as `continuation_shifts`), the root of largest Z of
+        the one root finder; without Eq. (18), which the caller adds to every
+        root as on the contour. No tape and no adjoint: energies only.
+
+        Where the outside curve is still to be placed, every orbital is
+        continued in the same solve and held (`continued`), so the curve reads
+        it instead of sweeping the self-energy again.
+
+        A member whose continuation fails numerically takes the correction of
+        the nearest member that did not (`calibrate_scissor`), warned about
+        and flagged 'qp_continuation_failed'; a failed HOMO or LUMO is
+        refused, since every excitation energy stands on the gap.
+        """
+        states = np.asarray(self.chain.resolved.qp_set, int)
+        self.fix_cd_grid(states, eps)
+        norb = len(eps)
+        solved = (np.arange(norb) if self.chain.outside_scissor == 'curve'
+                  and self.chain.resolved.outside_shift is None
+                  and len(states) < norb else states)
+        with self.chain.phase('qp_continuation'):
+            xc_all = (np.asarray(xc_correction, float) if solved is states
+                      else self.chain.xc_correction(mf, solved, env))
+            factors = (d_sigma if isinstance(d_sigma, SlicedFactors)
+                       else (x_mo, d_sigma))
+            failed = {}
+            roots, z = ac_quasiparticle_roots(
+                mf, mol, self.chain.nocc, solved, factors=factors,
+                xc_diagonal=xc_all, numerics=self.chain.settings,
+                failures=failed)
+            roots, z, failed = lockstep((roots, z, failed))
+        self.chain.continued = ContinuedRoots(mf, x_mo, d_sigma, env, solved,
+                                              roots, z, failed)
+        at = {int(p): i for i, p in enumerate(solved)}
+        pos = [at[int(p)] for p in states]
+        roots, z = roots[pos].copy(), z[pos].copy()
+        xc = xc_all[pos] if solved is not states else xc_all
+        lost = [int(p) for p in states if int(p) in failed]
+        if lost:
+            frontier = {self.chain.nocc - 1, self.chain.nocc} & set(lost)
+            if frontier:
+                raise RuntimeError(
+                    f'the analytic continuation failed on the frontier '
+                    f'orbital(s) {sorted(frontier)}: '
+                    + '; '.join(failed[p] for p in sorted(frontier)))
+            good = {int(p): float(w) - float(eps[p])
+                    for p, w in zip(states, roots) if int(p) not in failed}
+            shift = calibrate_scissor(eps, self.chain.nocc, good, lost)
+            for i, p in enumerate(states):
+                if int(p) in failed:
+                    roots[i] = float(eps[p]) + shift[int(p)]
+            flag('qp_continuation_failed',
+                 f'the analytic continuation failed on quasiparticle '
+                 f'orbital(s) {lost} ({"; ".join(failed[p] for p in lost)}); '
+                 f'each takes the correction of its nearest solved member',
+                 QPContinuationFailed)
+        route_out = {'routes': {int(p): CONTINUATION_ROUTE for p in states},
+                     'roots': {int(p): float(w) for p, w in zip(states, roots)},
+                     'weights': {int(p): float(v) for p, v in zip(states, z)},
+                     'z': z, 'xc_correction': xc,
+                     'continuation_failed': lost}
+        self.freeze_qp_branch(route_out, eps, xc, states)
+        kept = [i for i, p in enumerate(states) if int(p) not in failed]
+        self._flag_z_outside({'z': z[kept], 'roots': route_out['roots'],
+                              'routes': route_out['routes']}, states[kept])
+        self.chain.conventions.qp_set_settled = True
+        self.chain.qp_diagnostics = {
+            'routes': dict(route_out['routes']),
+            'z': {int(p): float(v) for p, v in zip(states, z)},
+            'continuation_failed': lost}
+        return (roots, None), route_out
 
     def tile_kw(self):
         return {} if self.chain.tile_gb is None else {'tile_gb': self.chain.tile_gb}
@@ -950,6 +1154,9 @@ class QuasiparticleSet:
         rows) with this chain's static term. The one continuation the
         adaptive selection, its end-of-walk check and the outside curve read.
         """
+        held = self.chain.__dict__.get('continued')
+        if held is not None and held.serves(mf, x_mo, d_sigma, env, states):
+            return held.shifts(states, mf)
         with self.chain.phase(phase):
             xc = self.chain.xc_correction(mf, np.asarray(states, int), env)
             # W_solv would count the continuum again beside Eq. (18)

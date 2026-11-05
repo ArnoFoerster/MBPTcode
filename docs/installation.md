@@ -12,7 +12,7 @@ quasiparticle root scan and similar per-state loops
 same results, but those loops may oversubscribe the cores. Thread settings are
 under [Threads](parallel.md#threads).
 
-`opt_einsum` is imported at module load by `CC/cached_einsum.py`, which most of
+`opt_einsum` is imported at module load by `Base/utils/cached_einsum.py`, which most of
 the tree pulls in, so it is not optional.
 
 The restricted coupled-cluster integral path and the determinant-basis
@@ -24,13 +24,14 @@ is imported only when they are reached:
 pip install openfermion
 ```
 
-Three more optional dependencies, each imported only when the feature is
+Four more optional dependencies, each imported only when the feature is
 reached:
 
 ```bash
 pip install geometric        # geomeTRIC relaxation, in properties.optimize
 pip install cppe             # polarizable embedding from a real potential file
 pip install pyscf-dispersion # D3/D4 empirical dispersion
+pip install torch            # src/autograd_oracle: a torch reference for the GW-BSE forces, tests only
 ```
 
 `Solvers.active_space_solver.Block2DMRGSolver` additionally needs `block2`:
@@ -45,6 +46,12 @@ Error #15`) instead of raising a catchable error, while importing block2
 first works; so `block2` must be imported before `numpy` in any process that
 uses both. `KMP_DUPLICATE_LIB_OK=TRUE` suppresses the abort but can deadlock
 the DMRG sweep.
+
+The coupled-cluster active-space solver
+(`Solvers.active_space_solver.CoupledClusterSolver`) uses pyscf's CCSDT and
+CCSDTQ, which ship with recent pyscf (2.12.1 has them). Its tensor
+contractions run on `pytblis` when that is installed (`pip install pytblis`),
+else on pyscf's own einsum; the results are the same.
 
 `psutil` is optional: off Linux, where pyscf cannot read a process's resident
 size, the memory budgets of the ISDF and DF builds and of the EE-ADC Davidson

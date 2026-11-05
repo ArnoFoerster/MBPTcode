@@ -38,7 +38,7 @@ import pytest
 from pyscf import dft, gto, scf
 
 from src.Base.numerics.numerics import numerics_of
-from src.Base.numerics.constants import (ISDF_GRADIENT_FLOOR, ISDF_ROW_FORCE_ENERGY_TOL,
+from src.Base.numerics.constants import (ISDF_ROW_FORCE_ENERGY_TOL,
                                          SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL,
                                          SCF_TIGHT_CONV_TOL)
@@ -53,8 +53,8 @@ from src.gradients.isdf_derivatives import product_pairs
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.excitations import SurfaceSpec, surface_of
-from tests.isdf_test_grid import g1, g1_kw, g1_numerics
-from tests.pins import assert_same
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_kw, g1_numerics
+from tests.pins import assert_same, isdf_gradient_bar
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 MOLECULES = {
@@ -73,7 +73,7 @@ COMPONENTS = {'ethylene': ((2, 1), (0, 2), (3, 2)),
               'formaldehyde': ((0, 2), (1, 2), (2, 1))}
 #: (step, bar): the chain's routes at h = 1e-3 on the floor; SOP ethylene at
 #: the pole-basis noise of its energy.
-STEP, BAR = 1e-3, ISDF_GRADIENT_FLOOR
+STEP, BAR = 1e-3, isdf_gradient_bar()
 SOP_NOISY = {'ethylene': (4e-3, 1e-7)}
 SIZES = (2, 3, 8)
 #: The row fit's tile edge: ethylene's grid in 14 tiles, formaldehyde's in 10.
@@ -140,7 +140,7 @@ class Route:
 
 def drpa(mol, **kw):
     chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol),
-                                numerics=numerics_of(g1_kw(mol, kw)))
+                                numerics=numerics_of(dict(g1_kw(mol, kw), test_set=DUCHEMIN_BLASE_FIT)))
     return Route(chain, lambda m: chain.energy(m)[0],
                  lambda: chain.total_gradient()[0])
 
@@ -148,7 +148,7 @@ def drpa(mol, **kw):
 def bse(mol, **layout):
     chain = ExcitedStateChain(
         mol, chain_scf, spin='singlet', mf=chain_scf(mol),
-        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': BSE_CONV_TOL})))
+        numerics=g1_numerics(mol, numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': BSE_CONV_TOL})))
     return Route(chain, chain.excitation,
                  lambda: chain.excitation_gradient()[0])
 
@@ -157,7 +157,7 @@ def sop(mol, **kw):
     spec = SurfaceSpec(GroundState('dft', 'hf'), environment=None,
                        chi0='space-time', residues='sop', solver='davidson',
                        factorization='isdf', qp_states=QPStates(kind='frontier'),
-                       numerics=numerics_of(dict(kw, bse_adjoint='grid')))
+                       numerics=numerics_of(dict(kw, bse_adjoint='grid', test_set=DUCHEMIN_BLASE_FIT)))
     chain = surface_of(spec, Excitation('singlet', root=1, kernel='bse'), mol,
                        sop_scf)
     return Route(chain, chain.excitation,
@@ -214,7 +214,7 @@ def test_the_chain_force_follows_its_energy(route, name):
         lines.append(f'rows at {size}: {np.array2string(miss, precision=2)}, '
                      f'serial {apart:.1e}')
         assert np.abs(miss).max() < bar, lines
-        assert apart < ISDF_GRADIENT_FLOOR, lines
+        assert apart < isdf_gradient_bar(), lines
     print(f'\n{route} {name}, analytic - FD (h {h:g}): ' + '; '.join(lines))
 
 
@@ -277,7 +277,7 @@ def test_the_isdf_k_mean_field_force_follows_its_energy(name, xc):
         lines.append(f'{size} ranks {np.array2string(miss, precision=2)}, '
                      f'serial {apart:.1e}')
         assert np.abs(miss).max() < ISDF_ROW_FORCE_ENERGY_TOL, lines
-        assert apart < ISDF_GRADIENT_FLOOR, lines
+        assert apart < isdf_gradient_bar(), lines
     print(f'\n{name}/{xc} ISDF-K mean field, analytic - FD: '
           + '; '.join(lines))
 

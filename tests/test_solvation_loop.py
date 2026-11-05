@@ -44,9 +44,8 @@ from src.environments.reaction_field import ContinuumField
 from src.environments.solvent_screening import SolventScreening
 from src.gradients.state_models import HFState, MP2State
 from src.gradients.adc.ee_state_model import ADC2State
-from tests.adc_common import (AUX, ROOT_CONV_TOL, SCF_TOL_TIGHT,
-                              SOLVATION_TIGHT, WATER_C2V, check, df_rhf,
-                              five_point)
+from tests.adc_common import (ADC_NUMERICS, AUX, SCF_TOL_TIGHT, SOLVATION_TIGHT, WATER_C2V, check,
+                              df_rhf, five_point)
 
 
 def make_scf(mol, grad=1e-9):
@@ -64,16 +63,17 @@ def setup(eps_static=None, eps_inf=None):
 
 
 def models(mol, field, tight=False):
-    """Factories of fresh HF, MP2 and ADC(2) state models; tight converges
+    """Factories of fresh HF, MP2 and ADC(2) state models, on the loop's
+    Numerics (SOLVATION_TIGHT's; tight: ADC_NUMERICS); tight converges
     the SCF to a gradient of 1e-12 and the roots to 1e-12 (finite fields:
     omega is not variational in the orbitals, so their error enters it
     linearly)."""
     hf = lambda: HFState(mol, (lambda m: make_scf(m, 1e-12)) if tight else make_scf)
-    mp2 = lambda: MP2State(hf(), 1, AUX)
+    numerics = ADC_NUMERICS if tight else SOLVATION_TIGHT['numerics']
+    mp2 = lambda: MP2State(hf(), 1, AUX, numerics=numerics)
     adc = lambda spin: ADC2State(mp2(), spin, 0, 3,
                                  field.transition_environment()
-                                 if spin == 'singlet' else None,
-                                 conv_tol=ROOT_CONV_TOL if tight else 1e-8)
+                                 if spin == 'singlet' else None)
     return hf, mp2, adc
 
 

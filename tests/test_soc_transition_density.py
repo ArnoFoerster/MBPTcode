@@ -78,7 +78,8 @@ def formaldehyde_bse():
               W_aux=lr.static_screening_aux(nocc))
     singlet = solve_casida_davidson(lr, nocc, spin='singlet', **kw)
     triplet = solve_casida_davidson(lr, nocc, spin='triplet', **kw)
-    return soc_operator_mo(mf, mol), nocc, singlet, triplet
+    return (soc_operator_mo(mf, mol, two_electron='somf', one_electron='x2c'),
+            nocc, singlet, triplet)
 
 
 def test_the_local_form_is_the_modules_own(formaldehyde_bse):

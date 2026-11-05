@@ -38,11 +38,12 @@ from src.properties.vibronic import (adiabatic_gap, align_to,
                                      relax_state,
                                      reorganization_from_huang_rhys)
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
 CH2O = ('C 0.0000 0.0000 -0.5290; O 0.0000 0.0000 0.6746; '
         'H 0.0000 0.9376 -1.1188; H 0.0000 -0.9376 -1.1188')
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 
 
 class HarmonicToySurface(PotentialEnergySurface):
@@ -216,7 +217,8 @@ def test_rate_marcus_levich_jortner_against_a_hand_evaluation():
     k_B in the wrong unit and an atomic-time conversion applied twice.
     """
     k = marcus_levich_jortner_rate(coupling=1e-6, delta_e=-0.02, lambda_m=0.01,
-                                   s_eff=1.0, omega_eff=0.005, temperature=300.0)
+                                   s_eff=1.0, omega_eff=0.005, temperature=300.0,
+                                   n_max=50)
     assert k == pytest.approx(1.0313579250e7, rel=1e-8)
 
 
@@ -224,13 +226,13 @@ def test_rate_reduces_to_marcus_when_the_quantum_mode_vanishes():
     """S -> 0 leaves one channel, and that channel IS the Marcus expression."""
     args = dict(coupling=2.5e-6, delta_e=-0.015, temperature=298.15)
     mlj = marcus_levich_jortner_rate(lambda_m=0.012, s_eff=0.0, omega_eff=0.006,
-                                     **args)
+                                     n_max=50, **args)
     assert mlj == pytest.approx(marcus_rate(lambda_total=0.012, **args),
                                 rel=1e-12)
     # A small but nonzero S must not reproduce it: the quantum channels are a
     # real physical effect, not a numerical correction.
     near = marcus_levich_jortner_rate(lambda_m=0.012, s_eff=1e-3,
-                                      omega_eff=0.006, **args)
+                                      omega_eff=0.006, n_max=50, **args)
     assert near != pytest.approx(mlj, rel=1e-9)
     assert near == pytest.approx(mlj, rel=1e-2)
 
@@ -239,7 +241,7 @@ def test_rate_is_quadratic_in_the_coupling():
     """k scales with |V|^2, which is what makes a factor of three in a spin-orbit
     element an order of magnitude in the rate."""
     args = dict(delta_e=0.0008, lambda_m=0.01, s_eff=0.8, omega_eff=0.005,
-                temperature=300.0)
+                temperature=300.0, n_max=50)
     base = marcus_levich_jortner_rate(coupling=1e-6, **args)
     for scale in (2.0, 5.0, 0.5):
         assert marcus_levich_jortner_rate(coupling=scale * 1e-6,

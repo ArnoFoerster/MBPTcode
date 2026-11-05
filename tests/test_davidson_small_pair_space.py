@@ -24,16 +24,15 @@ today's operator. `test_the_pair_space_limit_names_itself_when_not_completed`
 is the gate that the reproduction still stalls: it fails with "DID NOT WARN"
 once it does not.
 
-The stall needs real_eig's twenty corrections a cycle. The Davidson now
-corrects only its tracked Ritz pairs (`davidson._davidson_root`), and on the
-reproduction it no longer runs out of pairs at any of 2 to 15 roots, every
-root on the dense one to 2e-13 Ha without the completion (workstation,
-measured). The completion stays for a solve whose tracked pairs outnumber
+The stall needs real_eig's twenty corrections a cycle. The Davidson corrects
+only its tracked Ritz pairs (`davidson._davidson_root`), and on the
+reproduction it does not run out of pairs at any of 2 to 15 roots, every root
+on the dense one to 2e-13 Ha without the completion. The completion stays for a solve whose tracked pairs outnumber
 the pairs left; the stall gates reach it by handing the loop real_eig's
 width (`real_eig_width`), the path the completion was written for.
 
 The stall is the iteration's path, not a guarantee of the solver: the last
-cycles' partner test is degenerate (|w| = 1 to rounding), so under a cluster's MKL a
+cycles' partner test is degenerate (|w| = 1 to rounding), so under another MKL a
 relative 1e-16 move of the operator's inputs decides whether it happens
 (measured: 15 of 30 neighbours stalled at one noise size). The
 solver guarantees the roots, to the tolerance and to the dense ones, by either

@@ -36,7 +36,8 @@
   photophysics command lines
 - [Density matrices](methods/density-matrices.md) — MPn, GW and CC correlated
   1-RDMs
-- [Coupled cluster](methods/coupled-cluster.md) — CCSDT and EOM-CCSDT
+- [Coupled cluster](methods/coupled-cluster.md) — CCSDT and EOM-CCSDT, and
+  CCSDT/CCSDTQ as a solver for large active spaces
 - [Finite temperature](methods/finite-temperature.md) — Matsubara-axis grids
 - [Periodic systems](methods/periodic.md) — k-point RPA, BSE and GW for
   crystals, metals and slabs

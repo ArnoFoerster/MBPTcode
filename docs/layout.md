@@ -5,8 +5,9 @@ layers below it, never from a layer above:
 
 | layer | packages | what it holds |
 |---|---|---|
+| generators | `src/CodeGeneration` | the pdaggerq code generators: they may import any layer, and no runtime module imports them |
 | physics | `src/photophysics` | composite runs of a molecule: rates, the staged TADF run, solvated spectra |
-| properties | `src/properties` | geometry optimization, vibrations, couplings, band shapes: anything computed from a potential-energy surface |
+| properties | `src/properties`, `src/autograd_oracle` | geometry optimization, vibrations, couplings, band shapes: anything computed from a potential-energy surface; the torch reference for the GW-BSE forces |
 | gradients | `src/gradients` and its `rpa/`, `gwbse/`, `adc/` | the surfaces and their analytic forces |
 | electronic structure | `src/SingleReference`, `src/MultiReference`, `src/fragments` | the methods: ADC, CC, GW, BSE, linear response, ... |
 | environments | `src/environments` | solvent continua, point charges, polarizable sites |
@@ -26,19 +27,32 @@ src/Base/                      the foundation
                                (grids, quadratures, solver settings);
                                constants.py: every named number
     pyscf/                     pyscf_interface.py (integrals, the mean field's
-                               pieces), scf_convergence.py, dispersion.py
+                               pieces), spin_orbit_mean_field.py (the
+                               two-electron spin-orbit mean-field operator),
+                               scf_convergence.py, dispersion.py
                                (empirical D3/D4), cphf.py (the CPHF /
                                Z-vector solve of the relaxed densities; the
                                gradient layer's multiplier solve is
                                gradients/multipliers.py)
     factorization/             separable_ri.py (ISDF / separable RI of the
                                ERIs, with its radii table in data/),
+                               ao_product_fit.py (the fit on every AO
+                               product and its pivoted points: LS-THC of
+                               Parrish et al. with Matthews' selection,
+                               used as the ISDF fit),
                                isdf_jk.py (ISDF Coulomb and exchange for the
                                SCF), the distributed DF and ISDF builds,
-                               sliced_factors.py
+                               sliced_factors.py, shell_runs.py (the
+                               bounded runs of consecutive shells every
+                               blocked integral pass is cut into),
+                               test_sets.py (the replicated and the
+                               row fit of each ISDF test set, chosen by
+                               name)
     geometry/                  displaced geometries, body frames, Kabsch
     basis/                     CP2K's aug-MOLOPT orbital and RI sets, read at
-                               run time (see basis-sets.md)
+                               run time (see basis-sets.md); the auxiliary
+                               pairing rules and the per-element and per-atom
+                               basis map
     utils/grids/               minimax and Gauss-Legendre imaginary-axis
                                grids, the time-frequency grid object,
                                finite-temperature (IR) grids, analytic
@@ -47,6 +61,8 @@ src/Base/                      the foundation
                                solvers, the distributed ELPA eigensolve
     utils/parallel/            the MPI region (mpi_grid.py), thread pools,
                                memory budgets
+    utils/record_compat.py     every rule for reading a record an earlier
+                               form of the code wrote
     utils/record_io.py         JSON records and checkpoints, the code id a
                                record carries
     utils/timing.py            wall-clock seconds of a named stage,
@@ -65,8 +81,10 @@ src/Base/                      the foundation
 src/Solvers/                   the quasiparticle root finder (one for every
                                route), the symmetric Davidson eigensolver,
                                and the active-space solvers (FCI,
-                               determinant basis, DMRG)
-src/environments/              solvent_screening.py (PCM reaction field and
+                               determinant basis, DMRG, coupled cluster)
+src/environments/              medium.py (a medium by name or by eps and
+                               n^2, and the cavity conventions),
+                               solvent_screening.py (PCM reaction field and
                                its adjoint), pcm_factorization.py and
                                pcm_derivatives.py (the cavity's cached solve
                                and nuclear derivatives), environment.py
@@ -103,8 +121,13 @@ src/SingleReference/
 src/MultiReference/QDPT/       active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them
-src/fragments/                 fragment-localized orbitals, the basis of the
-                               fragment-partitioned BSE
+src/fragments/                 fragment-localized orbitals and the fragment
+                               partition of any Hermitian singles operator
+                               (GW-BSE, ADC(2): diabats, A_eff(Omega_0)),
+                               transfer.py (site-site couplings, triplet
+                               transfer) and tta_coupling.py (the
+                               charge-transfer-mediated triplet-pair
+                               coupling of triplet-triplet annihilation)
 src/gradients/                 the method-neutral core: surface.py (the
                                PotentialEnergySurface base class and the
                                ingredients a property may ask of a surface),
@@ -112,7 +135,9 @@ src/gradients/                 the method-neutral core: surface.py (the
                                derivative integrals (one-electron, DF, ISDF),
                                state and surface identity, state models and
                                the solvated surface, the force of a
-                               density-fitted correlated energy
+                               density-fitted correlated energy, the
+                               mean-field orbital couplings and the
+                               fragment-diabatic gradient Lagrangian
     rpa/                       the dRPA ground state and the RPA screening
                                chain GW-BSE is built on
     gwbse/                     GW-BSE forces: the excited-state chain, the
@@ -121,19 +146,34 @@ src/gradients/                 the method-neutral core: surface.py (the
                                couplings, the fragment BSE, and
                                surface_factory.py, the one entry point
                                (potential_energy_surface)
-    adc/                       ADC(2) forces and the ADC(2) state model
+    adc/                       ADC(2) forces, the ADC(2) state model and the
+                               ADC(2) spectrum of one geometry
 src/properties/                optimize.py (walks, refreeze), vibronic.py,
                                hessian.py, mode_hessian.py (force constants
                                along chosen normal modes), curvilinear.py
-                               (displacements in valence internal
-                               coordinates, for Huang-Rhys factors),
-                               conformers.py, spin_orbit.py,
+                               (displacements and the Duschinsky
+                               matrix in valence internal coordinates),
+                               conformers.py, ring_conformers.py,
+                               conformer_weights.py, torsion_scan.py,
+                               spin_orbit.py,
                                spin_vibronic.py, nonadiabatic.py,
                                characters.py, band_shape.py,
-                               franck_condon.py, excitations.py (vertical
-                               and adiabatic energies from one SurfaceSpec)
+                               duschinsky.py (bands with Duschinsky
+                               rotation and frequency change from two
+                               supplied Hessians), herzberg_teller.py
+                               (dmu/dq intensity), franck_condon.py,
+                               transition_moments.py, excitations.py (vertical
+                               and adiabatic energies from one SurfaceSpec),
+                               state_moments.py (dipoles between two
+                               excited states)
 src/photophysics/              rates.py (golden-rule and Marcus rates, the
-                               rate table) and the composite runs: the
+                               rate table), rate_chain.py (ISC and RISC
+                               of any method's minima on the full model and
+                               each of its ablations), forster.py (Förster
+                               transfer and annihilation rates and radii),
+                               transfer_rates.py (rates of triplet transfer
+                               and triplet-triplet annihilation between
+                               molecules) and the composite runs: the
                                staged TADF run (`python -m src.photophysics`)
                                and the gas and continuum absorption, emission
                                and adiabatic energies (`python -m

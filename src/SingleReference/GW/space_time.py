@@ -37,21 +37,22 @@ from dataclasses import replace
 import numpy as np
 from pyscf import df as pyscf_df
 
+from src.Base.factorization.test_sets import is_ao_products, replicated_fit, row_fit
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK,
-                                         ISDF_TILE_GB)
+from src.Base.numerics.constants import (FIT_CHOLESKY_BLOCK, ISDF_DEFAULT_TEST_SET,
+                                         ISDF_DUCHEMIN_BLASE, ISDF_TILE_GB)
 from src.Base.numerics.numerics import numerics_or_default, requested
 from src.Base.environment_seam import environment_of
 from pyscf import scf as pyscf_scf
 
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
-                                            require_closed_shell_or_unrestricted,
-                                            spin_index, occupied_count)
-from src.Base.factorization.separable_ri import (aux_metric_sqrt,
-                                                 build_separable_ri, fit_M_streaming,
+                                            require_closed_shell_or_unrestricted, spin_index)
+from src.Base.orbital_spaces import occupied_count
+from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  molecular_points_covariant,
                                                  refuse_unrepresented_factors,
                                                  resolve_grid)
+from src.Base.factorization.ao_product_fit import pivoted_points, placed
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
@@ -65,7 +66,8 @@ from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid, COSINE_WT,
 from src.Base.orbital_spaces import particle_hole_window, transition_range
 from src.SingleReference.GW.imaginary_time import (
     SigmaPairs, self_energy_matrix_imaginary_time, self_energy_diagonal_rows,
-    sigma_ao_to_mo_diagonal, screening_frequency_grid,
+    self_energy_diagonal_tiles,
+    sigma_ao_to_mo_diagonal, sigma_factor_tiles, screening_frequency_grid,
     screened_interaction_rows, screened_interaction_tau_blocked,
     minimax_points_for_gw, minimax_points_for_gw_unrestricted,
     unrestricted_fit_ranges, unrestricted_screening_frequency_grid)
@@ -75,7 +77,8 @@ from src.SingleReference.GW.reaction_field import (
     shift_after_solve)
 from src.SingleReference.LinearResponse.space_time import (
     chi0_frequency_rows, chi0_imaginary_frequency, dyson_screening,
-    minimax_points_for_bse, spin_summed, split_branches, static_screening_grid,
+    grid_factor_tiles, minimax_points_for_bse, spin_summed,
+    static_screening_grid,
     static_screening_matrix, static_screening_matrix_unrestricted)
 
 
@@ -122,7 +125,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      list over nbas x auxnbas. See `build_D_F`, which carries
                      the measurement; size it from the node.
     comm:            spreads the fit's three-centre pass over ranks
-                     (`build_separable_ri`); `current_comm()` when None, serial
+                     (`test_sets.replicated_fit`); `current_comm()` when None, serial
                      without either. The result is rank 0's on every rank: at
                      entry the mean-field arrays and the placed points are
                      locksteps of rank 0's (each rank converged its own SCF,
@@ -138,7 +141,7 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      `fit_integrals`, `fit_integrals_reduce`, `fit_gram`,
                      `fit_cholesky`, `fit_solve`, `fit_blocks` and
                      `fit_blocks_total` come from `fit_M_streaming` through
-                     `build_separable_ri`; `fit_assembly` is that function's X
+                     `test_sets.replicated_fit`; `fit_assembly` is that function's X
                      tail plus this function's own (the dressed metric, the
                      MO/AO projections, replication), in one key; `fit_total`
                      is this call, start to return. The radius lookup has no
@@ -169,6 +172,15 @@ def separable_factors(mf, mol, auxbasis=None, radii=None, counts=None,
                      `DistributedISDFJK.fit_tiles`), read instead of fitting
                      where its points and settings are this call's, ignored
                      otherwise; `timings['fit_reused_tiles']` says it was read.
+
+    `numerics.isdf.test_set` 'ao_products', what an unnamed one means,
+    fits every AO product in the Coulomb metric (`ao_product_fit`; with
+    fit='rows' `ao_product_fit_rows`) on `numerics.isdf.pivot_points`
+    (else `ao_product_fit.pivot_count`) points pivoted from the grid at
+    this geometry (`ao_product_fit.pivoted_points`); 'duchemin_blase'
+    places the grid as it is:
+    a selection made per call, for energies at one geometry; a gradient
+    chain freezes its selection (`FrozenFactorization`).
     """
     return _separable_factors(
         mf, mol, True, auxbasis=auxbasis, radii=radii, counts=counts,
@@ -199,6 +211,10 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
     sliced, fit_block = bool(req['sliced']), req['fit_block']
     if fit not in ('replicated', 'rows'):
         raise ValueError(f"fit={fit!r}: 'replicated' or 'rows'")
+    isdf = numerics_or_default(numerics).isdf
+    # a named grid without a test set is the AO-product fit
+    test_set = isdf.test_set or ISDF_DEFAULT_TEST_SET
+    ao_products = is_ao_products(test_set)
     _t0 = _time.time()
     comm = current_comm() if comm is None else comm
     auxbasis = req['auxbasis'] or paired_auxbasis(mol.basis)
@@ -212,7 +228,14 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
         where='separable_factors')
 
     _t = _time.time()
-    coords = molecular_points_covariant(mol, radii, origin_by_element=origins)
+    if ao_products:
+        frames = atomic_frames(mol)[0]
+        pts_local, _, _ = pivoted_points(mol, radii, origins, frames,
+                                         isdf.pivot_points, numerics, comm)
+        coords = placed(mol, pts_local, frames)
+    else:
+        coords = molecular_points_covariant(mol, radii,
+                                            origin_by_element=origins)
     if timings is not None:
         timings['fit_points'] = _time.time() - _t
     if comm is not None and comm.Get_size() > 1:
@@ -223,12 +246,13 @@ def _separable_factors(mf, mol, refuse, auxbasis=None, radii=None,
             (mf.mo_energy, mf.mo_coeff, mf.mo_occ, coords), comm, check=True)
     if fit == 'rows':
         out = _row_factors(mf, mol, auxmol, coords, numerics, comm, timings,
-                           fit_block, _t0, fit_tiles)
+                           fit_block, _t0, fit_tiles, test_set)
         return _represented(out, mf, mol, auxmol, comm) if refuse else out
     # Z = M^T V M is never read here: D = M^T V^1/2 below carries the metric.
-    X, _, M = build_separable_ri(mol, coords, auxmol=auxmol,
-                                 numerics=numerics, comm=comm, timings=timings,
-                                 with_Z=False)
+    # the AO-product projection divided over the ranks by point tiles, the
+    # solve by every rank; `replicate_factors` leaves rank 0's below
+    X, M = replicated_fit(test_set, mol, auxmol, coords, numerics, comm,
+                          timings=timings)
 
     # Symmetric V^1/2 gauge on the auxiliary index -- the one Sigma expects,
     # dressed by the environment attached to the mean field (v -> v + vtilde).
@@ -272,22 +296,21 @@ def _represented(factors, mf, mol, auxmol, comm, root=None):
 
 
 def _row_factors(mf, mol, auxmol, coords, numerics, comm, timings, fit_block,
-                 t0, fit_tiles=None):
-    """`separable_factors`' fit='rows' tail: the row-distributed fit (or the
-    tiles handed in of it), then X_mo, D = M^T V^1/2 and X_ao on this rank's
-    contiguous rows, each read in the fit's own tiles; `SlicedFactors` over
-    more than one rank."""
-    row_fit = fit_M_streaming(mol, auxmol, coords,
-                              numerics=numerics, comm=comm, timings=timings,
-                              fit='rows', block=fit_block, tiles=fit_tiles)
+                 t0, fit_tiles=None, test_set=ISDF_DUCHEMIN_BLASE):
+    """`separable_factors`' fit='rows' tail: the row-distributed fit of
+    `test_set` (`test_sets.row_fit`, or the tiles handed in of it), then
+    X_mo, D = M^T V^1/2 and X_ao on this rank's contiguous rows, each read
+    in the fit's own tiles; `SlicedFactors` over more than one rank."""
+    fit = row_fit(test_set, mol, auxmol, coords, numerics=numerics, comm=comm,
+                  block=fit_block, tiles=fit_tiles, timings=timings)
     _t = _time.time()
     many = comm is not None and comm.Get_size() > 1
-    X_mo = row_fit.mo_rows(mf.mo_coeff)
+    X_mo = fit.mo_rows(mf.mo_coeff)
     # the metric root is formed on rank 0 alone and streamed in slabs
-    D = row_fit.metric_root_rows(auxmol, environment_of(mf))
-    X_ao = row_fit.ao_rows()
+    D = fit.metric_root_rows(auxmol, environment_of(mf))
+    X_ao = fit.ao_rows()
     out = (SlicedFactors.from_rows(X_mo, D, X_ao, coords, comm,
-                                   fit_held=row_fit.held)
+                                   fit_held=fit.held)
            if many else (X_mo, D, X_ao, coords))
     out = replicate_factors(out, comm)
     if timings is not None:
@@ -297,15 +320,17 @@ def _row_factors(mf, mol, auxmol, coords, numerics, comm, timings, fit_block,
 
 
 def _sliced_solve_factors(factors, comm):
-    """(X_mo, D, X_ao, coords) as one quasiparticle solve reads `SlicedFactors`.
+    """(X_mo, D, X_ao, coords) as the frequency-blocked solve
+    (`_qp_blocked`) reads `SlicedFactors`.
 
-    D is read whole by both sweeps, chi0 and the self-energy, so it is
-    gathered once here and held for the solve. The collocations stay sliced
-    and are handed on as the factors themselves: the chi0 sweep gathers its
-    two branches (`split_branches`), the self-energy sweep X_ao
-    (`_sigma_mo_diagonal`), each once and each gone when its sweep returns.
-    A continuum's Eq. (18) reads the orbital densities D^T X_mo^2 off the
-    rows (`_density_factor`), gathering nothing.
+    Its tau-split sweeps read D whole, so it is gathered once here and held
+    for the solve. The collocations stay sliced and are handed on as the
+    factors themselves: the chi0 sweep gathers its two branches
+    (`split_branches`), the self-energy sweep X_ao (`_sigma_mo_diagonal`),
+    each once and each gone when its sweep returns. A continuum's Eq. (18)
+    reads the orbital densities D^T X_mo^2 off the rows (`_density_factor`),
+    gathering nothing. The in-core route over ranks gathers none of them
+    (`_qp_grid_rows`).
     """
     factors.require(comm)
     return factors, factors.gather('D'), factors, factors.coords
@@ -405,15 +430,16 @@ def _dyson_owned(chi0, transform=None):
 
 
 def _static_screening(X_mo, D, eps, nocc, extras, comm=None,
-                      tile_memory_gb=ISDF_TILE_GB, branches=None):
+                      tile_memory_gb=ISDF_TILE_GB, tiles=None):
     """W(omega = 0), dressed, on the route's factors: `static_screening_matrix`
     on `static_screening_grid`, the one build the BSE kernel and the chain's
     reaction field read; recorded in `extras` with its point count. A route
-    that has split the collocation hands its `branches` and tile budget."""
+    that has cut the factors into grid tiles hands them (`tiles`) and its
+    tile budget."""
     grid = static_screening_grid(eps, nocc)
     w_static = static_screening_matrix(X_mo, D, eps, nocc, grid, comm=comm,
                                        tile_memory_gb=tile_memory_gb,
-                                       branches=branches)
+                                       tiles=tiles)
     if extras is not None:
         extras['w_static'] = w_static
         extras['w_static_ntau'] = grid.ntau
@@ -425,28 +451,37 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
                   extras, ntau, comm, transform, dm_correction,
                   greedy, timings, screen_r_cut, sigma_x, eps_anchor,
                   sigma_x_matrix, tile_gb, xc_diagonal=None, with_z=False,
-                  failures=None):
+                  failures=None, numerics=None):
     """The in-core route over more than one rank, split over grid rows as
-    well as tau points, so that it divides past ntau ranks and no rank holds a
-    whole (M, M) block, a whole stack of (naux, naux) slices or the AO
-    self-energy:
+    well as tau points, so that it divides past ntau ranks and no rank holds
+    the factors, a whole (M, M) block, a whole stack of (naux, naux) slices
+    or the AO self-energy:
 
+        X_mo, D      this rank's fixed grid tiles  `grid_factor_tiles`
         chi0(i.nu)   this rank's auxiliary rows    `chi0_frequency_rows`
         W(i.nu)      whole on its owner alone      `_dyson_owned`
+        W(0)         every rank, tiles in order    `static_screening_matrix`
         Wt(i.tau)    this rank's auxiliary rows    `screened_interaction_rows`
-        Sigma_pp     whole on every rank           `self_energy_diagonal_rows`
+        X_ao C, D T  this rank's fixed grid tiles  `sigma_factor_tiles`
+        Sigma_pp     whole on every rank           `self_energy_diagonal_tiles`
 
-    Two sums are reduced and re-associate over the ranks: proj(tau) over the
-    grid-row tiles and the self-energy's branch sums over its block pairs.
-    Every other step is an output partition: chi0's rows the serial update of
-    their proj rows, each W the serial inversion of its chi0, Wt's rows one
-    call shape at every rank count, each root the serial solve of its Sigma.
+    Every M^2 sweep holds its p tiles and streams the q tiles past from their
+    owners, so the factors are whole on no rank. One sum re-associates over
+    the ranks: proj(tau) of the GW chi0, reduce-scattered over the ranks'
+    tiles. W(0) and Sigma add their tiles in a fixed order and are the same
+    bits at every rank count; every other step is an output partition: chi0's
+    rows the serial update of their proj rows, each W the serial inversion
+    of its chi0, Wt's rows one call shape at every rank count, each root the
+    serial solve of its Sigma.
+
+    X_mo, D and X_ao are whole arrays or the same `SlicedFactors`; the
+    tiles' rows and a pass's budget are `numerics.layout.tile_gb`'s.
     """
     _t = _time.time()
-    # X_mo's two branches gathered once, for chi0 and W(0) alike
-    branches = split_branches(X_mo, eps, nocc, mu)[:2]
+    tiles = grid_factor_tiles(X_mo, D, eps, nocc, mu, comm, numerics)
+    naux = tiles.naux
     chi0 = chi0_frequency_rows(X_mo, D, eps, nocc, grid, mu=mu, comm=comm,
-                               tile_memory_gb=tile_gb, branches=branches)
+                               tile_memory_gb=tile_gb, tiles=tiles)
     if timings is not None:
         timings['t_chi0'] = _time.time() - _t
         timings['nranks'] = comm.Get_size()
@@ -455,13 +490,13 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
     W_minus_I = _dyson_owned(chi0, transform)
     del chi0
     w_static = (_static_screening(X_mo, D, eps, nocc, extras, comm,
-                                  tile_memory_gb=tile_gb, branches=branches)
+                                  tile_memory_gb=tile_gb, tiles=tiles)
                 if want_static else None)
-    del branches
+    del tiles
     rW, _ = sigma_fit_ranges(eps, nocc, mu=mu)
     Ctw, _ = minimax_transform_weights(COSINE_WT, tau_points, freq_points,
                                        *rW, warn=False)
-    Wt = screened_interaction_rows(W_minus_I, Ctw, D.shape[1], comm)
+    Wt = screened_interaction_rows(W_minus_I, Ctw, naux, comm)
     if timings is not None:
         timings['dyson_frequencies'] = len(W_minus_I)
     del W_minus_I
@@ -469,22 +504,20 @@ def _qp_grid_rows(X_mo, D, X_ao, coords, mf, mol, eps, nocc, mu, grid,
     if transform is not None:
         reaction_field = separable_quasiparticle_shift(
             X_mo, _density_factor(X_mo, D), w_static, transform, nocc)
-        D = _bare_gauge(X_mo, D, transform)
     if timings is not None:
         timings['t_dyson'] = _time.time() - _t
 
     _t = _time.time()
-    if isinstance(X_ao, SlicedFactors):
-        X_ao = X_ao.gather('X_ao')
-    elif X_ao is None:
-        X_ao = _ao_collocation(X_mo, mf)
-    pairs = SigmaPairs(X_ao, D, mf.mo_coeff, eps, nocc,
-                       np.atleast_1d(p_state), mu, block_memory_gb=tile_gb,
-                       coords=coords, screen_r_cut=screen_r_cut)
-    del X_ao
-    sigma = self_energy_diagonal_rows(pairs, Wt, eps, nocc, tau_points,
-                                      pade_freq, mu=mu)
-    del pairs, Wt
+    sliced = isinstance(X_mo, SlicedFactors)
+    tiled, far = sigma_factor_tiles(
+        X_mo if sliced else X_ao, None if sliced else D, mf.mo_coeff, eps,
+        nocc, mu, comm, transform, coords, screen_r_cut,
+        X_mo=X_mo, ovlp=mf.get_ovlp() if X_ao is None else None,
+        numerics=numerics)
+    sigma = self_energy_diagonal_tiles(tiled, Wt, eps, nocc,
+                                       np.atleast_1d(p_state), tau_points,
+                                       pade_freq, mu=mu, far=far)
+    del tiled, Wt
     if timings is not None:
         timings['t_sigma'] = _time.time() - _t
 
@@ -662,24 +695,28 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                  built here when `factors` is not given; one is required.
     factors:     pre-built (X_mo, D), to reuse the factorization across calls,
                  or `SlicedFactors` from `separable_factors(sliced=True)` over
-                 this call's ranks: D is gathered whole once for the solve,
-                 X_o/X_v once for the chi0 sweep and X_ao once for the
-                 self-energy sweep, each dropped when its sweep returns, so
-                 between the sweeps a rank holds its grid rows alone. The
-                 gathered arrays are the replicated ones, so the energies are
-                 bitwise those of the replicated factors.
+                 this call's ranks: the in-core route reads them through
+                 fixed grid tiles (`_qp_grid_rows`) and gathers none of them,
+                 so a rank holds its grid rows and tiles alone; the
+                 frequency-blocked route gathers D once for the solve, X_o/X_v
+                 once for the chi0 sweep and X_ao once for the self-energy
+                 sweep. Rows and tiles are the replicated arrays', so the
+                 energies are bitwise those of the replicated factors at the
+                 same rank count.
     freq_block:  build W blockwise in frequency, so chi0 is never formed.
     scratch_dir: additionally cache the tau projection on disk.
     distribute:  over more than one rank the in-core route is split over
-                 grid rows as well as tau points (`_qp_grid_rows`): the
-                 (tau, tile) and (tau, block pair) items of both M^2 sweeps
-                 go over the ranks, so the stage divides past ntau ranks;
-                 chi0 and Wt(tau) are held by auxiliary rows, each
+                 grid tiles as well as tau points (`_qp_grid_rows`): the
+                 (tau, tile) items of both M^2 sweeps go over the ranks, so
+                 the stage divides past ntau ranks; the factors are held in
+                 fixed grid tiles, chi0 and Wt(tau) by auxiliary rows, each
                  frequency's W whole on its owner alone, Sigma as the
-                 states' diagonal, with no whole (M, M) block, stack of
-                 (naux, naux) slices or AO self-energy on any rank. proj(tau)
-                 and the self-energy's branch sums are reduced and
-                 re-associate; every other step is an output partition. The
+                 states' diagonal, with no whole factor, (M, M) block, stack
+                 of (naux, naux) slices or AO self-energy on any rank.
+                 proj(tau) is reduced and re-associates; W(0) and the
+                 self-energy's branch sums are added in tile order, the same
+                 bits at every rank count; every other step is an output
+                 partition. The
                  window's per-state Pade and root search split over the states
                  (`qp_solve.finish_qp`), with no reduction and bitwise. With
                  freq_block or scratch_dir the tau partition moves inside
@@ -792,8 +829,11 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
     # Sigma[W_solv] - Sigma[W_gas]; screening Sigma dynamically as well counts
     # that difference twice. The BSE kernel keeps the dressed factors.
     transform = separable_gauge_transform(mol, environment_of(mf), auxbasis)
-    if sliced:
+    if sliced and (freq_block or scratch_dir):
         X_mo, D, X_ao, coords = _sliced_solve_factors(factors, mpi_comm)
+    elif sliced:
+        X_mo = D = X_ao = factors.require(mpi_comm)
+        coords = factors.coords
     else:
         X_mo, D, X_ao, coords = unpack_factors(factors)
 
@@ -820,7 +860,7 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                           dm_correction, greedy, timings,
                           screen_r_cut, sigma_x, eps_anchor, sigma_x_matrix,
                           tile_gb, xc_diagonal, with_z,
-                          failures=failures),
+                          failures=failures, numerics=numerics),
             mpi_comm, extras)
 
     _t = _time.time()

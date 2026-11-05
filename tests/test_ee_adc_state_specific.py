@@ -63,7 +63,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import (ee_density, ee_fold, ee_ri_density,
                                            ee_ri_fold, ee_state_specific)
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import H2CO, WATER_C2V, check, df_rhf_converged
+from tests.adc_common import H2CO, WATER_C2V, check, df_rhf_converged, ee_numerics
 from tests.pins import RECORDING_BLAS, matches
 
 PARITY = {'singlet': +1, 'triplet': -1}
@@ -115,7 +115,7 @@ def check_against_pyscf():
                                            ).transpose(0, 2, 1, 3)
     targets, hf = pyscf_targets(mf, 3)
     for spin in ('singlet', 'triplet'):
-        e, Z = solve_ee_adc(mf, level='adc2', spin=spin, nroots=2, conv_tol=1e-11)
+        e, Z = solve_ee_adc(mf, level='adc2', spin=spin, nroots=2, numerics=ee_numerics(conv_tol=1e-11))
         ep, P, p0 = targets[spin]
         for k in range(2):
             j = int(np.argmin(np.abs(ep - e[k])))
@@ -150,7 +150,7 @@ def check_ri_against_dense(atom):
     F = ee_ri_fold.RIFactors.from_full(eps, B, no)
     for spin in ('singlet', 'triplet'):
         e, Z = solve_ee_adc(mf, level='adc2', df=True, spin=spin, nroots=2,
-                            conv_tol=1e-10)
+                            numerics=ee_numerics(conv_tol=1e-10))
         op = ee_ri_fold.RIFoldADC2(F, spin)
         r = ee_fold.solve_folded(op.pieces(), 2, spin=spin, tol_omega=1e-11,
                                  tol_residual=1e-10, dense_limit=0, solver='newton')
@@ -213,8 +213,9 @@ def check_energy_formula():
     dm0 = mf.make_rdm1()
     # a generic traceless density: one root of the fold at adc2
     e, _, res = solve_ee_adc(mf, level='adc2', spin='singlet', nroots=1,
-                             fold=True, environment=env, conv_tol=1e-9,
-                             return_fold=True, state_specific='vertical')
+                             fold=True, environment=env, numerics=ee_numerics(conv_tol=1e-9),
+                             return_fold=True, state_specific='vertical',
+                             ss_density='unrelaxed')
     dP = C @ res.delta_density[0] @ C.T
     for mode, eps in (('vertical', env.eps), ('equilibrium', env.eps_static)):
         ref = _second_difference(_pcm_like(env, mol, eps), dm0, dP)
@@ -238,9 +239,9 @@ def check_energy_formula():
     td.nstates, td.conv_tol = 4, 1e-12
     td.kernel()
     e1, _, r1 = solve_ee_adc(mf, level='adc1', spin='singlet', nroots=2,
-                             fold=True, environment=env, conv_tol=1e-10,
+                             fold=True, environment=env, numerics=ee_numerics(conv_tol=1e-10, dense_limit=0),
                              return_fold=True, state_specific='vertical',
-                             dense_limit=0)
+                             ss_density='unrelaxed', )
     no = mol.nelectron // 2
     p = _pcm_like(env, mol, env.eps)
     for k in range(2):
@@ -264,7 +265,7 @@ def check_driver():
     ok = True
     mol, env, mf = toluene(H2CO, 'aug-cc-pvdz')
     kw = dict(level='adc2', nroots=2, frozen=2, auxbasis='aug-cc-pvdz-ri',
-              conv_tol=1e-8, fold=True, return_fold=True)
+              numerics=ee_numerics(conv_tol=1e-8), fold=True, return_fold=True)
     for spin in ('singlet', 'triplet'):
         e, _, res = solve_ee_adc(mf, spin=spin, environment=env,
                                  state_specific='equilibrium', **kw)
@@ -298,7 +299,8 @@ def check_default_and_refusals():
     """Check 5."""
     ok = True
     gas = rhf(WATER_C2V, 'cc-pvdz', df=True)
-    kw = dict(level='adc2', spin='singlet', nroots=2, fold=True, conv_tol=1e-8)
+    kw = dict(level='adc2', spin='singlet', nroots=2, fold=True,
+              numerics=ee_numerics(conv_tol=1e-8))
     # each pair is two Davidson solves of one problem: to a few ulp, not
     # bitwise
     a, _ = solve_ee_adc(gas, **kw)
@@ -383,7 +385,7 @@ def check_frozen_charges():
     mol, _, sol = toluene(H2CO, 'cc-pvdz')
     ours = {spin: solve_ee_adc(sol, level='adc2', spin=spin, nroots=2,
                                fold=True, environment=NoEnvironment(),
-                               conv_tol=1e-10)[0]
+                               numerics=ee_numerics(conv_tol=1e-10))[0]
             for spin in ('singlet', 'triplet')}
     for scale in (1.0, 1.01):
         ref = _frozen_charge_omegas(mol, sol, scale)

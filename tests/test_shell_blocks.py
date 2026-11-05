@@ -27,6 +27,7 @@ import pytest
 from pyscf import gto
 
 from src.Base.numerics.constants import DERIV_BLOCK_BYTES
+from src.Base.factorization.shell_runs import shell_ranges, shell_runs
 from src.gradients.grad_engine import _shell_blocks
 
 #: Big enough that per_ao * a whole-molecule block overflows int32; benzene at
@@ -80,3 +81,19 @@ def test_a_tiny_budget_still_partitions_the_molecule():
     blocks, widths = blocks_and_widths(mol, 1)
     assert len(blocks) == mol.nbas
     assert sum(widths) == mol.nao
+
+
+@pytest.mark.parametrize('width', (1, 7, 40, 10 ** 6))
+def test_every_run_is_maximal_and_ranges_carry_its_functions(width):
+    """`shell_runs` is the one rule every blocked integral pass uses: each run
+    takes the next shell whenever the run stays within `width`, and
+    `shell_ranges` gives the same runs with their function ranges."""
+    mol = gto.M(atom=BENZENE, basis='cc-pvdz', verbose=0)
+    ao_loc = mol.ao_loc_nr()
+    runs = shell_runs(ao_loc, width)
+    assert runs[0][0] == 0 and runs[-1][1] == mol.nbas
+    assert all(a[1] == b[0] for a, b in zip(runs, runs[1:]))
+    for s0, s1 in runs[:-1]:
+        assert ao_loc[s1 + 1] - ao_loc[s0] > width
+    assert shell_ranges(ao_loc, width) == [
+        (s0, s1, int(ao_loc[s0]), int(ao_loc[s1])) for s0, s1 in runs]

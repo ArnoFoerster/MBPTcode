@@ -141,8 +141,26 @@ class VvvvKernels:
 # MP amplitudes (A3-A5), density (A21-A23), Z intermediates (A11-A20)
 # ======================================================================
 
-def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None):
+def pair_class_scaled(X, w_os, w_ss):
+    """A spin-blocked doubles tensor X (i j a b) with each block scaled by the
+    spin class of its occupied pair: w_ss where i and j have one spin, w_os
+    where they differ."""
+    if not isinstance(X, _sb.SB):
+        raise ValueError('spin-class scaling is written for spin-blocked tensors')
+    return _sb.SB({k: (w_ss if k[0] == k[1] else w_os) * v for k, v in X.items()},
+                  parity=X.parity)
+
+
+def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None, scaling=None):
     """t2_1 (A3), t1_2 (A4) and, for order>=3, t2_2 (A5).
+
+    scaling (c_os, c_ss), spin-blocked only: the ground state of the
+    spin-component scaled model in which every coupling of the reference or
+    a single to a doubles configuration carries sqrt(c) of the doubles' pair
+    class (c_os opposite, c_ss same spin). t2_1 is then sqrt(c) times its
+    MP1 value, t1_2 is built from c t2_1 (two such couplings), t2_2 from the
+    scaled t2_1 (the doubles-doubles interaction stays bare), so the MP2
+    density (density2) is c_os, c_ss weighted as SCS-MP2's.
 
     d_ijab = eps_a + eps_b - eps_i - eps_j  and  d_ia = 2(eps_i - eps_a),
     the paper's Appendix-A preamble: doubles denominators carry the opposite
@@ -175,9 +193,14 @@ def amplitudes(be, gb, d_ijab, d_ia, order=3, vk=None, en_shift=None):
     vk = vk if vk is not None else VvvvKernels(be, gb.get('vvvv'))
     check_denominator(d_ijab)
     t2_1 = be.divide(gb['oovv'], d_ijab)
+    t2_c = t2_1
+    if scaling is not None:
+        c_os, c_ss = scaling
+        t2_c = pair_class_scaled(t2_1, c_os, c_ss)
+        t2_1 = pair_class_scaled(t2_1, np.sqrt(c_os), np.sqrt(c_ss))
     out = {'t2_1': t2_1}
-    num = (_ovvv_ia(be, gb, t2_1)
-           + be.ein('jkab,jkib->ia', t2_1, gb['ooov']))
+    num = (_ovvv_ia(be, gb, t2_c)
+           + be.ein('jkab,jkib->ia', t2_c, gb['ooov']))
     out['t1_2'] = be.divide(num, d_ia)
     if order < 3:
         return out

@@ -10,7 +10,7 @@ of the Gram matrix and is fitted to zero. Three realizations:
   replicated   `FrozenFactorization._fit` is `fit_M_streaming` on the frozen
                pair layout, the same M to a few ulp on the same points and pairs;
   rows         `fit_rows`, the grid index in fixed tiles over the ranks;
-  whole form   `fit_M_stable` on D over every product pair and F zero on the
+  whole form   `fit_M` on D over every product pair and F zero on the
                screened ones, what the whole-form fit adjoint rebuilds.
 
 The last two are gated within `FIT_REASSOCIATION_K` times what one
@@ -32,16 +32,17 @@ from pyscf import df as pyscf_df, gto, scf
 from src.Base.factorization import separable_ri
 from src.Base.numerics.constants import FIT_REASSOCIATION_K, ISDF_FIT_REGULARIZATION
 from src.Base.numerics.numerics import Numerics
-from src.Base.factorization.separable_ri import (atomic_grid, aux_metric_sqrt, fit_M_stable,
+from src.Base.factorization.separable_ri import (atomic_grid, aux_metric_sqrt, fit_M,
                                                  fit_M_streaming, molecular_points_covariant)
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.isdf_derivatives import pair_positions, product_pairs
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 MOLECULES = {
-    'water': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    'water': WATER,
     'ethylene': ('C 0.0 0.0 0.667; C 0.0 0.0 -0.667; H 0.0 0.923 1.238; '
                  'H 0.0 -0.923 1.238; H 0.0 0.923 -1.238; '
                  'H 0.0 -0.923 -1.238'),
@@ -79,7 +80,7 @@ def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
     return [(s, s + 1) for s in reversed(range(mol.nbas))]
 
 
-def whole_form(mol, auxmol, crd, layout, fit=fit_M_stable):
+def whole_form(mol, auxmol, crd, layout, fit=fit_M):
     """The estimator formed whole: D over every product pair, F zero on the
     screened ones (`dfactor_adjoint_gauges`' rebuild), solved by `fit`."""
     gram = product_pairs(mol)
@@ -105,13 +106,13 @@ def screened_gram(mol, auxmol, crd, layout):
     e3c = e3c.reshape(mol.nao_nr(), mol.nao_nr(), naux)
     F = np.hstack([np.linalg.solve(V, e3c[mu, nu, :].T) * wc[None, :],
                    np.eye(naux)])
-    return fit_M_stable(separable_ri.fit_test_set_D(mol, auxmol, crd, layout), F)
+    return fit_M(separable_ri.fit_test_set_D(mol, auxmol, crd, layout), F)
 
 
 def realizations(name):
     """Every realization of M on the chain's frozen grid, and the bar."""
     mol = molecule(MOLECULES[name])
-    fac = FrozenFactorization(mol, Numerics(isdf={'auxbasis': AUX, 'counts': g1(mol)}))
+    fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(mol)}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     rows = fit_M_streaming(mol, auxmol, crd, fit='rows', layout=fac.layout)
     out = dict(mol=mol, auxmol=auxmol, coords=crd, layout=fac.layout,
@@ -145,7 +146,7 @@ def test_the_chain_and_production_place_the_same_points(name):
     """The chain's re-optimized radii are the shipped row at these counts,
     so the chain and production fit on one grid."""
     mol = molecule(MOLECULES[name])
-    chain = FrozenFactorization(mol, Numerics(isdf={'auxbasis': AUX, 'counts': g1(mol)})).coords(mol)
+    chain = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(mol)})).coords(mol)
     assert_same(chain, shipped_grid(mol), unit='1', quantity='root',
                 label='grid points')
 
@@ -168,7 +169,7 @@ def test_the_frozen_layout_is_what_the_fit_keeps():
     one pair it
     is another fit: the layout is read, not re-screened."""
     mol = molecule(DISPLACED['ethylene'])
-    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
+    fac = FrozenFactorization(molecule(MOLECULES['ethylene']), Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'auxbasis': AUX, 'counts': g1(molecule(MOLECULES['ethylene']))}))
     auxmol, crd = fac.auxmol(mol), fac.coords(mol)
     own = separable_ri.fit_test_set_layout(mol, crd)
     free = fit_M_streaming(mol, auxmol, crd)

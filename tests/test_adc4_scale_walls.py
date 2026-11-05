@@ -26,6 +26,12 @@ the dense routes they replace.
    materialize rank >= 3 amplitudes refuse a g-free solver, and ADCSolver
    runs DF ADC(4) with ntau without forming the 4-index integrals.
 
+This file (slow tier) is the cheap setting: the rows on H2O/6-31G (seconds),
+the poles check as an operator comparison on three random vectors and the pool
+on LiH/STO-3G with the HOMO root at the solver tolerance. The settings of the
+list above (dense eigh poles on H2O/STO-3G, pool on H2O/6-31G with two roots)
+run in test_adc4_scale_walls_full.py (heavy tier).
+
 Run: python tests/test_adc4_scale_walls.py, or under pytest.
 """
 import os
@@ -46,13 +52,17 @@ from src.SingleReference.ADC.cross_block_decoupling import delta_u_rows_k1
 from src.SingleReference.ADC.sigma_driver import (restricted_dyson_operator,
                                                   solve_dyson_adc_downfolded)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER
 
 pytestmark = requires_runtime(4)
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
+LIH = 'Li 0 0 0; H 0 0 1.595'
 ULP = 8
 AMP_ULP = 64      # two dense-g builds differing only in how B.B is summed differ by 8-15 ulp
 TOL_POLE = 1e-12
+TOL_MATVEC = 1e-13    # relative to the largest element of the product
+N_VECTORS = 3
 NTAU = 8
 
 
@@ -66,8 +76,8 @@ def ulps(a, b):
     return float(np.abs(a - b).max() / np.spacing(np.abs(a).max()))
 
 
-def system(basis):
-    mol = gto.M(atom=H2O, basis=basis, verbose=0)
+def system(basis, atom=H2O):
+    mol = gto.M(atom=atom, basis=basis, verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-12)
     B = DFIntegrals.from_scf(mol, mf).B_aa
     vpr = np.einsum('Qpr,Qqs->pqrs', B, B, optimize=True)        # <pq|rs>
@@ -87,9 +97,9 @@ def principal_poles(M, norb, n=3):
     return np.concatenate([ip, ea])
 
 
-def check_rows(basis='6-31g'):
-    _, mf, B, ga, vpr = system(basis)
-    nocc = 5
+def check_rows(basis='6-31g', atom=H2O, label='H2O'):
+    mol, mf, B, ga, vpr = system(basis, atom)
+    nocc = mol.nelectron // 2
     ok = True
     for df in (False, True):
         g = BuildSuperMatrixADCnRestricted(mf.mo_energy, ga, vpr, ga, nocc, B_aa=B)
@@ -103,17 +113,17 @@ def check_rows(basis='6-31g'):
         for hc in (1, 2):
             du_ip, du_ea = g.cross_block_decoupling_rows(uI, uE, kI, kE, extra_leaves=leaves,
                                                          hole_chunk=hc)
-            tag = f"H2O/{basis} {'DF' if df else 'dense'} slice {hc}"
+            tag = f"{label}/{basis} {'DF' if df else 'dense'} slice {hc}"
             u_ea, u_ip = ulps(ref[1], du_ea), ulps(ref[0], du_ip)
             ok &= check(u_ea <= ULP, f'{tag}: streamed 2p1h rows == dense', f'{u_ea:.1f} ulp')
             ok &= check(u_ip <= ULP, f'{tag}: streamed 2h1p rows == dense', f'{u_ip:.1f} ulp')
     return ok
 
 
-def check_poles(basis='sto-3g'):
+def check_poles(basis='sto-3g', atom=H2O, label='H2O'):
     """The diagrammatic supermatrix (streamed rows) against the two-sector one
-    with the dense rows added: principal poles within 8 ulp."""
-    mol, mf, B, ga, vpr = system(basis)
+    with the dense rows added: principal poles within 1e-12 Eh."""
+    mol, mf, B, ga, vpr = system(basis, atom)
     nocc = mol.nelectron // 2
     norb = len(mf.mo_energy)
     g = BuildSuperMatrixADCnRestricted(mf.mo_energy, ga, vpr, ga, nocc)
@@ -129,13 +139,40 @@ def check_poles(basis='sto-3g'):
     R[:norb, k1] += du.T
     a, b = principal_poles(M, norb), principal_poles(R, norb)
     d = float(np.max(np.abs(a - b)))
-    return check(d <= TOL_POLE, f'H2O/{basis}: diagrammatic poles, streamed rows == dense rows',
+    return check(d <= TOL_POLE, f'{label}/{basis}: diagrammatic poles, streamed rows == dense rows',
                  f'{d:.1e} Eh; IP {np.round(a[:3], 8)}')
 
 
-def check_gfree_pool(basis='6-31g'):
-    mol, mf, B, ga, vpr = system(basis)
-    nocc = 5
+def check_operators(basis='sto-3g', atom=LIH, label='LiH'):
+    """The same comparison on the operators, without a dense eigh: the
+    diagrammatic supermatrix applied to random vectors against the two-sector
+    one with the dense rows added."""
+    mol, mf, B, ga, vpr = system(basis, atom)
+    nocc = mol.nelectron // 2
+    norb = len(mf.mo_energy)
+    g = BuildSuperMatrixADCnRestricted(mf.mo_energy, ga, vpr, ga, nocc)
+    op, _ = restricted_dyson_operator(g, 'adc4', construction='diagrammatic')
+    op2, _ = restricted_dyson_operator(g, 'adc4', construction='twosector')
+    X = g.cross_block_generated(2)
+    kI, kE = g.sector_configs('IP')['K'], g.sector_configs('EA')['K']
+    du = np.concatenate(delta_u_rows_k1(g.u_block('IP'), g.u_block('EA'), kI, kE, X))
+    k1 = slice(norb, norb + len(du))
+    rng = np.random.default_rng(7)
+    d = 0.0
+    for _ in range(N_VECTORS):
+        x = rng.standard_normal(op.shape[0])
+        y = op.matvec(x)
+        y2 = op2.matvec(x)
+        y2[k1] += du @ x[:norb]
+        y2[:norb] += du.T @ x[k1]
+        d = max(d, float(np.abs(y - y2).max() / np.abs(y).max()))
+    return check(d <= TOL_MATVEC, f'{label}/{basis}: diagrammatic operator, streamed rows == '
+                 f'two-sector operator + dense rows', f'{d:.1e} relative')
+
+
+def check_gfree_pool(basis='6-31g', atom=H2O, label='H2O', n_roots=2, solver_tol=1e-12):
+    mol, mf, B, ga, vpr = system(basis, atom)
+    nocc = mol.nelectron // 2
     gd = BuildSuperMatrixADCnRestricted(mf.mo_energy, ga, vpr, ga, nocc, B_aa=B)
     gf = BuildSuperMatrixADCnRestricted(mf.mo_energy, None, None, None, nocc, B_aa=B)
     ok = True
@@ -151,34 +188,39 @@ def check_gfree_pool(basis='6-31g'):
     except NotImplementedError:
         ok &= check(True, 'g-free amps_order (materialized T3^(2)) refuses')
     leaves = {'B_aa': B, 'B_bb': B}
-    for k in (nocc - 1, nocc - 2):
+    for k in (nocc - 1, nocc - 2)[:n_roots]:
         e = [solve_dyson_adc_downfolded(s, k, level='adc4', extra_leaves=leaves,
                                         laplace_ntau=NTAU, construction='diagrammatic',
                                         tol=1e-12, davidson_tol=1e-10)['e'] for s in (gd, gf)]
+        if k == nocc - 1:
+            homo_ref = e[0]
         u = abs(e[0] - e[1]) / np.spacing(abs(e[0]))
-        ok &= check(u <= ULP, f'H2O/{basis} DF ADC(4) root from orbital {k}: g-free == dense-g',
+        ok &= check(u <= ULP, f'{label}/{basis} DF ADC(4) root from orbital {k}: g-free == dense-g',
                     f'{e[1]:.12f} Eh, {u:.1f} ulp')
     s = ADCSolver(mf, level='adc4', pdaggerq=True, df=True, matrix_free=True, ntau=NTAU,
                   construction='diagrammatic')
     ok &= check(s.eri is None, 'ADCSolver DF ADC(4) with ntau holds no 4-index integrals')
-    e = float(np.atleast_1d(s.solve(homo_index=nocc - 1, tol=1e-12)[0])[0])
-    ref = solve_dyson_adc_downfolded(gd, nocc - 1, level='adc4', extra_leaves=leaves,
-                                     laplace_ntau=NTAU, construction='diagrammatic',
-                                     tol=1e-12)['e']
-    d = abs(e - ref)
-    ok &= check(d < 1e-9, 'ADCSolver g-free HOMO == dense-g downfold (solver tol 1e-12)',
+    e = float(np.atleast_1d(s.solve(homo_index=nocc - 1, tol=solver_tol)[0])[0])
+    d = abs(e - homo_ref)
+    ok &= check(d < 1e-9, 'ADCSolver g-free HOMO == dense-g downfold (solver tolerance)',
                 f'{e:.12f} Eh, {d:.1e}')
     return ok
 
 
-def run():
+def run(full=False):
+    """The cheap setting, or with `full` the complete one (test_adc4_scale_walls_full.py)."""
     warnings.simplefilter('ignore')
     ok = True
     print('-- decoupling rows, streamed')
     ok &= check_rows()
-    ok &= check_poles()
-    print('-- g-free MBPT pool')
-    ok &= check_gfree_pool()
+    if full:
+        ok &= check_poles()
+        print('-- g-free MBPT pool')
+        ok &= check_gfree_pool()
+    else:
+        ok &= check_operators()
+        print('-- g-free MBPT pool')
+        ok &= check_gfree_pool('sto-3g', LIH, 'LiH', n_roots=1, solver_tol=1e-10)
     print('\nALL PASSED' if ok else '\nFAILURES DETECTED')
     return ok
 

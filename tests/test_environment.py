@@ -42,8 +42,9 @@ from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
-ATOM = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+ATOM = WATER
 H2O_C1 = 'O 0.03 0.02 0.117; H 0.10 0.757 -0.468; H -0.05 -0.80 -0.40'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 #: two charges off the molecular plane, asymmetric so no component vanishes

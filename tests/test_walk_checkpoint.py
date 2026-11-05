@@ -23,6 +23,12 @@ The same on a mean-field surface (water/STO-3G Hartree-Fock, which writes
 no record: the walk goes on on the surface it is handed), and through
 geomeTRIC, which restarts from the last accepted geometry and reaches the
 same minimum to its convergence criteria.
+
+Every walk here runs with the BLAS and OpenMP pools at one thread
+(`one_thread`): OpenBLAS at two threads is not run-to-run deterministic
+(numpy 2.4's, on the nightly CI), two uninterrupted walks then already end
+~5e-9 Bohr apart, and the bitwise resume claim is about the checkpoint, not
+the library.
 """
 
 import numpy as np
@@ -30,6 +36,7 @@ import pytest
 from pyscf import gto, scf
 
 from tests.blas_bar import assert_same
+from tests.pins import RECORDING_BLAS, blas_identity
 from src.Base.numerics.constants import GEOM_OPT_CONV
 from src.Base.utils.record_io import read_record, write_record
 from src.Base.geometry.body_frame import aligned_displacement
@@ -37,6 +44,7 @@ from src.properties.optimize import relax
 from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.photophysics_cases import run_of
+from src.Base.utils.parallel import threads
 
 #: The walk's thresholds: GEOM_OPT_CONV ten times looser.
 LOOSE = {k: 10.0 * v for k, v in GEOM_OPT_CONV.items()}
@@ -47,6 +55,17 @@ SAME = 1e-10
 #: Bohr / Ha: how close a restarted geomeTRIC walk must land, within the
 #: reach of the GAU criteria both walks converge to.
 GEOMETRIC_SAME = (1e-2, 1e-6)
+
+
+@pytest.fixture(autouse=True)
+def one_thread():
+    """The BLAS and OpenMP pools at one thread for every walk of this module,
+    so a walk repeats its bits run to run on any BLAS."""
+    if threads.threadpool_limits is None:
+        yield
+        return
+    with threads.threadpool_limits(limits=1):
+        yield
 
 
 class Killed(Exception):
@@ -91,13 +110,18 @@ def same_walk(mol, info, mol_ref, info_ref):
           f'minimum {moved:.1e} Bohr, energy {de:.1e} Ha from the '
           f'uninterrupted walk')
     assert moved <= SAME and de <= SAME
-    # the drift is a difference of two energies of two independent SCF solves
-    # (one per walk): bitwise on the recording BLAS, energy class bar on another
+    # the drift is a difference of two energies of two surfaces, each solved
+    # in each walk, at the end of a first walk whose geometry carries the
+    # gradient's round-off: a few ulp on the recording BLAS, SAME on another
+    # (an energy bar is too tight for it: 1.6e-11 Ha on OpenBLAS)
     if info['refreeze_drift'] is None or info_ref['refreeze_drift'] is None:
         assert info['refreeze_drift'] == info_ref['refreeze_drift']
-    else:
+    elif blas_identity() == RECORDING_BLAS:
         assert_same(info['refreeze_drift'], info_ref['refreeze_drift'],
                     label='refreeze drift')
+    else:
+        gap = abs(info['refreeze_drift'] - info_ref['refreeze_drift'])
+        assert gap <= SAME, ('refreeze drift', gap, SAME)
     assert info['cycles'] == info_ref['cycles']
 
 

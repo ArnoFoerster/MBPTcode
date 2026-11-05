@@ -39,6 +39,15 @@ from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import \
 # highest order of the restricted non-Dyson construction: ADC(6) would read the
 # order-5 ground state, which the generators do not emit
 MAX_NONDYSON_RESTRICTED_ORDER = 5
+# highest order on a DF (g-free) solver: ADC(4) reads rank-3 amplitudes
+MAX_NONDYSON_RESTRICTED_DF_ORDER = 3
+
+# Structures of the ADC(3) blocks whose every term puts the Fock factor on its
+# occupied-virtual slice, which vanishes on canonical HF orbitals (the restricted
+# solver pins f = diag(eps)). They are the only ones reading T1^(3) or the
+# triples T3^(2); the DF route has neither and skips them by name, so a missing
+# amplitude of any other structure still raises.
+_F_OV_ZERO = ('ft1', 'l1f', 'l1ft2', 'l2ft1', 'l2ft3', 'l3ft2')
 
 
 def _combo(shape, parts):
@@ -64,19 +73,21 @@ def _identity(d):
 
 class NonDysonRestricted:
     """Non-Dyson ISR of one sector ('IP' or 'EA') over a restricted solver
-    (BuildSuperMatrixADCnRestricted with dense g): raw block series, the ADC(n)
+    (BuildSuperMatrixADCnRestricted with dense g, or with a DF factor through
+    ADC(3)): raw block series, the ADC(n)
     matrix as a LinearOperator and its zeroth-order diagonal."""
 
     def __init__(self, rsolver, sector):
+        """rsolver with dense g serves ADC(2) to ADC(5); with a DF factor B_aa
+        (g-free) it serves ADC(2) and ADC(3) on canonical orbitals, the orders
+        whose surviving structures read rank <= 2 amplitudes through order 2."""
         if sector not in ('IP', 'EA'):
             raise ValueError(f"sector must be 'IP' or 'EA', got {sector!r}")
-        if rsolver.df:
-            raise ValueError("non-Dyson ADC(n) reads dense g: the restricted non-Dyson apply "
-                             "modules have no DF twins; build the solver from g_aaaa/g_abab/"
-                             "g_bbbb")
         self.r = rsolver
         self.sector = sector
+        self.df = bool(rsolver.df)
         self._mods = {}
+        self._amps_df = None
 
     # ----- classes and configurations --------------------------------------
     def configs(self, k):
@@ -98,7 +109,8 @@ class NonDysonRestricted:
     def _module(self, order, k_i, k_j):
         key = (order, k_i, k_j)
         if key not in self._mods:
-            self._mods[key] = generated(nondyson_apply_module_name(order, k_i, k_j)[:-3])
+            self._mods[key] = generated(
+                nondyson_apply_module_name(order, k_i, k_j, df=self.df)[:-3])
         return self._mods[key]
 
     def _resolve(self, kind, name, order, k_i, k_j):
@@ -116,8 +128,36 @@ class NonDysonRestricted:
 
     def _amps(self, n):
         """Amplitudes through order n (the f-dressed structures at order n read
-        t1^(n))."""
+        t1^(n)). DF: rank <= 2 through order 2 only (_amplitudes_df)."""
+        if self.df:
+            return self._amplitudes_df()
         return self.r.amps_order(max_order=max(n, 2))
+
+    def _amplitudes_df(self):
+        """T2^(1), T1^(2), T2^(2) and their l-convention twins from the DF
+        numerators, without rank >= 3 tensors. The l arrays are transposed views,
+        not copies: for the same-spin block to_l's sign-flipped virtual reversal
+        equals the plain transpose because t2_aaaa is antisymmetric in its two
+        virtual indices (to rounding, a few 1e-18); the mixed-spin block has
+        sign +1 and is exact. At most four
+        O^2 V^2 arrays are held."""
+        if self._amps_df is None:
+            mpn = self.r._mpn()
+            t2_1a, t2_1b = mpn.amplitudes_t2_1()
+            t1_2a, t2_2a, t2_2b = mpn.amplitudes_order2(t2_1a, t2_1b)
+
+            def L2(ta, tb):
+                la = ta.transpose(2, 3, 0, 1)
+                return {'l2_aaaa': la, 'l2_abab': tb.transpose(2, 3, 0, 1), 'l2_bbbb': la}
+
+            def T2(ta, tb):
+                return {'t2_aaaa': ta, 't2_abab': tb, 't2_bbbb': ta}
+            l1 = t1_2a.T
+            self._amps_df = {'L2_1': L2(t2_1a, t2_1b), 'T2_1': T2(t2_1a, t2_1b),
+                             'L1_2': {'l1_aa': l1, 'l1_bb': l1},
+                             'T1_2': {'t1_aa': t1_2a, 't1_bb': t1_2a},
+                             'L2_2': L2(t2_2a, t2_2b), 'T2_2': T2(t2_2a, t2_2b)}
+        return self._amps_df
 
     def _raw(self, kind, k_i, k_j, m, n):
         """The raw H^(m) ('u') or S^(m) ('s') block of (k_i, k_j) as a linear map
@@ -138,6 +178,9 @@ class NonDysonRestricted:
             for lead, rank, order in (('L', j, a), ('T', k, b)):
                 if rank:
                     leaves = A.get(f'{lead}{rank}_{order}')
+                    if leaves is None and self.df and name in _F_OV_ZERO:
+                        pool = None     # zero on canonical orbitals, see _F_OV_ZERO
+                        break
                     if leaves is None:
                         missing.append(f"{name}(l{j}^{a},t{k}^{b})")
                         pool = None
@@ -180,12 +223,34 @@ class NonDysonRestricted:
         r, o = self.r, slice(0, self.r.nocc)
         if c == 0:
             return 2.0 * float(np.sum(r.eps[o]))
+        if self.df:
+            return self._mp_energy_df(c)
         if c == 1:
             return -float(np.einsum('klkl->', r.g_aaaa[o, o, o, o])
                           + np.einsum('klkl->', r.g_abab[o, o, o, o]))
         mpn = MPnDensityDriverRestricted(np.diag(r.eps), r.g_aaaa, r.g_abab, r.g_bbbb, r.nocc)
         t2 = self._amps(c)[f'T2_{c - 1}']
         return float(mpn.compute_E(t2['t2_aaaa'], t2['t2_abab']))
+
+    def _mp_energy_df(self, c):
+        """mp_energy from the DF factor, (pq|rs) = sum_P B[P,p,q] B[P,r,s]:
+        <kl|kl> = (kk|ll), <kl||kl> = (kk|ll) - (kl|lk), and the MP(c)
+        correlation energy one occupied index at a time, so no O^2 V^2
+        integral array is formed."""
+        B, no = self.r.B_aa, self.r.nocc
+        if c == 1:
+            Boo = B[:, :no, :no]
+            d = np.einsum('Pkk->P', Boo)
+            return -float(2.0 * d @ d - np.einsum('Pkl,Plk->', Boo, Boo))
+        t2 = self._amps(c)[f'T2_{c - 1}']
+        ta, tb = t2['t2_aaaa'], t2['t2_abab']           # (a, b, i, j)
+        Bov = B[:, :no, no:]
+        e = 0.0
+        for i in range(no):
+            K = np.tensordot(Bov[:, i, :], Bov, axes=(0, 0))     # (ia|jb) as (a, j, b)
+            e += np.einsum('ajb,abj->', K, tb[:, :, i, :])
+            e += 0.5 * np.einsum('ajb,abj->', K - K.transpose(2, 1, 0), ta[:, :, i, :])
+        return float(e)
 
     # ----- the ADC(n) matrix ------------------------------------------------
     def raw_series(self, n, extra=None):
@@ -195,6 +260,10 @@ class NonDysonRestricted:
         if not 2 <= n <= MAX_NONDYSON_RESTRICTED_ORDER:
             raise ValueError(f"non-Dyson ADC({n}): the restricted construction covers "
                              f"ADC(2) to ADC({MAX_NONDYSON_RESTRICTED_ORDER})")
+        if self.df and n > MAX_NONDYSON_RESTRICTED_DF_ORDER:
+            raise ValueError(f"non-Dyson ADC({n}) on a DF solver: ADC(4) and higher read "
+                             f"rank-3 amplitudes, which the g-free provider does not form; "
+                             f"use dense g")
         cls = self.classes(n)
         dims = {k: self.dim(k) for k in cls}
         top = {}

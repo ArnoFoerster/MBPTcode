@@ -47,17 +47,18 @@ PACKAGES = ('src/gradients', 'src/properties')
 
 #: Realization kernels that live under src/gradients: the reverse-mode sweeps
 #: over imaginary time and frequency (`qp_set_gradient`, the space-time
-#: adjoint, the reaction-field screening). They partition and reduce, so they
-#: take `comm` and use the primitives. Their rule is the kernel rule: `comm`
-#: defaults to None, the context decides, and no serve loop or broadcast
-#: appears. Everything else under PACKAGES is the physics layer.
+#: adjoint, the reaction-field screening). They partition
+#: and reduce, so they take `comm` and use the primitives. Their rule is the
+#: kernel rule: `comm` defaults to None, the context decides, and no serve
+#: loop or broadcast appears. Everything else under PACKAGES is the physics
+#: layer.
 KERNEL_MODULES = frozenset({'src/gradients/gwbse/qp_space_time.py',
                             'src/gradients/rpa/space_time_adjoint.py',
                             'src/gradients/gwbse/reaction_field_adjoint.py'})
 
 #: Distributed kernels and state models that live under src/gradients
 #: (the MPI rule goes by role, not by folder): the tiled
-#: skeleton and correlation forces, the ISDF fit adjoint, and the state models of the solvation
+#: skeleton and correlation forces, the ISDF fit adjoints, and the state models of the solvation
 #: loop, moved in from Base and SingleReference. They split their work over
 #: the ranks themselves, so they may take `comm` and use any primitive of
 #: mpi_grid, broadcast included; a serve loop or a replicate* stays
@@ -67,10 +68,10 @@ DISTRIBUTED_MODULES = frozenset({'src/gradients/skeleton_tiles.py',
                                  'src/gradients/df_correlation_force_tiled.py',
                                  'src/gradients/state_models.py',
                                  'src/gradients/adc/ee_gradient.py',
-                                 'src/gradients/adc/fold_factors.py',
                                  'src/gradients/df_factors.py',
                                  'src/gradients/adc/ee_state_model.py',
                                  'src/gradients/isdf_fit_adjoint.py',
+                                 'src/gradients/ao_product_fit_adjoint.py',
                                  'src/gradients/gwbse/isdf_bse_adjoint.py'})
 
 #: The module the distribution primitives live in.
@@ -313,8 +314,18 @@ if __name__ == '__main__':
 LAYERS = {
     'src.Base': 0, 'src.Solvers': 0,                    # foundation
     'src.environments': 1,                              # environments: Base only
-    'src.SingleReference': 2, 'src.MultiReference': 2,  # electronic structure
-    'src.fragments': 2,
+    'src.SingleReference': 2, 'src.MultiReference': 2,  # electronic structure: the shared
+    # pieces (common) first, then the method packages in the order they build on
+    # each other -- response machinery, Epstein-Nesbet, CC, MPn densities, GW,
+    # and the methods built on those -- so GW may import CC and never the reverse
+    'src.SingleReference.LinearResponse': 2.1,
+    'src.SingleReference.EpsteinNesbet': 2.2,
+    'src.SingleReference.CC': 2.3,
+    'src.SingleReference.DensityMatrix': 2.4,
+    'src.SingleReference.GW': 2.5,
+    'src.SingleReference.ADC': 2.6, 'src.SingleReference.BSE': 2.6,
+    'src.SingleReference.Periodic': 2.6,
+    'src.fragments': 2.7,
     'src.gradients': 3.0,                               # the method-neutral core
     'src.gradients.rpa': 3.1,                           # the RPA screening GW-BSE is built on
     'src.gradients.gwbse': 3.2, 'src.gradients.adc': 3.2,

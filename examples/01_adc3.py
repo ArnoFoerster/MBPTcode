@@ -7,6 +7,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 
 
@@ -16,7 +17,7 @@ mf = scf.RHF(mol).run()
 
 solver = ADCSolver(mf, level='adc3')
 # Sigma(3+): the MP2-relaxed static self-energy beyond third order
-static = build_static_correction(mf, kind='mp2_relaxed')
+static = build_static_correction(mf, kind='mp2_relaxed', numerics=Numerics())
 
 # solve() seeds Davidson on the HOMO and follows that root
 eGF, Z = solver.solve(static_correction=static)

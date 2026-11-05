@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, df
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.DensityMatrix.density_matrix import compute_gw_density_matrix, GWDensityMatrixSolver
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_density_fitting_coefficients
 
@@ -22,7 +23,8 @@ if __name__ == '__main__':
 
     for polarizability in ['RPA', 'BSE']:
         for relax in [False, True]:
-            dm = compute_gw_density_matrix(mf, mol, polarizability=polarizability, df=True, relax=relax)
+            dm = compute_gw_density_matrix(mf, mol, polarizability=polarizability, df=True, relax=relax,
+                                           numerics=Numerics())
             n = np.trace(dm @ S)
             ok = abs(n - nelec) < 1e-6
             all_ok &= ok
@@ -43,7 +45,8 @@ if __name__ == '__main__':
     # relax=False vs relax=True must differ only in the ov block (oo/vv blocks
     # come from the same compute_unrelaxed_blocks call either way).
     dm_lin = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=False)
-    dm_relaxed = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True)
+    dm_relaxed = compute_gw_density_matrix(mf, mol, polarizability='RPA', df=True, relax=True,
+                                           numerics=Numerics())
     ok = not np.allclose(dm_lin, dm_relaxed, atol=1e-8)
     all_ok &= ok
     print(f"relaxed density differs from linearized (CPHF actually ran): {'OK' if ok else 'FAIL'}")

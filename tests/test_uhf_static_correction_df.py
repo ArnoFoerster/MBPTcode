@@ -44,7 +44,12 @@ from src.SingleReference.ADC.static_correction import (
     build_mp2_static_correction, build_mp2_static_correction_uhf_df,
 )
 from src.Base.numerics.constants import CORRELATION_CPHF_TOL
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import get_uhf_spin_orbital_df_factor_blockstacked
+
+# the two builders' Z-vector solve, on the tolerance of a correlated force
+CORRELATION = Numerics(scf={'multiplier_tol': CORRELATION_CPHF_TOL,
+                            'multiplier_max_iter': 100})
 
 
 if __name__ == '__main__':
@@ -68,19 +73,20 @@ if __name__ == '__main__':
 
             dense = build_mp2_static_correction(
                 mf, mol, relax=relax, u2_denom_dress=dress,
-                cphf_tol=CORRELATION_CPHF_TOL)
+                numerics=CORRELATION)
             df_exact = build_mp2_static_correction_uhf_df(
                 mf, mol, B_exact, relax=relax, u2_denom_dress=dress,
-                cphf_tol=CORRELATION_CPHF_TOL)
+                numerics=CORRELATION)
             diff = np.max(np.abs(dense - df_exact))
             ok = diff < CORRELATION_CPHF_TOL
             all_ok &= ok
             print(f"{label} {kind:14s} ({dname:8s}): DF (naux=norb^2 exact) "
                   f"matches dense (max diff={diff:.2e}): {'OK' if ok else 'FAIL'}")
 
-            sc_dense = build_static_correction(mf, mol, kind=kind, en_dress=dress)
+            sc_dense = build_static_correction(mf, mol, kind=kind, en_dress=dress,
+                                               numerics=Numerics())
             sc_df = build_static_correction(mf, mol, kind=kind, en_dress=dress,
-                                            df=True)
+                                            df=True, numerics=Numerics())
             diff_ri = np.max(np.abs(sc_dense - sc_df))
             ok_ri = diff_ri < 1e-4
             all_ok &= ok_ri

@@ -36,6 +36,8 @@ blind to one pair converges, reports info=0, and leaves a finite residual --
 which is exactly what the residual check is for, since the multiplier enters
 the force linearly and a stagnated solve gives a plausible wrong gradient.
 """
+import zlib
+
 import numpy as np
 import pytest
 import scipy.sparse.linalg
@@ -54,16 +56,17 @@ from src.SingleReference.LinearResponse.quasi_boson_rpa import build_rpa_AB
 from src.gradients.grad_engine import (_y_fold_lambda, fold_fock, orbital_Y,
                                        solve_multipliers)
 from src.gradients.mean_field_response import fock_partial_Y, solve_lambda
-from src.gradients.multipliers import solve_orbital_multipliers
+from src.gradients.multipliers import close_lagrangian, solve_orbital_multipliers
 from src.gradients.gwbse.quasi_boson_adjoint import RPAAdjoint as RPA
 from src.gradients.gwbse.targets import rpa_partials
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 #: a solve cut to five lgmres iterations
 FIVE_ITERATIONS = Numerics(scf={'multiplier_max_iter': 5})
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 
 
@@ -240,7 +243,7 @@ def test_the_dense_route_reproduces_its_old_solver(dense_case):
     """The four-index matvec through the shared solver, to a few ulp."""
     Y_E, F_mo, eri, nocc, eps = dense_case
     lam_ref, res_ref = _reference_solve_multipliers(Y_E, F_mo, eri, nocc, eps)
-    lam_new, res_new = solve_multipliers(Y_E, F_mo, eri, nocc, eps)
+    lam_new, res_new = solve_multipliers(Y_E, F_mo, eri, nocc, eps, numerics=Numerics())
     assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6          # there is a multiplier to compare
@@ -250,23 +253,38 @@ def test_the_cubic_route_reproduces_its_old_solver(cubic_case):
     """`fock_partial_Y` through the shared solver, to a few ulp."""
     mf, Y_E, nocc = cubic_case
     lam_ref, res_ref = _reference_solve_lambda(mf, Y_E, nocc)
-    lam_new, res_new = solve_lambda(mf, Y_E, nocc)
+    lam_new, res_new = solve_lambda(mf, Y_E, nocc, numerics=Numerics())
     assert_same(lam_new, lam_ref, unit='1', quantity='root', label='multipliers')
     assert_same(res_new, res_ref, unit='1', quantity='root', label='residual')
     assert np.abs(lam_new).max() > 1e-6
 
 
-def test_the_constants_are_the_numbers_the_two_copies_carried():
-    """The consolidation moved four hard-coded numbers; it did not change one."""
-    assert ORBITAL_MULTIPLIER_TOL == 1e-11
-    assert ORBITAL_MULTIPLIER_MAX_ITER == 3000
-    assert ORBITAL_MULTIPLIER_DEGENERACY_TOL == 1e-8
-    assert ORBITAL_MULTIPLIER_RESIDUAL_TOL == 1e-7
+def test_one_closure_of_the_lagrangian(cubic_case):
+    """`close_lagrangian`: the relaxed density gamma + Lambda, the stationary
+    gradient Y_E + Y[Lambda] and the energy-weighted matrix -(Y + Y^T)/4 of the
+    solve `solve_lambda` makes, bitwise; an earlier solve handed in is taken
+    as it is, not solved again."""
+    mf, Y_E, nocc = cubic_case
+    gamma = np.diag(np.linspace(-1.0, 1.0, len(mf.mo_energy)))
 
+    def matvec(Lam):
+        return fock_partial_Y(mf, Lam, nocc)
+    c = close_lagrangian(matvec, Y_E, mf.mo_energy, gamma, numerics=Numerics())
+    lam, res = solve_lambda(mf, Y_E, nocc, numerics=Numerics())
+    Y = Y_E + matvec(lam)
+    np.testing.assert_array_equal(c.lam, lam)
+    np.testing.assert_array_equal(c.gamma, gamma + lam)
+    np.testing.assert_array_equal(c.Y, Y)
+    np.testing.assert_array_equal(c.M, -0.25 * (Y + Y.T))
+    assert c.res == res and c.stationarity < ORBITAL_MULTIPLIER_RESIDUAL_TOL
 
-# ---------------------------------------------------------------------------
-# the two refusals
-# ---------------------------------------------------------------------------
+    def refused(*a, **k):
+        raise AssertionError('an earlier solve was solved again')
+    again = close_lagrangian(refused, Y_E, mf.mo_energy, gamma, solved=(lam, res),
+                             numerics=Numerics(), total=lambda L: Y_E + matvec(L))
+    for got, want in zip(again, c):
+        np.testing.assert_array_equal(got, want)
+
 
 def test_a_degenerate_pair_is_projected_out_when_its_gradient_vanishes():
     """A rotation inside a degenerate set does not change the energy, so the
@@ -278,7 +296,7 @@ def test_a_degenerate_pair_is_projected_out_when_its_gradient_vanishes():
                     [-0.3, 0.6, 0.0, 0.15],
                     [0.5, -0.1, 0.9, 0.0]])
     assert Y_E[0, 1] == Y_E[1, 0]                 # the degenerate pair carries none
-    Lam, res = solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps)
+    Lam, res = solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps, numerics=Numerics())
     assert Lam[0, 1] == 0.0                       # projected out, not guessed
     assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
     # every pair the equation DOES determine is stationary
@@ -299,7 +317,7 @@ def test_a_degenerate_pair_carrying_gradient_refuses():
                     [0.5, -0.1, 0.9, 0.0]])
     assert Y_E[0, 1] != Y_E[1, 0]
     with pytest.raises(RuntimeError, match='degenerate orbital pair'):
-        solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps)
+        solve_orbital_multipliers(_hartree_fock_matvec(eps), Y_E, eps, numerics=Numerics())
 
 
 def test_an_operator_blind_to_one_pair_is_caught_by_the_residual():
@@ -356,3 +374,44 @@ def test_the_same_right_hand_side_solves_with_the_whole_operator():
     assert np.abs(np.diag(Lam)).max() == 0.0      # zero diagonal by construction
     Y_tot = Y_E + _hartree_fock_matvec(eps)(Lam)
     assert np.abs(Y_tot - Y_tot.T).max() < 1e-10
+
+
+def _floored_matvec(eps, floor):
+    """A coupled response whose every application carries a deterministic,
+    non-linear error of size `floor`, as a matvec on grids and fitted
+    integrals carries its round-off: lgmres cannot lower the true residual
+    below about `floor`."""
+    n = len(eps)
+    rng = np.random.default_rng(3)
+    K = 0.05 * rng.standard_normal((n, n))
+    K = K + K.T
+
+    def matvec(Lam):
+        matvec.calls += 1
+        noise = np.random.default_rng(zlib.crc32(Lam.tobytes()))
+        return (2.0 * (np.diag(eps) @ Lam) + K @ Lam @ K
+                + floor * noise.standard_normal((n, n)))
+    matvec.calls = 0
+    return matvec
+
+
+def test_a_solve_on_its_round_off_floor_ends_below_the_residual_bar():
+    """A matvec whose round-off floor (1e-10) lies above the lgmres tolerance
+    (1e-11) but far below the residual bar (1e-7) ends within a few outer
+    cycles, unflagged, where it ran to the iteration ceiling (3000 outer
+    cycles) and was flagged before; its multiplier is the floor-free one to
+    the floor."""
+    eps = np.array([-1.1, -0.7, -0.4, 0.2, 0.5, 0.9, 1.4, 2.0])
+    rng = np.random.default_rng(5)
+    Y_E = 0.3 * rng.standard_normal((8, 8))
+    floored = _floored_matvec(eps, 1e-10)
+    flags = []
+    with collecting(flags):
+        Lam, res = solve_orbital_multipliers(floored, Y_E, eps, flags=flags, numerics=Numerics())
+    assert flags == []
+    assert res < ORBITAL_MULTIPLIER_RESIDUAL_TOL
+    assert floored.calls < 200, floored.calls
+    exact = _floored_matvec(eps, 0.0)
+    Lam_ref, res_ref = solve_orbital_multipliers(exact, Y_E, eps, numerics=Numerics())
+    assert res_ref < ORBITAL_MULTIPLIER_TOL * max(1.0, np.linalg.norm(Y_E))
+    assert np.abs(Lam - Lam_ref).max() < 1e-8

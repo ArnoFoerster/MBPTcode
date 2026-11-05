@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri, get_antisymmetrized_spin_block_eri,
@@ -150,7 +151,8 @@ for _level in ('adc2x', 'adc3'):
 @route('r_hw_adc3_dense_full_static_mp2')
 def _():
     s = h2o_sto3g()
-    sc = build_mp2_static_correction_restricted(s['mf'], s['mol'], s['nocc'], relax=True)
+    sc = build_mp2_static_correction_restricted(s['mf'], s['mol'], s['nocc'], relax=True,
+                                                numerics=Numerics())
     solver = _r_solver(s)
     return _dense_result(solver.build_supermatrix(s['nocc'], static_correction=sc),
                          solver.norb)
@@ -188,7 +190,7 @@ for _entag, _en in EN_GRID.items():
     def _(en=_en):
         s = h2o_sto3g()
         sc = build_mp2_static_correction_restricted(
-            s['mf'], s['mol'], s['nocc'], relax=True, u2_denom_dress=en)
+            s['mf'], s['mol'], s['nocc'], relax=True, u2_denom_dress=en, numerics=Numerics())
         solver = _r_solver(s, dress=dict(en))
         return _dense_result(solver.build_supermatrix(s['nocc'], static_correction=sc),
                              solver.norb)
@@ -199,7 +201,8 @@ def _():
     s = h2o_sto3g()
     en = {'hh': True, 'pp': True}
     sc = build_mp2_static_correction_restricted(
-        s['mf'], s['mol'], s['nocc'], relax=True, B_aa=s['B'], u2_denom_dress=en)
+        s['mf'], s['mol'], s['nocc'], relax=True, B_aa=s['B'], u2_denom_dress=en,
+        numerics=Numerics())
     solver = _r_solver(s, df=True, dress=en)
     return _dense_result(solver.build_supermatrix(s['nocc'], static_correction=sc),
                          solver.norb)
@@ -210,7 +213,8 @@ def _():
     s = h2o_sto3g()
     en = {'hh': True, 'pp': True}
     sc = build_mp2_static_correction_restricted(
-        s['mf'], s['mol'], s['nocc'], relax=True, B_aa=s['B'], u2_denom_dress=en)
+        s['mf'], s['mol'], s['nocc'], relax=True, B_aa=s['B'], u2_denom_dress=en,
+        numerics=Numerics())
     solver = _r_solver(s, df=True, dress=en)
     e, Z, _v = _davidson_mf(solver, s['nocc'],
                                                homo_index=s['nocc'] - 1,
@@ -329,7 +333,7 @@ def _():
 @route('u_hw_adc3_dense_static_mp2')
 def _():
     s = h2o_sto3g()
-    sc = build_mp2_static_correction(s['mf'], s['mol'], s['nocc'], relax=True)
+    sc = build_mp2_static_correction(s['mf'], s['mol'], s['nocc'], relax=True, numerics=Numerics())
     solver = ADCSolverUnrestricted.from_arrays(s['eps_spin'], s['g_anti'], nocc=2 * s['nocc'])
     e, Z, _v = solver.solve_dense(2 * s['nocc'], static_correction=sc)
     return {'e': e, 'Z': Z}
@@ -416,7 +420,8 @@ def _():
 @route('r_gen_adc4_diagonal_static', tol=TOL_ITER)
 def _():
     s = h2o_sto3g()
-    sc = build_mp2_static_correction_restricted(s['mf'], s['mol'], s['nocc'], relax=True)
+    sc = build_mp2_static_correction_restricted(s['mf'], s['mol'], s['nocc'], relax=True,
+                                                numerics=Numerics())
     f_orb = np.diag(s['eps']) + sc
     out = solve_dyson_adc4_downfold(_rgen(s), s['nocc'] - 1, f_orb=f_orb)
     return {'e': np.array([out['e_adc3'], out['e_downfold']])}

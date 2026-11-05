@@ -11,14 +11,11 @@ down to Bp, chi0 or C_ov is the one that route already owns.
 """
 import numpy as np
 
-from src.Base.numerics.constants import SOP_FIT_RCOND
-from src.SingleReference.GW.real_screening import screening_aux
-from src.Base.orbital_spaces import ov_energies
+from src.Base.numerics.constants import QP_SUBSPACE_POLE_CHUNK, SOP_FIT_RCOND
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.GW.sum_over_poles import (
-    denominators, pole_pseudoinverse, subspace_self_energy_jacobian)
-from src.Base.orbital_spaces import get_occ_virt_indices
-from src.gradients.gwbse.contour_deformation_adjoint import (integral_term_backward,
-                                                             screening_chain)
+    PoleSlice, denominators, large_group, lockstep_group, pole_pseudoinverse,
+    subspace_self_energy_jacobian)
 
 
 def sigma_sop_backward(omega, amplitudes, poles, eps, nocc, nu_points,
@@ -55,14 +52,35 @@ def subspace_hamiltonian_backward(h, amp, d, h_bar):
     Sigma^c[H] = 1/2 sum_x [R_x A_x + A_x R_x], R_x = (H - d_x)^-1, on H
     (`subspace_self_energy_jacobian`). Then e0_bar = Lambda, A_x's adjoint is
     (R_x Lambda + Lambda R_x)/2 and d_x's tr(Lambda R_x^2 A_x). Everything is
-    taken in H's eigenbasis, where R_x is diagonal.
+    taken in H's eigenbasis, where R_x is diagonal. A large group takes
+    rank 0's inputs and eigenbasis on every rank, as its forward solve does.
     """
-    e, u = np.linalg.eigh(h)
+    n = len(h)
+    if large_group(n):
+        comm = current_comm()
+        h, amp, d, h_bar = lockstep_group(comm, h, amp, np.ravel(d), h_bar)
+        poles = PoleSlice(h, amp, d, comm)
+        e, u = poles.e, poles.u
+    else:
+        e, u = np.linalg.eigh(h)
     d = np.asarray(d, float).ravel()
     r = 1.0 / (e[None, :] - d[:, None])
-    at = u.T @ amp @ u
-    n = len(e)
     hb = u.T @ (0.5 * (h_bar + np.asarray(h_bar).T)) @ u
+    if large_group(n):
+        # no n^2 x n^2 Jacobian: GMRES on the operator, the amplitudes
+        # transformed a chunk of poles at a time
+        lam = poles.solve(hb, transpose=True)
+        lam = 0.5 * (lam + lam.T)
+        amp_bar = np.empty_like(amp)
+        d_bar = np.empty(len(d))
+        for a in range(0, len(d), QP_SUBSPACE_POLE_CHUNK):
+            part = slice(a, a + QP_SUBSPACE_POLE_CHUNK)
+            rc = r[part]
+            amp_bar[part] = u @ (0.5 * lam[None] * (rc[:, :, None] + rc[:, None, :])) @ u.T
+            d_bar[part] = np.einsum('kl,xl,xlk->x', lam, rc ** 2,
+                                    u.T @ amp[part] @ u)
+        return u @ lam @ u.T, amp_bar, d_bar
+    at = u.T @ amp @ u
     jac = subspace_self_energy_jacobian(r, at)
     lam = np.linalg.solve(np.eye(n * n) - jac.T, hb.ravel()).reshape(n, n)
     lam = 0.5 * (lam + lam.T)
@@ -82,41 +100,3 @@ def subspace_residues_backward(amp_bar, poles, nu_points, pairs):
         g = amp_bar[:, a, b] if a == b else amp_bar[:, a, b] + amp_bar[:, b, a]
         out[(a, b)] = pinv.T @ g.reshape(-1, n_poles).T
     return out
-
-
-def sop_partials(omega, amplitudes, poles, eps, nocc, nu_points, Bp, C_ov,
-                 sigma_bar=1.0):
-    """(eps_bar, Bp_bar, Cov_bar) of sigma_bar * Sigma^c_pp, all the way down.
-    A test gate, read by no production route: the whole-chain reference the
-    production adjoint of the pole model is checked against.
-
-    `sigma_sop_backward` stops at wc, and wc enters the screening exactly as
-    the integral term's own weights do -- both terms are
-    sum_q weight_q Bp[:,q]^T [W(i.nu_k) - 1] Bp[:,q] -- so this is
-    `sigma_cd_backward`'s explicit branch with weights = wc_bar[k] in place of
-    -w_k g_k/pi, and with no residue block at all. That absence is the whole
-    point: there is no frozen pole set in the reverse pass, no dW/domega' at a
-    real frequency, and no backend.
-
-    The O(N^4) screening rebuild here is the REFERENCE route, the same one
-    `sigma_cd_backward` takes when handed C_ov. A cubic caller passes chi0
-    adjoints instead; the wc_bar this consumes is identical either way.
-    """
-    eps_bar, wc_bar, _ = sigma_sop_backward(omega, amplitudes, poles, eps, nocc,
-                                            nu_points, sigma_bar)
-    d = ov_energies(eps, nocc)
-    Bp_bar = np.zeros_like(Bp)
-    Cov_bar = np.zeros_like(C_ov)
-    d_bar = np.zeros_like(d)
-    for k, nu in enumerate(nu_points):
-        wtb = screening_aux(C_ov, d, nu, True)[1] @ Bp
-        bb, _, _ = integral_term_backward(Bp, wtb, wc_bar[k], want_chi0=False)
-        Bp_bar += bb
-        cvb, db, _ = screening_chain(wtb, wc_bar[k], C_ov, d, nu, True)
-        Cov_bar += cvb
-        d_bar += db
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    d4 = d_bar.reshape(len(occ), len(virt))
-    eps_bar[virt] += d4.sum(axis=0)
-    eps_bar[occ] -= d4.sum(axis=1)
-    return eps_bar, Bp_bar, Cov_bar

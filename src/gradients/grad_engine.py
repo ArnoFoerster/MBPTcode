@@ -31,16 +31,15 @@ import numpy as np
 from pyscf import ao2mo
 from pyscf import grad as _pyscf_grad  # registers mf.Gradients()
 
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.numerics.constants import DERIV_BLOCK_BYTES
 from src.SingleReference.common.eri_blocks import MOEriBlocks
 from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
 from src.gradients.df_assembly import df_densities, two_electron_skeleton_df
-from src.gradients.mean_field_response import (fock_partial_Y,
-                                               fock_partial_skeleton,
-                                               solve_lambda)
-from src.gradients.multipliers import solve_orbital_multipliers
-from src.gradients.one_electron import one_electron_skeleton
-from src.gradients.skeleton_tiles import shell_runs
+from src.gradients.mean_field_response import fock_partial_Y, fock_partial_skeleton
+from src.gradients.multipliers import (close_lagrangian, lagrangian_skeleton,
+                                       solve_orbital_multipliers)
+from src.Base.factorization.shell_runs import shell_runs
 
 
 # ---------------------------------------------------------------------------
@@ -90,13 +89,13 @@ def _y_fold_lambda(Lam, F_mo, eri_mo, nocc):
     return Y
 
 
-def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, numerics=None,
+def solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, numerics,
                       verbose=False):
     """Solve antisym(Y_E + Y[fold(Lambda)]) = 0 for symmetric zero-diag Lambda.
 
     The dense route's entry to `solve_orbital_multipliers`: the matvec is the
-    closed-form `_y_fold_lambda` built from the four-index MO integral tensor.
-    Returns (Lambda, res_norm).
+    closed-form `_y_fold_lambda` built from the four-index MO integral tensor;
+    numerics the run's `Numerics`, required. Returns (Lambda, res_norm).
     """
     return solve_orbital_multipliers(
         lambda Lam: _y_fold_lambda(Lam, F_mo, eri_mo, nocc),
@@ -128,7 +127,7 @@ def _permutation_sum(G_ao):
 
 def _shell_blocks(mol, max_bytes):
     """Shell ranges whose (grad mu nu|lam sig) block, 3 nao^3 * 8 bytes per
-    AO of its leading index, fits in max_bytes (`skeleton_tiles.shell_runs`)."""
+    AO of its leading index, fits in max_bytes (`shell_runs`)."""
     return shell_runs(mol.ao_loc_nr(), max_bytes // (3 * mol.nao ** 3 * 8))
 
 
@@ -165,7 +164,7 @@ def two_electron_skeleton(mol, Gbar_list, max_bytes=DERIV_BLOCK_BYTES):
 # ---------------------------------------------------------------------------
 
 def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
-                                    verbose=False):
+                                    verbose=False, *, numerics):
     """dL_X/dR with the Fock partial taken on the REFERENCE'S OWN Fock.
 
     `fold_fock` writes F_pq = h_pq + sum_k [2(pq|kk) - (pk|qk)], which is the
@@ -191,35 +190,33 @@ def kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo, auxmol=None,
     C = mf.mo_coeff
     nocc = mol.nelectron // 2
     h_mo = C.T @ mf.get_hcore() @ C
-    gam, Ms, four, diags = [], [], [], []
+    closed, four, diags = [], [], []
     for target in target_list:
         gammaF, Gamma4 = target[0], target[1]
         Y_E = orbital_Y(np.zeros_like(gammaF), Gamma4, h_mo, eri_mo)
         Y_E = Y_E + fock_partial_Y(mf, gammaF, nocc)
         if len(target) > 2 and target[2] is not None:
             Y_E = Y_E + target[2]
-        Lam, res = solve_lambda(mf, Y_E, nocc, verbose=verbose)
-        Y_tot = Y_E + fock_partial_Y(mf, Lam, nocc)
-        Mmat = -0.25 * (Y_tot + Y_tot.T)
-        gam.append(0.5 * (gammaF + gammaF.T) + Lam)
-        Ms.append(Mmat)
+        c = close_lagrangian(lambda Lam: fock_partial_Y(mf, Lam, nocc), Y_E,
+                             mf.mo_energy, 0.5 * (gammaF + gammaF.T),
+                             numerics=numerics, verbose=verbose)
+        closed.append(c)
         four.append(Gamma4)
-        diags.append({'stationarity': np.abs(Y_tot - Y_tot.T).max(),
-                      'multiplier_res': res, 'Lambda': Lam, 'M': Mmat})
+        diags.append({'stationarity': c.stationarity, 'multiplier_res': c.res,
+                      'Lambda': c.lam, 'M': c.M})
     if auxmol is None:
         Gbar = [_permutation_sum(ao_backtransform(G4, C)) for G4 in four]
         G = two_electron_skeleton(mol, Gbar)
     else:
         three, two = zip(*(df_densities(G4, C, mol, auxmol) for G4 in four))
         G = two_electron_skeleton_df(mol, auxmol, three, two)
-    G += one_electron_skeleton(mol, mf, [C @ g @ C.T for g in gam],
-                               [C @ m @ C.T for m in Ms])
-    return [g + fock_partial_skeleton(mf, gt, nocc)
-            for g, gt in zip(G, gam)], diags
+    G += lagrangian_skeleton(mol, mf, closed)
+    return [g + fock_partial_skeleton(mf, c.gamma, nocc)
+            for g, c in zip(G, closed)], diags
 
 
 def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
-                          verbose=False):
+                          verbose=False, *, numerics):
     """dL_X/dR for several targets sharing one skeleton-derivative sweep.
 
     target_list: list of (gammaF, Gamma4_E) MO-partial pairs, optionally
@@ -233,6 +230,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
              consistent when eri_mo is the RI four-index tensor from the SAME
              auxiliary basis (`SingleReference.common.eri_blocks.df_eri_mo`) -- differentiating a
              fitted energy with exact derivative integrals is not a gradient.
+    numerics: the run's `Numerics`, required, whose scf section sets the
+             multipliers' solve (`multipliers`).
 
     A Kohn-Sham reference is routed to `kohn_sham_correlation_gradients`: the
     fold below is the Hartree-Fock Fock and differentiates the wrong one-body
@@ -250,7 +249,8 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
         eri_mo = ao2mo.general(mol, (C,) * 4, compact=False).reshape((norb,) * 4)
     if xc_hybrid_coeff(mf)[0]:
         return kohn_sham_correlation_gradients(mol, mf, target_list, eri_mo,
-                                               auxmol=auxmol, verbose=verbose)
+                                               auxmol=auxmol, verbose=verbose,
+                                               numerics=numerics)
     h_mo = C.T @ mf.get_hcore() @ C
     F_mo = np.diag(eps)
 
@@ -269,37 +269,33 @@ def correlation_gradients(mol, mf, target_list, eri_mo=None, auxmol=None,
         Y_E = orbital_Y(gh_E, Gamma4, h_mo, eri_mo)
         if Y_extra is not None:
             Y_E = Y_E + Y_extra
-        Lam, res = solve_multipliers(Y_E, F_mo, eri_mo, nocc, eps, verbose=verbose)
-        Y_tot = Y_E + _y_fold_lambda(Lam, F_mo, eri_mo, nocc)
-        stat = np.abs(Y_tot - Y_tot.T).max()
-        if verbose:
-            print(f"    [stationarity] |antisym Y_tot| = {stat:.3e}")
-        # dL under dC = C X: X_up coefficient Y_tot,up + M_pu + M_up = 0 with
-        # M symmetric and antisym(Y_tot) = 0 enforced => M = -Y_tot/2.
-        Mmat = -0.25 * (Y_tot + Y_tot.T)
-        gh_L, _ = fold_fock(Lam, nocc, Gamma4)
-        dens.append((gh_E + gh_L, Gamma4, Mmat))
-        diags.append({'stationarity': stat, 'multiplier_res': res,
-                      'Lambda': Lam, 'M': Mmat})
+        c = close_lagrangian(lambda Lam: _y_fold_lambda(Lam, F_mo, eri_mo, nocc),
+                             Y_E, eps, gh_E, numerics=numerics, verbose=verbose)
+        if verbose and (current_comm() is None or current_comm().Get_rank() == 0):
+            print(f"    [stationarity] |antisym Y_tot| = {c.stationarity:.3e}")
+        # the multiplier enters the one-electron density through its fold,
+        # which also adds its two-particle part to Gamma4
+        gh_L, _ = fold_fock(c.lam, nocc, Gamma4)
+        dens.append((c._replace(gamma=gh_E + gh_L), Gamma4))
+        diags.append({'stationarity': c.stationarity, 'multiplier_res': c.res,
+                      'Lambda': c.lam, 'M': c.M})
 
     # Back-transform ONCE per target and contract the derivative integrals in
     # the AO basis, not an MO transform per atom and direction.
-    gam_ao = [C @ g @ C.T for g, _, _ in dens]
-    M_ao = [C @ m @ C.T for _, _, m in dens]
     if auxmol is None:
-        Gbar = [_permutation_sum(ao_backtransform(G4, C)) for _, G4, _ in dens]
+        Gbar = [_permutation_sum(ao_backtransform(G4, C)) for _, G4 in dens]
         G = two_electron_skeleton(mol, Gbar)
     else:
-        three, two = zip(*(df_densities(G4, C, mol, auxmol) for _, G4, _ in dens))
+        three, two = zip(*(df_densities(G4, C, mol, auxmol) for _, G4 in dens))
         G = two_electron_skeleton_df(mol, auxmol, three, two)
-    G += one_electron_skeleton(mol, mf, gam_ao, M_ao)
+    G += lagrangian_skeleton(mol, mf, [c for c, _ in dens])
     return list(G), diags
 
 
 def correlation_gradient(mol, mf, gammaF, Gamma4_E, eri_mo=None, auxmol=None,
-                         verbose=False):
+                         verbose=False, *, numerics):
     """Single-target wrapper around correlation_gradients."""
     Gs, diags = correlation_gradients(mol, mf, [(gammaF, Gamma4_E)],
                                       eri_mo=eri_mo, auxmol=auxmol,
-                                      verbose=verbose)
+                                      verbose=verbose, numerics=numerics)
     return Gs[0], diags[0]

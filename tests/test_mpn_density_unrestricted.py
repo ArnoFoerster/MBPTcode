@@ -23,11 +23,12 @@ from pyscf import gto, scf
 from tests.mpn_density_oracle import (MP2DensityMatrixSolverUnrestricted, MP3DensityMatrixSolverUnrestricted)
 from src.SingleReference.DensityMatrix.mpn_density_driver_unrestricted import MPnDensityDriverUnrestricted
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 CASES = [
     ('H 0 0 0; Li 0 0 1.6', 'sto-3g', 0, 'LiH (RHF-as-UHF)'),
-    ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', '6-31g', 0, 'H2O (RHF-as-UHF)'),
+    (WATER_AT_ORIGIN_COARSE, '6-31g', 0, 'H2O (RHF-as-UHF)'),
     ('O 0 0 0; H 0 0 0.97', '6-31g', 1, 'OH radical'),
     ('N 0 0 0; H 0 0.8 0.6; H 0 -0.8 0.6', 'sto-3g', 1, 'NH2 radical'),
 ]

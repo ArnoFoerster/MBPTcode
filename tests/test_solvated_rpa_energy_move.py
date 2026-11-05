@@ -5,7 +5,7 @@ independent spelling, to a few ulp.
 functional -- the reaction-field matrix N in the dressed auxiliary gauge, the
 (screening, counter-term) pair of the fold, and the solute-solvent dispersion
 term `solute_solvent_dispersion_energy` (not `Base.dispersion`'s empirical
-D3/D4 correction). `gradients/solvated_rpa_energy.py` holds the reverse pass
+D3/D4 correction). `gradients/rpa/solvated_energy.py` holds the reverse pass
 (`fold_bar_to_gauge`) and the four-sweep diagnostic that drives it
 (`solvated_correlation_energies`).
 
@@ -55,6 +55,7 @@ from src.gradients.rpa.space_time_adjoint import (rpa_energy_and_adjoint,
                                                   rpa_frequency_traces)
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED
 
 
 def same(got, want, quantity='root', unit='1'):
@@ -64,7 +65,7 @@ def same(got, want, quantity='root', unit='1'):
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Hartree. The adiabatic limit and a physical pole energy, so the dispersion
 #: gate sees both ends of g(iw) rather than one point of it.
 POLE_ENERGIES = (1e8, 3.67e-2, 1e-4)

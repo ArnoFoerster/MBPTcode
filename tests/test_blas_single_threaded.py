@@ -76,11 +76,12 @@ from src.Base.factorization.separable_ri import (atomic_grid, build_separable_ri
 from src.Base.utils.parallel import threads
 from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
 import src.SingleReference.GW.qp_solve as qp_solve
+from src.SingleReference.common import mean_field_operators
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 #: The control on where the wrap ends needs a fit whose Gram matrix BLAS really
 #: does thread; water at cc-pVDZ is small enough that the library may serve it
@@ -106,9 +107,9 @@ _needs_threadpoolctl = pytest.mark.skipif(
 
 def built(mf, mol):
     """The static term from a fresh build: the operator the mean field
-    holds (`qp_solve.mean_field_static_operator`) dropped first, so the
+    holds (`mean_field_operators.mean_field_static_operator`) dropped first, so the
     thread policy under test is the one the build runs under."""
-    qp_solve._STATIC_OPERATORS.clear()
+    mean_field_operators._STATIC_OPERATORS.clear()
     return static_exchange_mean_field_matrix(mf, mol)
 
 
@@ -296,11 +297,12 @@ def test_the_static_term_below_the_threshold_is_the_unwrapped_build(water,
         return seen[-1]
 
     monkeypatch.setattr(qp_solve, 'blas_single_threaded', probe)
+    monkeypatch.setattr(mean_field_operators, 'blas_single_threaded', probe)
     wrapped = built(water['mf'], water['mol'])
     assert seen and all(isinstance(c, contextlib.nullcontext) for c in seen), (
         'the build armed the wrap below the threshold')
-    monkeypatch.setattr(qp_solve, 'blas_single_threaded',
-                        contextlib.nullcontext)
+    for module in (qp_solve, mean_field_operators):
+        monkeypatch.setattr(module, 'blas_single_threaded', contextlib.nullcontext)
     plain = built(water['mf'], water['mol'])
     assert_same(wrapped, plain, quantity='root', label='below the threshold')
 

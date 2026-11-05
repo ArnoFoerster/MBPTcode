@@ -26,6 +26,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from src.SingleReference.ADC.eeADC import ee_u_dense_full as ppd, ee_utils
+from tests.molecules import WATER_AT_ORIGIN
 
 
 def _system(atom, basis='sto-3g'):
@@ -38,7 +39,7 @@ def _system(atom, basis='sto-3g'):
 
 
 SMALL = ['H 0 0 0; F 0 0 0.917', 'Li 0 0 0; H 0 0 1.6', 'B 0 0 0; H 0 0 1.23']
-MED = SMALL + ['O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+MED = SMALL + [WATER_AT_ORIGIN,
                'Be 0 0 0; H 0 0 1.34; H 0 0 -1.34']
 
 

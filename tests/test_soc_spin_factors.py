@@ -36,6 +36,7 @@ from src.properties.spin_orbit import (coupling, ground_state_element,
                                        soc_operator_mo)
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 
 # The PAULI matrices. h_SO's alpha^2/4 is the prefactor of sigma, not of the
@@ -145,12 +146,13 @@ def normalized_vectors(rng, nocc, nvir, count=2):
 @pytest.fixture(scope='module')
 def water():
     """(mol, mf, h_mo, nocc). Oxygen carries the whole coupling at this size."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12
     mf.kernel()
-    return mol, mf, soc_operator_mo(mf, mol), mol.nelectron // 2
+    return (mol, mf, soc_operator_mo(mf, mol, two_electron='somf',
+                                     one_electron='x2c'), mol.nelectron // 2)
 
 
 def test_the_determinant_states_are_orthonormal(water):
@@ -269,17 +271,17 @@ def test_against_pyscfs_two_component_operator(water, one_electron, bound):
 
 
 def test_the_two_one_electron_routes_agree_on_a_first_row_molecule(water):
-    """X2C is the default because it is exact within its own decoupling where
+    """X2C is the production operator because it is exact within its own decoupling where
     `int1e_pnucxp` is only the leading term, and because it carries its own
     normalization -- there is no alpha^2/4 to pair with a spin matrix, which is
     the convention that halved this module. On a first-row system the two must
     still agree to well under a per cent, or one of them is not what it says."""
     mol, mf, _, nocc = water
-    a, b = (soc_operator(mol, mf.make_rdm1(), one_electron=k)
-            for k in ('x2c', 'breit-pauli'))
-    # two builds of one operator: to a few ulp, not bitwise
-    assert_same(soc_operator(mol, mf.make_rdm1()), a, quantity='root',
-                label='x2c is default')
+    a, b = (soc_operator(mol, mf.make_rdm1(), two_electron='somf',
+                         one_electron=k) for k in ('x2c', 'breit-pauli'))
+    # the operator is declared, never defaulted
+    with pytest.raises(TypeError, match='one_electron'):
+        soc_operator(mol, mf.make_rdm1(), two_electron='somf')
     dev = abs(a - b).max() / abs(b).max()
     assert dev < 0.01, f'x2c and Breit-Pauli differ by {dev:.2%} on a C/O/H system'
     assert dev > 1e-6, 'the two routes are suspiciously identical'

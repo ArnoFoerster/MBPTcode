@@ -50,12 +50,12 @@ with the doubles stored as [l, d, k, c]: the OUTER particle-hole pair (l, d)
 carries the quasiparticle energies, the INNER pair (k, c) is the screening
 excitation that S acts on.
 """
-import warnings
 
 import numpy as np
 from pyscf import scf
 from scipy import linalg
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (HARTREE_TO_EV, KAPPA, UPFOLDED_BSE_DAVIDSON_MAX_CYCLE,
                                          UPFOLDED_BSE_DAVIDSON_TOL, UPFOLDED_BSE_DENSE_LIMIT,
                                          UPFOLDED_BSE_IMAG_TOL, UPFOLDED_BSE_LINDEP_TOL,
@@ -88,13 +88,28 @@ def _complex_roots(theta, imag, imag_tol, scale, X, flags, what):
                    f'above {imag_tol:.0e} relative): the dynamical BSE has no real '
                    f'solution there; root(s) {np.flatnonzero(bad).tolist()} are '
                    'returned as NaN')
-        warnings.warn(message, RuntimeWarning, stacklevel=3)
-        if flags is not None:
-            flags.append({'flag': 'upfolded_bse_complex_roots', 'message': message})
+        flag('upfolded_bse_complex_roots', message, RuntimeWarning,
+             stacklevel=3, into=flags)
         X = np.array(X, float)
         theta[bad] = np.nan
         X[:, bad] = np.nan
     return theta, X
+
+
+def _dropped_roots(w_real, flags, what):
+    """Warn and flag 'upfolded_bse_dropped_roots' when `what` holds a value
+    with Re <= 0: the solvers keep positive excitation energies only, so such
+    a root (a physical instability of the upfolded problem, or a Ritz value
+    the subspace has not resolved) is left out of the returned set."""
+    w_real = np.asarray(w_real)
+    low = w_real[w_real <= 0]
+    if low.size:
+        message = (f'{low.size} upfolded-BSE {what} with Re <= 0 (lowest '
+                   f'{low.min():.4e} Ha) are left out of the returned '
+                   'excitation energies; the upfolded problem has a '
+                   'non-positive root.')
+        flag('upfolded_bse_dropped_roots', message, RuntimeWarning,
+             stacklevel=3, into=flags)
 
 
 def dimensions(no, nv):
@@ -420,6 +435,7 @@ def solve_dense(eps, e_qp, gb, no, nv, spin='singlet', nroots=5,
     H = build_hamiltonian(eps, e_qp, gb, no, nv, spin)
     w, vr = linalg.eig(H)
     keep = np.argsort(w.real)
+    _dropped_roots(w.real, flags, 'eigenvalues')
     keep = [k for k in keep if w.real[k] > 0][:nroots]
     # Complex eigenvalues DO occur, in conjugate pairs, high in the doubles
     # manifold -- H is real but not symmetric, and the dynamical BSE it
@@ -494,6 +510,7 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
         V = np.hstack([V, new])
         W = np.hstack([W, np.column_stack([aop(new[:, k])
                                            for k in range(new.shape[1])])])
+    _dropped_roots(w.real, flags, 'Ritz values')
     scale = max(1.0, float(np.abs(theta).max()))
     theta, X = _complex_roots(theta, theta_c.imag, imag_tol, scale, X, flags,
                               'Ritz values')
@@ -503,9 +520,8 @@ def davidson_nonsymmetric(aop, diag, nroots=5, tol=UPFOLDED_BSE_DAVIDSON_TOL,
                    f'values are not converged roots.')
         if refuse_unconverged:
             raise UpfoldedBSERefusal(message)
-        warnings.warn(message, RuntimeWarning, stacklevel=2)
-        if flags is not None:
-            flags.append({'flag': 'upfolded_bse_not_converged', 'message': message})
+        flag('upfolded_bse_not_converged', message, RuntimeWarning,
+             stacklevel=2, into=flags)
     return theta, X
 
 
@@ -570,10 +586,9 @@ def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
     the exact four-index ERI (False), on the dense and the matrix-free path
     alike, so the system size picks the solver and never the integrals.
 
-    e_qp: GW quasiparticle energies (Hartree), length norb. `None` falls back
-    to the mean-field eigenvalues, which is NOT GW/BSE -- it is the same
-    matrix with an uncorrelated one-particle spectrum, useful for testing the
-    algebra and nothing else. Use `qp_energies(mf)` for the real thing.
+    e_qp: GW quasiparticle energies (Hartree), length norb, required:
+    `qp_energies(mf)`. A test of the algebra alone passes the mean-field
+    eigenvalues explicitly (`mf.mo_energy`); that matrix is not GW/BSE.
 
     flags: a list that receives the solve's named numerical events
     ('upfolded_bse_complex_roots', NaN roots; davidson_nonsymmetric:
@@ -588,11 +603,11 @@ def solve_bse_upfolded(mf, mol=None, spin='singlet', nroots=5, e_qp=None,
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
     act = slice(frozen, len(eps))
     if e_qp is None:
-        warnings.warn(
-            'no GW quasiparticle energies given; falling back to mean-field '
-            'eigenvalues. That is not GW/BSE -- pass e_qp=qp_energies(mf).',
-            RuntimeWarning, stacklevel=2)
-        e_qp = eps
+        raise ValueError(
+            'solve_bse_upfolded needs the GW quasiparticle energies: pass '
+            'e_qp=qp_energies(mf). The mean-field eigenvalues in their place '
+            'are not GW/BSE; pass e_qp=mf.mo_energy explicitly to test the '
+            'algebra on them.')
     e_qp = np.asarray(e_qp)
     eps, e_qp = eps[act], e_qp[act]
     norb = len(eps)

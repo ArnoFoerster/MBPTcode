@@ -36,12 +36,12 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients import df_correlation_force_tiled as tcf
 from src.gradients import df_factors
-from src.gradients.adc.fold_factors import ground_factors
 from src.SingleReference.ADC.eeADC import ee_fold, ee_ri_fold
 from src.gradients.adc import ee_gradient as eg
 from src.gradients.adc.ee_state_model import ADC2State
+from src.Base.numerics.numerics import Numerics
 from src.gradients.state_models import HFState, MP2State
-from tests.adc_common import (ATOMS, AUX, FD_STEP_FORCE, JKFIT, SCF_GRAD_TILED,
+from tests.adc_common import (ground_fold, ATOMS, AUX, FD_STEP_FORCE, JKFIT, SCF_GRAD_TILED,
                               SCF_TOL_TIGHT, check, df_rhf, molecule)
 from tests.pins import RECORDING_BLAS, matches
 
@@ -81,17 +81,19 @@ def check_against_dense():
         nf = frozen_of(mol)
         mf = scf_tight(mol)
         # MP2, gas
-        op = ground_factors(mol, mf, nf, AUX, 1e-9, aux_chunk=AUX_CHUNK).op
-        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, nf, AUX)
-        Ft, (_, _, gt, _, at, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED)
+        op = ground_fold(mol, mf, nf, AUX, 1e-9, aux_chunk=AUX_CHUNK)
+        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, nf, AUX, numerics=Numerics())
+        Ft, (_, _, gt, _, at, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED,
+                                                  numerics=Numerics())
         e, eD = float(np.max(np.abs(Fd - Ft))), float(np.max(np.abs(gd - gt)))
         ok &= check(e < 1e-10 and eD < 1e-10, f'{name} MP2: tiled force = dense',
                     f'force {e:.1e} Ha/Bohr, relaxed density {eD:.1e}, |Y - Y^T| '
                     f'{at:.0e}, max |F| {float(np.max(np.abs(Fd))):.2e}')
         # the triplet, gas, the same root to both routes
         op, rt = triplet_root(mol, mf, nf)
-        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, nf, AUX, op, rt)
-        Ft, (_, _, gt, _, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, rt, **TILED)
+        Fd, (_, _, gd, _, _, _) = eg.dense_force(mf, mol, nf, AUX, op, rt, numerics=Numerics())
+        Ft, (_, _, gt, _, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, rt, **TILED,
+                                                 numerics=Numerics())
         e, eD = float(np.max(np.abs(Fd - Ft))), float(np.max(np.abs(gd - gt)))
         ok &= check(e < 1e-10 and eD < 1e-10, f'{name} T1: tiled force = dense',
                     f'force {e:.1e} Ha/Bohr, relaxed density {eD:.1e}, max |F| '
@@ -102,9 +104,10 @@ def check_against_dense():
         out = {}
         for route in ('dense', 'tiled'):
             hf = HFState(mol, make_scf)
-            mp2 = MP2State(hf, nf, AUX, force_route=route, tile_gb=1e-9)
-            state = ADC2State(mp2, 'singlet', 0, 3, field.transition_environment(),
-                              conv_tol=1e-12)
+            mp2 = MP2State(hf, nf, AUX, force_route=route,
+                           numerics=Numerics(layout={'tile_gb': 1e-9},
+                                             adc={'conv_tol': 1e-12}))
+            state = ADC2State(mp2, 'singlet', 0, 3, field.transition_environment())
             h, c = field.operator(field.charges(field.potential(hf(0.0, 0.0).dm_eff)))
             F, info = state.force(h, c)
             F = F + field.force(info['dm_eff'])
@@ -134,8 +137,8 @@ def check_ranks():
     root_s = eg._pick(rs, 0, None)[1]
 
     def mp2(comm):
-        op = ground_factors(mol, mf, nf, AUX, 1e-9, comm, AUX_CHUNK).op
-        F, (_, _, g, _, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED)
+        op = ground_fold(mol, mf, nf, AUX, 1e-9, comm, AUX_CHUNK)
+        F, (_, _, g, _, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, **TILED, numerics=Numerics())
         return [F, g]
 
     def singlet(comm):
@@ -145,12 +148,12 @@ def check_ranks():
         op = ee_ri_fold.RIFoldADC2(f, 'singlet', reaction_field=rf, tile_gb=1e-9,
                                    comm=comm, aux_chunk=AUX_CHUNK)
         F, (_, _, g, lr, _, _) = eg.tiled_force(mf, mol, op, nf, AUX, root_s, tenv,
-                                                **TILED)
+                                                **TILED, numerics=Numerics())
         return [F, g, lr[0][1]]
 
     def triplet(comm):
         F, info = eg.adc2_force_tiled(mf, mol, 'triplet', frozen=nf, auxbasis=AUX,
-                                      comm=comm, aux_chunk=AUX_CHUNK, **TILED)
+                                      comm=comm, aux_chunk=AUX_CHUNK, **TILED, numerics=Numerics())
         return [F, info['dm_corr'], np.array([info['omega']])]
 
     for label, run, kinds in (
@@ -190,7 +193,7 @@ def check_finite_differences():
     mol = molecule(ATOMS, basis=BASIS)
     nf = frozen_of(mol)
     F, _ = eg.adc2_force_tiled(scf_tight(mol), mol, 'singlet', frozen=nf, auxbasis=AUX,
-                               aux_chunk=AUX_CHUNK, **TILED)
+                               aux_chunk=AUX_CHUNK, **TILED, numerics=Numerics())
     fd = np.zeros_like(F)
     for a in range(mol.natm):
         for x in range(3):
@@ -220,13 +223,14 @@ def check_memory_refusal():
     try:
         try:
             eg.adc2_force_tiled(mf, mol, None, frozen=nf, auxbasis=AUX, ground=True,
-                                max_memory=0.5 * est['peak_gb'] * 1024, **TILED)
+                                max_memory=0.5 * est['peak_gb'] * 1024, **TILED,
+                                numerics=Numerics())
             ok &= check(False, 'a max_memory below the estimate is refused')
         except MemoryError as err:
             ok &= check(not called, 'a max_memory below the estimate is refused '
                         'before any work', str(err)[:70])
         F, info = eg.adc2_force_tiled(mf, mol, None, frozen=nf, auxbasis=AUX,
-                                      ground=True, max_memory=4000, **TILED)
+                                      ground=True, max_memory=4000, **TILED, numerics=Numerics())
         peak = info['estimate']['peak_gb']
         ok &= check(bool(called) and 0.0 < peak * 1024 < 4000,
                     'above the estimate it runs', f'estimated peak {peak * 1024:.1f} MB')

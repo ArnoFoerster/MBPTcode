@@ -19,18 +19,20 @@ import numpy as np
 import pytest
 from pyscf import gto
 
-from src.Base.numerics.constants import HARTREE_TO_EV, ISDF_GRADIENT_FLOOR
+from src.Base.numerics.constants import HARTREE_TO_EV
 from src.gradients.gwbse.rpa_bse_surface import RPABSESurface
 from src.gradients.gwbse.state_manifold import (StateManifold, driven_chain,
                                                 own_root_attribute, root_attribute)
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight_default_cycles
+from tests.pins import isdf_gradient_bar
+from tests.molecules import WATER_ROUNDED
 
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    return gto.M(atom=WATER_ROUNDED,
                  basis='cc-pvdz', verbose=0)
 
 
@@ -118,7 +120,7 @@ def test_bse_gradients_off_one_pass_equal_independent_surfaces(bse, mol):
         ref = ExcitedStateChain(mol, rhf_tight_default_cycles, spin='singlet', state=n,
                                 mf=bse.mf0, numerics=g1_numerics(mol)).total_gradient()
         # E_0 + Omega: two chains' gradients, so two reproducibility floors
-        assert np.abs(got[n][0] - ref[0]).max() < 2 * ISDF_GRADIENT_FLOOR
+        assert np.abs(got[n][0] - ref[0]).max() < 2 * isdf_gradient_bar()
         # the seeded Newton root sits one ulp from the unseeded one
         assert abs(got[n][1] - ref[1]) < 1e-12
         assert np.abs(got[n][0].sum(axis=0)).max() < 1e-9
@@ -191,7 +193,7 @@ def test_a_composed_roots_gradient_is_that_roots_own(composed, root1_reference):
     _, g_ref = root1_reference
     man = StateManifold(composed, states=(0, 1))
     g1 = man.gradient(1)[0]
-    assert np.abs(g1 - g_ref).max() < 2 * ISDF_GRADIENT_FLOOR
+    assert np.abs(g1 - g_ref).max() < 2 * isdf_gradient_bar()
     assert np.abs(g1 - man.gradient(0)[0]).max() > 1e-3
     assert np.abs(g1.sum(axis=0)).max() < 1e-9
 

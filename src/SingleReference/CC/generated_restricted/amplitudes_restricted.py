@@ -2,14 +2,8 @@
 # Produced by src/CodeGeneration/generate_restricted_ccsdt.py.
 # Restricted (spin-blocked) CCSDT energy and T-residuals.
 # See that module's docstring for the equations/conventions.
-# allow numpy built with MKL to consume more threads for tensordot -- but only
-# if the caller hasn't already pinned the thread count (same convention as
-# amplitudes.py's generalized-pipeline counterpart)
-import os
-os.environ.setdefault("MKL_NUM_THREADS", "{}".format(os.cpu_count() - 1))
-
 import numpy as np
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 
 def cc_energy_restricted(t1_aa, t1_bb, t2_aaaa, t2_abab, t2_bbbb, f_aa, f_bb, g_aaaa, g_abab, g_bbbb, o, v):

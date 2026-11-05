@@ -10,8 +10,8 @@ A correlated energy E_c on RHF orbitals is described to this module by
     Y_extra (nmo, nmo)                dE_c / dkappa_rp of any further orbital
                                        dependence (a reaction field's LR term)
 
-with E_c depending on B only through sum_P B^P_pq B^P_rs. MP2 is here
-(`mp2_pieces`); ADC(2) in src.gradients.adc.ee_gradient.
+with E_c depending on B only through sum_P B^P_pq B^P_rs. MP2 and SCS-MP2 are here
+(`mp2_pieces`); ADC(2) and SCS-ADC(2) in src.gradients.adc.ee_gradient.
 
 The orbitals. For C -> C (1 + kappa) (kappa general), dL/dkappa_rp = Y_rp,
 
@@ -41,14 +41,17 @@ phase and in a fixed field.
 import numpy as np
 import scipy.linalg
 from pyscf import df as pyscf_df
-from pyscf import scf
 
-from src.Base.pyscf.pyscf_interface import auxmol_of
+from src.Base.pyscf.pyscf_interface import auxmol_of, response_kernel
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.SingleReference.common.df_amplitudes import (PAIR, amplitude_fock,
-                                                      doubles_denominator)
+                                                      doubles_denominator, singlet_pairs)
+from src.Base.factorization.distributed_df import correlation_metric_mode, rank0_metric_factor
+from src.Base.factorization.isdf_jk import interpolated_exchange
 from src.gradients.df_assembly import fit_coefficients, two_electron_skeleton_df
-from src.gradients.grad_engine import one_electron_skeleton
-from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.gradients.multipliers import (close_lagrangian, lagrangian_skeleton,
+                                       rotation_gradient)
 from src.gradients.skeleton_tiles import fitted_fock_skeleton
 
 
@@ -67,22 +70,41 @@ class RIFactors:
 
 
 def whitening(auxmol):
-    """(V, X = L^-1) of the auxiliary metric V = L L^T."""
+    """(V, X) of the auxiliary metric V: X = L^-1 for V = L L^T, or, where V
+    has an eigenvalue below the eigen-replacement's cut, that replacement, the
+    one the energy's fit takes (`distributed_df.correlation_metric_mode`,
+    `correlation_df`): X then has one row per kept eigenvector, and X^T X is
+    the pseudo-inverse of V. Over the current region's ranks the choice and
+    the factor are rank 0's (`rank0_metric_factor`), a collective every rank
+    calls."""
     V = auxmol.intor('int2c2e')
-    Lc = scipy.linalg.cholesky(V, lower=True)
-    return V, scipy.linalg.solve_triangular(Lc, np.eye(Lc.shape[0]), lower=True)
+    mode = correlation_metric_mode(auxmol, current_comm())
+    low, mode = rank0_metric_factor(auxmol, auxmol, mode=mode)
+    if mode == 'eig':
+        return V, low
+    return V, scipy.linalg.solve_triangular(low, np.eye(low.shape[0]), lower=True)
 
 
-def mp2_pieces(B, eps, nf, nocc):
+def fit_coefficients_whitened(J, V, X):
+    """K = J V^-1 over the last index of J, or J X^T X (V^+) where `whitening`
+    dropped near-dependent directions."""
+    if X.shape[0] == V.shape[0]:
+        return fit_coefficients(J, V)
+    return (J.reshape(-1, J.shape[-1]) @ X.T @ X).reshape(J.shape)
+
+
+def mp2_pieces(B, eps, nf, nocc, scaling=None):
     """(e_mp2, gamma (nmo, nmo), Gamma (nmo, nmo, naux)) of closed-shell
     DF-MP2 with nf frozen core orbitals: E = -sum I tau, tau = (2 I - I~) / D,
-    D = e_a + e_b - e_i - e_j > 0."""
+    D = e_a + e_b - e_i - e_j > 0. scaling (c_os, c_ss): SCS-MP2, tau =
+    [(c_os + c_ss) I - c_ss I~] / D (df_amplitudes.singlet_pairs); E stays
+    quadratic in I, so gamma and Gamma keep their form."""
     nmo, naux = B.shape[0], B.shape[2]
     o, v = slice(nf, nocc), slice(nocc, nmo)
     L = B[o, v]
     I = np.einsum('iaP,jbP->iajb', L, L)
     D = doubles_denominator(eps[o], eps[v])
-    tau = (2.0 * I - I.transpose(PAIR)) / D
+    tau = singlet_pairs(I, I.transpose(PAIR), scaling) / D
     e = -float(np.sum(I * tau))
     g_oo, g_vv = amplitude_fock(-I / D, tau)
     gamma = np.zeros((nmo, nmo))
@@ -94,45 +116,49 @@ def mp2_pieces(B, eps, nf, nocc):
 
 def jk_fit(mf):
     """The auxiliary basis of mf's JK fit. A correlation force takes the
-    Fock skeleton of that fit, so a mean field without one is refused."""
+    Fock skeleton of that fit and solves its Z-vector on that fit's kernel,
+    so a mean field without one is refused, and so is an interpolated
+    (ISDF-K) one: its exchange is not the fit the force differentiates."""
     with_df = getattr(mf, 'with_df', None)
     if with_df is None:
         raise ValueError('the DF correlation force needs a density-fitted mean '
                          'field (mf.density_fit()): its JK skeleton is the fit\'s, '
                          f'and this {type(mf).__name__} has none')
+    if interpolated_exchange(mf):
+        raise ValueError('the DF correlation force needs a density-fitted mean '
+                         'field, not an interpolated (ISDF-K) one: its Z-vector '
+                         'kernel and JK skeleton are the density fit\'s, so on '
+                         'ISDF-K exchange the force would not be the energy\'s '
+                         'derivative')
     return with_df.auxbasis
 
 
 def scf_kernel(mf):
-    """G(x) = J[x] - K[x]/2 of mf's own interaction (its JK fit, or the exact
-    integrals when it has none), no environment, built serially whatever the
-    mean field's distribution."""
-    with_df = getattr(mf, 'with_df', None)
-    m = scf.RHF(mf.mol)
-    if with_df is not None:
-        m = m.density_fit(auxbasis=with_df.auxbasis)
-        m.with_df = with_df
-
-    def kernel(x):
-        vj, vk = m.get_jk(mf.mol, x, hermi=1)
-        return vj - 0.5 * vk
-    return kernel
+    """G(x) = J[x] - K[x]/2 of mf's own JK fit, no environment: the mean
+    field's one response kernel (`pyscf_interface.response_kernel`), its Fock
+    builds shared over the current communicator's ranks, a collective that
+    every rank calls alike (as the multiplier solve's root-driven iteration
+    does)."""
+    return response_kernel(mf, environment=False, comm=current_comm())
 
 
 def relax(mf, mol, B, gamma0, Gam, nf, Y_extra=None, numerics=None, flags=None):
-    """(gamma, Y): the relaxed gamma (MO, multipliers included) and the
-    orbital gradient of the stationary Lagrangian (module docstring)."""
+    """The `multipliers.ClosedLagrangian` (MO) of the correlation energy:
+    its relaxed gamma, multipliers included, the orbital gradient of the
+    stationary Lagrangian and its energy-weighted matrix (module docstring)."""
     YG = np.einsum('pqP,rqP->rp', Gam + Gam.transpose(1, 0, 2), B, optimize=True)
     if Y_extra is not None:
         YG = YG + Y_extra
     return relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
 
 
-def relax_gradient(mf, mol, YG, gamma0, nf, numerics=None, flags=None):
+def relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags=None):
     """relax from the Gamma part of the orbital gradient, YG_rp = sum_qP
     Gs2^P_pq B^P_rq (+ Y_extra), however it was assembled: the multipliers of
     the virtual-occupied and frozen-core-active pairs (module docstring),
-    their tolerances from `numerics`, a short solve flagged into `flags`."""
+    their tolerances from `numerics`, a short solve flagged into `flags`. Under
+    ranks a collective: rank 0 iterates, every rank builds its share of each
+    Fock matrix (scf_kernel)."""
     C = np.asarray(mf.mo_coeff)
     eps = np.asarray(mf.mo_energy, float)
     nmo, nocc = C.shape[1], mol.nelectron // 2
@@ -143,11 +169,10 @@ def relax_gradient(mf, mol, YG, gamma0, nf, numerics=None, flags=None):
     free = np.zeros((nmo, nmo), bool)
     free[:nocc, nocc:] = True
     free[:nf, nf:nocc] = True
-    Lam, _ = solve_orbital_multipliers(
-        lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_of(gamma0), eps,
-        numerics=numerics, free=free, flags=flags)
-    gamma = gamma0 + Lam
-    return gamma, Y_of(gamma)
+    # the stationary gradient in one build of the whole relaxed density
+    return close_lagrangian(lambda L: rotation_gradient(C, fock, L, nocc, kernel),
+                            Y_of(gamma0), eps, gamma0, numerics=numerics, free=free,
+                            flags=flags, total=lambda L: Y_of(gamma0 + L))
 
 
 def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
@@ -155,11 +180,10 @@ def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
     """(force (natm, 3) of E_c, gamma (MO, relaxed), max |Y - Y^T|)."""
     C = np.asarray(mf.mo_coeff)
     nocc = mol.nelectron // 2
-    gamma, Y = relax(mf, mol, ri.B, gamma0, Gam, nf, Y_extra, numerics, flags)
-    asym = float(np.max(np.abs(Y - Y.T)))
-    W = 0.25 * (Y + Y.T)
-    gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
-    f1 = one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao])[0]
+    closed = relax(mf, mol, ri.B, gamma0, Gam, nf, Y_extra, numerics, flags)
+    gamma, asym = closed.gamma, closed.stationarity
+    gamma_ao = C @ gamma @ C.T
+    f1 = lagrangian_skeleton(mol, mf, [closed])[0]
     Co = C[:, :nocc]
     jk_fit(mf)                     # refuses a mean field with no JK fit
     auxjk = auxmol_of(mf, mol)
@@ -167,39 +191,43 @@ def correlation_force(mol, mf, ri, gamma0, Gam, nf, Y_extra=None, numerics=None,
                                occ=np.sqrt(2.0) * Co, exchange=1.0)
     Gs = 0.5 * (Gam + Gam.transpose(1, 0, 2))
     G3 = 0.5 * np.einsum('pqP,PQ->pqQ', Gs, ri.X, optimize=True)
-    G2 = np.einsum('pqP,pqQ->PQ', fit_coefficients(ri.J, ri.V), G3, optimize=True)
+    G2 = np.einsum('pqP,pqQ->PQ', fit_coefficients_whitened(ri.J, ri.V, ri.X), G3, optimize=True)
     G3_ao = np.einsum('mp,nq,pqQ->mnQ', C, C, G3, optimize=True)
     fri = two_electron_skeleton_df(mol, ri.auxmol, [G3_ao], [0.5 * (G2 + G2.T)])[0]
     return f1 + fjk + fri, gamma, asym
 
 
-def hf_force(mf):
-    """pyscf's force of the SCF energy E_vac[D] + tr(h_ext D) with the
-    external operator's own derivative left out (its vacuum hcore_generator),
-    nuclear repulsion included. The mean field's own gradient class
-    (mf.nuc_grad_method()): RHF or DF-RHF, and for a Kohn-Sham reference the
-    RKS class with its exchange-correlation term (RHF's class there would
-    differentiate J - K/2 and no XC)."""
-    g = mf.nuc_grad_method()
-    g.verbose = 0
-    return g.kernel()
+def mp2_density(mf, mol, frozen, auxbasis, numerics=None, flags=None, scaling=None):
+    """(e_mp2, gamma (MO, relaxed)) of DF-MP2 on the dense reference: the
+    force's energy and relaxed density without its derivative integrals,
+    d E_MP2 / d h_pq; numerics, flags and scaling as mp2_force's."""
+    jk_fit(mf)                     # refuses a mean field with no JK fit
+    nocc = mol.nelectron // 2
+    ri = RIFactors(mol, mf, auxbasis)
+    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc, scaling)
+    gamma = relax(mf, mol, ri.B, gamma, Gam, frozen, None, numerics, flags).gamma
+    return e2, gamma
 
 
-def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None):
+def mp2_force(mf, mol, frozen, auxbasis, excited=None, numerics=None, flags=None,
+              scaling=None):
     """(dE/dR (natm, 3), (e_mp2, gamma (MO, relaxed), max |Y - Y^T|, extra)) of
     E_HF + E_MP2 on the dense reference; excited(C, nocc, nmo) -> (gamma,
     Gamma, Y_extra, extra) adds an excitation's pieces in the full MO layout.
     numerics: the caller's (the Z-vector's tolerances); flags: the list a
-    short Z-vector solve appends its flag to."""
+    short Z-vector solve appends its flag to; scaling: (c_os, c_ss) of
+    SCS-MP2, or None (mp2_pieces). E_HF's force is
+    `isdf_mean_field.mean_field_skeleton_force`: over the current ranks, every
+    rank calling, with the external operator's own derivative left out."""
     jk_fit(mf)                     # refuses a mean field with no JK fit
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
     ri = RIFactors(mol, mf, auxbasis)
-    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc)
+    e2, gamma, Gam = mp2_pieces(ri.B, mf.mo_energy, frozen, nocc, scaling)
     Y_extra = extra = None
     if excited is not None:
         g1, G1, Y_extra, extra = excited(C, nocc, nmo)
         gamma, Gam = gamma + g1, Gam + G1
     fc, gam, asym = correlation_force(mol, mf, ri, gamma, Gam, frozen, Y_extra,
                                       numerics, flags)
-    return hf_force(mf) + fc, (e2, gam, asym, extra)
+    return mean_field_skeleton_force(mf) + fc, (e2, gam, asym, extra)

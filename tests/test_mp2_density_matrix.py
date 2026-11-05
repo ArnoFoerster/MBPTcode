@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf, mp
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.DensityMatrix.density_matrix import (compute_mp2_density_matrix_ao)
 from tests.mpn_density_oracle import (compute_mp2_density_matrix, MP2DensityMatrixSolver, MP2DensityMatrixSolverUnrestricted)
 from src.Base.pyscf.pyscf_interface import (
@@ -110,7 +111,7 @@ if __name__ == '__main__':
         S = mol.intor('int1e_ovlp')
         nelec = mol.nelectron
         dm_lin = compute_mp2_density_matrix_ao(mf, mol, relax=False)
-        dm_relaxed = compute_mp2_density_matrix_ao(mf, mol, relax=True)
+        dm_relaxed = compute_mp2_density_matrix_ao(mf, mol, relax=True, numerics=Numerics())
 
         for label, dm in [('relax=False', dm_lin), ('relax=True', dm_relaxed)]:
             n = np.trace(dm @ S)

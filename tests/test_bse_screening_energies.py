@@ -32,11 +32,12 @@ from src.SingleReference.LinearResponse.linear_response import LinearResponseSol
 from src.Base.numerics.numerics import numerics_of
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED_LOW
 
 NROOTS = 4
 
 if __name__ == '__main__':
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='cc-pvdz', verbose=0)
     nocc = mol.nelectron // 2
     # cc-pVDZ-RI on purpose: it is an MP2 correlation-fitting set, so its error

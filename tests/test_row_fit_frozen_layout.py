@@ -18,7 +18,7 @@ from src.Base.factorization import separable_ri
 from src.Base.numerics.numerics import Numerics
 from src.gradients.rpa.factor_chain import FrozenFactorization
 from src.gradients.rpa.ground_state import RPAGroundStateChain
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, DUCHEMIN_BLASE_FIT
 from tests.pins import assert_same
 
 ATOM = 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.58; H 0 -0.94 -0.58'
@@ -42,7 +42,7 @@ def _displaced(mol, atom, axis, h):
 
 def test_the_row_fit_keeps_the_reference_pairs_at_a_displaced_geometry():
     mol = gto.M(atom=ATOM, basis='cc-pvdz', verbose=0)
-    fac = FrozenFactorization(mol, Numerics(isdf={'fit': 'rows', 'counts': g1(mol)},
+    fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'fit': 'rows', 'counts': g1(mol)},
                                             layout={'sliced': True}))
     chain = RPAGroundStateChain(mol, _rhf, factorization=fac)
     m = _displaced(mol, 2, 1, 0.1)

@@ -66,6 +66,7 @@ from tests.generated_runtime import requires_runtime
 from tests.lambda_oracle import (LambdaSelfEnergyOracle, ADCFoldOracle,
                                  GeneratedADCBlocks, generated_supermatrix)
 from src.SingleReference.ADC.generated_modules import generated
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(5)
 
@@ -159,7 +160,7 @@ def main():
     for atom, label, want_nonzero in [
             ('H 0 0 0; H 0 0 0.74', 'H2/sto-3g', False),
             ('Li 0 0 0; H 0 0 1.6', 'LiH/sto-3g', True),
-            ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'H2O/sto-3g', True)]:
+            (WATER_RIGHT_ANGLE, 'H2O/sto-3g', True)]:
         mol = gto.M(atom=atom, basis='sto-3g', verbose=0)
         mf = scf.RHF(mol).run()
         nocc_sp = mol.nelectron // 2
@@ -202,7 +203,7 @@ def main():
     s2r = generated('adc4_c2_s2c_apply_restricted_blocks')
 
     for atom, label in [('Li 0 0 0; H 0 0 1.6', 'LiH/sto-3g'),
-                        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'H2O/sto-3g')]:
+                        (WATER_RIGHT_ANGLE, 'H2O/sto-3g')]:
         mol = gto.M(atom=atom, basis='sto-3g', verbose=0)
         mf = scf.RHF(mol).run()
         eps_sp = get_orbital_energies(mf, representation='spatial')

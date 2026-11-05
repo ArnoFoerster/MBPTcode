@@ -52,17 +52,12 @@ excited-excited.
 """
 import numpy as np
 
-from src.Base.numerics.constants import (COUPLING_GAP_MIN, NUCLEAR_FD_STEP,
-                                         ORBITAL_MULTIPLIER_DEGENERACY_TOL,
-                                         ORBITAL_MULTIPLIER_RESIDUAL_TOL)
-from src.Base.numerics.numerics import numerics_identity, require_same_identity
-from src.Base.pyscf.pyscf_interface import occupied_count, response_kernel
-from src.Base.geometry.geometry import displaced
-from src.gradients.mean_field_response import (fock_partial_skeleton,
-                                               solve_lambda)
-from src.gradients.one_electron import one_electron_skeleton
-from src.gradients.state_identity import mo_overlap
-from src.Base.numerics.constants import EXCITED_SPIN_FACTOR, GROUND_SPIN_FACTOR
+from src.Base.numerics.constants import COUPLING_GAP_MIN
+from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
+                                        surface_numerics)
+from src.Base.orbital_spaces import occupied_count
+from src.gradients.orbital_coupling import configuration_coupling, ov_coupling
+from src.Base.numerics.constants import GROUND_SPIN_FACTOR
 
 
 def state_to_state_density(nocc, xm, ym, xn, yn):
@@ -84,173 +79,7 @@ def state_to_state_density(nocc, xm, ym, xn, yn):
     return (x_m @ x_n.T - y_m @ y_n.T, x_m.T @ x_n - y_m.T @ y_n)
 
 
-def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
-                                 step=NUCLEAR_FD_STEP):
-    """A_pq = <phi_p | d phi_q / dR> for the CANONICAL orbitals, by difference.
-
-    Mean fields only -- no GW and no BSE. A test gate, not on the production
-    path: this is the independent check that `configuration_coupling`'s
-    Z-vector reproduces,
-    and it is also the cheapest way to SEE the gauge.
-
-    Each displaced solve returns its orbitals up to a sign, which is fixed by
-    making the diagonal of the overlap positive; a within-block ROTATION needs
-    no fixing, because it is exactly the canonical gauge this term carries.
-    """
-    crd = np.asarray(mol.atom_coords())
-    out = []
-    for sign in (-1.0, 1.0):
-        delta = np.zeros_like(crd)
-        delta[atom, axis] = sign * step
-        md = displaced(mol, delta, crd)
-        t = mo_overlap(mol, mf.mo_coeff, md, scf_factory(md).mo_coeff)
-        out.append(t * np.sign(np.diag(t))[None, :])
-    return (out[1] - out[0]) / (2 * step)
-
-
-def _transition_weight(goo, gvv, nocc, norb):
-    """gamma_pq with sum_pq gamma_pq A_pq the configuration term.
-
-    The occupied block is transposed against the virtual one, which is the
-    minus sign of the transported RPA metric written as a single contraction.
-    """
-    gam = np.zeros((norb, norb))
-    gam[:nocc, :nocc] = -np.asarray(goo, float).T
-    gam[nocc:, nocc:] = np.asarray(gvv, float)
-    return EXCITED_SPIN_FACTOR * gam
-
-
-def sigma_contraction(mol, mo_coeff, weight, antisymmetrize):
-    """(natm, 3) sum_pq weight_pq Sigma_pq, Sigma_pq = <phi_p | d phi_q / dR>
-    at FIXED coefficients -- one `int1e_ipovlp` contraction, no response.
-
-    A basis function moves only with the nucleus it sits on, and
-    d(chi_nu)/dR_A = -grad(chi_nu) because chi_nu(r - R_A).
-
-    antisymmetrize takes (Sigma - Sigma.T)/2, the within-block A^sym of the
-    symmetric gauge. The ground-state coupling wants the raw Sigma instead,
-    because there the coupled-perturbed rotation is supplied explicitly rather
-    than fixed by a gauge choice.
-    """
-    c = np.asarray(mo_coeff, float)
-    ip = mol.intor('int1e_ipovlp', comp=3)
-    out = np.zeros((mol.natm, 3))
-    for atom in range(mol.natm):
-        lo, hi = mol.aoslice_by_atom()[atom][2:4]
-        for x in range(3):
-            sig = np.zeros_like(ip[x])
-            sig[:, lo:hi] = -ip[x].T[:, lo:hi]
-            mo = c.T @ sig @ c
-            out[atom, x] = float((weight * (0.5 * (mo - mo.T) if antisymmetrize
-                                            else mo)).sum())
-    return out
-
-
-def _z_vector_contraction(mol, mf, nocc, w_f, w_s):
-    """(natm, 3) sum_pq w_f_pq dF_pq + sum_pq w_s_pq dS_pq, FIXED MO basis.
-
-    Both derivatives are what a displaced geometry gives with the reference
-    coefficients held. dF carries the density response and dS does not, and
-    the response meets a FIXED weight, so ONE Z-vector replaces the 3 natm
-    coupled-perturbed solves the nuclear perturbations would each need.
-
-    `solve_lambda` inverts exactly the operator this needs: for a symmetric
-    Lambda, antisym(fock_partial_Y)[i,a] is
-    -[2 (eps_a - eps_i) Lambda_ai + 4 Ghat[Lambda]_ai], so seeding an
-    antisymmetric Y_E's occupied-virtual block with 4 Ghat solves for Z.
-
-    The occupied-occupied rotation never enters: its antisymmetric part cancels
-    out of the density derivative, leaving dD dependent on the
-    occupied-virtual block and on dS_oo alone.
-    """
-    c = np.asarray(mf.mo_coeff, float)
-    eps = np.asarray(mf.mo_energy, float)
-    norb = len(eps)
-    kernel = response_kernel(mf)
-    ghat = c.T @ kernel(c @ w_f @ c.T) @ c
-
-    y_e = np.zeros((norb, norb))
-    y_e[:nocc, nocc:] = 2.0 * ghat[nocc:, :nocc].T
-    y_e[nocc:, :nocc] = -2.0 * ghat[nocc:, :nocc]
-    z = solve_lambda(mf, y_e, nocc)[0]
-
-    v = np.zeros((norb, norb))
-    v[nocc:, :nocc] = z[nocc:, :nocc] * eps[None, :nocc]
-    v = v + v.T
-    ghat_z = c.T @ kernel(c @ z @ c.T) @ c
-
-    oo = np.zeros((norb, norb), bool)
-    oo[:nocc, :nocc] = True
-    theta = w_f - z
-    omega = w_s + v + np.where(oo, 2.0 * (ghat_z - ghat), 0.0)
-    return (one_electron_skeleton(mol, mf, [c @ theta @ c.T],
-                                  [c @ omega @ c.T])[0]
-            + fock_partial_skeleton(mf, theta, nocc))
-
-
-def _pair_matrix(block, nocc, norb):
-    """The symmetric (norb, norb) matrix carrying an (nocc, nvir) weight twice.
-
-    A sum over occupied-virtual pairs meets a SYMMETRIC derivative, so it is
-    HALF of the full matrix contraction; callers pass half of this.
-    """
-    out = np.zeros((norb, norb))
-    out[:nocc, nocc:] = np.asarray(block, float)
-    return out + out.T
-
-
-def configuration_coupling(mol, mf, nocc, goo, gvv):
-    """(natm, 3) the configuration term between two EXCITED states.
-
-    Writing A = A^sym + kappa, the canonical condition gives, for p != q inside
-    one block,
-
-        kappa_pq = [ dF_pq - eps_q dS_pq ] / (eps_q - eps_p) + dS_pq / 2
-
-    in the FIXED reference MO basis. Contracting gamma with it turns every
-    energy denominator into a FIXED weight, so nothing diverges as two orbitals
-    approach each other -- what multiplies 1/(eps_q - eps_p) is dF, which
-    vanishes with it:
-
-        w_f = sym(g),                g_pq = gamma_pq / (eps_q - eps_p)
-        w_s = sym(-g eps_q + gamma/2)
-
-    Only the block-diagonal blocks of A enter: the state-to-state density of
-    two singly excited states has no occupied-virtual block, so the one part of
-    the rotation a gauge cannot fix never appears.
-
-    A pair inside ORBITAL_MULTIPLIER_DEGENERACY_TOL has no canonical rotation:
-    it is dropped when gamma vanishes on it (by symmetry) and refused when it
-    does not, as `multipliers` refuses such a pair's right-hand side.
-    """
-    c = np.asarray(mf.mo_coeff, float)
-    eps = np.asarray(mf.mo_energy, float)
-    norb = len(eps)
-    gam = _transition_weight(goo, gvv, nocc, norb)
-
-    de = eps[None, :] - eps[:, None]
-    block = np.zeros((norb, norb), bool)
-    block[:nocc, :nocc] = block[nocc:, nocc:] = True
-    np.fill_diagonal(block, False)
-    degenerate = block & (np.abs(de) < ORBITAL_MULTIPLIER_DEGENERACY_TOL)
-    if degenerate.any():
-        bad = float(np.abs(gam[degenerate]).max())
-        if bad > ORBITAL_MULTIPLIER_RESIDUAL_TOL:
-            raise RuntimeError(
-                f'a degenerate orbital pair carries state-to-state density '
-                f'{bad:.2e}: its canonical rotation is undefined, so the '
-                f'configuration term is too; symmetry-adapted treatment '
-                f'needed')
-    safe = np.where(degenerate, np.inf, de)
-    g = np.where(block, gam / safe, 0.0)
-    w_f = 0.5 * (g + g.T)
-    w_s = np.where(block, -g * eps[None, :] + 0.5 * gam, 0.0)
-    w_s = 0.5 * (w_s + w_s.T)
-    return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
-            + sigma_contraction(mol, c, gam, True))
-
-
-def ground_state_coupling(mol, mf, nocc, xn, yn):
+def ground_state_coupling(mol, mf, nocc, xn, yn, numerics):
     """(natm, 3) d_0n = <Psi_0 | d/dR Psi_n>, the S1 -> S0 coupling.
 
     ONE TERM, not two, and this is what makes it different from every
@@ -272,34 +101,11 @@ def ground_state_coupling(mol, mf, nocc, xn, yn):
     So this needs a response solve where the other did not -- but it is still
     ONE Z-vector, because (X - Y) is a fixed vector and the energy denominator
     is absorbed into its weight. eps_a - eps_i never vanishes on a closed shell.
+    numerics: the run's `Numerics` (that Z-vector's solve), required.
     """
     x = np.asarray(xn, float).reshape(nocc, -1)
     y = np.asarray(yn, float).reshape(nocc, -1)
-    return ov_coupling(mol, mf, nocc, GROUND_SPIN_FACTOR * (x - y))
-
-
-def ov_coupling(mol, mf, nocc, w):
-    """(natm, 3) sum_ia W_ia A_ia, A_ia = <phi_i | d phi_a / dR>, canonical.
-
-    The occupied-virtual block of the derivative overlap, which is the
-    coupled-perturbed rotation: `ground_state_coupling` is this with
-    W = sqrt(2) (X - Y), and the localization response of
-    `fragment_diabatic` reaches it with the occupied-virtual weight of the
-    local orbitals' motion. One Z-vector for any W.
-    """
-    w = np.asarray(w, float).reshape(nocc, -1)
-    eps = np.asarray(mf.mo_energy, float)
-    norb = len(eps)
-    u = w / (eps[None, nocc:] - eps[:nocc, None])
-    # dF and dS are SYMMETRIC, so a sum over occupied-virtual pairs is half of
-    # the full matrix contraction. Sigma is NOT, so its weight carries the
-    # occupied-virtual entries alone and nothing on the transpose.
-    w_f = 0.5 * _pair_matrix(u, nocc, norb)
-    w_s = -0.5 * _pair_matrix(u * eps[None, nocc:], nocc, norb)
-    w_sig = np.zeros((norb, norb))
-    w_sig[:nocc, nocc:] = w
-    return (_z_vector_contraction(mol, mf, nocc, w_f, w_s)
-            + sigma_contraction(mol, mf.mo_coeff, w_sig, False))
+    return ov_coupling(mol, mf, nocc, GROUND_SPIN_FACTOR * (x - y), numerics)
 
 
 def require_coupling_gap(gap, m, n):
@@ -337,8 +143,9 @@ def evaluated_coupling(evaluation, m, n):
     """(d_mn, diagnostics) in 1/Bohr between two roots of one
     `StateEvaluation`, m and n its state keys: the interstate numerator it
     computed over Omega_n - Omega_m, plus the configuration term's one
-    Z-vector. The numerator is symmetric in the pair, so either ordering held
-    in `evaluation.interstate` serves, and d_nm = -d_mn.
+    Z-vector, solved on the evaluation's `Numerics` (`numerics`). The
+    numerator is symmetric in the pair, so either ordering held in
+    `evaluation.interstate` serves, and d_nm = -d_mn.
     """
     pair = (m, n) if (m, n) in evaluation.interstate else (n, m)
     if pair not in evaluation.interstate:
@@ -357,7 +164,8 @@ def evaluated_coupling(evaluation, m, n):
     nocc = occupied_count(mf)
     goo, gvv = state_to_state_density(nocc, xm[:, rm], ym[:, rm],
                                       xn[:, rn], yn[:, rn])
-    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv,
+                                 getattr(evaluation, 'numerics', None))
     amp = np.asarray(num) / gap
     return amp + csf, dict(diags, gap=gap,
                            branch_amplitude=float(np.abs(amp).max()),
@@ -371,7 +179,8 @@ def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     Antisymmetric in m <-> n: the interstate numerator is symmetric -- both
     orderings are averaged in the chain's interstate backward pass -- and the
     gap changes sign. One forward pass serves the numerator and the
-    state-to-state density.
+    state-to-state density; the configuration term's Z-vector is solved on
+    the chain's `Numerics`.
 
     evaluation: a `StateEvaluation` whose `interstate` holds the pair, m and n
     its state keys (`evaluated_coupling`); `chain` is not used except to
@@ -394,7 +203,8 @@ def analytic_coupling(chain, m, n, mol=None, mf=None, evaluation=None):
     nocc = occupied_count(mf)
     goo, gvv = state_to_state_density(nocc, xn[:, rm], yn[:, rm],
                                       xn[:, rn], yn[:, rn])
-    csf = configuration_coupling(mol, mf, nocc, goo, gvv)
+    csf = configuration_coupling(mol, mf, nocc, goo, gvv,
+                                 surface_numerics(chain))
     amp = num / diags['gap']
     return amp + csf, dict(diags, branch_amplitude=float(np.abs(amp).max()),
                            branch_configuration=float(np.abs(csf).max()),
@@ -418,6 +228,7 @@ def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
                              f'singlet; state {n!r} is a {spin}')
         flags = evaluation.require_scf_quality('analytic_ground_coupling')
         mol, mf = evaluation.mol, evaluation.mf
+        numerics = getattr(evaluation, 'numerics', None)
     else:
         if chain.spin != 'singlet':
             raise ValueError(f'd_0n couples the closed-shell ground state to a '
@@ -428,8 +239,9 @@ def analytic_ground_coupling(chain, n, mol=None, mf=None, evaluation=None):
         solution = chain.forward(mol, mf)[1]
         om, xn, yn = solution.omega, solution.x, solution.y
         root = n
+        numerics = surface_numerics(chain)
     d = ground_state_coupling(mol, mf, occupied_count(mf), xn[:, root],
-                              yn[:, root])
+                              yn[:, root], numerics)
     return d, {'omega_n': float(om[root]), 'gap': float(om[root]),
                'branch_configuration': float(np.abs(d).max()),
                'scf_flags': flags}

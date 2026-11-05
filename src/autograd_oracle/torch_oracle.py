@@ -5,18 +5,18 @@
 Reads the factors, the frozen conventions and (when present) the production
 adjoints written by `gate_factors.py`, evaluates the chain in torch,
 differentiates it by autograd, prints the forward and adjoint comparisons, and
-writes its own adjoints for the swap-in step. Pinned to ONE torch thread (the
-x86 build under Rosetta segfaults in backward with two) and ends with
-os._exit (its Intel OpenMP runtime deadlocks the normal exit on this stack).
+writes its own adjoints for the swap-in step. Pinned to ONE torch thread (some
+torch builds segfault in backward with two) and ends with os._exit (an Intel
+OpenMP runtime can deadlock the normal exit).
 """
 import argparse
 import os
 import sys
 import time
 
-# ONE THREAD, NOT A CHOICE. The x86_64 torch in this environment runs under
-# Rosetta, and its backward pass segfaults reproducibly (3/3) with two intra-op
-# threads and never (3/3) with one. The oracle is small; it does not need them.
+# ONE THREAD, NOT A CHOICE. Some torch builds segfault reproducibly in the
+# backward pass with two intra-op threads and never with one. The oracle is
+# small; it does not need them.
 for _v in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
            'VECLIB_MAXIMUM_THREADS'):
     os.environ[_v] = '1'

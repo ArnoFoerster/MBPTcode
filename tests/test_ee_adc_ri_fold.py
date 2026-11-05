@@ -68,7 +68,7 @@ from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.ADC.eeADC import ee_fold, ee_r_sigma_df, ee_ri_fold
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
-from tests.adc_common import H2CO, WATER_ORIGIN, check, df_rhf_converged, rhf_df
+from tests.adc_common import H2CO, WATER_ORIGIN, check, df_rhf_converged, rhf_df, ee_numerics
 from tests.pins import RECORDING_BLAS, matches
 
 
@@ -132,10 +132,10 @@ def check_solves(mf):
     mol = mf.mol
     for spin in ee_ri_fold.SPINS:
         e, Z, res = solve_ee_adc(mf, level='adc2', spin=spin, nroots=3, fold=True,
-                                 frozen=1, auxbasis='cc-pvdz-ri', conv_tol=1e-9,
+                                 frozen=1, auxbasis='cc-pvdz-ri', numerics=ee_numerics(conv_tol=1e-9),
                                  return_fold=True)
         er, _ = solve_ee_adc(mf, level='adc2', df=True, spin=spin, nroots=3,
-                             frozen=1, auxbasis='cc-pvdz-ri', conv_tol=1e-9)
+                             frozen=1, auxbasis='cc-pvdz-ri', numerics=ee_numerics(conv_tol=1e-9))
         d = float(np.abs(e - er).max()) * HARTREE_TO_EV
         ok &= check(d < 1e-8 and res.converged.all() and
                     np.all((res.t1 > 0) & (res.t1 <= 1)),
@@ -180,9 +180,9 @@ def check_cis_pcm():
     for spin in ee_ri_fold.SPINS:
         ref = pyscf_tda_pcm(mf, env.eps, spin, 4)
         e1, _ = solve_ee_adc(mf, level='adc1', df=True, spin=spin, nroots=4,
-                             environment=env, conv_tol=1e-9)
+                             environment=env, numerics=ee_numerics(conv_tol=1e-9))
         e2, _ = solve_ee_adc(mf, level='adc1', spin=spin, nroots=4, fold=True,
-                             environment=env, conv_tol=1e-9, dense_limit=0)
+                             environment=env, numerics=ee_numerics(conv_tol=1e-9, dense_limit=0))
         d1 = float(np.abs(e1 - ref).max()) * HARTREE_TO_EV
         d2 = float(np.abs(e2 - ref).max()) * HARTREE_TO_EV
         ok &= check(d1 < 1e-6 and d2 < 1e-6,
@@ -190,7 +190,7 @@ def check_cis_pcm():
                     f'full {d1:.1e} eV, tiled {d2:.1e} eV')
         if spin == 'triplet':
             e0, _ = solve_ee_adc(mf, level='adc1', df=True, spin=spin, nroots=4,
-                                 conv_tol=1e-9, environment=NoEnvironment())
+                                 numerics=ee_numerics(conv_tol=1e-9), environment=NoEnvironment())
             ok &= check(float(np.abs(e0 - e1).max()) * HARTREE_TO_EV < 1e-8,
                         'triplet: no transition reaction field')
     return ok
@@ -202,7 +202,7 @@ def check_adc2_pcm():
     mol, env, mf = toluene(H2CO, 'aug-cc-pvdz')
     gas = rhf_df(H2CO, 'aug-cc-pvdz')
     kw = dict(level='adc2', nroots=2, frozen=2, auxbasis='aug-cc-pvdz-ri',
-              conv_tol=1e-8)
+              numerics=ee_numerics(conv_tol=1e-8))
     for spin in ee_ri_fold.SPINS:
         ef, _ = solve_ee_adc(mf, spin=spin, fold=True, environment=env, **kw)
         er, _ = solve_ee_adc(mf, spin=spin, df=True, environment=env, **kw)

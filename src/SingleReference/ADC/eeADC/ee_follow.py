@@ -25,11 +25,11 @@ has no number to take in its place: it is warned about and flagged
 'adc_root_missing' (root_missing), and the caller returns NaN for it, which a
 walk rejects and retries shorter (properties.optimize.NonFiniteEvaluation).
 """
-import warnings
 
 import numpy as np
 from pyscf import gto
 
+from src.Base import numerical_flags
 from src.Base.numerics.constants import ROOT_FOLLOW_MARGIN_MIN, ROOT_FOLLOW_WEIGHT_MIN
 
 
@@ -41,11 +41,9 @@ class FollowingWarning(RuntimeWarning):
 
 
 def flag(flags, name, text):
-    """Warn (FollowingWarning) and append {'flag': name, 'message': text} to
-    `flags` when it is a list."""
-    warnings.warn(text, FollowingWarning, stacklevel=3)
-    if flags is not None:
-        flags.append({'flag': name, 'message': text})
+    """`numerical_flags.flag` as a FollowingWarning, from the caller's
+    caller, also appended to `flags` when it is a list."""
+    numerical_flags.flag(name, text, FollowingWarning, stacklevel=3, into=flags)
 
 
 def flag_unconverged(converged, label, flags=None):

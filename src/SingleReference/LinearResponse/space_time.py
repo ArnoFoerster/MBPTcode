@@ -50,6 +50,16 @@ rows (re-associated, the one reduced sum of the sweep), and chi0(i.nu) is
 accumulated on those rows with the serial elementwise update, so every row of
 chi0 is the serial update of its proj rows, bitwise.
 
+Grid tiles: the factors themselves are whole on no rank when the sweep runs
+on fixed grid tiles (`grid_factor_tiles`, `polarizability_tile_rows`): each
+(tau point, p tile) item holds its p rows while every q tile streams past
+from its owner, so a rank holds its tiles and one pass's working set, which
+falls with the rank count. The tiles are set by the grid and the budget, not
+by the rank count, so each item is the same calls at every rank count; the
+static screening adds the items in tile order along a chain of the ranks
+holding them and is the one-rank W bit for bit, while the GW chi0
+reduce-scatters the ranks' partials as above.
+
 `three_index_slice`, `b_block` and `three_index_ov` sit here for the same
 reason: one bra state's pair density, an arbitrary index block and the
 particle-hole block are the forward halves of the three-index chain, read by
@@ -79,9 +89,12 @@ from typing import NamedTuple
 
 import numpy as np
 
-from src.Base.numerics.constants import BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB
+from src.Base.numerics.constants import (DEFAULT_TAU_TARGET,
+                                         ISDF_SQUARE_TILE_ROWS, ISDF_TILE_GB)
 from src.Base.numerical_flags import flag
-from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.factorization.sliced_factors import SlicedFactors, column_tiles
+from src.Base.numerics.numerics import Numerics, numerics_or_default
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
                                               contiguous_block, current_comm,
                                               exchange_rows, ordered_chain_sum,
@@ -413,20 +426,27 @@ class ProjRows:
 def tile_rows(M, tile_memory_gb, per_row_bytes):
     """Grid rows per tile so that `per_row_bytes` x rows fits in
     tile_memory_gb: at least one row, at most all M of them."""
-    return max(1, min(M, int(tile_memory_gb * BYTES_PER_GB / max(per_row_bytes, 1))))
+    return fits(tile_memory_gb, per_row_bytes, cap=M)
+
+
+def square_tile_rows(rows):
+    """`rows` of a (rows, M) tile of an (M, M) intermediate, at most
+    ISDF_SQUARE_TILE_ROWS, so that no rank forms the (M, M) array whole
+    where M exceeds it, whatever the memory budget allows."""
+    return max(1, min(int(rows), ISDF_SQUARE_TILE_ROWS))
 
 
 def polarizability_work(M, tile_memory_gb=ISDF_TILE_GB):
     """The two (rows, M) Green's-function tiles `polarizability_projected_tau`
     works in, sized for this M and budget, to be reused across tau points."""
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     return np.empty((rows, M)), np.empty((rows, M))
 
 
 def polarizability_tiles(M, tile_memory_gb=ISDF_TILE_GB):
     """[(p0, p1)] grid-row tiles of `polarizability_projected_tau`, set by M
     and the budget alone: the addends of proj(tau), whoever sums them."""
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     return [(p0, min(p0 + rows, M)) for p0 in range(0, M, rows)]
 
 
@@ -483,7 +503,8 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
         proj_ab(tau) = -2 sum_PQ D[P,a] (Go_PQ Gv_PQ) D[Q,b]
 
     Tiled over grid rows, which is exact because the expression is a sum over
-    them, so the M x M object never exists. Contract the Pi block with D first:
+    them, so the M x M object never exists: rows set by the budget and at most
+    ISDF_SQUARE_TILE_ROWS (`square_tile_rows`). Contract the Pi block with D first:
     the other order builds an (naux, M) intermediate instead.
 
     The one kernel of the N^3 sweep, for the energy routes and the gradient
@@ -502,7 +523,7 @@ def polarizability_projected_tau(X_o, X_v, e_o, e_v, D, tau,
     """
     M = X_o.shape[0]
     naux = D.shape[1]
-    rows = tile_rows(M, tile_memory_gb, 3 * M * 8)
+    rows = square_tile_rows(tile_rows(M, tile_memory_gb, 3 * M * 8))
     if tiles is None:
         tiles = polarizability_tiles(M, tile_memory_gb)
     if work is None:
@@ -694,25 +715,37 @@ def polarizability_rows_sweep(X_o, X_v, e_o, e_v, D, tau_points, comm=None,
 
 
 def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
-                        tile_memory_gb=ISDF_TILE_GB, branches=None):
+                        tile_memory_gb=ISDF_TILE_GB, tiles=None):
     """chi0(i.omega) held by auxiliary rows, `ProjRows` over the frequency
     axis: this rank's rows of every frequency, (nfreq, r1 - r0, naux).
 
-    The M^2 sweep is split over grid-row tiles as well as tau points
-    (`polarizability_rows_sweep`); each point's proj rows are folded in with
-    `chi0_imaginary_frequency`'s own update, elementwise, so a rank's chi0
-    rows are the serial update of the reduced proj rows bitwise and no rank
-    holds a whole (naux, naux) slice of chi0. Serially it is
-    `chi0_imaginary_frequency`, bitwise.
+    The M^2 sweep is split over grid-row tiles as well as tau points; each
+    point's proj rows are folded in with `chi0_imaginary_frequency`'s own
+    update, elementwise, so a rank's chi0 rows are the serial update of the
+    reduced proj rows bitwise and no rank holds a whole (naux, naux) slice of
+    chi0.
 
-    X: the MO collocation or `SlicedFactors`, whose two branches
-    `split_branches` gathers whole once (or `branches`, as split there); D
-    whole. comm: None is `current_comm()`.
+    With `tiles` (`grid_factor_tiles`), or X as `SlicedFactors`, the sweep
+    runs on the fixed grid tiles (`polarizability_tile_rows`): a rank holds
+    its tiles of X and D and never either array whole. Otherwise X and D are
+    whole, the tiles are the serial kernel's (`polarizability_rows_sweep`)
+    and serially it is `chi0_imaginary_frequency`, bitwise. comm: None is
+    `current_comm()`.
     """
     comm = current_comm() if comm is None else comm
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
-    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
+    if tiles is None and isinstance(X, SlicedFactors):
+        tiles = grid_factor_tiles(X, D, eps, nocc, mu, comm,
+                                  layout_numerics(tile_memory_gb))
+    if tiles is not None:
+        naux = tiles.naux
+        r0, r1 = contiguous_block(naux, rank, size)
+        chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
+        for k, rows in polarizability_tile_rows(tiles, grid.tau_points, comm):
+            chi0 += grid.cosft_wt[:, k, None, None] * rows
+        return ProjRows(chi0, naux, comm)
+    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu)
     naux = D.shape[1]
     r0, r1 = contiguous_block(naux, rank, size)
     chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
@@ -723,11 +756,288 @@ def chi0_frequency_rows(X, D, eps, nocc, grid, mu=None, comm=None,
     return ProjRows(chi0, naux, comm)
 
 
+def layout_tile_gb(numerics):
+    """GB of one pass of a grid-tile sweep: `numerics.layout.tile_gb`,
+    ISDF_TILE_GB where it is None."""
+    gb = numerics_or_default(numerics).layout.tile_gb
+    return ISDF_TILE_GB if gb is None else float(gb)
+
+
+def layout_numerics(gb):
+    """Numerics whose layout budget is `gb`, for a caller that was handed
+    the budget alone: the defaults where it is theirs."""
+    base = Numerics()
+    if gb is None or float(gb) == layout_tile_gb(base):
+        return base
+    return base.derive('the caller\'s working-set budget',
+                       layout={'tile_gb': float(gb)})
+
+
+def grid_tile_rows(npts, ncol, numerics=None):
+    """Rows of one fixed tile of a distributed grid sweep: four (rows, ncol)
+    blocks within the layout's budget, at most ISDF_SQUARE_TILE_ROWS
+    (`square_tile_rows`). Set by the grid, the column count and the budget
+    alone and never by the rank count, so a sweep made of tiles computes
+    every tile the same way at every rank count."""
+    return square_tile_rows(tile_rows(int(npts), layout_tile_gb(numerics),
+                                      4 * 8 * int(ncol)))
+
+
+class TiledFactors(NamedTuple):
+    """The separable factors as the distributed M^2 sweeps read them:
+    `tiles`, [X_mo | D] in fixed grid tiles (`GridTileRows`), the occupied
+    columns first; `nocc` and `nmo` split the columns, X_o = [:, :nocc],
+    X_v = [:, nocc:nmo], D = [:, nmo:]; e_o and e_v the energies shifted by
+    the chemical potential, as `split_branches` hands them out."""
+    tiles: object
+    nocc: int
+    nmo: int
+    e_o: np.ndarray
+    e_v: np.ndarray
+
+    @property
+    def naux(self):
+        return self.tiles.rows.shape[1] - self.nmo
+
+
+def grid_factor_tiles(X, D, eps, nocc, mu=None, comm=None, numerics=None):
+    """`TiledFactors` of the MO collocation X and the Coulomb factor D, the
+    layout of every distributed sweep of the polarizability.
+
+    X may be `SlicedFactors` over `comm`, D then None (their own D), the
+    same factors, or a whole D on their grid in another gauge (a reaction
+    field's bare factor), of which each rank cuts its own rows
+    (`SlicedFactors.coulomb_rows`): each rank hands in its own rows and
+    keeps its tiles, so X is whole on no rank. Whole arrays are cut into the
+    tiles directly. The tile rows are set by the grid, the column count and
+    `numerics.layout.tile_gb` (`grid_tile_rows`), never by the rank count,
+    and a sweep's pass works within the same budget. comm: None is
+    `current_comm()`."""
+    comm = current_comm() if comm is None else comm
+    size = 1 if comm is None else comm.Get_size()
+    eps = np.asarray(eps, float)
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    if mu is None:
+        mu = particle_hole_window(eps, nocc)[2]
+    if isinstance(X, SlicedFactors):
+        X.require(comm)
+        parts, npts, whole = [X.X_mo, X.coulomb_rows(D)], X.npts, False
+    else:
+        parts, npts, whole = [X, D], X.shape[0], True
+    ncol = parts[0].shape[1] + parts[1].shape[1]
+    gb = layout_tile_gb(numerics)
+    tiles = column_tiles(parts, npts, grid_tile_rows(npts, ncol, numerics),
+                         comm if size > 1 else None, whole=whole)
+    tiles.pass_gb = gb
+    return TiledFactors(tiles, len(occ), len(occ) + len(virt),
+                        eps[occ] - mu, eps[virt] - mu)
+
+
+def _proj_items(tiled, tau_points, items, on_done):
+    """Every item (k, p) of `items` through the tile sweep: the grid rows of
+    tile p of proj(tau_k) before its D_p^T projection,
+
+        Y_p = sum_q (G^o(tau_k) * G^v(tau_k))[p, q] D[q],   q ascending,
+
+    and on_done(k, p, D_p, Y_p) in the items' order. Each (p, q) block is
+    the same three GEMMs at every rank count, on the same tile rows."""
+    F, no, nmo = tiled.tiles, tiled.nocc, tiled.nmo
+    naux = tiled.naux
+
+    def start(k, p, rows):
+        tau = tau_points[k]
+        return (rows[:, :no] * np.exp(tiled.e_o * tau),
+                rows[:, no:nmo] * np.exp(-tiled.e_v * tau),
+                np.zeros((rows.shape[0], naux)))
+
+    def step(state, q, rows):
+        xo, xv, Y = state
+        G = xo @ rows[:, :no].T
+        G *= xv @ rows[:, no:nmo].T
+        Y += G @ rows[:, nmo:]
+
+    def finish(k, p, rows, state):
+        on_done(k, p, rows[:, nmo:], state[2])
+
+    F.sweep(items, start, step, finish,
+            lambda p: (F.bounds[p][1] - F.bounds[p][0]) * 8
+            * (nmo + naux + F.rows.shape[1]))
+
+
+def polarizability_tile_rows(tiled, tau_points, comm=None, ordered=False):
+    """(k, this rank's auxiliary rows of proj(tau_k)) for every tau point in
+    order, (r1 - r0, naux), the rows its `contiguous_block` of naux owns,
+    from the grid tiles alone (`grid_factor_tiles`): no rank holds X or D
+    whole, only its tiles, the p tiles of its current pass and one streamed
+    q tile.
+
+    The (tau point, p tile) items go over the ranks in `sweep_waves` windows
+    (`wave_items`), a rank's items a contiguous run of the window's
+    tau-major list. Each item is the same calls at every rank count
+    (`_proj_items`), and proj(tau) = -2 sum_p D_p^T Y_p over the p tiles:
+
+      ordered=False: each rank adds its own items' terms, p ascending, onto
+        zeros, and each point's partials are reduce-scattered to rows (a rank
+        without items of it hands in zeros): a sum re-associated over the
+        ranks' items, as `polarizability_rows_sweep`'s.
+      ordered=True: the terms are added in p order onto zeros at every rank
+        count, the running sum of a point handed from one rank to the next
+        along its items (a lockstep round per hand-over, every point at
+        once); a rank that starts a point's sum runs it first and a rank
+        that continues one runs it once the sum has arrived. The sum is then
+        the one-rank sum, bitwise, and is sent to the row owners verbatim.
+        Serially both are that sum.
+
+    The row buffer is reused: read it before asking for the next point."""
+    comm = current_comm() if comm is None else comm
+    size = 1 if comm is None else comm.Get_size()
+    rank = 0 if comm is None else comm.Get_rank()
+    if size == 1:
+        comm = None
+    F, naux = tiled.tiles, tiled.naux
+    tau_points = np.asarray(tau_points, float)
+    ntau, nt = len(tau_points), len(F.bounds)
+    bounds = [contiguous_block(naux, r, size) for r in range(size)]
+    r0, r1 = bounds[rank]
+    rows = np.empty((r1 - r0, naux))
+    for k0, k1 in sweep_waves(ntau, size):
+        everyone = [wave_items(k0, k1, nt, r, size) for r in range(size)]
+        if not ordered:
+            partial = {}
+
+            def add(k, p, Dp, Y):
+                if k not in partial:
+                    partial[k] = np.zeros((naux, naux))
+                partial[k] += Dp.T @ Y
+
+            _proj_items(tiled, tau_points, everyone[rank], add)
+            zero = None
+            for k in range(k0, k1):
+                send = partial.pop(k, None)
+                if send is None:
+                    if zero is None:
+                        zero = np.zeros((naux, naux))
+                    send = zero
+                else:
+                    send *= -2.0
+                reduce_scatter_rows(send, comm, out=rows)
+                del send
+                yield k, rows
+            continue
+        # each point's rows popped as they are handed out, so the window's
+        # receive buffer is gone before the next window starts
+        window = _ordered_window(tiled, tau_points, everyone, rank, comm,
+                                 bounds)
+        for k in sorted(window):
+            rows[...] = window.pop(k)
+            yield k, rows
+        del window
+
+
+def _ordered_window(tiled, tau_points, everyone, rank, comm, bounds):
+    """{k: this rank's rows of proj(tau_k)} for one window of
+    `polarizability_tile_rows(ordered=True)`: `everyone[r]` is rank r's run
+    of the window's (k, p) items. Each point's chain is the ranks holding
+    its items, in rank order; round 0 runs every rank's items of the points
+    whose chain it starts, round h hands each running sum from member h - 1
+    to member h, which then runs its items onto it. A finished sum is
+    scaled by -2 and its rows go to their owners after the round."""
+    naux = tiled.naux
+    size = len(everyone)
+    pieces = [{} for _ in range(size)]
+    for r, items in enumerate(everyone):
+        for k, p in items:
+            pieces[r].setdefault(k, []).append(p)
+    chains = {}
+    for r in range(size):
+        for k in pieces[r]:
+            chains.setdefault(k, []).append(r)
+    totals, out = {}, {}
+
+    def add(k, p, Dp, Y):
+        totals[k] += Dp.T @ Y
+
+    for h in range(max(len(c) for c in chains.values())):
+        if h:
+            totals.update(_hand_over_round(chains, h, totals, rank, comm, naux))
+        mine = [k for k, c in sorted(chains.items())
+                if len(c) > h and c[h] == rank]
+        for k in mine:
+            if h == 0:
+                totals[k] = np.zeros((naux, naux))
+        _proj_items(tiled, tau_points,
+                    [(k, p) for k in mine for p in pieces[rank][k]], add)
+        done = {}
+        for k in mine:
+            if chains[k][-1] == rank:
+                done[k] = totals.pop(k)
+                done[k] *= -2.0
+        finished = [k for k, c in sorted(chains.items()) if len(c) == h + 1]
+        out.update(_rows_to_owners(done, finished, chains, rank, comm,
+                                   bounds, naux))
+    return out
+
+
+def _hand_over_round(chains, h, totals, rank, comm, naux):
+    """Every running sum moved from member h - 1 of its chain to member h,
+    verbatim, in one exchange: {k: the sum this rank receives}. A rank is
+    one member of a chain at a time, so it sends and receives at most one."""
+    size = 1 if comm is None else comm.Get_size()
+    moves = [(k, c[h - 1], c[h]) for k, c in sorted(chains.items())
+             if len(c) > h]
+    send_k = [k for k, a, _ in moves if a == rank]
+    recv_k = [k for k, _, b in moves if b == rank]
+    if len(send_k) > 1 or len(recv_k) > 1:
+        raise RuntimeError(f'rank {rank} hands over {send_k} and receives '
+                           f'{recv_k} in one round; a chain runs along '
+                           'consecutive ranks')
+    if comm is None:
+        return {}
+    send = totals.pop(send_k[0]) if send_k else np.empty((0, naux))
+    to = [b for k, a, b in moves if a == rank]
+    frm = [a for k, a, b in moves if b == rank]
+    got = np.empty((naux, naux) if recv_k else (0, naux))
+    exchange_rows(send, [(0, naux) if to and r == to[0] else (0, 0)
+                         for r in range(size)],
+                  got, [(0, naux) if frm and r == frm[0] else (0, 0)
+                        for r in range(size)], comm)
+    return {recv_k[0]: got} if recv_k else {}
+
+
+def _rows_to_owners(done, finished, chains, rank, comm, bounds, naux):
+    """{k: this rank's rows of each finished sum}: `done` holds the sums this
+    rank finished, `finished` every point finished this round (its last
+    chain member the sender), each sent to the row owners verbatim, one
+    point a sender per round."""
+    size = 1 if comm is None else comm.Get_size()
+    r0, r1 = bounds[rank]
+    if comm is None:
+        return {k: a[r0:r1] for k, a in done.items()}
+    by_sender = {}
+    for k in finished:
+        by_sender.setdefault(chains[k][-1], []).append(k)
+    out = {}
+    for j in range(max((len(v) for v in by_sender.values()), default=0)):
+        sends = {s: ks[j] for s, ks in by_sender.items() if j < len(ks)}
+        order = sorted(sends)
+        k_own = sends.get(rank)
+        send = done.pop(k_own) if k_own is not None else np.empty((0, naux))
+        got = np.empty((len(order) * (r1 - r0), naux))
+        recv = [(0, 0)] * size
+        for i, s in enumerate(order):
+            recv[s] = (i * (r1 - r0), (i + 1) * (r1 - r0))
+        exchange_rows(send, list(bounds) if k_own is not None
+                      else [(0, 0)] * size, got, recv, comm)
+        for i, s in enumerate(order):
+            out[sends[s]] = got[i * (r1 - r0):(i + 1) * (r1 - r0)]
+    return out
+
+
 def frequency_blocks(nfreq, naux, tile_gb, live):
     """(k0, k1) ranges over the frequency axis such that `live` (naux, naux)
     arrays per frequency fit in tile_gb. The one knob for both the M-row tiles
     and the frequency blocks: a working-set budget, not a count."""
-    nb = max(1, min(nfreq, int(tile_gb * BYTES_PER_GB / max(live * naux * naux * 8, 1))))
+    nb = fits(tile_gb, live * naux * naux * 8, cap=nfreq)
     return [(k0, min(k0 + nb, nfreq)) for k0 in range(0, nfreq, nb)]
 
 
@@ -1001,7 +1311,7 @@ def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
 
 
 def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,
-                            tile_memory_gb=ISDF_TILE_GB, branches=None):
+                            tile_memory_gb=ISDF_TILE_GB, tiles=None):
     """W = [1 - chi0(i.omega = 0)]^-1 in the auxiliary basis, from the
     separable factors in imaginary time.
 
@@ -1017,37 +1327,39 @@ def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,
     current `distributed` region's, whose ranks all call this in lockstep, on
     X, D, eps and a grid that already agree bit for bit across them --
     `mpi_grid.replicate` at the entry point, which `isdf_bse_factors` does
-    before it sizes the grid. Tau is the compute axis (every point is an M^2
-    sweep) and there is one frequency, so the whole result is a single
-    (naux, naux) accumulator, the best compute-per-byte sweep in the chain.
-    The inversion afterwards is replicated. Each rank computes its
-    consecutive tau points' addends and the running sum visits the ranks in
-    tau order (`ordered_chain_sum`), so chi0 is the one-rank bits at every
-    rank count. A rank holds its own tau addends of (naux, naux) each beside
-    the running sum and one copy in flight, and the sum crosses once per rank
-    that owns a point.
+    before it sizes the grid. The sweep runs on the fixed grid tiles
+    (`grid_factor_tiles`, or `tiles` already built from these factors), so a
+    rank holds its tiles of X and D and never either whole, and every
+    proj(tau) is summed over the tiles in tile order whatever the rank count
+    (`polarizability_tile_rows(ordered=True)`); chi0 is folded on auxiliary
+    rows with the elementwise update in tau order, so it is the one-rank
+    bits at every rank count. The rows are gathered and the inversion
+    afterwards is replicated.
 
-    X may be `SlicedFactors` over `comm` (`split_branches` gathers its
-    branches, or takes `branches` already gathered); D is then the whole,
-    gathered array. tile_memory_gb: the grid-row tile budget of each tau
-    point's sweep (`polarizability_projected_tau`).
+    X may be `SlicedFactors` over `comm`, D then None or the same factors, or
+    a whole D on their grid in another gauge (`grid_factor_tiles`).
+    tile_memory_gb: the working-set budget of the grid tiles and of a pass
+    of the sweep, read where `tiles` are not handed in.
     """
     comm = current_comm() if comm is None else comm
     grid = static_screening_grid(eps, nocc) if grid is None else grid
     rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
                     else (0, 1))
-    # consecutive tau points per rank, so the running sum crosses once per rank
-    owners = [r for r in range(nranks)
-              for _ in range(*contiguous_block(grid.ntau, r, nranks))]
-    t0, t1 = contiguous_block(grid.ntau, rank, nranks)
-    X_o, X_v, e_o, e_v, _, _, _ = split_branches(X, eps, nocc, mu, branches)
-    terms = dict(chi0_tau_terms(X_o, X_v, e_o, e_v, D, grid,
-                                range(t0, t1), tile_memory_gb))
-    naux = D.shape[1]
-    # chi0's tau addends in tau order (`ordered_chain_sum`): the one-rank bits
-    chi0 = ordered_chain_sum(terms, owners, comm,
-                             np.zeros((grid.nfreq, naux, naux)))[0]
-    return dyson_screening(chi0)
+    if tiles is None:
+        tiles = grid_factor_tiles(X, D, eps, nocc, mu, comm,
+                                  layout_numerics(tile_memory_gb))
+    naux = tiles.naux
+    r0, r1 = contiguous_block(naux, rank, nranks)
+    chi0 = np.zeros((grid.nfreq, r1 - r0, naux))
+    for k, rows in polarizability_tile_rows(tiles, grid.tau_points, comm,
+                                            ordered=True):
+        chi0 += grid.cosft_wt[:, k, None, None] * rows
+    whole = np.empty((naux, naux))
+    whole[r0:r1] = chi0[0]
+    del chi0
+    if nranks > 1:
+        allgather_rows(whole, comm)
+    return dyson_screening(whole)
 
 
 def static_screening_matrix_unrestricted(X_mos, D, spectra, noccs,

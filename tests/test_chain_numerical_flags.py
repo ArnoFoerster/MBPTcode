@@ -38,7 +38,8 @@ import src.Base.numerics.constants as constants
 import src.gradients.rpa.factor_chain as factor_chain
 from src.Base.numerics.numerics import Numerics
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.isdf_derivatives import one_fit_adjoint, sqrtm_adjoint
+from src.gradients.isdf_derivatives import one_fit_adjoint
+from src.gradients.isdf_adjoint_pieces import sqrtm_adjoint
 import src.gradients.gwbse.qp_set as qp_set
 from src.gradients.gwbse.qp_set import QuasiparticleRootLost, QuasiparticleSet
 from src.gradients.gwbse.state_following import CasidaSolution, StateFollower
@@ -47,8 +48,8 @@ from src.gradients.gwbse.diagnostics import held_grid, log_entries
 from src.properties.excitations import merged_logs, scf_flags
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_df_jkfit
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 def test_a_member_leaving_its_frozen_group_warns_and_is_recorded():

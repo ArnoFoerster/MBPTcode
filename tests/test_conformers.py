@@ -35,7 +35,7 @@ from src.properties.conformers import (Conformer, Torsion, bond_in_ring,
                                        search_conformers, split_bond,
                                        torsion_starts, torsion_values)
 from src.Base.step_failed import StepFailed
-from src.properties import conformers
+from src.properties import conformers, curvilinear
 from src.properties.optimize import derived_walk
 from src.gradients.mean_field_surface import MeanFieldSurface
 
@@ -124,6 +124,18 @@ def test_ring_bonds_are_skipped(cyclohexane):
         # ... so ring membership is the only thing that disqualifies it.
         assert bond_in_ring(adj, a, b)
     assert rotatable_bonds(cyclohexane, adj) == []
+
+
+def test_the_dihedral_is_the_curvilinear_one_with_the_search_sign():
+    """Looking along j->k, k-l turned 60 degrees counter-clockwise from i-j:
+    IUPAC -60, which the curvilinear primitive gives in radians, and +60 in
+    the conformer search's sense (the one `rotate_torsion` advances)."""
+    turn = np.radians(60.0)
+    crd = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0],
+                    [np.cos(turn), -np.sin(turn), 1.0]])
+    prims = ([], [], [(0, 1, 2, 3)])
+    assert curvilinear.values(crd, prims)[0] == pytest.approx(-turn, abs=1e-14)
+    assert dihedral(crd, 0, 1, 2, 3) == pytest.approx(60.0, abs=1e-12)
 
 
 def test_rotation_is_rigid_and_reaches_the_requested_dihedral(butadiene):

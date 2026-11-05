@@ -1,11 +1,11 @@
 """What a cluster allocation actually holds, read from the job environment.
 
 pyscf's `max_memory` defaults to 4000 MB regardless of what SLURM handed the
-job. On a 16-core node (`-c 16`) that default made anthracene
-cc-pVTZ keep its 1.8 GB Cholesky-fitted DF tensor in core (SCF 32 s, static
-exchange build 2.3 s) while pentacene cc-pVTZ's 6.4 GB tensor no longer fit,
-so pyscf streamed it from a scratch file on GPFS at every J/K build instead --
-a 13x SCF and a 24x static exchange build for 1.5x the basis. `max_memory`
+job. A DF tensor larger than that is streamed from a scratch file at every J/K
+build instead of held in core, which costs an order of magnitude in the SCF and
+the static exchange build long before the node's memory is used (anthracene
+cc-pVTZ's 1.8 GB tensor fits under the default, pentacene cc-pVTZ's 6.4 GB does
+not). `max_memory`
 (`Mole.max_memory`, inherited by `mf.max_memory`) is the one knob both `DF.build`
 (`pyscf/df/df.py`) and this repository's own ISDF block budget
 (`SingleReference.GW.qp_solve.static_exchange_diagonal`'s `exchange='df-direct'`
@@ -125,12 +125,21 @@ def describe_df_storage(mf):
                 max_memory_mb=mf.max_memory)
 
 
+def fits(budget_gb, per_item_bytes, cap=None, least=1):
+    """How many items of `per_item_bytes` each a working set of `budget_gb`
+    holds: int(budget / per item), at least `least` and at most `cap` (None:
+    no cap). The one rule every blocked loop sizes its blocks by."""
+    n = int(budget_gb * BYTES_PER_GB / max(per_item_bytes, 1))
+    return max(least, n if cap is None else min(cap, n))
+
+
 def tile_width(per_index_bytes, cap, numerics):
     """Indices per tile: as many as numerics.layout.tile_gb (a
     `src.Base.numerics.numerics.Numerics`; the working-set cap of one tile, GB) holds at
-    per_index_bytes each, at least one and at most cap. A layout without a
-    tile_gb is refused: the width is the caller's choice, not a default here."""
+    per_index_bytes each, at least one and at most cap (`fits`). A layout
+    without a tile_gb is refused: the width is the caller's choice, not a
+    default here."""
     tile_gb = numerics.layout.tile_gb
     if tile_gb is None:
         raise ValueError('tile_width needs numerics.layout.tile_gb')
-    return int(max(1, min(cap, tile_gb * BYTES_PER_GB // per_index_bytes)))
+    return fits(tile_gb, per_index_bytes, cap)

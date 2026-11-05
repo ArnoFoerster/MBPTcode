@@ -24,15 +24,16 @@ upfolded BSE (BSE/bse_upfolded.py) is non-symmetric with possibly complex
 roots; EOM-CC (CC/eom.py, pyscf davidson_nosym1) is non-Hermitian
 biorthogonal.
 """
-import warnings
 
 import numpy as np
 from pyscf import lib as pyscf_lib
 from pyscf.lib.linalg_helper import LinearDependenceError
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (DAVIDSON_COMPLETION_SEED,
                                          DAVIDSON_DENOMINATOR_FLOOR,
                                          DAVIDSON_FOLLOW_OVERLAP_TIE,
+                                         DAVIDSON_GUESS_DEG_TOL,
                                          DAVIDSON_LINDEP_CEILING,
                                          DAVIDSON_LINDEP_FLOOR,
                                          DAVIDSON_MAX_CYCLE,
@@ -110,17 +111,57 @@ def overlap_pick(ref):
     return pick
 
 
-def diagonal_seeds(diag, count):
-    """`count` unit vectors on the lowest entries of `diag` -- the zeroth-order
-    guess for the lowest roots. Seeding wider than nroots is deliberate: a
-    bare-nroots seed can collapse a degenerate pair, because the members of a
-    degenerate set are generally distinct configurations and one seed can only
-    open one of them."""
+def cluster_extended_count(sorted_diag, count, limit, deg_tol=DAVIDSON_GUESS_DEG_TOL):
+    """(n, truncated): `count` entries of the ascending `sorted_diag`, extended
+    past the cut for as long as the next entry stays within `deg_tol` of the
+    last one kept, up to `limit` entries. The members of a degenerate set are
+    different configurations in different irreps, so a cut through one loses
+    whole symmetry blocks. truncated: `limit` stopped the extension inside a
+    cluster."""
+    size = len(sorted_diag)
+    n = min(count, size)
+    cut = sorted_diag[n - 1] + deg_tol
+    n_max = min(max(limit, n), size)
+    while n < n_max and sorted_diag[n] <= cut:
+        n += 1
+    return n, bool(n == n_max < size and sorted_diag[n] <= cut)
+
+
+def seed_limit(count):
+    """The most unit-vector seeds a degenerate cluster may extend the guess of
+    `count` roots to (`cluster_extended_count`): 4 count, at least 20.
+    pyscf's real_eig sizes its trial-space holders at max(4 nroots,
+    2 space_inc) in the worst (memory-starved) case, with space_inc at least
+    min(20, n_pair // 2), and a guess wider than that overruns them."""
+    return max(4 * count, 20)
+
+
+def diagonal_seeds(diag, count, limit=None, counters=None, warn=True):
+    """Unit vectors on the lowest entries of `diag` -- the zeroth-order guess
+    for the lowest roots: `count` of them, extended through a degenerate
+    cluster the cut would split (`cluster_extended_count`) up to `limit`
+    (default `seed_limit`). A cut that `limit` still leaves inside a cluster is
+    warned about (unless warn=False) and named in `counters['guess_truncated']`. Seeding wider than
+    nroots is deliberate: a bare-nroots seed can collapse a degenerate pair,
+    because the members of a degenerate set are generally distinct
+    configurations and one seed can only open one of them."""
     diag = np.asarray(diag, float)
     count = max(1, min(int(count), diag.size))
-    cols = np.argsort(diag)[:count]
+    order = np.argsort(diag)
+    count, truncated = cluster_extended_count(
+        diag[order], count, seed_limit(count) if limit is None else limit)
+    if truncated:
+        if counters is not None:
+            counters['guess_truncated'] = True
+    if truncated and warn:
+        flag('davidson_guess_truncated',
+             f'Davidson seeds cut at {count} vectors inside a cluster of '
+             f'diagonal entries degenerate to {DAVIDSON_GUESS_DEG_TOL:g} Ha, so '
+             'the cut may split a degenerate set and lose the symmetry blocks '
+             'its other members would have opened. Ask for fewer roots and '
+             'check the roots stop moving.', RuntimeWarning, stacklevel=3)
     seeds = np.zeros((count, diag.size))
-    seeds[np.arange(count), cols] = 1.0
+    seeds[np.arange(count), order[:count]] = 1.0
     return [seeds[i] for i in range(count)]
 
 
@@ -243,7 +284,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
         max_subspace = _default_subspace(nroots)
     max_subspace = int(min(max_subspace, n))
     if n > max_subspace < 3 * nroots + 4:
-        warnings.warn(
+        flag('davidson_subspace_crowded',
             f'{label}: max_subspace={max_subspace} leaves almost no room above '
             f'the {nroots} Ritz vectors a restart collapses to, so the solve '
             'will restart continuously and may never converge. Raise it, or '
@@ -260,8 +301,11 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
     if guess is None:
         # wider than nroots for degenerate clusters, but never so wide that
         # the seed alone crowds the subspace into restarting immediately
-        guess = diagonal_seeds(diag, min(n, 2 * nroots + 4,
-                                         max(nroots, max_subspace // 2)))
+        seed_room = max(nroots, max_subspace // 2)
+        # the subspace's room is the limit here, and a cluster wider than it
+        # is opened by the corrections, so the cut is not a warning
+        guess = diagonal_seeds(diag, min(n, 2 * nroots + 4, seed_room),
+                               limit=seed_room, warn=False)
     if precond is None:
         precond = jacobi_davidson_precond(diag)
 
@@ -317,7 +361,7 @@ def solve_symmetric(matvec, diag, nroots=1, x0=None, pick=None,
 
     if warn_unconverged and not conv.all():
         stuck = np.flatnonzero(~conv)
-        warnings.warn(
+        flag('davidson_not_converged',
             f'{label} left {stuck.size} of {e.size} roots unconverged after '
             f'{max_cycle} cycles at |r| <= {tol_residual:g} (roots '
             f'{stuck.tolist()}); their energies are whatever the last '
@@ -397,7 +441,7 @@ def _complete_lowest(matvec, block, diag, e, X, warn, opts):
     else:
         why = f'{k + 1} rounds of merging did not end in a certificate'
     if warn:
-        warnings.warn(
+        flag('davidson_lowest_not_certified',
             f"{opts['label']}: the {k} converged roots are not certified to be "
             f'the lowest ({why}); all reported unconverged.',
             RuntimeWarning, stacklevel=3)

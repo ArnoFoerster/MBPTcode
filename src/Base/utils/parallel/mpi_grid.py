@@ -80,12 +80,15 @@ import os
 import pickle
 import sys
 import threading
+import time
 import traceback
+import weakref
 
 import numpy as np
 
 from src.Base.numerics.constants import (AGREEMENT_DIGEST_BLOCK, AGREEMENT_DIGEST_SEED,
-                                         MPI_COUNT_MAX)
+                                         MPI_COUNT_MAX, MPI_STAGE_DOUBLES,
+                                         NODE_IDLE_POLL_S)
 from src.Base.utils.parallel.simulated_comm import SimulatedComm
 
 MPI = None
@@ -202,7 +205,9 @@ def reduce_sum(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_sum(part)
         else:
-            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().SUM)
+            for piece, stage in _staged(part, comm):
+                comm.Allreduce(_mpi().IN_PLACE, stage, op=_mpi().SUM)
+                piece[...] = stage
     if buf is not a:
         a[...] = buf
     return a
@@ -237,7 +242,7 @@ def ordered_sum(addends, comm, shape=None, onto=None):
     return total
 
 
-def ordered_chain_sum(terms, owners, comm, onto):
+def ordered_chain_sum(terms, owners, comm, onto, root=None):
     """The sum of n indexed terms in index order onto `onto`, term k held by
     rank `owners[k]` alone ({k: array} of this rank's): the same bits on
     every rank and at every rank count, and serially the terms' own sum in
@@ -250,7 +255,14 @@ def ordered_chain_sum(terms, owners, comm, onto):
     copy in flight and its own terms; the running sum crosses once per change
     of owner along the index, so owners should hold consecutive runs. The
     owners must hold their terms before the chain starts.
+
+    root: the one rank that holds `onto` and receives the sum, for a sum only
+    its owner keeps; the chain starts from it and ends at it, and every other
+    rank passes `onto` as an array of the sum's shape (its values unread) and
+    gets None back. Serially it is the call without root.
     """
+    if root is not None and comm is not None and comm.Get_size() > 1:
+        return _ordered_chain_sum_at(terms, owners, comm, onto, int(root))
     total = np.array(onto, dtype=np.float64, order='C', copy=True)
     if comm is None or comm.Get_size() == 1:
         for k in range(len(owners)):
@@ -258,21 +270,109 @@ def ordered_chain_sum(terms, owners, comm, onto):
         return total
     size, rank = comm.Get_size(), comm.Get_rank()
     holder = int(owners[0]) if len(owners) else 0
-    empty = np.empty((0,) + total.shape[1:])
     for k, owner in enumerate(int(o) for o in owners):
         if owner != holder:
-            send = [total if (rank == holder and peer == owner) else empty
-                    for peer in range(size)]
-            shapes = [total.shape if (rank == owner and peer == holder)
-                      else empty.shape for peer in range(size)]
-            got = exchange_blocks(send, shapes, comm)
-            if rank == owner:
-                total[...] = got[holder]
+            total = _hand_over(total, holder, owner, comm)
             holder = owner
         if rank == owner:
             total += terms[k]
     broadcast_rows(total, holder, comm)
     return total
+
+
+def _ordered_chain_sum_at(terms, owners, comm, onto, root):
+    """`ordered_chain_sum` with the running sum starting from and ending at
+    `root`: the same additions in the same order, no broadcast."""
+    rank = comm.Get_rank()
+    total = (np.array(onto, dtype=np.float64, order='C', copy=True)
+             if rank == root else
+             np.empty(np.shape(onto), dtype=np.float64))
+    holder = root
+    for k, owner in enumerate(int(o) for o in owners):
+        if owner != holder:
+            total = _hand_over(total, holder, owner, comm)
+            holder = owner
+        if rank == owner:
+            total += terms[k]
+    if holder != root:
+        total = _hand_over(total, holder, root, comm)
+    return total if rank == root else None
+
+
+def _hand_over(total, holder, owner, comm):
+    """The running sum of a chain moved from `holder` to `owner`, verbatim:
+    the owner's `total` overwritten with the holder's, every rank in the
+    call."""
+    size, rank = comm.Get_size(), comm.Get_rank()
+    empty = np.empty((0,) + total.shape[1:])
+    send = [total if (rank == holder and peer == owner) else empty
+            for peer in range(size)]
+    shapes = [total.shape if (rank == owner and peer == holder)
+              else empty.shape for peer in range(size)]
+    got = exchange_blocks(send, shapes, comm)
+    if rank == owner:
+        total[...] = got[holder]
+    return total
+
+
+class OwnedSlices:
+    """n arrays of one shape, each held by one rank alone: rank r holds the
+    items of its `contiguous_block` of the n indices, so the whole list is
+    on no rank and what a rank holds falls with the rank count. One rank
+    holds every item.
+
+    `fetch(i)` is collective -- every rank calls it, for the same i, in the
+    same order -- and gives every rank item i: the owner its own array, the
+    others a broadcast copy of its bits. `put` and `held` are the owner's.
+    """
+
+    def __init__(self, n, shape, comm=None):
+        self.n, self.shape, self.comm = int(n), tuple(shape), comm
+        self.size = 1 if comm is None else comm.Get_size()
+        self.rank = 0 if comm is None else comm.Get_rank()
+        self.bounds = [contiguous_block(self.n, r, self.size)
+                       for r in range(self.size)]
+        self.held = {}
+
+    def __len__(self):
+        return self.n
+
+    def owner(self, i):
+        """The rank whose block holds item i."""
+        for r, (start, stop) in enumerate(self.bounds):
+            if start <= i < stop:
+                return r
+        raise IndexError(f'item {i} of {self.n}')
+
+    def mine(self):
+        """The indices this rank holds."""
+        return range(*self.bounds[self.rank])
+
+    def put(self, i, a):
+        """Item i, which this rank owns."""
+        if self.owner(i) != self.rank:
+            raise ValueError(f'item {i} is rank {self.owner(i)}\'s, not '
+                             f'rank {self.rank}\'s')
+        self.held[int(i)] = a
+
+    def fetch(self, i):
+        """Item i on every rank (collective)."""
+        i = int(i)
+        if self.size == 1:
+            return self.held[i]
+        owner = self.owner(i)
+        buf = (self.held[i] if self.rank == owner
+               else np.empty(self.shape, dtype=np.float64))
+        return broadcast_rows(buf, owner, self.comm)
+
+    def zeros(self, items):
+        """An `OwnedSlices` of the same layout holding zeros for the items of
+        `items` this rank owns."""
+        out = OwnedSlices(self.n, self.shape, self.comm)
+        for i in items:
+            if out.owner(i) == out.rank:
+                out.put(i, np.zeros(self.shape))
+        return out
 
 
 def reduce_scatter_rows(a, comm, out=None):
@@ -435,7 +535,9 @@ def reduce_max(a, comm):
         if isinstance(comm, SimulatedComm):
             comm.allreduce_max(part)
         else:
-            comm.Allreduce(_mpi().IN_PLACE, part, op=_mpi().MAX)
+            for piece, stage in _staged(part, comm):
+                comm.Allreduce(_mpi().IN_PLACE, stage, op=_mpi().MAX)
+                piece[...] = stage
     if buf is not a:
         a[...] = buf
     return a
@@ -450,6 +552,8 @@ def broadcast_rows(a, root, comm):
     `allgather_rows`, so a block past 2^31 doubles still moves. The shape is
     the caller's to know on every rank, as for any Bcast. A block past
     `MPI_COUNT_MAX` doubles goes in row windows, at most that many a call.
+    Over several nodes every rank moves it through its staging buffer
+    (`_staged`), the root's bits either way.
     """
     if comm is None or comm.Get_size() == 1:
         return a
@@ -462,6 +566,10 @@ def broadcast_rows(a, root, comm):
         part = a if len(windows) == 1 else a[w0:w1]
         if isinstance(comm, SimulatedComm):
             comm.bcast_into(part, root)
+        elif part.size and _spans_nodes(comm):
+            for piece, stage in _staged(part, comm):
+                comm.Bcast(stage, root=root)
+                piece[...] = stage
         elif part.size:
             rowtype = _mpi().DOUBLE.Create_contiguous(row).Commit()
             try:
@@ -503,6 +611,61 @@ def allgather_ranges(a, ranges, comm):
     return a
 
 
+def _genuine_mpi(comm):
+    """True when `comm` is an mpi4py communicator of more than one rank (not
+    None, a world of one or a `SimulatedComm`). Nothing here starts MPI."""
+    mod = sys.modules.get('mpi4py.MPI')
+    return (comm is not None and comm.Get_size() > 1 and mod is not None
+            and isinstance(comm, mod.Comm))
+
+
+def node_comm(comm):
+    """The ranks of `comm` that share this rank's node, in `comm`'s rank
+    order: an MPI shared-memory split of a genuine mpi4py communicator (a
+    collective on `comm`; the caller frees it), and `comm` itself -- one node
+    -- serially, on a world of one and on a `SimulatedComm`. A kernel that
+    would send every rank the same large block computed on demand can compute
+    it once per node instead and move it only inside the node."""
+    if not _genuine_mpi(comm):
+        return comm
+    return comm.Split_type(_mpi().COMM_TYPE_SHARED, key=comm.Get_rank())
+
+
+def on_root_with_node_cpus(fn, comm, root=0):
+    """fn() on rank `root` of `comm` alone, with its threads spread over the
+    CPUs of every rank of `comm` on root's node while all the other ranks wait
+    without spinning: fn's value on root, None on every other rank. A
+    collective on `comm`.
+
+    For a step that is cheaper to run once than to divide: a dense
+    eigensolve that is bound by memory bandwidth gains the node's other
+    memory controllers this way, and its bits do not move, since the thread
+    count stays root's own (`threads.spread_over`). The other ranks wait at a
+    non-blocking barrier they test every NODE_IDLE_POLL_S seconds, so no core
+    of the node spins. Serially, on a world of one and on a `SimulatedComm`,
+    fn() runs on root as it is.
+    """
+    from src.Base.utils.parallel.threads import spread_over
+    if comm is None or not _genuine_mpi(comm):
+        return fn() if comm is None or comm.Get_rank() == root else None
+    node = _node_of(comm).comm
+    mine = (sorted(os.sched_getaffinity(0))
+            if hasattr(os, 'sched_getaffinity') else None)
+    here = node.allgather((comm.Get_rank(), mine))
+    if comm.Get_rank() == root:
+        masks = [m for _, m in here]
+        cpus = (set().union(*masks)
+                if all(m is not None for m in masks) else None)
+        with spread_over(cpus):
+            value = fn()
+        comm.Ibarrier().Wait()
+        return value
+    pending = comm.Ibarrier()
+    while not pending.Test():
+        time.sleep(NODE_IDLE_POLL_S)
+    return None
+
+
 class NodeShared:
     """A float64 array held once per node: every rank of `comm` on one node maps
     the same memory (an MPI-3 shared window on the node's communicator), so an
@@ -510,29 +673,91 @@ class NodeShared:
     rank. `fills` is True on the rank that writes it (the node's first);
     `ready()` is the node barrier after which the others may read. Serially, on
     a world of one and on a SimulatedComm the array is private and `fills` is
-    True. Keep the object alive as long as the array is used: the window is
-    freed with it."""
+    True.
+
+    The node's communicator is split from `comm` once and reused, and a window
+    is freed once no rank of the node holds the array or a view of it any
+    more, at a later NodeShared on the same `comm` (`_Node`). Communicators
+    and windows each take an MPI context, of which a process has a few
+    thousand, so a long run that builds one per call would run out."""
 
     def __init__(self, shape, comm):
         shape = tuple(int(x) for x in shape)
-        self.node, self.win = None, None
-        # a window only on a genuine mpi4py communicator; nothing here starts MPI
-        mod = sys.modules.get('mpi4py.MPI')
-        if (comm is None or comm.Get_size() == 1 or mod is None
-                or not isinstance(comm, mod.Comm)):
+        self.node = None
+        if not _genuine_mpi(comm):
             self.array, self.fills = np.empty(shape), True
             return
-        self.node = comm.Split_type(_mpi().COMM_TYPE_SHARED)
+        node = _node_of(comm)
+        self.node = node.comm
         self.fills = self.node.Get_rank() == 0
         nbytes = 8 * int(np.prod(shape, dtype=np.int64)) if self.fills else 0
-        self.win = _mpi().Win.Allocate_shared(nbytes, 8, comm=self.node)
-        buf, _ = self.win.Shared_query(0)
-        self.array = np.ndarray(buffer=buf, dtype=np.float64, shape=shape)
+        self.array = node.allocate(nbytes, shape)
 
     def ready(self):
         """Barrier on the node: the filling rank has written the array."""
         if self.node is not None:
             self.node.Barrier()
+
+
+_NODE_KEY = []
+
+
+def _node_of(comm):
+    """The `_Node` of the genuine mpi4py communicator `comm`: split once (a
+    collective on `comm`, the first time on every rank) and kept on `comm` as
+    an MPI attribute."""
+    mod = _mpi()
+    if not _NODE_KEY:
+        _NODE_KEY.append(mod.Comm.Create_keyval())
+    node = comm.Get_attr(_NODE_KEY[0])
+    if node is None:
+        node = _Node(comm.Split_type(mod.COMM_TYPE_SHARED))
+        comm.Set_attr(_NODE_KEY[0], node)
+    return node
+
+
+class _Segment:
+    """A window's memory as numpy sees it: the array and every view of it hold
+    this object, so it lives exactly as long as some view of the memory does
+    on this rank."""
+
+    def __init__(self, buf, shape):
+        self.buf = buf
+        self.__array_interface__ = np.ndarray(buffer=buf, dtype=np.float64,
+                                              shape=shape).__array_interface__
+
+
+class _Node:
+    """The shared-memory communicator of one parent communicator and the
+    windows allocated on it, each with a weak reference to its `_Segment`."""
+
+    def __init__(self, comm):
+        self.comm, self.windows = comm, []
+
+    def allocate(self, nbytes, shape):
+        """A new window of `nbytes` on this rank (the node's memory is the
+        first rank's), as an array of `shape` over the first rank's memory.
+        Windows no rank views any more are freed first."""
+        self.sweep()
+        win = _mpi().Win.Allocate_shared(nbytes, 8, comm=self.comm)
+        buf, _ = win.Shared_query(0)
+        seg = _Segment(buf, shape)
+        self.windows.append((weakref.ref(seg), win))
+        return np.asarray(seg)
+
+    def sweep(self):
+        """Free the windows whose memory no rank of the node views. A
+        collective on the node: every rank holds the same windows in the same
+        order (each came from a collective allocation), and a window that one
+        rank still views waits for a later sweep."""
+        if not self.windows:
+            return
+        dead = [ref() is None for ref, _ in self.windows]
+        gone = [all(d) for d in zip(*self.comm.allgather(dead))]
+        for (_, win), free in zip(self.windows, gone):
+            if free:
+                win.Free()
+        self.windows = [w for w, free in zip(self.windows, gone) if not free]
 
 
 def _gather_ranges_once(buf, ranges, comm):
@@ -586,6 +811,51 @@ def _runs(rows):
     return [(int(r[0]), int(r[-1]) + 1) for r in np.split(rows, cut)]
 
 
+_SPANS_KEY = []
+_STAGE = threading.local()
+
+
+def _spans_nodes(comm):
+    """True when a genuine mpi4py communicator has ranks on more than one
+    node. Asked once per communicator (a collective on it, so the first
+    collective of `comm` asks on every rank) and kept on it as an MPI
+    attribute."""
+    mod = sys.modules.get('mpi4py.MPI')
+    if (comm is None or comm.Get_size() == 1 or mod is None
+            or not isinstance(comm, mod.Comm)):
+        return False
+    if not _SPANS_KEY:
+        _SPANS_KEY.append(mod.Comm.Create_keyval())
+    spans = comm.Get_attr(_SPANS_KEY[0])
+    if spans is None:
+        node = comm.Split_type(mod.COMM_TYPE_SHARED, key=comm.Get_rank())
+        spans = bool(comm.allreduce(int(node.Get_size() < comm.Get_size()),
+                                    op=mod.MAX))
+        node.Free()
+        comm.Set_attr(_SPANS_KEY[0], spans)
+    return spans
+
+
+def _staged(part, comm):
+    """(piece, stage) pairs that move the C-contiguous float64 `part` through
+    this thread's staging buffer when `comm` spans several nodes: each piece
+    is copied into its stage, the caller runs the collective on the stage and
+    copies it back. Memory the network has registered once serves every
+    transfer, where a freshly allocated array would be registered again each
+    time. On one node `part` is its own stage, one piece."""
+    if part.dtype != np.float64 or not _spans_nodes(comm):
+        yield part, part
+        return
+    stage = getattr(_STAGE, 'buf', None)
+    if stage is None:
+        stage = _STAGE.buf = np.empty(MPI_STAGE_DOUBLES)
+    flat = part.reshape(-1)
+    for w0, w1 in _windows(flat.size, stage.size):
+        piece, window = flat[w0:w1], stage[:w1 - w0]
+        window[...] = piece
+        yield piece, window
+
+
 def _windows(n, per):
     """[start, stop) windows of at most `per` over range(n); a single window,
     empty for n = 0, when one call carries it all."""
@@ -624,7 +894,9 @@ def _bcast_array(buf, root, comm):
         if isinstance(comm, SimulatedComm):
             comm.bcast_into(part, root)
         else:
-            comm.Bcast(part, root=root)
+            for piece, stage in _staged(part, comm):
+                comm.Bcast(stage, root=root)
+                piece[...] = stage
 
 
 def exchange_rows(send, send_ranges, recv, recv_ranges, comm):
@@ -1365,3 +1637,66 @@ def mpi_map(fn, items, comm=None):
         for i, result in chunk:
             out[i] = result
     return out
+
+
+def ordered_sliced_sum(terms, owners, comm, onto, root=None):
+    """`ordered_chain_sum`'s sum, to the bit, in two collectives instead of
+    one hand-over per change of owner.
+
+    The sum's elements are cut into one contiguous slice per rank
+    (`contiguous_block`); every rank sends each slice of its terms -- and
+    the chain's start its slice of `onto` -- to that slice's rank
+    (`exchange_blocks`); each rank adds its slice's terms onto `onto`'s in
+    index order, the additions the chain makes, element by element; and the
+    slices are gathered, to `root` alone where it is given (every other rank
+    gets None) and to every rank otherwise. The chain starts from `root`'s
+    `onto`, or without one from the first owner's, and so does this.
+
+    A rank receives 1 / size of every term and one sum, where the chain
+    carries the whole running sum across once per change of owner and makes
+    every rank wait for each hand-over. The arguments are
+    `ordered_chain_sum`'s; serially it is that call.
+    """
+    if comm is None or comm.Get_size() == 1:
+        return ordered_chain_sum(terms, owners, comm, onto, root=root)
+    size, rank = comm.Get_size(), comm.Get_rank()
+    owners = [int(o) for o in owners]
+    start = int(root) if root is not None else (owners[0] if owners else 0)
+    shape = tuple(np.shape(onto))
+    n = int(np.prod(shape, dtype=np.int64))
+    cuts = [contiguous_block(n, s, size) for s in range(size)]
+    rows = [np.ravel(np.asarray(terms[k], dtype=np.float64))
+            for k, owner in enumerate(owners) if owner == rank]
+    if rank == start:
+        rows.insert(0, np.ravel(np.asarray(onto, dtype=np.float64)))
+    send = [np.array([row[c0:c1] for row in rows],
+                     dtype=np.float64).reshape(len(rows), c1 - c0)
+            for c0, c1 in cuts]
+    rows = None
+    c0, c1 = cuts[rank]
+    counts = [owners.count(r) + (r == start) for r in range(size)]
+    got = exchange_blocks(send, [(counts[r], c1 - c0) for r in range(size)],
+                          comm)
+    send = None
+    # this slice of `onto` from the chain's start, then each term's in index
+    # order: the k-th term of an owner is that owner's k-th row
+    nth = [0] * size
+    nth[start] = 1
+    total = np.array(got[start][0], dtype=np.float64, copy=True)
+    for owner in owners:
+        total += got[owner][nth[owner]]
+        nth[owner] += 1
+    got = None
+    if root is None:
+        out = np.zeros(n)
+        out[c0:c1] = total
+        allgather_ranges(out.reshape(n, 1), [[cut] for cut in cuts], comm)
+        return out.reshape(shape)
+    empty = np.empty(0)
+    pieces = exchange_blocks(
+        [total if peer == root else empty for peer in range(size)],
+        [((cuts[r][1] - cuts[r][0]) if rank == root else 0,)
+         for r in range(size)], comm)
+    if rank != root:
+        return None
+    return np.concatenate(pieces).reshape(shape)

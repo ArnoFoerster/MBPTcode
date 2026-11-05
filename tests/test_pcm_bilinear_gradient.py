@@ -26,6 +26,7 @@ from src.environments.pcm_derivatives import (frozen_surface,
                                               reaction_field_fock_skeleton,
                                               solver_bilinear_gradient)
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_CS
 
 #: pyscf's PCM has FOUR branches, not three: COSMO is its own, with
 #: f = (eps-1)/(eps+1/2) against C-PCM's (eps-1)/eps. The derivative is shared
@@ -36,7 +37,7 @@ METHODS = ['C-PCM', 'COSMO', 'IEF-PCM', 'SS(V)PE']
 #: SS(V)PE against the 1e-6 bound below: correct, but with too little margin to
 #: gate without flaking, so they run on the other three.
 METHODS_WIDE_MARGIN = ['C-PCM', 'COSMO', 'IEF-PCM']
-ATOM = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+ATOM = WATER_CS
 EPS = 78.3553
 
 

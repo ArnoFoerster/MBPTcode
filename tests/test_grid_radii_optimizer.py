@@ -37,7 +37,7 @@ import numpy as np
 from pyscf import df, gto
 from threadpoolctl import threadpool_limits
 
-from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, LEGACY_R_MAX, _START_SHAPES,
+from src.Base.factorization.separable_ri import (ELEMENT_R_MAX, SINGLE_DESCENT_R_MAX, _START_SHAPES,
                                                  _shipped_key, _start_radii, atomic_points,
                                                  fit_error_coulomb, lebedev_subshells,
                                                  optimize_atomic_radii, published_grids,
@@ -100,38 +100,66 @@ if __name__ == '__main__':
     print(f'   max |shape 0 - geomspace(2 r_min, 0.8 r_max)| = {d:.2e}   '
           f'{len(_START_SHAPES)} shapes available   {"OK" if ok2 else "FAIL"}')
 
-    # 3. Start diversity, at PRODUCTION settings -- origin=False and the
-    #    default box. Both of the tempting variations hide the defect: with the
-    #    cusp sampled, or with r_max widened to 8, carbon's single start lands
-    #    in a good basin by itself and there is nothing left to rescue.
-    #
-    #    Both calls must run the LIVE search, bypassing the shipped table AND
-    #    the git-ignored radii cache; `return_candidates=True` is the
-    #    documented bypass of both, since a caller that wants the runners-up
-    #    has to run the search. The table holds ONE grid per physical request,
-    #    so a lookup answers n_start=1 and n_start=4 with the same row and the
-    #    comparison measures nothing (it reports 1.0x); a
-    #    stale cache silently reports its own thread count's minimum (see
-    #    optimize_atomic_radii). One BLAS thread, since the objective is a
-    #    numerically differentiated descent under threaded BLAS and a
-    #    different reduction order moves L-BFGS-B onto a different local
-    #    minimum. The ratio still varies by machine even from an empty cache
-    #    (measured 15x-44x across CPUs/OpenBLAS kernels at one thread), so the
-    #    bound is kept loose -- this checks that multi-start helps at all, not
-    #    by how much.
-    print('\n3. multi-start rescues carbon at 148 counts, production settings:')
-    with threadpool_limits(limits=1, user_api='blas'):
-        e_one = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                      counts=COUNTS_148, maxiter=110, n_start=1,
-                                      return_candidates=True)[1]
-        r_many, e_many, _ = optimize_atomic_radii('C', 'cc-pvdz', 'cc-pvdz-ri',
-                                                  counts=COUNTS_148, maxiter=110,
-                                                  n_start=4,
-                                                  return_candidates=True)
-    ok3 = e_many < e_one / 5.0
+    # 3. Start diversity, on a PLANTED stall. Whether carbon's own first start
+    #    stalls depends on the fit's rounding and on the machine (the descent is
+    #    a numerically differentiated local search), so the check does not rely
+    #    on it: descent 0 starts from every shell at one radius and is held
+    #    there -- its local search returns its start, at that grid's own fit
+    #    error -- and the other starts are the production ones, descended as in
+    #    production. Coincident radii alone do not hold a descent everywhere:
+    #    on OpenBLAS the rounding of the numerical gradient separates them and
+    #    the descent leaves (5.161e-03 from the start, as low as four starts).
+    #    Multi-start has to be never worse than the single start and much
+    #    better than it; and the same check, on a multi-start whose every
+    #    descent is the planted one, must fail. `return_candidates=True` runs
+    #    the live search (no table, no cache); one BLAS thread, for the reason
+    #    the descent is machine dependent.
+    print('\n3. multi-start rescues a planted stall (carbon, 148 counts, '
+          'production settings):')
+    from scipy.optimize import OptimizeResult
+    from src.Base.factorization import separable_ri as sri
+    production_start, production_minimize = sri._start_radii, sri.minimize
+    PLANTED_RADIUS = 1.0
+
+    def planted_stall(counts, r_min, r_max, k):
+        if k == 0:
+            return {name: np.full(n, PLANTED_RADIUS)
+                    for name, n in counts.items() if n}
+        return production_start(counts, r_min, r_max, k)
+
+    def held_at_planted(objective, x0, **kw):
+        """The local search, except from the planted start, which it does
+        not leave."""
+        if np.all(x0 == np.log(PLANTED_RADIUS)):
+            return OptimizeResult(x=np.array(x0, float), fun=objective(x0))
+        return production_minimize(objective, x0, **kw)
+
+    def descents(start):
+        sri._start_radii, sri.minimize = start, held_at_planted
+        try:
+            with threadpool_limits(limits=1, user_api='blas'):
+                one = optimize_atomic_radii(
+                    'C', 'cc-pvdz', 'cc-pvdz-ri', counts=COUNTS_148,
+                    maxiter=30, n_start=1, return_candidates=True)[1]
+                many = optimize_atomic_radii(
+                    'C', 'cc-pvdz', 'cc-pvdz-ri', counts=COUNTS_148,
+                    maxiter=30, n_start=4, return_candidates=True)[:2]
+            return one, many
+        finally:
+            sri._start_radii, sri.minimize = production_start, production_minimize
+
+    def rescued(one, many_err):
+        return many_err <= one and many_err < one / 2.0
+
+    e_one, (r_many, e_many) = descents(planted_stall)
+    ok3 = rescued(e_one, e_many)
+    broken_one, (_, broken_many) = descents(lambda c, lo, hi, k: planted_stall(c, lo, hi, 0))
+    ok3 &= not rescued(broken_one, broken_many)
     all_ok &= ok3
     print(f'   1 start {e_one:.3e}   4 starts {e_many:.3e}   '
-          f'{e_one / e_many:.1f}x   {"OK" if ok3 else "FAIL"}')
+          f'{e_one / e_many:.1f}x; every descent planted: '
+          f'{broken_one:.3e} / {broken_many:.3e} (must not pass)   '
+          f'{"OK" if ok3 else "FAIL"}')
 
     # 4. And the multi-start optimum must not be a collapsed grid: coincident
     #    radii duplicate whole Lebedev shells, which spends points on nothing.
@@ -192,17 +220,17 @@ if __name__ == '__main__':
           f'mixed-case MOLOPT lookup: {molopt_same}   '
           f'{"OK" if ok5 else "FAIL"}')
 
-    # 6. The box rule: one descent keeps the legacy box for every element, so
-    #    nothing cached changes meaning; a multi-start search widens it only
+    # 6. The box rule: one descent keeps the single-descent box for every
+    #    element, so nothing cached changes meaning; a multi-start search widens it only
     #    where the density asks for it.
-    print('\n6. search box: legacy for one descent, per element otherwise:')
-    ok6 = (all(search_r_max(el, 1) == LEGACY_R_MAX for el in ELEMENT_R_MAX)
-           and search_r_max('C', 8) == LEGACY_R_MAX
+    print('\n6. search box: single-descent box for one descent, per element otherwise:')
+    ok6 = (all(search_r_max(el, 1) == SINGLE_DESCENT_R_MAX for el in ELEMENT_R_MAX)
+           and search_r_max('C', 8) == SINGLE_DESCENT_R_MAX
            and search_r_max('Mg', 8) == 16.0
            and search_r_max('Mg', 8, r_max=7.0) == 7.0
            and search_r_max('Xx', 8) == 12.0)
     all_ok &= ok6
-    print(f'   n_start=1 -> {LEGACY_R_MAX} for all {len(ELEMENT_R_MAX)} elements; '
+    print(f'   n_start=1 -> {SINGLE_DESCENT_R_MAX} for all {len(ELEMENT_R_MAX)} elements; '
           f'n_start=8 -> C {search_r_max("C", 8)}, Mg {search_r_max("Mg", 8)}; '
           f'explicit wins; unlisted -> 12.0   {"OK" if ok6 else "FAIL"}')
 

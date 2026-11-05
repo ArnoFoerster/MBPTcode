@@ -16,9 +16,10 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from src.SingleReference.ADC.eeADC import ee_u_dense_full as ppd, ee_spin_adapt as psa
+from tests.molecules import WATER_AT_ORIGIN
 
 ATOMS = ['H 0 0 0; F 0 0 0.917', 'Li 0 0 0; H 0 0 1.6',
-         'O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587']
+         WATER_AT_ORIGIN]
 
 
 def _system(atom):

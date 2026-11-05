@@ -22,8 +22,9 @@ cppe = pytest.importorskip('cppe', reason='pip install cppe')
 from src.Base.environment_seam import Environment
 from src.environments.cppe_interface import polarizable_sites_from_potfile
 from src.environments.polarizable_sites import PolarizableSites
+from tests.molecules import WATER_ROUNDED
 
-ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+ATOM = WATER_ROUNDED
 #: Bohr: outside the QM density, where two isotropic sites are built both by
 #: hand and through a potential file, undamped, for the exact-match test.
 SITES_BOHR = np.array([[0.0, 0.0, 9.0], [5.0, 2.0, -6.0]])

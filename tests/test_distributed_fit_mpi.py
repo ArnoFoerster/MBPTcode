@@ -65,10 +65,10 @@ from src.SingleReference.GW.space_time import (_row_factors,
 from src.SingleReference.LinearResponse.davidson import _residual_floor
 from src.SingleReference.BSE.solve import isdf_bse_factors, solve_bse_isdf
 from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, duchemin_blase
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 #: Water's 444 points in 7 tiles: 2 and 3 ranks each own several, and hand
 #: panels and solved blocks to each other.
@@ -190,7 +190,7 @@ def solves(mf, mol, nocc, factors, comm=None):
     these factors in this region."""
     qp = solve_qp_energy_space_time(mf, mol, nocc, np.array([nocc - 1, nocc]),
                                     factors=factors, comm=comm)
-    om, _, _, info = solve_bse_isdf(mf, mol, nocc, numerics=Numerics(bse={'nroots': NROOTS}),
+    om, _, _, info = solve_bse_isdf(mf, mol, nocc, numerics=duchemin_blase(Numerics(bse={'nroots': NROOTS})),
                                     factors=factors, progress=False)
     return qp, om, roots_resolution(info['eps'], nocc, om)
 
@@ -281,7 +281,8 @@ def realization_gate(gate, mf, mol, nocc, part, whole):
     realizations of one fit: D within FIT_REALIZATION_REL_TOL, W(0), the
     window and the roots within FIT_REALIZATION_OBSERVABLE_REL_TOL."""
     gate.section('the realization gate against the replicated fit')
-    old = serial(separable_factors, mf, mol, auxbasis=AUXBASIS, counts=g1(mol))
+    old = serial(separable_factors, mf, mol, auxbasis=AUXBASIS, counts=g1(mol),
+                 numerics=duchemin_blase())
     (r0, r1), _, D, _ = rows_of(part)
     sums = np.sum(gate.everyone(np.array([
         np.sum((D - old[1][r0:r1]) ** 2), np.sum(old[1][r0:r1] ** 2)])),
@@ -312,7 +313,7 @@ def realization_gate(gate, mf, mol, nocc, part, whole):
                f'{gate.size} rank(s) == on the one-rank fit\'s whole arrays, '
                'to a few ulp, every rank rank 0\'s bitwise',
                f'{distinct} distinct')
-    sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True, counts=g1(mol))
+    sliced_old = (separable_factors(mf, mol, auxbasis=AUXBASIS, sliced=True, counts=g1(mol), numerics=duchemin_blase())
                   if gate.size > 1 else old)
     on_old = solves(mf, mol, nocc, sliced_old, comm=gate.comm)
     for name, got, ref, tol in zip(('window', 'BSE roots'), on_rows, on_old,
@@ -337,11 +338,11 @@ def main(comm):
         nao = mol.nao_nr()
         naux = df.addons.make_auxmol(mol, auxbasis=AUXBASIS).nao_nr()
         part = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows',
-                                 fit_block=TILE, counts=g1(mol))                 # context
+                                 fit_block=TILE, counts=g1(mol), numerics=duchemin_blase())                 # context
         rows_only(gate, part, mol, nao, naux)
         gate.section('across the ranks\' views, to a few ulp')
         whole = views_are_bitwise(gate, mf, mol, part, TILE)
-        production = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows', counts=g1(mol))
+        production = separable_factors(mf, mol, auxbasis=AUXBASIS, fit='rows', counts=g1(mol), numerics=duchemin_blase())
         views_are_bitwise(gate, mf, mol, production, FIT_CHOLESKY_BLOCK)
         realization_gate(gate, mf, mol, nocc, part, whole)
         metric_root(gate, mol, part, naux)

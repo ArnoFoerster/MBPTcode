@@ -26,10 +26,10 @@ import importlib
 import inspect
 import pkgutil
 import re
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.SingleReference.common.mp_amplitudes import orbital_denominator, to_l
 
 from src.SingleReference.DensityMatrix import generated_mpn as _gen_pkg
@@ -282,7 +282,7 @@ class MPnDensityDriver:
                    f"{max_order}, or allow_rank_truncation=True for validation-grade use.")
             if not allow_rank_truncation:
                 raise RuntimeError(msg)
-            warnings.warn(msg, stacklevel=2)
+            flag('mpn_rank_truncated', msg, UserWarning)
         args = self.kernel_args()
         amps, Es = {}, {}
         for o in range(1, max_order + 1):

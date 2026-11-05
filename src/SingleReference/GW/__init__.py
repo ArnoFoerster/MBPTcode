@@ -2,11 +2,8 @@
 
     qp_energy.py              calc_qp_energy: the front door
     self_energy.py            Lehmann self-energy from a Casida solution
-    transition_amplitudes.py  chi / vertex transition amplitudes (named apart
-                              from CC/amplitudes.py, the generated CCSDT
-                              equations)
     qp_solve.py               shared QP machinery for the imaginary-axis
-                              routes -- Pade continuation, Sigma_x - v_xc
+                              routes -- Pade continuation, the static term
     imaginary_axis.py         Sigma by quadrature on an imaginary frequency
                               grid, O(N^4)
     imaginary_time.py         Sigma = -G W as a pointwise product in

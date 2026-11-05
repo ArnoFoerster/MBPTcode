@@ -74,9 +74,10 @@ from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.rpa.space_time_adjoint import rpa_energy_and_adjoint
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER, WATER_ROUNDED
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 SMALL, SMALL_AUX = 'cc-pvdz', 'cc-pvdz-ri'
 #: Largest difference between the dense and the matrix-free BSE roots on one
 #: quasiparticle diagonal, in Hartree. The two build the same operator from
@@ -117,7 +118,7 @@ def water():
 @pytest.fixture(scope='module')
 def solvated():
     """The two factorizations of one solvated molecule: X is shared, D is not."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=SMALL, verbose=0)
     nocc = mol.nelectron // 2
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis=SMALL_AUX)

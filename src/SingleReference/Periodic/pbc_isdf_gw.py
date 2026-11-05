@@ -40,10 +40,10 @@ guessable -- fitting the tau grid on the screening range instead of the
 self-energy range is a silent accuracy loss, not an error. The driver owns
 them, and dispatches between the two routes on `beta`.
 """
-import warnings
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import DEFAULT_TAU_TARGET, IR_EPS
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid, minimax_time_grid
 from src.Base.utils.grids.matsubara import (IRBasis, matsubara_frequencies,
@@ -529,7 +529,7 @@ def qp_energy_thc(cell, mf, npoints=None, states=None, kn=0, ntau='auto',
             if not np.isfinite(tau_err) or tau_err > tau_target:
                 # a numerical shortfall of the tabulated grids, not an input:
                 # the largest grid runs, warned and flagged
-                warnings.warn(
+                flag('minimax_tau_target_missed',
                     f"no tabulated minimax grid up to {ntau} points resolves "
                     f"this system's ranges to {tau_target:g} (best "
                     f"{tau_err:g}); the {ntau}-point grid is used. The binding "

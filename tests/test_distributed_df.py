@@ -49,6 +49,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -60,18 +61,15 @@ from pyscf.df import addons
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 
 from tests.archived_tree import require_commit, unpack_commit
-from tests.blas_bar import bar_with_drift
-from tests.pins import (RECORDING_BLAS, assert_archive_same, assert_same,
-                        bar_under)
+from tests.pins import CROSS_PATH_RTOL, assert_archive_same, assert_same
 from tests.archive_radii import install_current_radii
 from src.Base.factorization import distributed_df
+from src.Base.utils.parallel import memory
 from src.Base.numerics.constants import COMPOSED_GRAD_K
-from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF,
-                                                   DistributedNumInt, distributed_df_jk,
-                                                   distributed_df_storage,
-                                                   distributed_handles,
-                                                   distributed_mean_field,
-                                                   distributed_numint)
+from src.Base.factorization.df_distribution import distributed_handles
+from src.Base.factorization.distributed_df import (TIMING_KEYS, DistributedDF, DistributedNumInt,
+                                                   distributed_df_jk, distributed_df_storage,
+                                                   distributed_mean_field, distributed_numint)
 from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.utils.parallel.mpi_grid import (
     contiguous_block, current_comm, distributed, lockstep_stats)
@@ -79,6 +77,7 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.parallel.threads import blas_single_threaded, blas_threads
 from tests.isdf_test_grid import g1
 from tests.pins import THREAD_CAPS
+from tests.molecules import WATER
 
 SIZES = [2, 3]
 #: The widest world the gates run: more ranks than water's density fit has
@@ -107,12 +106,6 @@ PERTURBATION = 1e-6
 #: enough into the iteration that DIIS holds several vectors, so a rank that
 #: kept its own density would extrapolate another Fock matrix from there on.
 PERTURBED_BUILD = 4
-#: How far the fitted tensor may sit from pyscf's own default-blocked one.
-#: Not the split's error: `incore.cholesky_eri` differs from itself by 2.5e-17
-#: on ethylene/cc-pVTZ between max_memory 4000 and 20, because the number of
-#: columns in one `solve_triangular` decides how LAPACK blocks the solve.
-CDERI_BLOCKING_TOL = bar_with_drift(1e-15)  # plus the energy class bar off the recording BLAS
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
 CASES = [('water', WATER, 'cc-pvdz', None),
@@ -361,7 +354,7 @@ def serial_column_walk(mf, blocks):
     being that same last bit.
     """
     auxmol = addons.make_auxmol(mf.mol, mf.with_df.auxbasis)
-    low, mode = distributed_df._metric_factor(mf.mol, auxmol)
+    low, mode = distributed_df.metric_factor(mf.mol, auxmol)
     env = distributed_df._int3c_env(mf.mol, auxmol)
     widest = max(width for _, _, width, _ in blocks)
     bufs = [np.empty((widest, low.shape[1])), np.empty((widest, low.shape[1]))]
@@ -399,8 +392,11 @@ def test_slices_tile_the_auxiliary_index(serial):
             rebuilt = np.concatenate([r['cderi'] for r in out], axis=0)
             assert_same(rebuilt, serial_column_walk(ref['mf'], out[0]['all']),
                         unit='1', quantity='root', label=(name, size))
-            assert np.abs(rebuilt - whole).max() <= bar_under(
-                RECORDING_BLAS, CDERI_BLOCKING_TOL, unit='1')
+            # pyscf's default-blocked tensor is another computation path: the
+            # number of columns in one `solve_triangular` decides how LAPACK
+            # blocks the solve
+            assert (np.abs(rebuilt - whole).max()
+                    <= CROSS_PATH_RTOL * np.abs(whole).max())
             rows = -(-naux // size)             # ceil
             assert max(b[1] - b[0] for b in blocks) == rows
             assert [r['nbytes'] for r in out] == [(b[1] - b[0]) * nao_pair * 8
@@ -813,6 +809,48 @@ def test_a_foreign_with_df_is_refused_while_isdf_is_dispatched():
     assert_same(mf.mo_coeff, ref.mo_coeff, unit='1', quantity='vector',
                 label='foreign with_df, serial')
     assert getattr(mf, '_distributed_timings', None) is None
+
+
+class _ShortOnRank:
+    """`distributed_df.memory` with `left_mb` 0 MB on rank `short` and the
+    real value elsewhere."""
+
+    def __init__(self, short):
+        self.short = short
+
+    def __getattr__(self, name):
+        return getattr(memory, name)
+
+    def left_mb(self, max_memory):
+        rank = current_comm().Get_rank()
+        return 0.0 if rank == self.short else memory.left_mb(max_memory)
+
+
+@pytest.mark.parametrize('short', [0, 1])
+def test_memory_refusal_on_one_rank_raises_on_every_rank(monkeypatch, short):
+    """The slice and the free memory differ per rank. A rank short of
+    max_memory for its slice raises MemoryError; so must every other rank, or
+    they enter the next collective of the build alone and wait for it. Each
+    rank's verdict is gathered under a time limit, so a divergence fails
+    instead of hanging."""
+    monkeypatch.setattr(distributed_df, 'memory', _ShortOnRank(short))
+    mfs = [mean_field(WATER, 'cc-pvdz', None) for _ in range(2)]
+
+    def one_rank(comm):
+        try:
+            distributed_df_jk(mfs[comm.Get_rank()], comm)
+        except MemoryError as exc:
+            return str(exc)
+        return None
+
+    out = []
+    worker = threading.Thread(
+        target=lambda: out.append(run_simulated(one_rank, 2)), daemon=True)
+    worker.start()
+    worker.join(timeout=120)
+    assert out, 'the ranks diverged at the memory check: the build hung'
+    assert all(msg is not None and 'short of max_memory' in msg
+               for msg in out[0]), out[0]
 
 
 def timed(comm, mf, **kwargs):

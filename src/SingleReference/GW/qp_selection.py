@@ -52,7 +52,8 @@ its own, |delta_p| + u_p, whatever its weight: that bounds every root's
 first-order error, not only the targets'. The partition is still frozen at
 the reference geometry, so the surface stays smooth; the cost is fewer holes.
 
-Pure numpy, except `ac_quasiparticle_shifts`, the one call into a GW route.
+Pure numpy, except `ac_quasiparticle_roots` (and `ac_quasiparticle_shifts`
+on it), the one call into a GW route.
 Everything here is in Hartree; tolerances are taken in the units of their
 constants (meV, eV).
 """
@@ -239,6 +240,55 @@ def degenerate_blocks(eps, members, tol):
     if current:
         blocks.append(tuple(sorted(current)))
     return blocks
+
+
+def window_blocks(eps, members, window):
+    """`members` cut into blocks whose orbitals all lie within `window` of
+    each other (complete linkage). Members are taken in (energy, index) order;
+    a block takes each next member, and once its span reaches `window` it is
+    cut at its largest gap between neighbours (the last of equal ones), the
+    part below closing and the part above staying open. So a near-degenerate
+    pair is never split for the window's sake while a wider gap lies inside
+    it (0, 0.029 and 0.031 Ha under 0.03 give (0) and the pair), equal
+    energies are never split, and a gap of exactly `window` opens a new
+    block. Chaining neighbours instead (`degenerate_blocks`) joins a whole
+    band into one block."""
+    eps = np.asarray(eps, float)
+    ordered = sorted((int(p) for p in members), key=lambda p: (eps[p], p))
+    blocks, current = [], []
+    for p in ordered:
+        current.append(p)
+        while eps[current[-1]] - eps[current[0]] >= window:
+            gaps = np.diff(eps[current])
+            cut = len(gaps) - int(np.argmax(gaps[::-1]))
+            blocks.append(current[:cut])
+            current = current[cut:]
+    if current:
+        blocks.append(current)
+    return [tuple(sorted(b)) for b in blocks]
+
+
+def contiguous_runs(block):
+    """`block` cut into its runs of consecutive orbital indices, each a sorted
+    tuple. Indices are the energy order of the mean field a group is decided
+    on, so a run is a contiguous energy window: no orbital outside it lies
+    between two of its members."""
+    out, run = [], []
+    for p in sorted(int(q) for q in block):
+        if run and p != run[-1] + 1:
+            out.append(tuple(run))
+            run = []
+        run.append(p)
+    if run:
+        out.append(tuple(run))
+    return out
+
+
+def contiguous_range(block):
+    """Every orbital index from the lowest of `block` to its highest: the
+    energy window it spans, in the order of the mean field it is read in."""
+    idx = [int(p) for p in block]
+    return tuple(range(min(idx), max(idx) + 1)) if idx else ()
 
 
 def merged_blocks(members, *groupings):
@@ -683,6 +733,24 @@ def calibrated_selection(eps, nocc, candidates, ac_shift, explicit_shift,
     return selection, calibration
 
 
+def ac_quasiparticle_roots(mf, mol, nocc, states, *, factors, xc_diagonal,
+                           numerics, comm=None, timings=None, failures=None):
+    """(roots, Z), arrays over `states`, Hartree: the analytic-continuation
+    quasiparticle equation w = eps_p + xc_p + Re Sigma_c(w) of each state,
+    solved by the one root finder (largest Z) on the caller's factors and
+    static term, with no reaction field (a caller in a continuum adds its
+    Eq. (18) to each root after the solve). The arguments are
+    `ac_quasiparticle_shifts`'s; a state whose continuation fails
+    numerically comes back NaN, its exception in `failures` when given.
+    """
+    with attached_environment(mf, NoEnvironment()):
+        roots, z = solve_qp_energy_space_time(
+            mf, mol, nocc, np.asarray(states, int), numerics=numerics,
+            factors=factors, xc_diagonal=np.asarray(xc_diagonal, float),
+            with_z=True, comm=comm, timings=timings, failures=failures)
+    return np.asarray(roots, float), np.asarray(z, float)
+
+
 def ac_quasiparticle_shifts(mf, mol, nocc, states, *, factors, xc_diagonal,
                             numerics, comm=None, timings=None, failures=None,
                             reaction_field=None):
@@ -712,11 +780,10 @@ def ac_quasiparticle_shifts(mf, mol, nocc, states, *, factors, xc_diagonal,
     other exception raises.
     """
     states = np.asarray(states, int)
-    with attached_environment(mf, NoEnvironment()):
-        roots, z = solve_qp_energy_space_time(
-            mf, mol, nocc, states, numerics=numerics, factors=factors,
-            xc_diagonal=np.asarray(xc_diagonal, float), with_z=True,
-            comm=comm, timings=timings, failures=failures)
+    roots, z = ac_quasiparticle_roots(mf, mol, nocc, states, factors=factors,
+                                      xc_diagonal=xc_diagonal,
+                                      numerics=numerics, comm=comm,
+                                      timings=timings, failures=failures)
     roots = add_reaction_field(np.asarray(roots, float), reaction_field,
                                states)
     eps = np.asarray(mf.mo_energy, float)

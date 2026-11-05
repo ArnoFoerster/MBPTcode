@@ -30,7 +30,7 @@ applies to the matrix-free modules.
 """
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_en as _en

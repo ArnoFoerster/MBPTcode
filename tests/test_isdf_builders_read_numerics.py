@@ -27,15 +27,16 @@ from src.Base.numerics.numerics import IsdfNumerics, Numerics
 from src.Base.factorization.separable_ri import atomic_grid, build_D_F, fit_settings
 from src.Base.factorization.separable_ri import molecular_points_covariant
 from src.gradients.rpa.factor_chain import FrozenFactorization
+from tests.molecules import WATER
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 QUARTET = ('l_max_second', 'pair_tol', 'regularization', 'block_memory_gb')
 #: The modules of the ISDF fit and its adjoints.
 FIT_MODULES = ('src/Base/factorization/separable_ri.py', 'src/Base/factorization/isdf_jk.py',
                'src/gradients/skeleton_tiles.py', 'src/Base/factorization/distributed_isdf_jk.py',
-               'src/gradients/isdf_derivatives.py',
+               'src/gradients/isdf_derivatives.py', 'src/gradients/isdf_adjoint_pieces.py',
                'src/gradients/rpa/factor_chain.py')
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 
 
 def takers(paths, names):

@@ -47,10 +47,11 @@ from src.SingleReference.ADC.precursor_classes import class_configs
 from src.SingleReference.ADC.sigma_driver import build_sigma_operator
 from tests.generated_runtime import requires_runtime
 from tests.test_faddeev_adc3 import ccd_spin_orbital
+from tests.molecules import WATER
 
 pytestmark = requires_runtime(4)
 
-MOLS = {'h2o': 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+MOLS = {'h2o': WATER,
         'lih': 'Li 0 0 0; H 0 0 1.595'}
 LAMBDAS = (0.08, 0.04, 0.02)
 OMEGAS = np.array([-0.6 + 0.4j, -0.2 + 0.4j, 0.4 + 0.4j, 1.0 + 0.4j])

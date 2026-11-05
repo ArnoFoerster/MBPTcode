@@ -54,6 +54,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_two_electron_integrals_chemist,
                                             get_density_fitting_coefficients,
                                             get_uhf_spin_orbital_arrays_blockstacked,
@@ -70,7 +71,8 @@ from src.Base.environment_seam import environment_of
 from src.Base.numerics.constants import HARTREE_TO_EV, PCM_LEBEDEV_ORDER
 from tests.isdf_test_grid import g1, g1_route
 from tests.pins import RECORDING_BLAS, matches
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+from tests.molecules import WATER_ROUNDED_LOW
+WATER = WATER_ROUNDED_LOW
 
 
 def check(ok, label, detail=''):
@@ -254,7 +256,7 @@ def check_end_to_end(mol):
         ip_gw = -calc_qp_energy(mf, selfenergy='GW', df=df, state='homo')
         solver = ADCSolver(mf, level='adc3', df=df)
         static = build_static_correction(mf, kind='mp2_relaxed',
-                                         B_aa=solver.B_aa if df else None)
+                                         B_aa=solver.B_aa if df else None, numerics=Numerics())
         e_gf, _ = solver.solve(static_correction=static)
         return ip_gw, -e_gf[0] * HARTREE_TO_EV
 

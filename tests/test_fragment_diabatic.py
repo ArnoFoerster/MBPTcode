@@ -31,7 +31,7 @@ WHAT EACH GATE IS FOR:
   displaced geometry. This is the gate for the canonical-gauge and the
   localization terms, which are several percent of the element's gradient
   here and which a root cannot see. Every element is compared signed, the
-  couplings included: the diabats' phase (`fragment_bse.diabat_phase`) is
+  couplings included: the diabats' phase (`partition.diabat_phase`) is
   the same in the analytic partition and in the finite difference's own.
 - the same, in a field of fixed point charges, with both charge-transfer
   diabats explicit, for the dressed A_eff and the bare A_PP. The charges make
@@ -85,15 +85,18 @@ from src.Base.numerics import constants
 from src.environments.environment import PointCharges
 from src.fragments.localization import FragmentOrbitals
 from src.gradients.gwbse.excited_state import ExcitedStateChain
-from src.gradients.gwbse.fragment_diabatic import DiabaticGradient, DiabaticSurface
-from src.gradients.gwbse import fragment_bse
+from src.fragments import partition as fragment_partition
+from src.gradients.fragment_diabatic import DiabaticGradient, DiabaticSurface
+from src.gradients.gwbse.fragment_diabatic import BSEFragmentMethod
 from src.Base.geometry.geometry import displaced
+from tests.feshbach_oracle import FeshbachOracle
 from tests.fragment_diabatic_fd import (derivative_ladder, diabatic_derivative,
                                      linear_vibronic_coupling)
 from tests.isdf_test_grid import g1
 from src.gradients.gwbse.bse_isdf import bse_solve
-from src.gradients.gwbse.fragment_bse import (BSEOperator, FeshbachOracle,
-                                         FragmentPartition, to_local)
+from src.gradients.gwbse.fragment_bse import BSEOperator
+from src.fragments.checkpoint import PartitionCheckpoint
+from src.fragments.partition import FragmentPartition, to_local
 from src.Base.numerics.numerics import numerics_of
 
 ETHYLENE = [('C', (0, 0, 0.667)), ('C', (0, 0, -0.667)),
@@ -154,14 +157,14 @@ def charged_full_chain():
 
 @pytest.fixture(scope='module')
 def gradient(chain):
-    return DiabaticGradient(chain, FRAGMENTS, SITES, omega0=OMEGA0)
+    return DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, omega0=OMEGA0)
 
 
 def force_iterative(monkeypatch):
     """Every block, guard, resolvent and response iterative: both dense
-    limits (`fragment_bse.dense_limit`) below the smallest block here."""
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_DENSE_MAX', 10)
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_MATRIX_FREE_DENSE_MAX', 10)
+    limits (`partition.dense_limit`) below the smallest block here."""
+    monkeypatch.setattr(fragment_partition, 'FRAGMENT_DENSE_MAX', 10)
+    monkeypatch.setattr(fragment_partition, 'FRAGMENT_MATRIX_FREE_DENSE_MAX', 10)
 
 
 def random_direction(natm, seed):
@@ -219,7 +222,7 @@ def test_diabats_depend_on_the_fragment_subspaces_only(operator, orbitals,
         other = FragmentPartition.build(operator, orbs, SITES,
                                         omega0=partition.omega0)
         # signed: the diabats' phase is their transition density's
-        # (`fragment_bse.diabat_phase`), which no local orbital's sign moves
+        # (`partition.diabat_phase`), which no local orbital's sign moves
         for name, a, b in (('a_eff', other.a_eff, partition.a_eff),
                            ('sigma', other.sigma, partition.sigma),
                            ('dsigma', other.dsigma, partition.dsigma),
@@ -267,7 +270,7 @@ def test_root_gradient_is_the_supermolecular_root_gradient(chain, operator):
     # two states per site: the lowest root (0.3136 Ha) lies within the pole
     # margin of Q's lowest eigenvalue with one (0.3161 Ha), and Omega_0 must
     # equal the root here; with two Q starts at 0.3369 Ha
-    grad = DiabaticGradient(chain, FRAGMENTS, TWO_PER_SITE, omega0=omega)
+    grad = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, TWO_PER_SITE, omega0=omega)
     g, d = grad.root_gradient(omega)
     assert np.abs(g - ref).max() < 1e-8 * max(1.0, np.abs(ref).max())
     assert np.abs(d['canonical']).max() < 1e-10
@@ -276,7 +279,7 @@ def test_root_gradient_is_the_supermolecular_root_gradient(chain, operator):
 
 def test_element_gradients_match_finite_differences(chain, gradient):
     direction = random_direction(chain.mol0.natm, 7)
-    ladder = derivative_ladder(chain, FRAGMENTS, SITES, direction,
+    ladder = derivative_ladder(BSEFragmentMethod(chain), FRAGMENTS, SITES, direction,
                                omega0=gradient.partition.omega0,
                                steps=(1e-3, 5e-4))
     fd = ladder['richardson'][-1]
@@ -292,10 +295,10 @@ def test_element_gradients_match_finite_differences(chain, gradient):
 def test_elements_in_point_charges_match_finite_differences(charged_chain,
                                                             dressed):
     direction = random_direction(charged_chain.mol0.natm, 11)
-    grad = DiabaticGradient(charged_chain, FRAGMENTS, SITES, BOTH_CT,
+    grad = DiabaticGradient(BSEFragmentMethod(charged_chain), FRAGMENTS, SITES, BOTH_CT,
                             omega0=OMEGA0_CHARGED, dressed=dressed)
     key = 'a_eff' if dressed else 'a_pp'
-    fd = [diabatic_derivative(charged_chain, FRAGMENTS, SITES, direction,
+    fd = [diabatic_derivative(BSEFragmentMethod(charged_chain), FRAGMENTS, SITES, direction,
                               BOTH_CT, omega0=OMEGA0_CHARGED, step=h)[0][key]
           for h in (5e-4, 2.5e-4)]
     fd = (4.0 * fd[1] - fd[0]) / 3.0
@@ -309,7 +312,7 @@ def test_elements_in_point_charges_match_finite_differences(charged_chain,
 
 def test_charge_transfer_diabat_surface_gradient(charged_chain):
     direction = random_direction(charged_chain.mol0.natm, 13)
-    surf = DiabaticSurface(charged_chain, FRAGMENTS, SITES, 'ct 0->1.0',
+    surf = DiabaticSurface(BSEFragmentMethod(charged_chain), FRAGMENTS, SITES, 'ct 0->1.0',
                            BOTH_CT, omega0=OMEGA0_CHARGED)
     g, e, _ = surf.total_gradient()
     mol0 = charged_chain.mol0
@@ -340,7 +343,7 @@ def test_linear_vibronic_coupling_is_the_projected_gradients(chain, gradient):
 def test_iterative_gradient_matches_dense(chain, gradient, monkeypatch):
     dense = {ab: gradient.element(*ab)[0] for ab in ((0, 0), (0, 1))}
     force_iterative(monkeypatch)
-    iterative = DiabaticGradient(chain, FRAGMENTS, SITES, route='isdf',
+    iterative = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, route='isdf',
                                  omega0=gradient.partition.omega0)
     for ab, ref in dense.items():
         g = iterative.element(*ab)[0]
@@ -357,8 +360,8 @@ OMEGA0_TWO = 0.30
 
 def check_elements(chain, sites, ct, omega0, seed, tol, steps=(1e-3, 5e-4)):
     direction = random_direction(chain.mol0.natm, seed)
-    grad = DiabaticGradient(chain, FRAGMENTS, sites, ct, omega0=omega0)
-    fd = [diabatic_derivative(chain, FRAGMENTS, sites, direction, ct,
+    grad = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, sites, ct, omega0=omega0)
+    fd = [diabatic_derivative(BSEFragmentMethod(chain), FRAGMENTS, sites, direction, ct,
                               omega0=omega0, step=h)[0]['a_eff']
           for h in steps]
     fd = (4.0 * fd[1] - fd[0]) / 3.0
@@ -431,7 +434,7 @@ def test_full_bse_root_gradient_is_the_supermolecular_root_gradient(
     assert abs(info['omega'] - omega) < 1e-10
     # two states per site, as in the Tamm-Dancoff gate: the lowest root lies
     # within the pole margin of Q's lowest eigenvalue with one (0.3133 Ha)
-    grad = DiabaticGradient(full_chain, FRAGMENTS, TWO_PER_SITE, omega0=omega)
+    grad = DiabaticGradient(BSEFragmentMethod(full_chain), FRAGMENTS, TWO_PER_SITE, omega0=omega)
     g, d = grad.root_gradient(omega)
     assert np.abs(g - ref).max() < 1e-8 * max(1.0, np.abs(ref).max())
     assert np.abs(d['canonical']).max() < 1e-10
@@ -445,10 +448,10 @@ def test_full_bse_elements_in_point_charges_match_finite_differences(
 
 
 def test_full_bse_iterative_gradient_matches_dense(full_chain, monkeypatch):
-    dense = DiabaticGradient(full_chain, FRAGMENTS, SITES, omega0=OMEGA0)
+    dense = DiabaticGradient(BSEFragmentMethod(full_chain), FRAGMENTS, SITES, omega0=OMEGA0)
     ref = {ab: dense.element(*ab)[0] for ab in ((0, 0), (0, 1))}
     force_iterative(monkeypatch)
-    iterative = DiabaticGradient(full_chain, FRAGMENTS, SITES, route='isdf',
+    iterative = DiabaticGradient(BSEFragmentMethod(full_chain), FRAGMENTS, SITES, route='isdf',
                                  omega0=dense.partition.omega0)
     for ab, r in ref.items():
         g = iterative.element(*ab)[0]
@@ -461,16 +464,16 @@ def test_an_unconverged_pole_guard_decides_or_says_it_cannot(
     isdf = BSEOperator.from_chain(full_chain, route='isdf')[0]
     force_iterative(monkeypatch)
     converged = FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 1)
+    monkeypatch.setattr(fragment_partition, 'FRAGMENT_GUARD_MAX_CYCLE', 1)
     with pytest.raises(RuntimeError, match='cannot decide'):
         FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 5)
+    monkeypatch.setattr(fragment_partition, 'FRAGMENT_GUARD_MAX_CYCLE', 5)
     with pytest.warns(RuntimeWarning, match='pole guard'):
         short = FragmentPartition.build(isdf, orbitals, SITES, omega0=OMEGA0_GUARD)
     # the guard decides; Sigma never depended on it
     assert np.abs(short.a_eff - converged.a_eff).max() < 1e-12
     assert abs(short.q_lowest - full_partition.q_lowest) < 1e-4
-    monkeypatch.setattr(fragment_bse, 'FRAGMENT_GUARD_MAX_CYCLE', 2)
+    monkeypatch.setattr(fragment_partition, 'FRAGMENT_GUARD_MAX_CYCLE', 2)
     with pytest.raises(ValueError, match='not below the lowest positive'):
         FragmentPartition.build(isdf, orbitals, SITES,
                                 omega0=full_partition.q_lowest)
@@ -486,6 +489,108 @@ def test_the_resolvent_refuses_an_indefinite_q_block(
     with pytest.raises(ValueError, match='non-positive curvature'):
         FragmentPartition.build(isdf, orbitals, SITES,
                                 omega0=full_partition.q_lowest + 0.02)
+
+
+def counting(monkeypatch):
+    """Count the solves of each long stage of `FragmentPartition.build`."""
+    calls = dict(blocks=0, guard=0, resolvent=0)
+    for name, key in (('_lowest', 'blocks'), ('_guard_lowest', 'guard'),
+                      ('_batched_cg', 'resolvent')):
+        def wrap(*a, _f=getattr(fragment_partition, name), _k=key, **kw):
+            calls[_k] += 1
+            return _f(*a, **kw)
+        monkeypatch.setattr(fragment_partition, name, wrap)
+    return calls
+
+
+def same_partition(a, b):
+    for name in ('p_local', 'y_local', 'a_pp', 'sigma', 'dsigma', 'gaps'):
+        assert np.array_equal(getattr(a, name), getattr(b, name)), name
+    assert a.q_lowest == b.q_lowest and a.omega0 == b.omega0
+    assert a.labels == b.labels
+
+
+@pytest.mark.parametrize('iterative', [False, True])
+def test_a_restored_partition_is_the_fresh_one_and_skips_the_solves(
+        chain, operator, orbitals, tmp_path, monkeypatch, iterative):
+    if iterative:
+        force_iterative(monkeypatch)
+    calls = counting(monkeypatch)
+    fresh = FragmentPartition.build(operator, orbitals, SITES, BOTH_CT,
+                                   omega0=OMEGA0)
+    first = FragmentPartition.build(
+        operator, orbitals, SITES, BOTH_CT, omega0=OMEGA0, checkpoint=PartitionCheckpoint(
+            tmp_path, tag='t'))
+    same_partition(fresh, first)
+    solved = dict(calls)
+    if iterative:
+        assert all(n > 0 for n in solved.values())
+    again = FragmentPartition.build(
+        operator, orbitals, SITES, BOTH_CT, omega0=OMEGA0, checkpoint=PartitionCheckpoint(
+            tmp_path, tag='t'))
+    assert calls == solved, 'a restore ran a solve'
+    same_partition(first, again)
+    # the element gradients of the restored partition are the fresh one's
+    fresh_g = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, BOTH_CT, omega0=OMEGA0)
+    solved = dict(calls)
+    restored = DiabaticGradient(BSEFragmentMethod(chain), FRAGMENTS, SITES, BOTH_CT,
+                                omega0=OMEGA0, checkpoint=PartitionCheckpoint(tmp_path,
+                                                               tag='t'))
+    assert calls == solved
+    # the partition is bit-identical; what is left is the iterative
+    # response solve's own run-to-run noise (MINRES to its tolerance)
+    bar = 1e-7 if iterative else 1e-12
+    for ab in ((0, 0), (0, 1), (1, 2)):
+        g, h = fresh_g.element(*ab)[0], restored.element(*ab)[0]
+        assert np.abs(g - h).max() < bar * np.abs(g).max()
+
+
+def test_a_changed_key_refuses_the_checkpoint(chain, operator, orbitals,
+                                              tmp_path, monkeypatch):
+    force_iterative(monkeypatch)
+    calls = counting(monkeypatch)
+
+    def build(op=operator, orbs=orbitals, sites=SITES, tag='t',
+              omega0=OMEGA0, **kw):
+        return FragmentPartition.build(
+            op, orbs, sites, BOTH_CT, omega0=omega0, checkpoint=PartitionCheckpoint(
+                tmp_path, tag=tag), **kw)
+
+    def count(**kw):
+        before = dict(calls)
+        build(**kw)
+        return {k: calls[k] - before[k] for k in calls}
+    base = build()
+    assert count() == dict(blocks=0, guard=0, resolvent=0)
+    # Omega_0 moves the guard and the resolvent, not the blocks
+    moved = count(omega0=base.omega0 - 0.001)
+    assert moved['blocks'] == 0 and moved['guard'] > 0 \
+        and moved['resolvent'] > 0
+    # a displaced geometry, the same orbital identity: everything is solved
+    mol = displaced(chain.mol0, 1e-3 * random_direction(chain.mol0.natm, 3))
+    mol, mf = chain.mean_field(mol)
+    op = BSEOperator.from_chain(chain, mol, mf, route='dense')[0]
+    orbs = FragmentOrbitals.from_mf(mf, FRAGMENTS, reference=orbitals)
+    assert all(n > 0 for n in count(op=op, orbs=orbs,
+                                    omega0=base.omega0).values())
+    # other diabats, another tag (code commit), another tolerance
+    assert count(sites=TWO_PER_SITE, omega0=OMEGA0_TWO)['blocks'] > 0
+    assert all(n > 0 for n in count(tag='other').values())
+    assert all(n > 0 for n in count(tol=1e-9).values())
+    # the last write was the tolerance's: the original is refused again
+    assert count()['blocks'] > 0
+
+
+def test_a_torn_checkpoint_file_is_a_miss(operator, orbitals, tmp_path):
+    ckpt = PartitionCheckpoint(tmp_path, tag='t')
+    FragmentPartition.build(operator, orbitals, SITES, omega0=OMEGA0,
+                            checkpoint=ckpt)
+    (tmp_path / 'guard.npz').write_bytes(b'not an npz')
+    again = FragmentPartition.build(operator, orbitals, SITES, omega0=OMEGA0,
+                                    checkpoint=PartitionCheckpoint(
+                                        tmp_path, tag='t'))
+    same_partition(again, FragmentPartition.build(operator, orbitals, SITES,
+                                                  omega0=OMEGA0))
 
 
 if __name__ == '__main__':

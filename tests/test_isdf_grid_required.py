@@ -12,8 +12,8 @@ from src.gradients.isdf_mean_field import isdf_jk_with_force
 from src.Base.factorization.separable_ri import optimize_atomic_radii
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.rpa.factor_chain import FrozenFactorization
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module')

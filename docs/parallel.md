@@ -151,6 +151,27 @@ cores each rank may use (see [Threads](#threads)). Without `mpi4py`, or with
 bit for bit the serial code.
 `mpi4py` is imported on first use, never at module import.
 
+### Several nodes
+
+Between nodes, MPI moves data by remote memory access, and the network card
+must register (pin) a buffer's memory before it can use it. glibc gives every
+array larger than 32 MB its own memory mapping and returns it to the system when
+the array is freed, so an array allocated just before a transfer sits in memory
+the card has never seen; registering it every time made a broadcast of 40 MB
+arrays between two nodes 36 times slower than into one reused array. The
+collectives of `src.Base.utils.parallel.mpi_grid` therefore move their data,
+on a communicator that spans several nodes, through a buffer each thread keeps
+for the whole run (`MPI_STAGE_DOUBLES`, 128 MiB). MPI calls made outside
+`mpi_grid` (pyscf's, for one) do not go through it; for those, keep freed memory
+in the process so it stays registered:
+
+```bash
+export MALLOC_MMAP_MAX_=0 MALLOC_TRIM_THRESHOLD_=1000000000000
+srun -N 4 --ntasks-per-node 8 -c 16 python run.py
+```
+
+Inside one node the ranks share memory and none of this applies.
+
 A solvent continuum works the same way. `SolventScreening.mean_field`
 converges the solvated SCF through `distributed_mean_field`; the reaction
 field of the cavity is cheap, so every rank computes it from the shared

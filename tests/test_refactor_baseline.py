@@ -216,7 +216,9 @@ def test_the_isdf_grids_came_from_the_table(baseline):
 # --------------------------------------------------------- the cheap re-checks
 def test_mean_field_surface_is_bitwise_what_was_recorded(baseline, water):
     """The mean field every chain in the record reads, bitwise the
-    record's energy and gradient at both geometries."""
+    record's energy and gradient at both geometries. The gradient is
+    re-recorded on the workstation for the mean field's force in fixed tiles
+    (5e-15, its sums in tile order); the energies are the record's own."""
     recorded = baseline['surfaces']['water']['MeanFieldSurface']
     assert recorded['status'] == 'ok'
     surface = MeanFieldSurface(water, lambda mol: scf_factory(mol, baseline))

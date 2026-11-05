@@ -44,6 +44,7 @@ from src.SingleReference.LinearResponse.space_time import (
 from src.gradients.gwbse.reaction_field_adjoint import static_screening
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 SIZES = [2, 3]
@@ -60,7 +61,7 @@ EPS_SOLVENT = 1.78
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=BASIS, verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis=AUXBASIS)
     mf.conv_tol = SCF_TIGHT_CONV_TOL

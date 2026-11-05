@@ -32,15 +32,18 @@ import numpy as np
 
 from src.Base.numerics.constants import (ATOMIC_TIME_SECONDS,
                                          BOLTZMANN_HARTREE_PER_KELVIN,
+                                         GAUSSIAN_FWHM_PER_SIGMA,
                                          HARTREE_TO_CM, HARTREE_TO_EV,
                                          HARTREE_TO_MEV,
+                                         RATE_BAND_GRID_WIDTHS,
                                          RATE_FC_LAMBDA_RATIO_MAX,
                                          RATE_LAMBDA_REMAINDER_MIN_MEV,
                                          RATE_MLJ_N_MAX,
                                          RATE_THERMAL_WINDOW_KT,
                                          SPEED_OF_LIGHT_AU, TRIPLET_SUBLEVELS)
-from src.properties.franck_condon import (FCIntegrandNotDecayed, bose,
-                                          fc_weighted_dos,
+from src.properties.band_shape import vibronic_band_grid
+from src.properties.franck_condon import (TRAPEZOID, FCIntegrandNotDecayed,
+                                          bose, fc_weighted_dos,
                                           require_vibrational_modes,
                                           thermal_energy)
 
@@ -109,7 +112,7 @@ class ManifoldGaps:
                              'each state\'s own minimum')
 
 
-def _golden_rule(coupling, rho_fc):
+def golden_rule(coupling, rho_fc):
     """(2 pi / hbar) |V|^2 rho_FC in s^-1, from Hartree and Hartree^-1.
 
     hbar = 1 in atomic units, so the product is already a rate in inverse
@@ -119,7 +122,7 @@ def _golden_rule(coupling, rho_fc):
 
 
 def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
-                               temperature, n_max=50):
+                               temperature, n_max):
     """Marcus-Levich-Jortner rate in s^-1.
 
         rho_FC = sum_n e^-S S^n / n! (4 pi lambda_M k_B T)^-1/2
@@ -146,8 +149,17 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         both: S = sum_k S_k over the high-frequency modes and
         omega_eff = sum_k S_k omega_k / sum_k S_k, their Huang-Rhys-weighted
         first moment.
-    n_max: quanta retained in the Poisson sum.
+    n_max: quanta retained in the Poisson sum (the rate chain's
+        RATE_MLJ_N_MAX); too few to hold the Poisson weight are refused.
     """
+    return golden_rule(coupling, mlj_density(delta_e, lambda_m, s_eff,
+                                             omega_eff, temperature, n_max))
+
+
+def mlj_density(delta_e, lambda_m, s_eff, omega_eff, temperature, n_max):
+    """rho_FC of `marcus_levich_jortner_rate`, Hartree^-1: the Poisson sum
+    over quanta of the effective mode, each a classical Marcus line of
+    width lambda_m (same arguments and sign convention)."""
     kt = thermal_energy(lambda_m, temperature)
     if s_eff < 0.0 or omega_eff < 0.0:
         raise ValueError(f'the effective mode needs S >= 0 and omega >= 0, got '
@@ -166,9 +178,8 @@ def marcus_levich_jortner_rate(coupling, delta_e, lambda_m, s_eff, omega_eff,
         raise ValueError(f'n_max = {n_max} keeps only {poisson.sum():.6f} of '
                          f'the Poisson weight at S = {s_eff}; raise n_max')
     activation = (float(delta_e) + lambda_m + n * omega_eff) ** 2
-    rho_fc = ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
-              / np.sqrt(4.0 * np.pi * lambda_m * kt))
-    return _golden_rule(coupling, rho_fc)
+    return ((poisson * np.exp(-activation / (4.0 * lambda_m * kt))).sum()
+            / np.sqrt(4.0 * np.pi * lambda_m * kt))
 
 
 def marcus_rate(coupling, delta_e, lambda_total, temperature):
@@ -185,7 +196,7 @@ def marcus_rate(coupling, delta_e, lambda_total, temperature):
     rho_fc = (np.exp(-(float(delta_e) + lambda_total) ** 2
                      / (4.0 * lambda_total * kt))
               / np.sqrt(4.0 * np.pi * lambda_total * kt))
-    return _golden_rule(coupling, rho_fc)
+    return golden_rule(coupling, rho_fc)
 
 
 def spin_vibronic_rate(delta_e, v0, dv_dq, omega_promoting, rho_fc,
@@ -223,13 +234,13 @@ def spin_vibronic_rate(delta_e, v0, dv_dq, omega_promoting, rho_fc,
         raise ValueError(f'{dv.shape} derivatives against {w.shape} '
                          f'frequencies; one per promoting mode')
     n = bose(w, kt)
-    k_c = _golden_rule(v0, rho_fc(float(delta_e)))
+    k_c = golden_rule(v0, rho_fc(float(delta_e)))
     k_ht = 0.0
     for dvk, wk, nk in zip(dv, w, n):
-        k_ht += _golden_rule(dvk * np.sqrt(0.5 * (nk + 1.0)),
-                             rho_fc(float(delta_e) + float(wk)))
-        k_ht += _golden_rule(dvk * np.sqrt(0.5 * nk),
-                             rho_fc(float(delta_e) - float(wk)))
+        k_ht += golden_rule(dvk * np.sqrt(0.5 * (nk + 1.0)),
+                            rho_fc(float(delta_e) + float(wk)))
+        k_ht += golden_rule(dvk * np.sqrt(0.5 * nk),
+                            rho_fc(float(delta_e) - float(wk)))
     return k_c + k_ht, k_c, k_ht
 
 
@@ -297,11 +308,10 @@ def radiative_rate(delta_e, dipole):
     delta_e: the emission energy in Hartree.
     dipole: <0|r|n> in atomic units, either the (3,) vector or its magnitude.
 
-    Condon only. A weakly allowed transition -- which a charge-transfer TADF
-    state usually is -- also emits through dmu/dQ, and that term is NOT here;
-    it is the same Herzberg-Teller structure `spin_vibronic_rate` carries for
-    intersystem crossing, and it needs the transition dipole's nuclear
-    derivative.
+    Condon, at one energy. A weakly allowed transition -- which a
+    charge-transfer TADF state usually is -- also emits through dmu/dQ:
+    `vibronic_radiative_rate` integrates E^3 over the vibronic band with the
+    Herzberg-Teller dipole (`properties.herzberg_teller`).
     """
     mu2 = float(np.sum(np.asarray(dipole, float) ** 2))
     w = float(delta_e)
@@ -310,6 +320,49 @@ def radiative_rate(delta_e, dipole):
                          'radiative rate needs the state above the one it '
                          'falls to')
     return (4.0 * w ** 3 * mu2 / (3.0 * SPEED_OF_LIGHT_AU ** 3)
+            / ATOMIC_TIME_SECONDS)
+
+
+def vibronic_radiative_rate(model, e_adiabatic, temperature, *,
+                            gaussian_fwhm, lorentzian_fwhm=0.0, dipole=None,
+                            energies=None):
+    """Spontaneous-emission rate in s^-1 over the whole vibronic band.
+
+        k_r = 4 / (3 c^3) int E^3 rho_em(E) dE
+
+    with rho_em the emission density of `model` (a
+    `band_shape.VibronicModel`) at photon energy E, whose area is the squared
+    transition dipole: `duschinsky.DuschinskyOscillators(model, dipole)` with
+    a `herzberg_teller.TransitionDipole` carries <|mu(q)|^2> itself, the
+    Herzberg-Teller emission of a weakly allowed emitter; a Condon model
+    (no dipole of its own) takes the constant `dipole` here. Every line
+    emits at its own E^3, so no single emission energy has to be chosen.
+
+    e_adiabatic: the electronic adiabatic gap, Hartree. energies: the photon
+    grid, default `band_shape.vibronic_band_grid`; the broadenings are
+    required in the same sense as for the band (a Lorentzian's algebraic
+    tail is cut where the grid ends; 12 band widths each side).
+    """
+    own = getattr(model, 'dipole', None)
+    if (own is None) == (dipole is None):
+        raise ValueError('the transition dipole is given twice or not at '
+                         'all: a Condon model takes `dipole`, a '
+                         'Herzberg-Teller model carries its own')
+    if energies is None:
+        # E^3 weights the blue tail (RATE_BAND_GRID_WIDTHS)
+        energies = vibronic_band_grid(model, e_adiabatic, temperature,
+                                      gaussian_fwhm=gaussian_fwhm,
+                                      lorentzian_fwhm=lorentzian_fwhm,
+                                      n_widths=RATE_BAND_GRID_WIDTHS)
+    e = np.asarray(energies, float)
+    rho = model.density(e - float(e_adiabatic), temperature, 'emission',
+                        broadening=float(gaussian_fwhm)
+                        / GAUSSIAN_FWHM_PER_SIGMA,
+                        lorentzian=0.5 * float(lorentzian_fwhm))
+    mu2 = 1.0 if dipole is None else float(np.sum(np.asarray(dipole,
+                                                              float) ** 2))
+    moment = float(TRAPEZOID(e ** 3 * rho, e))
+    return (4.0 * mu2 * moment / (3.0 * SPEED_OF_LIGHT_AU ** 3)
             / ATOMIC_TIME_SECONDS)
 
 
@@ -457,9 +510,18 @@ def _root_number(name):
     return int(name[1:])
 
 
-def _rms_cm(dv):
-    """Root mean square of |dV/dq_k| over the modes, in cm^-1."""
+def rms_cm(dv):
+    """Root mean square of |dV/dq_k| over the modes (Hartree), in cm^-1."""
     return float(np.sqrt((np.asarray(dv, float) ** 2).mean()) * HARTREE_TO_CM)
+
+
+def effective_mode(s, omega):
+    """(S, omega_eff): the total Huang-Rhys factor of the modes and the
+    S-weighted mean of their frequencies omega, the one mode of the
+    Marcus-Levich-Jortner density (0 where S is 0)."""
+    s = np.asarray(s, float)
+    s_sum = float(s.sum())
+    return s_sum, (float((s * omega).sum() / s_sum) if s_sum > 0 else 0.0)
 
 
 def fc_lambda_guard(lam_rule, lam):
@@ -661,9 +723,8 @@ def rate_table(s1, t1, e0, omega, s_isc, temperature, lambda_env, s_ic=None,
     lam_s = t1.energy[t1.emitter] - e_s1
     s_k = np.asarray(s_isc, float)
     rho = dens.rho_of(s_k)
-    s_sum = float(s_k.sum())
+    s_sum, om_eff = effective_mode(s_k, omega)
     lam_rule = dens.sum_rule(s_k)
-    om_eff = float((s_k * omega).sum() / max(s_sum, 1e-30))
     out = {'temperature_K': temperature,
            'lambda_env_eV': lambda_env * HARTREE_TO_EV,
            'emitter': s_name, 'reservoir': t_name,
@@ -750,9 +811,9 @@ def _crossing_rows(crossings, rho, lam_rule, s_sum, om_eff, temperature):
         channels[name] = {
             'v_condon_cm': v * HARTREE_TO_CM,
             'initial_sublevel_average': average,
-            'dv_dq_rms_by_path_cm': {path: _rms_cm(x) for path, x in
+            'dv_dq_rms_by_path_cm': {path: rms_cm(x) for path, x in
                                      (at.dv_dq_paths or {}).items()},
-            'dv_dq_rms_cm': None if condon else _rms_cm(dv),
+            'dv_dq_rms_cm': None if condon else rms_cm(dv),
             **marcus_rows(v / np.sqrt(average), de, lam, s_sum, om_eff,
                           temperature),
             'fc_lambda': fc,

@@ -24,7 +24,7 @@ Hartree-Fock at 148 points per atom in tiles of `TILE` points (7 tiles):
       and every adjoint the kernels hand the assembly (eps_bar, X_bar,
       D_bar). The orbital, collocation and fit branches and the forces
       within FIT_REALIZATION_FORCE_TOL, the whole assembly refitting the
-      estimator with `fit_M_stable`. Every rank holds rank 0's force.
+      estimator with `fit_M`. Every rank holds rank 0's force.
   (c) The memory scan at every force (`test_chain_row_fit.watch`): every line
       of every frame under src/ inside the nuclear assembly is traced, and no
       array it names holds the grid by a factor's, the fit's or the test
@@ -69,10 +69,9 @@ from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.rpa.factor_chain import FrozenFactorization
-from src.gradients.isdf_derivatives import (collocation_adjoint,
-                                            dfactor_adjoint_gauges,
-                                            orbital_rotation_rows,
-                                            point_chain, product_pairs)
+from src.gradients.isdf_derivatives import (collocation_adjoint, dfactor_adjoint_gauges,
+                                            orbital_rotation_rows, product_pairs)
+from src.gradients.isdf_adjoint_pieces import point_chain
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.surface import evaluate
 from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
@@ -81,13 +80,16 @@ from tests.test_chain_row_fit import (ETHYLENE, FD_COMPONENTS, FD_STEP,
                                       state_pair, watch)
 from tests.test_chain_sliced_factors import (H2O, H2O_DISPLACED, chain_scf,
                                              own_water)
-from tests.isdf_test_grid import g1, g1_kw
-from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, matches
+from tests.isdf_test_grid import g1, g1_kw, DUCHEMIN_BLASE_FIT
+from tests.pins import RECORDING_BLAS, assert_same, bitwise_arrays, isdf_gradient_bar, matches
 
 SIZES = [1, 2, 3, 8]
-#: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ at 148
-#: points per atom drops two pairs 2.8e-5 Bohr further on.
-CROSSING_SHIFT = 0.05484
+#: Bohr, carbon 0 along the C=C bond: the screen of ethylene/cc-pVDZ on G1
+#: drops two pairs, (0, 41) and (0, 46), at 0.0190232 Bohr, 3.2e-5 Bohr further
+#: on (found by scanning the shift in steps of 4e-3 Bohr and bisecting the
+#: changes of the screen; the neighbouring changes are at 0.0057668 and
+#: 0.0205918 Bohr, the stencil reaches 2e-4).
+CROSSING_SHIFT = 0.018993
 
 
 # ------------------------------------------------------------------- (a)
@@ -98,7 +100,7 @@ def test_the_adjoint_on_fixed_adjoints(atom):
     tolerances."""
     mol = molecule(atom)
     with distributed(None):
-        fac = FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)}))
+        fac = FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)}))
     aux, crd = fac.auxmol(mol), fac.coords(mol)
     npts, naux, nao = len(crd), aux.nao_nr(), mol.nao
     rng = np.random.default_rng(3)
@@ -274,7 +276,7 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
     with monkeypatch.context() as patch:
         patch_whole_assembly(patch)
         out = run_simulated(rank, 2)
-    npts = FrozenFactorization(own_water(), Numerics(isdf={'counts': g1(own_water())})).M
+    npts = FrozenFactorization(own_water(), Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(own_water())})).M
     for r, log in enumerate(out):
         found, faults = log[-1]
         assert (npts, npts) in found, (r, found)
@@ -283,8 +285,6 @@ def test_the_scan_fails_the_whole_assembly(monkeypatch):
 
 
 # ------------------------------------------------------------------- (d)
-@pytest.mark.xfail(strict=True, reason=(
-    'premise tuned to the retired 148-point grid: CROSSING_SHIFT puts no screen change inside the FD stencil on G1; the premise is to be re-tuned on G1'))
 def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     """The dRPA force of the row fit against a five-point difference of its
     own energy, beside the whole assembly of the same estimator and that of
@@ -296,7 +296,7 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     mol.build(False, False)
     with distributed(None):
         chain = RPAGroundStateChain(mol, chain_scf,
-                                    numerics=numerics_of(g1_kw(mol, row_kw())))
+                                    numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT)))
         grad = chain.total_gradient()[0]
         fd, crossed = [], []
         for ia, x in FD_COMPONENTS:
@@ -328,8 +328,8 @@ def test_ethylene_force_is_the_derivative_of_its_energy(monkeypatch):
     print(f'\nethylene dRPA on the row fit: |analytic - fd| {err:.2e}, the '
           f'whole assembly {whole:.2e}, the screened-Gram estimator {wrong:.2e} '
           'Ha/Bohr')
-    assert err < ISDF_GRADIENT_FLOOR
-    assert whole < ISDF_GRADIENT_FLOOR
+    assert err < isdf_gradient_bar()
+    assert whole < isdf_gradient_bar()
     assert wrong > 100 * ISDF_GRADIENT_FLOOR
 
 

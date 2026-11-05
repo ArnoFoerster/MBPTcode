@@ -46,8 +46,8 @@ nothing: ranks are processes and each calls this from its own main thread.
 
 A THIRD POOL: numpy's element-wise work. A ufunc runs on the thread that
 calls it, so an element-wise stage between the libcint and the BLAS calls --
-the ISDF fit's test co-densities, a shell block of them 3 GB at the
-chlorophyllide dimer -- runs on one core whatever OMP_NUM_THREADS says, and
+the ISDF fit's test co-densities, a shell block of them gigabytes on a
+large chromophore dimer -- runs on one core whatever OMP_NUM_THREADS says, and
 more ranks are the only thing that divides it. `row_map` cuts such a stage's
 rows over Python threads (numpy releases the GIL inside its loops), as many
 as the process's OpenMP pool (`openmp_threads`). Every element is still made
@@ -64,6 +64,7 @@ never the arithmetic pyscf does.
 import contextlib
 import contextvars
 import os
+import sys
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -82,10 +83,10 @@ except ImportError:                      # soft dependency: every routine no-ops
 #: that owns the pool (`pool_is_ours`) ever fills it.
 _TAKEN = threading.local()
 
-#: The executors `row_map` runs on, one per (process, thread count), made on
-#: first use and kept: a pass calls it several times per shell block.
-_ROW_POOLS = {}
-_ROW_POOLS_LOCK = threading.Lock()
+#: The process's executors (`pool`), one per (process, purpose, thread count),
+#: made on first use and kept: a pass calls them several times per block.
+_POOLS = {}
+_POOLS_LOCK = threading.Lock()
 
 #: `openmp_threads`' count per process, read once by the main thread.
 _OPENMP_THREADS = {}
@@ -111,6 +112,46 @@ class BlasLimit:
             _taken().pop()
         self._limits.__exit__(*exc)
         return False
+
+
+@contextlib.contextmanager
+def spread_over(cpus):
+    """Context manager moving every thread of this process onto `cpus` (a set
+    of CPU ids) until exit, when each thread gets its own mask back and a
+    thread started inside gets the main thread's.
+
+    The thread COUNT is not touched, so a BLAS splits its work as before and
+    returns the same bits; what moves is where the threads run, and with that
+    which memory controllers serve them. A dense eigensolve on 16 threads bound
+    to one 16-core NUMA domain of an AMD EPYC 7H12 node ran 3.3 times slower
+    than on the same 16 threads free to run on the whole node: the reduction
+    to tridiagonal form streams its matrix through memory. A no-op where the
+    OS has no per-thread masks (no `/proc/self/task`, no `sched_setaffinity`)
+    or `cpus` is empty.
+    """
+    tasks = '/proc/self/task'
+    if not cpus or not hasattr(os, 'sched_setaffinity') or not os.path.isdir(tasks):
+        yield
+        return
+    saved = {}
+    for tid in (int(t) for t in os.listdir(tasks)):
+        try:
+            saved[tid] = os.sched_getaffinity(tid)
+            os.sched_setaffinity(tid, cpus)
+        except OSError:  # the thread has exited, or no CPU of `cpus` is allowed
+            pass
+    try:
+        yield
+    finally:
+        main = saved.get(os.getpid())
+        for tid in (int(t) for t in os.listdir(tasks)):
+            mask = saved.get(tid, main)
+            if mask is None:
+                continue
+            try:
+                os.sched_setaffinity(tid, mask)
+            except OSError:
+                pass
 
 
 def blas_single_threaded(min_threads=BLAS_WRAP_MIN_THREADS):
@@ -237,17 +278,28 @@ def row_map(fn, n, threads):
     if parts == 1:
         return [fn(*ranges[0])]
     context = contextvars.copy_context()
-    return list(_row_pool(int(threads)).map(
+    return list(pool(int(threads)).map(
         lambda r: context.copy().run(fn, *r), ranges))
 
 
-def _row_pool(threads):
-    """This process's executor of `threads` workers, made once."""
-    key = (os.getpid(), threads)
-    with _ROW_POOLS_LOCK:
-        if key not in _ROW_POOLS:
-            _ROW_POOLS[key] = ThreadPoolExecutor(threads)
-        return _ROW_POOLS[key]
+def pool(workers, purpose='rows'):
+    """This process's executor of `workers` threads for `purpose`, made once.
+    Executors of different purposes are distinct, so a task running on one may
+    wait on another and never on its own: 'rows' is `row_map`'s, 'stream' the
+    ADC slab streams', 'accumulate' the CC antisymmetrizer's and 'copies' the
+    threaded einsum copies'."""
+    key = (os.getpid(), purpose, int(workers))
+    with _POOLS_LOCK:
+        if key not in _POOLS:
+            _POOLS[key] = ThreadPoolExecutor(int(workers))
+        return _POOLS[key]
+
+
+def budget():
+    """This process's thread budget: OMP_NUM_THREADS, else the CPUs in this
+    thread's affinity mask (`resolve_workers` with no work-item cap). Every
+    pool here is sized from it."""
+    return resolve_workers(None, sys.maxsize)
 
 
 def _positive_int_env(name):

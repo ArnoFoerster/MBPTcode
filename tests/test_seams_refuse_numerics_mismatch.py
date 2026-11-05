@@ -73,7 +73,7 @@ def test_a_spin_orbit_pair_of_other_numerics_is_refused():
     one = nm.Stamped((np.zeros(1), None, None), 'a' * 64)
     two = nm.Stamped((np.zeros(1), None, None), 'b' * 64)
     with pytest.raises(nm.NumericsMismatch, match='spin-orbit'):
-        spin_orbit_couplings(None, None, 1, one, two)
+        spin_orbit_couplings(None, None, 1, one, two, numerics=Numerics())
 
 
 def test_a_coupling_off_an_evaluation_of_other_numerics_is_refused(h2, g1):

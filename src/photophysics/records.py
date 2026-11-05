@@ -48,8 +48,10 @@ def walk_fields(info):
     walk's rigid move, the explicit states the rebuild added (grow-only
     adaptive set), what the walks leave undetermined (`walk_resolution`,
     meV), the numerical events flagged on it (`relaxation_flags`,
-    `numerical_flags`), and the refrozen walk's own convergence again under
-    `last_walk`."""
+    `numerical_flags`), the rounds of the walk returned and its convention
+    refreezes, each with the round it started and its jump
+    (`optimize.refreeze_round`), and the refrozen walk's own convergence again
+    under `last_walk`."""
     last = info.get('refreeze_info') or info
     return dict(
         relaxation_fields(info),
@@ -61,6 +63,9 @@ def walk_fields(info):
         refreeze_qp_growth=info.get('refreeze_qp_growth'),
         first_walk_de_meV=info.get('first_walk_de_meV'),
         numerical_flags=dict(info.get('numerical_flags') or {}),
+        rounds=info.get('rounds'),
+        convention_refreezes=[dict(e) for e in
+                              info.get('convention_refreezes') or []],
         last_walk={k: last.get(k) for k in ('converged', 'cycles',
                                             'opt_grad_max', 'status')})
 

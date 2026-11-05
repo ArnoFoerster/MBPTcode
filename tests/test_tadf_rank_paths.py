@@ -57,7 +57,7 @@ from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed, mpi_map
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.Base.numerics.constants import NUCLEAR_FD_STEP, PIN_CROSS_BLAS_GRADIENT_BAR
+from src.Base.numerics.constants import NUCLEAR_FD_STEP, ISDF_GRADIENT_FLOOR
 from src.gradients.gwbse import qp_space_time
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling)
@@ -70,9 +70,10 @@ from src.gradients.gwbse.surface_factory import reference_mean_field
 from tests.blas_bar import assert_same_within
 from tests.pins import assert_same
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 MAX_MEMORY = 4000
 S0, S1, T0, T1 = ('singlet', 0), ('singlet', 1), ('triplet', 0), ('triplet', 1)
 #: serial against ranked on the row fit and the fixed-order reductions
@@ -148,7 +149,8 @@ def property_block(solvent=None):
                       couplings=((S0, S1), (T0, T1)))
     nocc = mol.nelectron // 2
     soc = spin_orbit_couplings(ev.mf, ev.mol, nocc, ev.spectrum['singlet'],
-                               ev.spectrum['triplet'], nroots=2)
+                               ev.spectrum['triplet'], nroots=2,
+                               numerics=spec.numerics)
     sv = spin_vibronic_coupling(ev, soc['h_mo'], S0, T0, singlet_paths=(S1,),
                                 triplet_paths=(T1,))
     return {'force': ev.gradient[S0], 'omega': np.array([ev.omega[k] for k in
@@ -236,7 +238,7 @@ def test_a_wrong_rank_fails_the_gate(pyscf_one_thread, monkeypatch):
     """Rank 1's half of the frequency pass off by DEFECT, relative: the
     ranks still agree with each other (the sum they reduce is the same),
     and parts (i) and (ii) both fail."""
-    real = qp_space_time.cd_screening_contraction_multi
+    real = qp_space_time.cd_pair_contraction_multi
 
     def wrong(*args, **kwargs):
         out = real(*args, **kwargs)
@@ -247,8 +249,7 @@ def test_a_wrong_rank_fails_the_gate(pyscf_one_thread, monkeypatch):
 
     serial_fits, ranked_fits = PoleFits(), PoleFits()
     serial = block_with(monkeypatch, serial_fits, None)
-    monkeypatch.setattr(qp_space_time, 'cd_screening_contraction_multi',
-                        wrong)
+    monkeypatch.setattr(qp_space_time, 'cd_pair_contraction_multi', wrong)
     ranked = block_with(monkeypatch, ranked_fits, None, ranks=2)
     wc_ratio, rest = verdicts(serial, serial_fits.fits, ranked[0],
                               ranked_fits.fits)
@@ -271,6 +272,6 @@ def test_hessian_displacements_over_two_ranks(pyscf_one_thread):
     # to a few ulp on the recording BLAS. On another BLAS every displaced
     # gradient moves by the gradient class bar and the central difference
     # divides that by 2 * step.
-    bar = PIN_CROSS_BLAS_GRADIENT_BAR / (2 * NUCLEAR_FD_STEP)
+    bar = ISDF_GRADIENT_FLOOR / (2 * NUCLEAR_FD_STEP)
     for r, got in enumerate(run_simulated(rank, 2)):
         assert_same_within(got, serial, bar, label=r)

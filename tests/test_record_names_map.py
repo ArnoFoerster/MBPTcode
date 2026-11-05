@@ -69,3 +69,18 @@ def test_a_current_name_passes_through_unchanged():
     name = 'src.Base.numerics.numerics:Numerics'
     assert record_io.current_record_name(name) == name
     assert record_io.record_class(name) is Numerics
+
+
+def test_fragment_classes_named_by_their_first_modules_load():
+    """The fragment partition classes live in `src.fragments.partition` and
+    the diabatic gradient classes in `src.gradients.fragment_diabatic`; a
+    record that names them as the first tree did reads back as those."""
+    from src.fragments import partition
+    from src.gradients import fragment_diabatic
+    for name, module in (('FragmentCanonical', partition),
+                         ('FragmentPartition', partition),
+                         ('DiabaticGradient', fragment_diabatic),
+                         ('DiabaticSurface', fragment_diabatic)):
+        old = ('src.gradients.fragment_bse:' if module is partition
+               else 'src.gradients.fragment_diabatic:') + name
+        assert record_io.record_class(old) is getattr(module, name), old

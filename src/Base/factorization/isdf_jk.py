@@ -57,7 +57,13 @@ structure come from.
 Duchemin and Blase, J. Chem. Phys. 150, 174120 (2019) -- the separable RI that
 is actually fitted here (`src/Base/factorization/separable_ri.py`): the interpolation
 coefficients reproduce RI-V fitting coefficients rather than the orbital
-products themselves, which is what keeps the per-molecule step cubic.
+products themselves, which is what keeps the per-molecule step cubic. It is
+the mean field's fit unless a test set is named: its points follow the atoms'
+frames, so the energy is smooth along a walk. With
+`IsdfNumerics.test_set='ao_products'` the fit is trained on every AO product
+in the Coulomb metric, on `pivot_points` (else `pivot_count`) points pivoted
+from the grid (`ao_product_fit`), smooth along a walk inside
+`frozen_frames`.
 """
 import contextlib
 import threading
@@ -68,22 +74,28 @@ import scipy.linalg
 from pyscf import df, scf
 from pyscf.lib import logger
 
+from src.Base.factorization.test_sets import is_ao_products, replicated_fit
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BYTES_PER_GB, ISDF_JK_CHECK_TOL,
+from src.Base.orbital_spaces import occupied_count
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
+                                         ISDF_JK_BLOCK_MEMORY_FRACTION,
+                                         ISDF_JK_BLOCK_MIN_MB,
+                                         ISDF_JK_BLOCK_MIN_ROWS,
+                                         ISDF_JK_CHECK_TOL,
                                          ISDF_SCF_KERNEL_MEMORY_FRACTION)
 from src.Base.geometry.geometry import elements_of
 from src.Base.numerics.numerics import (ISDF_JK_REQUEST_FIELDS, IsdfNumerics,
                                         numerics_or_default, requested, same_setting)
-from src.Base.factorization.separable_ri import (ao_values, aux_metric_sqrt,
-                                                 fit_M_streaming,
+from src.Base.factorization.separable_ri import (aux_metric_sqrt,
                                                  molecular_points_covariant,
-                                                 refuse_unrepresented_factors, require_grid,
-                                                 resolve_grid, resolve_isdf_grid)
+                                                 refuse_unrepresented_factors,
+                                                 require_grid, resolve_grid,
+                                                 resolve_isdf_grid)
 from src.Base.geometry.body_frame import BodyFrame
 from src.Base.factorization.separable_ri import atomic_frames
-from src.Base.utils.parallel import memory
 from src.Base.utils.parallel.mpi_grid import current_comm, lockstep
 from src.Base.factorization.separable_ri import points_on_frames
+from src.Base.factorization.ao_product_fit import placed, pivoted_points
 
 
 #: The pair layout an ISDFJK built inside `frozen_pair_layout` fits on,
@@ -142,6 +154,10 @@ class FrozenFrames:
         # rank 0's on every rank: eigh's last bits differ between nodes
         self.frames = lockstep(atomic_frames(mol)[0])
         self.body = BodyFrame(self.reference)
+        # the reference's pivoted points (pts_local, owner), which every
+        # handle built on these frames places instead of pivoting again;
+        # None where the grid is not pivoted (`reference_frames` sets it)
+        self.selection = None
 
     def at(self, coords):
         """(natm, 3, 3) frames, rows the axes, at `coords` (Bohr)."""
@@ -185,11 +201,15 @@ def reference_frames(mf):
         if with_df.coords is not None and with_df.grid_radii is None:
             return None          # points handed in: no frames placed them
         held = FrozenFrames(mf.mol)
+        held.selection = with_df.selection
+        placed_here = (None if with_df.coords is None else
+                       placed(mf.mol, with_df.selection[0], held.frames)
+                       if with_df.selection is not None else
+                       points_on_frames(mf.mol, with_df.grid_radii,
+                                        with_df.grid_origins, held.frames))
         # rank 0's frames against this rank's placement: equal to round-off
         if with_df.coords is not None and not np.allclose(
-                points_on_frames(mf.mol, with_df.grid_radii,
-                                 with_df.grid_origins, held.frames),
-                with_df.coords, rtol=0.0, atol=1e-10):
+                placed_here, with_df.coords, rtol=0.0, atol=1e-10):
             raise ValueError(
                 'this ISDF-K mean field\'s points are not on the covariant '
                 'frames of its own geometry, so no frames frozen here are '
@@ -408,6 +428,14 @@ class ISDFJK(df.df.DF):
         # larger one to fit what J needs, at a larger test set and a
         # proportionally longer fit.
         self.numerics = numerics_or_default(numerics)
+        # the fit's test set and its pivoted points, the same choice as the
+        # post-SCF factors' (`IsdfNumerics.test_set`, `pivot_points`); the
+        # parent is this handle's own grid, its level's rows densified
+        # unnamed, the tabulated grid's fit: its points follow the atoms'
+        # frames at every geometry, where pivoted points move smoothly only
+        # inside `frozen_frames`, which a walk's mean field does not enter
+        self.test_set = self.numerics.isdf.test_set or ISDF_DUCHEMIN_BLASE
+        self.pivot_points = self.numerics.isdf.pivot_points
         # None follows mol.verbose, so the knob that turns on the mean field's
         # output turns on the factorization's too, which can run for minutes
         # to hours.
@@ -452,6 +480,9 @@ class ISDFJK(df.df.DF):
         # outside, and the gradient refuses that case rather than guessing.
         self.grid_radii = None
         self.grid_origins = None
+        # (pts_local, owner) of the pivoted points (`pivot_points`): the
+        # atom-local clouds a derivative splits them into; None otherwise
+        self.selection = None
         self._z = {}             # omega key -> _ZRows
         self._built = False
         # True once a `DistributedISDFJK` divides this handle over ranks
@@ -483,13 +514,37 @@ class ISDFJK(df.df.DF):
         counts (when named), radii, auxiliary basis, frames and the run's
         `runtime_radii`, in the one `isdf_grid` call the serial build and the
         distributed one (`DistributedISDFJK`) both make, so the two fit one
-        grid."""
-        return isdf_grid(
+        grid.
+
+        On the AO-product test set the points are `pivot_points` (else
+        `pivot_count`) pivots of the AO-product
+        Gram matrix over the grid's densified parent (`pivoted_points`), on
+        the frames the grid would take; a `FrozenFrames` that carries a
+        selection (`reference_frames`) places that selection instead, so a
+        walk's mean fields keep the reference's points. `selection` holds
+        the clouds either way."""
+        frames = self.fit_frames()
+        pts, radii, origins = isdf_grid(
             self.mol, counts=self.counts if self._named_counts else None,
             radii=self.radii,
             auxbasis=self.auxbasis, n_start=self.n_start, return_info=True,
-            frames=self.fit_frames(),
+            frames=frames,
             runtime_radii=self.numerics.isdf.runtime_radii)
+        if not is_ao_products(self.test_set):
+            return pts, radii, origins
+        mol = self.mol
+        held = None if frames is None else frames.selection
+        if held is None:
+            on = (lockstep(atomic_frames(mol)[0]) if frames is None
+                  else frames.at(mol.atom_coords()))
+            pts_local, owner, _ = pivoted_points(mol, radii, origins, on,
+                                                 self.pivot_points,
+                                                 self.numerics)
+            held = lockstep((pts_local, owner))
+        else:
+            on = frames.at(mol.atom_coords())
+        self.selection = held
+        return lockstep(placed(mol, held[0], on)), radii, origins
 
     def build(self):
         if self._built:
@@ -511,11 +566,10 @@ class ISDFJK(df.df.DF):
             self.auxmol = df.addons.make_auxmol(mol, auxbasis=self.auxbasis)
         if self.coords is None:
             self.coords, self.grid_radii, self.grid_origins = self.place_grid()
-        self.X = ao_values(mol, self.coords)
-        self.M = fit_M_streaming(mol, self.auxmol, self.coords,
-                                 numerics=self.numerics,
-                                 progress=self.progress,
-                                 layout=self.fit_layout())
+        self.X, self.M = replicated_fit(self.test_set, mol, self.auxmol,
+                                        self.coords, self.numerics,
+                                        progress=self.progress,
+                                        layout=self.fit_layout)
         log.timer('ISDF factorization (M = %d points, nao = %d, naux = %d)'
                   % (self.nk, mol.nao_nr(), self.auxmol.nao_nr()), *t0)
         if self.j_route == 'isdf':
@@ -549,13 +603,15 @@ class ISDFJK(df.df.DF):
         return self.frozen_frames
 
     def _resolve_z_mode(self):
+        """'dense' where Z takes less than ISDF_SCF_KERNEL_MEMORY_FRACTION of
+        max_memory, else 'factored' (z_mode 'auto'). The budget, not the
+        memory free at this moment: the two modes are different arithmetic,
+        so one input must take one mode in every run."""
         if self.z_mode != 'auto':
             return self.z_mode
         nk = self.nk
-        free = memory.left_mb(self.max_memory) * 1e6
-        # Dense Z plus one row block plus the (nk, nao) buffers; a third of the
-        # remaining memory is the budget, so an SCF still has room to breathe.
-        return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * free
+        budget = self.max_memory * 1e6
+        return ('dense' if nk * nk * 8 < ISDF_SCF_KERNEL_MEMORY_FRACTION * budget
                 else 'factored')
 
     def _zrows(self, omega):
@@ -573,8 +629,6 @@ class ISDFJK(df.df.DF):
         with self.mol.with_range_coulomb(om), self.auxmol.with_range_coulomb(om):
             V = self.auxmol.intor('int2c2e', aosym='s1')
 
-        # Resolved once: it reads the process's memory, which the dense branch
-        # then changes, so asking twice can report a mode that was not used.
         mode = self._resolve_z_mode()
         if mode == 'dense':
             zr = _ZRows(Z=M.T @ (V @ M))
@@ -586,14 +640,18 @@ class ISDFJK(df.df.DF):
         return zr
 
     def _block(self):
+        """Rows per block of the J/K builds: `layout.block`, else sized from
+        max_memory (ISDF_JK_BLOCK_MEMORY_FRACTION), never from the memory free
+        at this moment, since the block edge moves the sums' last bits."""
         if self.block:
             return self.block
         nk, nao = self.X.shape
-        free = max(memory.left_mb(self.max_memory) * 1e6, 2e8)
+        budget = max(ISDF_JK_BLOCK_MEMORY_FRACTION * self.max_memory,
+                     ISDF_JK_BLOCK_MIN_MB) * 1e6
         # A row block costs b*nk (the Hadamard argument) and, in factored mode,
         # b*nk again for the rebuilt Z rows.
-        b = int(0.25 * free / (2 * nk * 8))
-        return int(np.clip(b, 16, nk))
+        b = int(budget / (2 * nk * 8))
+        return int(np.clip(b, ISDF_JK_BLOCK_MIN_ROWS, nk))
 
     def probe_densities(self):
         """Densities to test the interpolation against, cheapest first.
@@ -729,6 +787,7 @@ class ISDFJK(df.df.DF):
             self.coords = None
             self.X = self.M = None
             self.grid_radii = self.grid_origins = None
+            self.selection = None
             self._z = {}
             self._jdf = {}
             self._checked = False
@@ -754,6 +813,22 @@ class ISDFJK(df.df.DF):
             raise NotImplementedError('ISDFJK stores no cderi; see loop().')
 
 
+def exchange_realization(mf):
+    """How mf builds its exchange, the one question every force, skeleton
+    and post-SCF step asks of a mean field: 'isdf' (an ISDF-K fit:
+    density-fitted Coulomb, interpolated exchange), 'df' (a density fit of
+    both), or 'exact' (four-centre integrals)."""
+    with_df = getattr(mf, 'with_df', None)
+    if isinstance(with_df, ISDFJK):
+        return 'isdf'
+    return 'exact' if with_df is None else 'df'
+
+
+def interpolated_exchange(mf):
+    """Whether mf's exchange is interpolated (`exchange_realization` 'isdf')."""
+    return exchange_realization(mf) == 'isdf'
+
+
 def separable_factors_from_jk(mf):
     """(X_mo, D, X_ao, coords) for GW/BSE, from an SCF that already fitted.
 
@@ -775,8 +850,6 @@ def separable_factors_from_jk(mf):
             'separable_factors_from_jk needs an SCF whose with_df is an ISDFJK '
             f'(got {type(with_df).__name__}); a mean field that did not fit '
             'one needs its factors built by build_separable_ri.')
-    # cycle: pyscf_interface -> distributed_df -> this module
-    from src.Base.pyscf.pyscf_interface import occupied_count
     if not with_df.built:
         with_df.build()
     V = with_df.auxmol.intor('int2c2e', aosym='s1')

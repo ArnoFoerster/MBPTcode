@@ -52,6 +52,9 @@ from src.SingleReference.DensityMatrix.generated_mpn_restricted import mp3_t3_la
 from src.SingleReference.DensityMatrix.generated_mpn_restricted import mp3_t3_laplace_restricted_df as gen_lap3_df
 from src.Base.utils.grids.grids import minimax_time_grid
 from src.Base.numerics.constants import MPN_DENSITY_LAPLACE_NTAU
+from src.Base.utils.parallel.mpi_grid import current_comm, reduce_sum
+from src.Base.utils.threaded_copies import threaded_transposes_default
+from src.Base.utils.cached_einsum import einsum as _einsum
 from src.SingleReference.common.mp_amplitudes import (orbital_denominator, to_l,
                                                       u2_2p1h_amplitude_chunks)
 from src.SingleReference.DensityMatrix.laplace_amplitudes import LaplaceAmplitude, denominator_grid
@@ -256,6 +259,7 @@ def compute_delta_gamma2_df_streamed(B_aa, eps, nocc, dh=None, dp=None, e_ai=Non
     (cancels in the bilinears, explicit in the linear t1_2 numerator
     terms, which reproduce gen_df.t1_2_aa_numerator_df's six terms
     chunk-by-chunk)."""
+    threaded_transposes_default()
     norb = B_aa.shape[1]
     no, nv = nocc, norb - nocc
     eps_o, eps_v = eps[:no], eps[no:]
@@ -278,23 +282,30 @@ def compute_delta_gamma2_df_streamed(B_aa, eps, nocc, dh=None, dp=None, e_ai=Non
         t2a = -tp_same            # t2_aaaa[:, :, :, lo:hi]
         t2b = -tp_opp             # t2_abab[:, :, :, lo:hi]
 
-        tmp3_oo += np.einsum('abni,abmi->mn', t2a, t2a, optimize=True)
-        tmp4_oo += np.einsum('bani,bami->mn', t2b, t2b, optimize=True)
-        vv_acc += 0.5 * np.einsum('eaij,faij->ef', t2a, t2a, optimize=True)
-        vv_acc += 1.0 * np.einsum('eaij,faij->ef', t2b, t2b, optimize=True)
+        tmp3_oo += _einsum('abni,abmi->mn', t2a, t2a, optimize=True)
+        tmp4_oo += _einsum('bani,bami->mn', t2b, t2b, optimize=True)
+        vv_acc += 0.5 * _einsum('eaij,faij->ef', t2a, t2a, optimize=True)
+        vv_acc += 1.0 * _einsum('eaij,faij->ef', t2b, t2b, optimize=True)
 
         Bov_j = B_ov[:, lo:hi, :]
         Boo_j = B_oo[:, lo:hi, :]
-        num_t1 -= 0.5 * np.einsum('Qkb,Qji,bakj->ai', B_ov, Boo_j, t2a, optimize=True)
-        num_t1 += 0.5 * np.einsum('Qki,Qjb,bakj->ai', B_oo, Bov_j, t2a, optimize=True)
-        num_t1 -= 1.0 * np.einsum('Qki,Qjb,abkj->ai', B_oo, Bov_j, t2b, optimize=True)
-        T3_acc += np.einsum('Qjb,bcij->Qci', Bov_j, t2a, optimize=True)
-        T4_acc += np.einsum('Qjc,bcij->Qbi', Bov_j, t2a, optimize=True)
-        T5_acc += np.einsum('Qjc,bcij->Qbi', Bov_j, t2b, optimize=True)
+        num_t1 -= 0.5 * _einsum('Qkb,Qji,bakj->ai', B_ov, Boo_j, t2a, optimize=True)
+        num_t1 += 0.5 * _einsum('Qki,Qjb,bakj->ai', B_oo, Bov_j, t2a, optimize=True)
+        num_t1 -= 1.0 * _einsum('Qki,Qjb,abkj->ai', B_oo, Bov_j, t2b, optimize=True)
+        T3_acc += _einsum('Qjb,bcij->Qci', Bov_j, t2a, optimize=True)
+        T4_acc += _einsum('Qjc,bcij->Qbi', Bov_j, t2a, optimize=True)
+        T5_acc += _einsum('Qjc,bcij->Qbi', Bov_j, t2b, optimize=True)
 
-    num_t1 -= 0.5 * np.einsum('Qac,Qci->ai', B_vv, T3_acc, optimize=True)
-    num_t1 += 0.5 * np.einsum('Qab,Qbi->ai', B_vv, T4_acc, optimize=True)
-    num_t1 += 1.0 * np.einsum('Qab,Qbi->ai', B_vv, T5_acc, optimize=True)
+    # inside a distribution each rank streamed only its own occupied chunks: every
+    # accumulator is a plain sum over chunks, so the ranks' partials add up
+    comm = current_comm()
+    if comm is not None and comm.Get_size() > 1:
+        for acc in (tmp3_oo, tmp4_oo, vv_acc, num_t1, T3_acc, T4_acc, T5_acc):
+            reduce_sum(acc, comm)
+
+    num_t1 -= 0.5 * _einsum('Qac,Qci->ai', B_vv, T3_acc, optimize=True)
+    num_t1 += 0.5 * _einsum('Qab,Qbi->ai', B_vv, T4_acc, optimize=True)
+    num_t1 += 1.0 * _einsum('Qab,Qbi->ai', B_vv, T5_acc, optimize=True)
 
     if e_ai is None:
         e_ai = 1.0 / (eps_o[None, :] - eps_v[:, None])
@@ -358,7 +369,6 @@ class MPnDensityDriverRestricted:
             self.e_abij_aaaa, self.e_abij_abab = e_abij
         else:
             self.e_abij_aaaa = self.e_abij_abab = e_abij
-        self.e_abij = self.e_abij_abab   # back-compat alias (rank-2 consumers)
 
     def kernel_args(self):
         return dict(g_aaaa=self.g_aaaa, g_abab=self.g_abab, g_bbbb=self.g_bbbb,

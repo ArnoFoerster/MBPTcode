@@ -32,4 +32,4 @@ def test_x2c_on_a_non_relativistic_heavy_reference_is_refused():
         """A non-relativistic mean field: no `with_x2c`."""
 
     with pytest.raises(ValueError, match='scalar-relativistic'):
-        soc_operator_mo(MeanField(), mol, one_electron='x2c')
+        soc_operator_mo(MeanField(), mol, two_electron='somf', one_electron='x2c')

@@ -34,6 +34,7 @@ from pyscf import gto, scf
 from pyscf import solvent as pyscf_solvent
 
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER_ROUNDED
 
 
 def check(ok, label, detail=''):
@@ -118,7 +119,7 @@ def check_a_solvent_name_carries_both_constants(mol):
 
 def run():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     base_mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     base_mf.kernel()

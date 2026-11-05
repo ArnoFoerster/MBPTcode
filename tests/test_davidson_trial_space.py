@@ -55,14 +55,14 @@ from src.SingleReference.LinearResponse.block_actions import (bse_pair_diagonal,
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.trial_space import PairRows, pair_tiles
 from tests.test_distributed_fit_mpi import relative, roots_resolution
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, duchemin_blase
+from tests.molecules import WATER
 
 NOCC, NVIR, NAUX, NROOTS, CONV_TOL = 8, 150, 40, 12, 1e-6
 FORCED_SPACE = 60
 DIMER_PAIRS = 354 * 1426
 #: The chlorophyllide dimer/cc-pVTZ: n_occ 354, n_vir 3714.
 DIMER_TZ_PAIRS = 354 * 3714
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BENZENE = ('C 1.396 0 0; C 0.698 1.209 0; C -0.698 1.209 0; C -1.396 0 0; '
            'C -0.698 -1.209 0; C 0.698 -1.209 0; H 2.479 0 0; '
            'H 1.240 2.147 0; H -1.240 2.147 0; H -2.479 0 0; '
@@ -203,7 +203,7 @@ def _system(geometry):
     # benzene's virtual 86 is missed by 0.12 on the default grid and the
     # factors would be refused; this gate is the solver's, not the fit's
     factors = unrefused_separable_factors(mf, mol, auxbasis='cc-pvdz-ri',
-                                          counts=g1(mol))
+                                          counts=g1(mol), numerics=duchemin_blase())
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(mol=mol, mf=mf, nocc=nocc, factors=factors, W_aux=W_aux,
                 eps=np.asarray(mf.mo_energy, float))

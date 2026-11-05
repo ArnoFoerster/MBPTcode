@@ -8,11 +8,15 @@ generating function behind it gives the vibronic band shapes
 of its time grid warns (`FCIntegrandNotDecayed`) and is recorded.
 """
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 
 from src.Base.numerics.constants import (BOLTZMANN_HARTREE_PER_KELVIN,
-                                         FC_UNDERFLOW_EXPONENT, HARTREE_TO_CM,
+                                         FC_DECAYED_FRACTION, FC_DT_PER_PERIOD,
+                                         FC_MAX_POINTS, FC_MIN_POINTS,
+                                         FC_T_DECAY, FC_UNDERFLOW_EXPONENT,
+                                         FC_WINDOWS, HARTREE_TO_CM,
                                          VIBRONIC_MODE_FLOOR_CM)
 
 
@@ -64,7 +68,7 @@ def bose(omega, kt):
     return out
 
 
-def _saddle(delta_e, s_k, omega_k, n_k, lam_cl, gauss, kt):
+def _saddle(delta_e, s_k, omega_k, n_k, lam_cl, gauss):
     """tau at the stationary point of F(tau) = phi(-i tau) - dE tau, and F, F".
 
     F is CONVEX -- F'' is a sum of positive terms -- so F' is monotone
@@ -134,7 +138,7 @@ def _saddle(delta_e, s_k, omega_k, n_k, lam_cl, gauss, kt):
     return tau, f_min, d2F(tau)
 
 
-def _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
+def log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl, gauss):
     """ln G(z) of `fc_weighted_dos` without the Lorentzian, at complex times z."""
     z = np.asarray(z, complex)
     phi = np.zeros_like(z)
@@ -153,30 +157,96 @@ class FCIntegrandNotDecayed(RuntimeWarning):
     its `numerical_flags`)."""
 
 
-def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
-                       dt_per_period, t_decay, max_points):
+@dataclass(frozen=True)
+class FCTimeGrid:
+    """The one set of knobs of a real-time Franck-Condon integral
+    (`fc_weighted_dos`, `duschinsky.duschinsky_density`): points per period
+    of the fastest phase, the first window in widths of the band, and the
+    cap on a grid's points (a larger grid is refused)."""
+    dt_per_period: int = FC_DT_PER_PERIOD
+    t_decay: float = FC_T_DECAY
+    max_points: int = FC_MAX_POINTS
+
+
+FC_TIME_GRID = FCTimeGrid()
+
+
+def decayed(edge, g):
+    """Whether |G| at a window's ends, `edge`, is below FC_DECAYED_FRACTION
+    of the largest |G| on its grid `g`."""
+    return edge <= FC_DECAYED_FRACTION * max(float(np.abs(g).max()), 1e-300)
+
+
+def grown(integrate, t_max):
+    """(result, t_max, decayed) of `integrate(t_max) -> (result, edge, g)`
+    on windows from `t_max`, each twice the last, FC_WINDOWS at most,
+    stopping at the first whose ends have decayed (`decayed`): a recurring
+    integrand (one quantum mode recurs at multiples of 2 pi / omega) is
+    grown past its recurrences, not sized from its first bell."""
+    for k in range(FC_WINDOWS):
+        if k:
+            t_max *= 2.0
+        result, edge, g = integrate(t_max)
+        if decayed(edge, g):
+            return result, t_max, True
+    return result, t_max, False
+
+
+def envelope_time(gauss, gamma):
+    """The time after which the broadening alone keeps |G| below
+    FC_DECAYED_FRACTION of G(0): |G| / G(0) <= 1 (a characteristic
+    function), so e^{-gauss t^2} or e^{-gamma t} bounds it, whichever is
+    given (inf with neither)."""
+    decay = -np.log(FC_DECAYED_FRACTION)
+    return min(np.sqrt(decay / gauss) if gauss > 0.0 else np.inf,
+               decay / gamma if gamma > 0.0 else np.inf)
+
+
+def real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
+                       time_grid, t_envelope):
     """rho(dE) for every dE off ONE real-axis grid, with e^{-gamma |t|}.
 
     |G(t)| does not depend on dE, so neither does the window; G is Hermitian,
     G(-t) = G(t)*, so rho = (1/pi) Re int_0^inf e^{-i dE t} G(t) dt.
+
+    THE GRID REACHES THE BROADENING'S ENVELOPE, `t_envelope`
+    (`envelope_time`), where it is finite. A strongly displaced fast mode
+    makes |G| dip below FC_DECAYED_FRACTION and revive one period later, so
+    a decayed last point alone proves nothing. `time_grid` is the
+    `FCTimeGrid`.
     """
-    fastest = max(omega_max, float(np.abs(de).max()), 1e-12)
-    t_max = t_decay / np.sqrt(variance + gamma ** 2)
-    for _ in range(13):
+    dt_per_period = time_grid.dt_per_period
+    # THE STEP RESOLVES THE BAND, not only the fastest mode. The trapezoid
+    # reads rho(dE) plus its aliases rho(dE +- 2 pi m / h), so 2 pi / h must
+    # reach past the band's far edge, |lambda| + 12 standard deviations
+    # beyond dE; a strongly displaced fast mode spreads it over many quanta
+    # of that mode. Rounded up to a power of two, so that two routes to one
+    # band (closed-form and numerical cumulants) take one grid.
+    reach = (float(np.abs(de).max()) + abs(float(lam_total))
+             + 12.0 * np.sqrt(variance))
+    reach = 2.0 ** np.ceil(np.log2(max(reach, 1e-12)))
+    fastest = max(omega_max, float(np.abs(de).max()), reach / dt_per_period,
+                  1e-12)
+    t_max = time_grid.t_decay / np.sqrt(variance + gamma ** 2)
+    if np.isfinite(t_envelope):
+        t_max = max(t_max, float(t_envelope))
+
+    def integrate(t_max):
+        # [0, t_max] of the [-t_max, t_max] grid G(-t) = G(t)* mirrors
         n_t = max(int(np.ceil(t_max * fastest * dt_per_period
-                              / (2.0 * np.pi))) + 1, 17)
-        if 2 * n_t - 1 > max_points:
+                              / (2.0 * np.pi))) + 1, (FC_MIN_POINTS + 1) // 2)
+        if 2 * n_t - 1 > time_grid.max_points:
             raise ValueError(
                 f'the real-axis grid needs {2 * n_t - 1} points (t_max '
                 f'{t_max:.3g} a.u., fastest phase {fastest:.3g} Ha) against a '
-                f'cap of {max_points}. Raise max_points, or widen the '
-                f'Lorentzian -- a narrower line needs more time.')
+                f'cap of {time_grid.max_points}. Raise max_points, or widen '
+                f'the Lorentzian -- a narrower line needs more time.')
         t = np.linspace(0.0, t_max, n_t)
         g = np.exp(log_g(t) - gamma * t)
-        if abs(g[-1]) <= 1e-10 * np.abs(g).max():
-            break
-        t_max *= 2.0
-    else:
+        return (t, g), abs(g[-1]), g
+
+    (t, g), t_max, done = grown(integrate, t_max)
+    if not done:
         warnings.warn(f'the Franck-Condon integrand had not decayed at t_max '
                       f'= {t_max:.3g} a.u.; rho may be truncated.',
                       FCIntegrandNotDecayed)
@@ -197,8 +267,7 @@ def _real_axis_density(de, log_g, variance, lam_total, gamma, omega_max,
 
 
 def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
-                    broadening=0.0, dt_per_period=24, t_decay=9.0,
-                    max_points=1 << 20, lorentzian=0.0):
+                    broadening=0.0, lorentzian=0.0, time_grid=FC_TIME_GRID):
     """rho_FC by the time-domain generating function -- EVERY mode explicitly.
 
         rho_FC(dE) = (1/2 pi) int dt e^{-i dE t} G(t)
@@ -226,6 +295,8 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
         integral stays on the real axis; that is safe because the Lorentzian's
         algebraic tail, gamma / (pi dE^2), keeps rho far above the roundoff
         floor that forces the shift for a Gaussian-damped deep tail.
+
+    time_grid: the integral's `FCTimeGrid`.
 
     delta_e may be a scalar or an array. Returns rho_FC in Hartree^-1.
     """
@@ -259,7 +330,7 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
             'bath, say which.')
 
     def log_g(z):
-        return _log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
+        return log_generating_function(z, s_k, omega_k, n_k, log_n, lam_cl,
                                         gauss)
 
     de = np.atleast_1d(np.asarray(delta_e, float))
@@ -268,49 +339,42 @@ def fc_weighted_dos(delta_e, s_k, omega_k, temperature, lambda_classical=0.0,
         variance = (float((s_k * omega_k ** 2 * (2.0 * n_k + 1.0)).sum())
                     + 2.0 * gauss)
         lam_total = float((s_k * omega_k).sum()) + lam_cl
-        rho = _real_axis_density(de, log_g, variance, lam_total, gamma,
-                                 float(omega_k.max()), dt_per_period, t_decay,
-                                 max_points)
+        rho = real_axis_density(de, log_g, variance, lam_total, gamma,
+                                 float(omega_k.max()), time_grid,
+                                 envelope_time(gauss, gamma))
         rho = np.maximum(rho, 0.0)
         return rho if np.ndim(delta_e) else float(rho[0])
 
     rho = np.empty(de.shape)
     for i, e in enumerate(de.ravel()):
-        tau, f0, f2 = _saddle(float(e), s_k, omega_k, n_k, lam_cl, gauss, kt)
+        tau, f0, f2 = _saddle(float(e), s_k, omega_k, n_k, lam_cl, gauss)
         if tau is None:
             rho.ravel()[i] = 0.0
             continue
         fastest = max(float(omega_k.max()), abs(float(e)), 1e-12)
 
         def integrate(t_max):
-            n_t = int(np.ceil(2.0 * t_max * fastest * dt_per_period
+            n_t = int(np.ceil(2.0 * t_max * fastest * time_grid.dt_per_period
                               / (2.0 * np.pi))) + 1
-            if n_t > max_points:
+            if n_t > time_grid.max_points:
                 raise ValueError(
                     f'the shifted grid needs {n_t} points (t_max '
                     f'{t_max:.3g} a.u., fastest phase {fastest:.3g} Ha) '
-                    f'against a cap of {max_points}. Raise max_points, or add '
-                    f'broadening -- a wider line needs less time.')
-            t = np.linspace(-t_max, t_max, max(n_t, 33))
+                    f'against a cap of {time_grid.max_points}. Raise '
+                    f'max_points, or add broadening -- a wider line needs '
+                    f'less time.')
+            t = np.linspace(-t_max, t_max, max(n_t, FC_MIN_POINTS))
             z = t - 1j * tau
             # exponent measured FROM the saddle: the integrand is O(1) there
             g = np.exp(log_g(z) - 1j * float(e) * z - f0)
-            return float(np.real(TRAPEZOID(g, t))) / (2.0 * np.pi), g
+            return (float(np.real(TRAPEZOID(g, t))) / (2.0 * np.pi),
+                    max(abs(g[0]), abs(g[-1])), g)
 
         # Grown until the integrand has died at its ends, not sized from the
-        # saddle curvature: a single quantum mode makes G recur at multiples
-        # of 2 pi / omega, one recurrence per vibrational channel, and
-        # 1/sqrt(F'') spans only the first. A many-mode spectrum dephases and
-        # stops after one pass.
-        t_max = t_decay / np.sqrt(f2)
-        value, g = integrate(t_max)
-        for _ in range(12):
-            edge = max(abs(g[0]), abs(g[-1]))
-            if edge <= 1e-10 * max(np.abs(g).max(), 1e-300):
-                break
-            t_max *= 2.0
-            value, g = integrate(t_max)
-        else:
+        # saddle curvature: 1/sqrt(F'') spans only the first recurrence of a
+        # quantum mode. A many-mode spectrum dephases and stops after one pass.
+        value, t_max, done = grown(integrate, time_grid.t_decay / np.sqrt(f2))
+        if not done:
             warnings.warn(
                 f'the Franck-Condon integrand had not decayed at t_max = '
                 f'{t_max:.3g} a.u. for dE = {e:.6g} Ha; rho may be truncated. '

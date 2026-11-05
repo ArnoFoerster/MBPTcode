@@ -31,14 +31,13 @@ import contextlib
 import functools
 import itertools
 import os
-import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from src.Base.utils.parallel.threads import (BlasLimit, blas_single_threaded, pool_is_ours,
-                                             resolve_workers, row_map)
+from src.Base.utils.parallel.memory import fits
+from src.Base.utils.parallel.threads import (BlasLimit, blas_single_threaded, budget, pool,
+                                             pool_is_ours, row_map)
 
 _EW_MIN = 1 << 20       # elements: a smaller elementwise pass stays on one thread
 _KSUM_MIN = 1 << 22     # elements of the long operand: a smaller product is not split
@@ -63,14 +62,12 @@ def _stream_gb(text):
 # GB a streamed kernel's slabs in flight may hold together; the job's environment
 # sets it through MBPT_STREAM_GB (one slab needs n * live * per_index * 8 bytes).
 _STREAM_GB = _stream_gb(os.environ.get('MBPT_STREAM_GB'))
-_STREAM_POOLS = {}
-_STREAM_LOCK = threading.Lock()
 
 
 def _threads():
-    """The thread pin: the process's thread budget (`resolve_workers`), not capped
+    """The thread pin: the process's thread budget (`threads.budget`), not capped
     by a count of work items, since it keys row_map's one executor."""
-    return resolve_workers(None, sys.maxsize)
+    return budget()
 
 
 def ew(op, a, b, out=None):
@@ -129,7 +126,7 @@ def slab_plan(n, per_index, live):
     per_index float64 together, at most _STREAM_GB, but never less than one index
     of one slab; workers is at most _stream_workers(). A budget that holds every
     index gives one slab on one worker."""
-    fit = max(1, int(_STREAM_GB * 1e9 // (8 * per_index * live)))
+    fit = fits(_STREAM_GB, 8 * per_index * live)
     if fit >= n:
         return n, 1
     workers = min(_stream_workers(), fit)
@@ -143,14 +140,10 @@ def _add(a, b):
 
 
 def _stream_pool(workers):
-    """This process's executor of `workers` slab threads, made once. It is not one
-    of row_map's: a slab's own ew passes run on those, and a slab waiting on a
-    pool it occupies would never return."""
-    key = (os.getpid(), workers)
-    with _STREAM_LOCK:
-        if key not in _STREAM_POOLS:
-            _STREAM_POOLS[key] = ThreadPoolExecutor(workers)
-        return _STREAM_POOLS[key]
+    """This process's executor of `workers` slab threads (`threads.pool`). It is
+    not one of row_map's: a slab's own ew passes run on those, and a slab
+    waiting on a pool it occupies would never return."""
+    return pool(workers, 'stream')
 
 
 def stream(fn, n, width, workers=None):
@@ -205,6 +198,13 @@ class SB:
         # then forms the alpha-first blocks alone and takes the rest from
         # them (_with_flip). None promises nothing.
         self.parity = parity
+
+    @classmethod
+    def from_half(cls, half, parity):
+        """The flip eigenvector of `parity` from its alpha-first blocks
+        `half`: each beta-first block is parity times its alpha <-> beta
+        partner, the same array for +1."""
+        return cls(_with_flip(half, parity), parity=parity)
 
     def get(self, key):
         return self.blocks.get(key)
@@ -661,28 +661,3 @@ def anti4_uhf(D_aa, X_aa, D_bb, X_bb, D_ab, X_ab, D_ba, X_ba):
     return SB({'aaaa': D_aa - X_aa, 'bbbb': D_bb - X_bb,
                'abab': D_ab, 'baba': D_ba,
                'abba': -X_ab, 'baab': -X_ba})
-
-
-def _axis_index_blockstacked(family, spin, no_a, no_b, nv_a, nv_b):
-    """Positions of one spin within an already-sliced BLOCK-STACKED axis.
-
-    ee_driver.spin_orbital_arrays lays a UHF reference out as
-    [occ_a, occ_b, virt_a, virt_b], so within the occupied segment alpha runs
-    first and beta follows -- contiguous ranges, not the interleaving an RHF
-    reference gives."""
-    n_a, n_b = (no_a, no_b) if family == 'o' else (nv_a, nv_b)
-    return np.arange(n_a) if spin == 0 else n_a + np.arange(n_b)
-
-
-def from_spin_orbital_uhf(T, families, no_a, no_b, nv_a, nv_b, tol=0.0):
-    """Slice a BLOCK-STACKED spin-orbital tensor block into spatial spin
-    blocks -- the unrestricted counterpart of from_spin_orbital, and the
-    oracle the unrestricted DF integral blocks are checked against."""
-    out = {}
-    for assign in itertools.product((0, 1), repeat=len(families)):
-        sl = [_axis_index_blockstacked(f, s, no_a, no_b, nv_a, nv_b)
-              for f, s in zip(families, assign)]
-        blk = T[np.ix_(*sl)]
-        if blk.size and np.abs(blk).max() > tol:
-            out[''.join('ab'[s] for s in assign)] = blk
-    return SB(out)

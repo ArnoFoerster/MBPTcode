@@ -31,6 +31,7 @@ from src.gradients.gwbse.excited_state import ExcitedStateChain
 from src.gradients.gwbse.state_following import CasidaSolution
 from src.properties.optimize import (HAVE_GEOMETRIC, optimize,
                                      optimize_geometric)
+from tests.molecules import WATER_AT_ORIGIN
 
 #: Roots planted per geometry.
 NROOTS = 3
@@ -43,7 +44,7 @@ TINY = 1e-5
 
 @pytest.fixture(scope='module')
 def mean_field():
-    mol = gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    mol = gto.M(atom=WATER_AT_ORIGIN,
                 basis='sto-3g', verbose=0)
     mf = scf.RHF(mol)
     mf.kernel()

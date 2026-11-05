@@ -13,9 +13,9 @@ from src.Base.numerics.constants import FIT_CHOLESKY_BLOCK
 from src.Base.utils.parallel.mpi_grid import current_comm
 from src.gradients.gwbse.bse_isdf import screening_backward
 from src.gradients.gwbse.reaction_field_adjoint import (
-    added_reaction_field_adjoint, offdiagonal_reaction_field_backward,
+    added_reaction_field_adjoint, offdiagonal_reaction_field_seeds,
     reaction_field_backward)
-from src.gradients.isdf_derivatives import GaugeAdjoint
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint
 from src.gradients.rpa.space_time_adjoint import chi0_backward, chi0_backward_rows
 
 
@@ -45,6 +45,18 @@ class ReverseState:
     t_bar: object = None
     chi0_bar: object = None
     w_corr: np.ndarray = None
+
+
+@dataclass(eq=False)
+class HeldReverse:
+    """A root's reverse pass a relaxed density stopped at the integrals:
+    its `ReverseState`, the Casida `solution` it was taken off, and the
+    multiplier the density solved (`SolvedMultiplier`), which a force on
+    the same solution finishes (`ExcitedStateChain.excitation_gradient`)."""
+
+    state: ReverseState
+    solution: object
+    multiplier: object
 
 
 class ReversePass:
@@ -105,11 +117,19 @@ class ReversePass:
         h_bar: the adjoint on the quasiparticle Hamiltonian's off-diagonal
         elements (`one_body_seed`), None on the diagonal route.
         """
+        return self._fold_integrals(shared, self.fold_to_integrals(
+            shared, eqp_bar, x_bar, d_bar, w_bar, release_tape=release_tape,
+            h_bar=h_bar))
+
+    def fold_to_integrals(self, shared, eqp_bar, x_bar, d_bar, w_bar,
+                          release_tape=True, h_bar=None):
+        """The `ReverseState` of `fold_to_nuclei` at its integrals: the
+        quasiparticle, screening and reaction-field stages folded."""
         st = self._fold_seeds(shared, eqp_bar, x_bar, d_bar, h_bar)
         self._fold_quasiparticle(shared, st, eqp_bar, release_tape)
         self._fold_screening(shared, st, w_bar)
         self._fold_reaction_field(shared, st, eqp_bar)
-        return self._fold_integrals(shared, st)
+        return st
 
     def _fold_seeds(self, shared, eqp_bar, x_bar, d_bar, h_bar):
         """The reverse pass's state: the seeds cut to tiles, the shared
@@ -246,23 +266,27 @@ class ReversePass:
         w_env[st.mask] = eqp_bar[st.mask]
         if shift is not None:
             with self.chain.phase('t_reaction_field_backward'):
+                seeds = (st.chi0_bar, None)
+                if lam is not None and st.h_bar is not None:
+                    # the quasiparticle Hamiltonian's <p|Sigma^env|q>, added
+                    # to the solved H, at the seed H_bar itself (zero without
+                    # one); its chi0 seeds ride on Eq. (18)'s two sweeps
+                    terms, (dressed, bare) = offdiagonal_reaction_field_seeds(
+                        [2.0 * st.h_bar[p, q] for _, _, p, q in qp_h.pairs],
+                        [(p, q) for _, _, p, q in qp_h.pairs], x_mo, d_w,
+                        d_bare, eps, self.chain.nocc, grid=self.chain.w_grid,
+                        screening=screening, block=st.block)
+                    st.eps_bar = added_reaction_field_adjoint(
+                        st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare, terms)
+                    seeds = (dressed if st.chi0_bar is None
+                             else st.chi0_bar + dressed, bare)
                 st.eps_bar = added_reaction_field_adjoint(
                     st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare,
                     reaction_field_backward(
                         w_env, x_mo, d_w, d_bare, eps, self.chain.nocc,
                         grid=self.chain.w_grid, screening=screening,
-                        block=st.block, dressed_chi0_bar=st.chi0_bar))
-            if lam is not None and st.h_bar is not None:
-                # the quasiparticle Hamiltonian's <p|Sigma^env|q>, added to
-                # the solved H, at the seed H_bar itself (zero without one)
-                with self.chain.phase('t_reaction_field_backward'):
-                    st.eps_bar = added_reaction_field_adjoint(
-                        st.eps_bar, st.x_bar, st.d_bar_w, st.d_bar_bare,
-                        offdiagonal_reaction_field_backward(
-                            [2.0 * st.h_bar[p, q] for _, _, p, q in qp_h.pairs],
-                            [(p, q) for _, _, p, q in qp_h.pairs], x_mo, d_w,
-                            d_bare, eps, self.chain.nocc, grid=self.chain.w_grid,
-                            screening=screening, block=st.block))
+                        block=st.block, dressed_chi0_bar=seeds[0],
+                        bare_chi0_bar=seeds[1]))
         st.w_corr = w_corr
 
     def _fold_integrals(self, shared, st):
@@ -282,13 +306,13 @@ class ReversePass:
                                    root_bar=np.linalg.solve(split.root_inf.T,
                                                             t_bar)),)
         # the Sigma_x - v_xc skeleton's fit adjoint rides the assembly's
-        with self.chain.one_fit_adjoint(mf):
+        with self.chain.one_fit_adjoint(mf) as pending:
             # the Hamiltonian's off-diagonal static term rides at its own
             # weight beside the Z-renormalized diagonal
             static = st.w_corr
             if lam is not None and self.chain.is_ks:
                 static = np.diag(st.w_corr) + lam - np.diag(np.diag(lam))
-            y_xc, g_xc = self.chain.xc_chain(mf, static)
+            y_xc, g_xc = self.chain.xc_chain(mf, static, pending=pending)
             grad, diags = self.chain.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 st.eps_bar, st.x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,
@@ -306,8 +330,28 @@ class ReversePass:
         grad, diags = self.fold_to_nuclei(shared, *seeds,
                                           release_tape=release_tape,
                                           h_bar=h_bar)
-        om = solution.omega
-        return grad, dict(diags, omega=float(om[root]), root=int(root))
+        return grad, self._root_record(diags, solution, root)
+
+    def root_state(self, shared, solution, root, release_tape=True):
+        """The `ReverseState` of dOmega_root at the integrals
+        (`fold_to_integrals`), off one forward and its Casida solution."""
+        with self.chain.phase('t_bse_backward'):
+            seeds = self.chain.follower.casida_seeds(shared, solution, root)
+            h_bar = self.chain.quasiparticles.one_body_seed(shared, solution, root)
+        return self.fold_to_integrals(shared, *seeds, release_tape=release_tape,
+                                      h_bar=h_bar)
+
+    def integrals_gradient(self, shared, solution, root, st):
+        """(dOmega_root/dR, diagnostics) from the root's reverse state `st`
+        at the integrals (`root_state`), which it consumes."""
+        if shared.resolved is not None:
+            self.chain.resolved_view = shared.resolved
+        grad, diags = self._fold_integrals(shared, st)
+        return grad, self._root_record(diags, solution, root)
+
+    @staticmethod
+    def _root_record(diags, solution, root):
+        return dict(diags, omega=float(solution.omega[root]), root=int(root))
 
     def interstate_gradient_of(self, shared, solution, m, n,
                                release_tape=True):

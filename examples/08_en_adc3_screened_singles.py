@@ -17,6 +17,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 
 
@@ -30,7 +31,7 @@ for singles, tag in ((False, 'doubles only'), (True, 'bare J-K'),
                      ('screened', 'screened J_W-K')):
     dress = dict(BASE, singles=singles)
     solver = ADCSolver(mf, level='adc3', en_dress=dress)
-    static = build_static_correction(mf, kind='mp2_relaxed', en_dress=dress)
+    static = build_static_correction(mf, kind='mp2_relaxed', en_dress=dress, numerics=Numerics())
     eGF, Z = solver.solve(static_correction=static)
     print(f'EN-ADC(3) singles={tag:16s} IP = {-eGF[0] * HARTREE_TO_EV:.3f} eV   '
           f'Z = {Z[0]:.3f}')

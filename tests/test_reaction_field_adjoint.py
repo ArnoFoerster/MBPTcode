@@ -21,10 +21,12 @@ from src.environments.solvent_screening import SolventScreening, detach_solvent_
 from src.SingleReference.GW.reaction_field import (bare_gauge_transform,
                                                    separable_quasiparticle_shift)
 from src.SingleReference.GW.space_time import separable_factors
-from src.gradients.gwbse.reaction_field_adjoint import (reaction_field_backward,
-                                                        reaction_field_shift)
+from src.gradients.gwbse.reaction_field_adjoint import (
+    offdiagonal_reaction_field_backward, offdiagonal_reaction_field_seeds,
+    reaction_field_backward, reaction_field_shift)
 from src.SingleReference.LinearResponse.space_time import static_screening_grid
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 STEP = 1e-4
@@ -33,7 +35,7 @@ STEP = 1e-4
 @pytest.fixture(scope='module')
 def setup():
     """The two factorizations of one molecule: X is shared, D is not."""
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=BASIS, verbose=0)
     nocc = mol.nelectron // 2
     mf = dft.RKS(mol, xc='pbe0').density_fit(auxbasis=AUXBASIS)
@@ -159,3 +161,30 @@ def test_a_dressed_chi0_seed_rides_the_same_sweep(setup):
         rel = np.abs(a - b).max() / np.abs(b).max()
         assert rel < 1e-12, f'{name}: merged vs apart {rel:.2e}'
     assert np.array_equal(merged[3], alone[3]), 'the bare sweep took the seed'
+
+
+def test_offdiagonal_seeds_ride_the_same_sweeps(setup):
+    """The quasiparticle Hamiltonian's <p|Sigma^env|q> handed to Eq. (18)'s
+    reverse pass as chi0 seeds (`offdiagonal_reaction_field_seeds`) is its
+    own reverse pass (`offdiagonal_reaction_field_backward`) added to Eq.
+    (18)'s: chi0's adjoint is linear in its seed, so only the association
+    moves. Occupied and virtual pairs both."""
+    s = setup
+    w = _weights(len(s['eps']))
+    nocc = s['nocc']
+    pairs = [(nocc - 2, nocc - 1), (nocc, nocc + 1), (nocc, nocc + 2)]
+    t = np.array([0.3, -0.7, 0.2])
+    args = (s['x_mo'], s['d_dressed'], s['d_bare'], s['eps'], nocc)
+    terms, (dressed, bare) = offdiagonal_reaction_field_seeds(
+        t, pairs, *args, grid=s['grid'])
+    merged = reaction_field_backward(w, *args, grid=s['grid'],
+                                     dressed_chi0_bar=dressed,
+                                     bare_chi0_bar=bare)
+    merged = [m + e for m, e in zip(merged, terms)]
+    alone = reaction_field_backward(w, *args, grid=s['grid'])
+    off = offdiagonal_reaction_field_backward(t, pairs, *args, grid=s['grid'])
+    for name, a, b, c in zip(('eps', 'x_mo', 'd_dressed', 'd_bare'), merged,
+                             alone, off):
+        rel = np.abs(a - (b + c)).max() / np.abs(b + c).max()
+        assert np.abs(c).max() > 0.0, name
+        assert rel < 1e-12, f'{name}: merged vs apart {rel:.2e}'

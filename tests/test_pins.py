@@ -30,6 +30,19 @@ def another_blas():
     return dict(blas_identity(), numpy='pretended other BLAS')
 
 
+def test_another_os_release_is_another_blas():
+    """The same libraries by name under another operating system release are
+    another identity: a pin from before an upgrade holds to its class bar, not
+    to a few ulp."""
+    here = blas_identity()
+    other = dict(here, os=here['os'] + ' (an earlier release)')
+    bar = PIN_CROSS_BLAS_BARS['energy']
+    ulp = np.spacing(abs(E_PIN))
+    assert not matches(E_PIN + 4 * PIN_SAME_ULPS * ulp, E_PIN, here)
+    assert matches(E_PIN + 4 * PIN_SAME_ULPS * ulp, E_PIN, other)
+    assert not matches(E_PIN + 1.5 * bar, E_PIN, other)
+
+
 @pytest.mark.parametrize('quantity', sorted(PIN_CROSS_BLAS_BARS))
 def test_the_same_blas_holds_to_a_few_ulp(quantity):
     """Two runs on one machine differ by an ulp (1.1e-16 Ha seen on one
@@ -82,13 +95,15 @@ def test_the_classes_are_the_ruled_bars():
     moved = grad + [[2.2e-9, 0.0, 0.0]]
     assert matches(moved, grad, other, quantity='gradient')
     assert not matches(moved, grad, other, quantity='energy')
+    # and the 1.04e-8 Ha/Bohr an OpenBLAS run missed a water ISDF pin by
+    assert matches(grad + [[1.04e-8, 0.0, 0.0]], grad, other, quantity='gradient')
+    assert not matches(grad + [[2.5e-8, 0.0, 0.0]], grad, other, quantity='gradient')
 
 
 def test_a_pin_without_a_class_is_an_energy():
     other = another_blas()
     assert matches(E_PIN + 1.5e-12, E_PIN, other)
     assert not matches(E_PIN + 3e-12, E_PIN, other)
-    assert PIN_CROSS_BLAS_BAR == 2e-12
 
 
 def test_a_shape_mismatch_never_matches():

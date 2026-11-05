@@ -40,6 +40,7 @@ from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from src.SingleReference.GW.real_screening import ResidueRefused
 from src.Solvers.qp_equation import QPRootNotConverged
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 NTAU, NFREQ = 8, 24
 SIZES = [1, 2, 3, 5, 8]
@@ -53,7 +54,7 @@ LAPLACE_TOL_OF_THE_GRID = 1e-2
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

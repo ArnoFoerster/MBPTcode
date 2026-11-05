@@ -8,7 +8,7 @@ rank, ONE `SlicedFactors` per geometry: each rank's `contiguous_block` of the
 grid rows of X_mo, D and X_ao, cut from the whole products after they are
 formed exactly as the whole layout forms them. Gated over 2, 3 and 8
 simulated ranks (`run_simulated`, threads of this process with the real
-collectives) on water/cc-pVDZ Hartree-Fock at 148 points per atom, each rank
+collectives) on water/cc-pVDZ Hartree-Fock on the G1 grid, each rank
 on its own Mole (the nuclear gradient writes `mol._env` in place), against
 the whole layout on the same rank count:
 
@@ -56,15 +56,13 @@ What breaks each gate:
     grid); `test_state_pair_chain_on_slices` does not see it, since a gather
     moves bytes, not bits.
 
-HEXAMER ESTIMATE (the whole per-stage table is in
-`src/gradients/rpa/factor_chain.py`'s module docstring), per rank over 8 ranks,
-factor arrays only, from M 117762, nmo = nao 10980, nocc 972, naux 28236
-(14721 rows per rank), GB whole -> sliced:
-
-  between steps                      43.3 -> 5.9 per live geometry
-  chi0/W adjoint sweep               127.6 -> 79.8 (adjoints 36.9 whole)
-  quasiparticle self-energy solve    90.6 -> 53.2
-  BSE Davidson, per trial vector     90.6 -> 8.0
+LARGE-SYSTEM ESTIMATE per rank, factor arrays only, with M grid points,
+nmo = nao, naux auxiliaries and M / ranks rows per rank: the replicated chain
+holds X_mo, X_ao and D whole at every stage; the sliced chain holds a rank's
+rows between steps and in the Davidson action, and gathers whole only what the
+chi0/W adjoint sweep and the quasiparticle self-energy solve read. The sliced
+peak is below the replicated one at every stage, by the largest factor between
+steps and in the BSE Davidson action.
 """
 import os
 import sys
@@ -92,22 +90,23 @@ from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.properties.optimize import optimize
 from src.gradients.surface import evaluate
 from src.gradients.gwbse.surface_factory import potential_energy_surface
-from tests.isdf_test_grid import g1, g1_numerics
+from tests.isdf_test_grid import g1, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
 from tests.pins import RECORDING_BLAS, bitwise_arrays, pin_bar, same_bar
 from tests.threads_helper import pyscf_one_thread  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED
 
 SIZES = [2, 3, 8]
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: One hydrogen 0.03 A along y: a geometry the chain fits and differentiates
 #: on its own, away from the reference's cached rows.
 H2O_DISPLACED = 'O 0 0 0.117; H 0 0.787 -0.468; H 0 -0.757 -0.468'
 #: What one composed force at a displaced geometry gathers, by name: the dRPA
-#: sweep X_mo + D and its assembly X_mo; the static W D + X_o + X_v, the
-#: quasiparticle solve X_mo + D, the Davidson D + X_o, the BSE cache X_mo + D,
-#: its adjoint X_mo + D, the quasiparticle adjoint X_mo + D, the chi0 adjoint
-#: D + X_o + X_v and the excited assembly X_mo.
-COMPOSED_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
+#: sweep X_mo + D and its assembly X_mo; the quasiparticle solve X_mo + D,
+#: the Davidson D + X_o, the BSE cache X_mo + D, its adjoint X_mo + D, the
+#: quasiparticle adjoint X_mo + D, the chi0 adjoint D + X_o + X_v and the
+#: excited assembly X_mo. The static W reads the grid tiles and gathers none.
+COMPOSED_GATHERS = {'X_mo': 7, 'D': 7, 'X_o': 2, 'X_v': 1}
 
 
 def chain_scf(mol):
@@ -143,7 +142,7 @@ def state_pair(sliced, scf_factory=chain_scf, **numerics):
     mol = own_water()
     return RPABSESurface(
         mol, scf_factory, spin='singlet', mf=scf_factory(mol),
-        numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': sliced, **numerics})))
+        numerics=duchemin_blase(g1_numerics(mol, numerics_of({'solver': 'davidson', 'sliced': sliced, **numerics}))))
 
 
 def reachable_arrays(root):
@@ -354,9 +353,9 @@ def test_gathers_are_one_per_sweep(size):
         # halves read; a half on other numerics is refused
         return RPABSESurface(
             mol, chain_scf, spin='singlet', mf=mf,
-            numerics=g1_numerics(mol, Numerics(
+            numerics=duchemin_blase(g1_numerics(mol, Numerics(
                 bse={'solver': 'davidson'}, quadrature={'ntau_rpa': ntau},
-                layout={'sliced': True})))
+                layout={'sliced': True}))))
 
     def rank(comm):
         return (gathers(state_pair(True)),
@@ -384,8 +383,8 @@ def test_excited_chain_on_slices(size, solver, pyscf_one_thread):
             mol = own_water()
             chain = ExcitedStateChain(
                 mol, scf_factory, mf=scf_factory(mol),
-                numerics=g1_numerics(mol, Numerics(bse={'solver': solver},
-                                                   layout={'sliced': sliced})))
+                numerics=duchemin_blase(g1_numerics(mol, Numerics(bse={'solver': solver},
+                                                   layout={'sliced': sliced}))))
             here = own_water(H2O_DISPLACED)
             g_ex, d_ex = chain.excitation_gradient(here)
             g_qp, d_qp = chain.quasiparticle_gradient(0, here)
@@ -412,7 +411,7 @@ def test_charged_surface_on_slices(pyscf_one_thread):
             mol = own_water()
             surface = RPAQPSurface(
                 mol, scf_factory, state=0, mf=scf_factory(mol),
-                numerics=g1_numerics(mol, Numerics(layout={'sliced': sliced})))
+                numerics=duchemin_blase(g1_numerics(mol, Numerics(layout={'sliced': sliced}))))
             g, e, _ = surface.total_gradient(own_water(H2O_DISPLACED))
             out.append((g, e))
         return out
@@ -459,27 +458,27 @@ def test_what_slices_cannot_serve_is_refused():
         return chain_scf(m)
 
     with pytest.raises(ValueError, match='sliced=False'):
-        FactorChain(mol, counted, numerics=Numerics(isdf={'counts': g1(mol)},
+        FactorChain(mol, counted, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                     layout={'sliced': True}))
     with pytest.raises(ValueError, match='layout|sliced'):
         ExcitedStateChain(
-            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                                           layout={'sliced': True})),
             numerics=Numerics(layout={'sliced': False}))
     assert built == []
     # a continuum is served on slices, its bare gauge and Eq. (18) by rows
     # (tests/test_solvated_row_fit.py)
-    RPAGroundStateChain(mol, chain_scf, environment=solvated, numerics=Numerics(isdf={'counts': g1(mol)},
+    RPAGroundStateChain(mol, chain_scf, environment=solvated, numerics=Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                                                 layout={'sliced': True}))
     ExcitedStateChain(
         mol, chain_scf, environment=solvated,
-        numerics=g1_numerics(mol, Numerics(layout={'sliced': True})))
+        numerics=duchemin_blase(g1_numerics(mol, Numerics(layout={'sliced': True}))))
 
     def rank(comm):
         m = own_water()
         chain = ExcitedStateChain(
             m, chain_scf, mf=chain_scf(m),
-            numerics=g1_numerics(m, Numerics(layout={'sliced': True})))
+            numerics=duchemin_blase(g1_numerics(m, Numerics(layout={'sliced': True}))))
         rows = chain.factors_at(m, chain.mf0)[0]
         with pytest.raises(TypeError):
             tuple(rows)

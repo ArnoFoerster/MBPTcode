@@ -19,7 +19,7 @@ import numpy as np
 
 from src.Base.numerics.constants import (BYTES_PER_GB, DEFAULT_TAU_TARGET, ISDF_TILE_GB,
                                          SCREENED_CHUNK_BYTES)
-from src.Base.factorization.sliced_factors import SlicedFactors
+from src.Base.factorization.sliced_factors import SlicedFactors, column_tiles
 from src.Base.utils.parallel.mpi_grid import (agreement, contiguous_block,
                                               current_comm, partition, reduce_sum)
 from src.Base.utils.grids.grids import minimax_frequency_grid
@@ -31,9 +31,11 @@ from src.Base.utils.grids.time_frequency import (minimax_transform_weights,
 from src.Base.orbital_spaces import (get_occ_virt_indices,
                                      particle_hole_window, transition_range)
 from src.SingleReference.LinearResponse.space_time import (
-    FrequencyBlock, ProjRows, dyson_screening, owned_frequency_blocks,
-    polarizability_projected_sweep, polarizability_projected_tau,
-    split_branches, sweep_waves, three_index_slice, wave_items)
+    FrequencyBlock, ProjRows, TiledFactors, dyson_screening, grid_tile_rows,
+    layout_tile_gb,
+    owned_frequency_blocks, polarizability_projected_sweep,
+    polarizability_projected_tau, split_branches, sweep_waves,
+    three_index_slice, wave_items)
 
 
 class SigmaPairs:
@@ -576,6 +578,161 @@ def self_energy_branch_sums(pairs, Wt, tau_points):
             pairs.add(sig[:, k], slabs.pop(k), tau_points[k],
                       [j for kk, j in mine if kk == k])
     return reduce_sum(sig, Wt.comm)
+
+
+def sigma_factor_tiles(X_ao, D, mo_coeff, eps, nocc, mu=None, comm=None,
+                       transform=None, coords=None, screen_r_cut=None,
+                       X_mo=None, ovlp=None, numerics=None):
+    """(`TiledFactors` of [X_ao C | D T], far) for the self-energy sweep: the
+    MO collocation the Green's functions are built from and the bare-gauge
+    Coulomb factor, in fixed grid tiles, each tile formed on its owner from
+    its own rows (`GridTileRows.map_tiles`), so no rank holds X_ao, X_ao C or
+    D whole.
+
+    X_ao and D are this rank's rows of `SlicedFactors` (pass the factors as
+    X_ao, D None or a whole D on their grid, `SlicedFactors.coulomb_rows`)
+    or whole arrays. X_ao None takes the collocation from the
+    MO one, X_ao = X_mo C^T S (`space_time._ao_collocation`; X_mo and ovlp
+    given). transform: T of a reaction field's bare gauge, None in the gas
+    phase. coords and screen_r_cut: the grid in Morton order and the tile
+    pairs the far-field screen drops (`far`, None without a screen), as
+    `spatially_ordered` orders and drops the AO build's blocks. The tile
+    rows and a pass's budget are `numerics.layout.tile_gb`'s
+    (`grid_tile_rows`)."""
+    comm = current_comm() if comm is None else comm
+    size = 1 if comm is None else comm.Get_size()
+    eps = np.asarray(eps, float)
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    if mu is None:
+        mu = particle_hole_window(eps, nocc)[2]
+    C = np.asarray(mo_coeff)
+    if isinstance(X_ao, SlicedFactors):
+        f = X_ao.require(comm)
+        parts, npts, whole = [f.X_ao, f.coulomb_rows(D)], f.npts, False
+        coords = f.coords if coords is None else coords
+    elif X_ao is None:
+        if isinstance(X_mo, SlicedFactors):
+            f = X_mo.require(comm)
+            parts, npts, whole = [f.X_mo, f.coulomb_rows(D)], f.npts, False
+            coords = f.coords if coords is None else coords
+        else:
+            parts, npts, whole = [X_mo, D], X_mo.shape[0], True
+        CtS = C.T @ ovlp
+    else:
+        parts, npts, whole = [X_ao, D], X_ao.shape[0], True
+    ncol = parts[0].shape[1] + parts[1].shape[1]
+    nmo, naux = C.shape[1], parts[1].shape[1]
+    block = grid_tile_rows(npts, max(ncol, nmo + naux), numerics)
+    order = (None if coords is None or not screen_r_cut
+             else _morton_order(np.asarray(coords)))
+    raw = column_tiles(parts, npts, block, comm if size > 1 else None, order,
+                       whole=whole)
+    raw.pass_gb = layout_tile_gb(numerics)
+    n0 = parts[0].shape[1]
+
+    def sigma_columns(rows):
+        x = rows[:, :n0] if X_ao is not None else rows[:, :n0] @ CtS
+        d = rows[:, n0:] if transform is None else rows[:, n0:] @ transform
+        return np.hstack([x @ C, d])
+
+    tiles = raw.map_tiles(sigma_columns, nmo + naux)
+    del raw
+    far = None
+    if order is not None:
+        far = _far_block_pairs(np.asarray(coords)[order], tiles.bounds,
+                               screen_r_cut)
+    return (TiledFactors(tiles, len(occ), len(occ) + len(virt),
+                         eps[occ] - mu, eps[virt] - mu), far)
+
+
+def self_energy_diagonal_tiles(tiled, Wt, eps, nocc, states, tau_points,
+                               omega_out, mu=None, ranges=None, far=None):
+    """Sigma^c_pp(i.omega_out) for `states`, (nstates, nfreq), whole on
+    every rank, from the self-energy's grid tiles (`sigma_factor_tiles`) and
+    Wt(i.tau) held by auxiliary rows (`ProjRows` over the ranks):
+    `self_energy_diagonal_rows` with no rank holding the collocation or D
+    whole (`self_energy_branch_sums_tiles`)."""
+    if mu is None:
+        mu = particle_hole_window(eps, nocc)[2]
+    _, rS = ranges or sigma_fit_ranges(eps, nocc, mu=mu)
+    C, _ = minimax_transform_weights(COSINE_TW, tau_points, omega_out, *rS,
+                                     warn=False)
+    S, _ = minimax_transform_weights(SINE_TW, tau_points, omega_out, *rS,
+                                     warn=False)
+    sig_l, sig_g = self_energy_branch_sums_tiles(tiled, Wt, states, tau_points,
+                                                 far)
+    return -0.5 * ((sig_g + sig_l).T @ C.T + 1j * ((sig_g - sig_l).T @ S.T))
+
+
+def self_energy_branch_sums_tiles(tiled, Wt, states, tau_points, far=None):
+    """(Sigma^<_pp(tau), Sigma^>_pp(tau)), (2, ntau, nstates), whole on every
+    rank, the same bits at every rank count.
+
+    The (tau point, p tile) items go over the ranks in `sweep_waves` windows
+    (`wave_items`); a rank gathers the at most two Wt(tau) slices its items
+    read, and each item runs against every q tile in order
+    (`GridTileRows.sweep`), the pair's branch sums
+
+        Sigma^{<,>}_pp += sum_{P in p, Q in q} X_s[P,p] (Zt*G)_PQ X_s[Q,p],
+        Zt = (D_p Wt) D_q^T,
+
+    added onto the item's own zeros, the pairs `far` marks skipped. Every
+    item's (2, nstates) sum is gathered and the items are added in (tau, p)
+    order onto zeros, so the result is the same at any rank count, one rank
+    included."""
+    size, rank = Wt.size_rank()
+    comm = Wt.comm
+    F, no, nmo = tiled.tiles, tiled.nocc, tiled.nmo
+    naux = tiled.naux
+    tau_points = np.asarray(tau_points, float)
+    ntau, nt = len(tau_points), len(F.bounds)
+    states = np.atleast_1d(states)
+    if states.size and np.array_equal(states, np.arange(states[0],
+                                                        states[-1] + 1)):
+        cols = slice(int(states[0]), int(states[-1]) + 1)
+    else:
+        cols = states
+    ns = len(states)
+    partials = []
+    for k0, k1 in sweep_waves(ntau, size):
+        mine = wave_items(k0, k1, nt, rank, size)
+        need = sorted({k for k, _ in mine})
+        slabs = {k: slab.copy() for k, slab in Wt.gather_slices(need)}
+
+        def start(k, p, rows):
+            tau = tau_points[k]
+            return [p, rows[:, nmo:] @ slabs[k],
+                    rows[:, :no] * np.exp(tiled.e_o * tau),
+                    rows[:, no:nmo] * np.exp(-tiled.e_v * tau),
+                    np.ascontiguousarray(rows[:, :nmo][:, cols]),
+                    np.zeros((2, ns))]
+
+        def step(state, q, rows):
+            p, DW, xo, xv, xs, out = state
+            if far is not None and far[p, q]:
+                return
+            Zt = DW @ rows[:, nmo:].T
+            Xs_q = rows[:, :nmo][:, cols]
+            G = xo @ rows[:, :no].T
+            G *= Zt
+            out[0] += np.einsum('Pp,Pp->p', xs, G @ Xs_q)
+            G = xv @ rows[:, no:nmo].T
+            G *= Zt
+            out[1] -= np.einsum('Pp,Pp->p', xs, G @ Xs_q)
+
+        def finish(k, p, rows, state):
+            partials.append(((k, p), state[5]))
+
+        F.sweep(mine, start, step, finish,
+                lambda p: (F.bounds[p][1] - F.bounds[p][0]) * 8
+                * (naux + nmo + ns + F.rows.shape[1]))
+        del slabs
+    every = (partials if comm is None
+             else [pair for part in comm.allgather(partials) for pair in part])
+    sig = np.zeros((2, ntau, ns))
+    for (k, _), v in sorted(every, key=lambda pair: pair[0]):
+        sig[:, k] += v
+    return sig[0], sig[1]
 
 
 def sigma_ao_to_mo_diagonal(sigma_ao, mo_coeff, states=None):

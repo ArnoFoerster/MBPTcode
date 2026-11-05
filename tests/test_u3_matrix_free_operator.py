@@ -41,6 +41,7 @@ from src.SingleReference.ADC.generated_modules import lazy
 s2cr = lazy('adc4_c2_s2c_apply_restricted_blocks')
 from src.Base.numerics.constants import HARTREE_TO_EV
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_CS
 
 pytestmark = requires_runtime(4)
 
@@ -48,7 +49,7 @@ pytestmark = requires_runtime(4)
 
 def main():
     all_ok = True
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_CS, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     ns = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')

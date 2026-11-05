@@ -44,7 +44,7 @@ from src.Base.utils.parallel.mpi_grid import current_comm
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.mean_field_response import xc_skeleton          # noqa: E402
 from tests.isdf_test_grid import g1
-from tests.pins import assert_same  # noqa: E402
+from tests.pins import assert_same, isdf_gradient_bar  # noqa: E402
 
 #: The test molecules' geometries, Angstrom.
 SYSTEMS = {
@@ -160,7 +160,7 @@ def test_the_skeleton_follows_the_moving_grid(case):
     fixed_miss = float(np.abs(fixed - moving).max())
     print(f'\n{case}: skeleton - FD {miss:.2e}, translation '
           f'{translation:.1e}; fixed-grid derivative - FD {fixed_miss:.2e}')
-    assert miss < ISDF_GRADIENT_FLOOR, miss
+    assert miss < isdf_gradient_bar(), miss
     assert translation < TRANSLATION_BAR, translation
     assert fixed_miss > GRID_MOTION, fixed_miss
 
@@ -173,7 +173,7 @@ def test_the_fixed_grid_derivative_meets_the_held_grid():
     fixed = np.einsum('axij,ij->ax', np.asarray(hessian_rks._get_vxc_deriv1(
         mf.Hessian(), mf.mo_coeff, mf.mo_occ, mf.max_memory)), g_ao)
     held = trace_difference(mf, g_ao, moving=False)
-    assert np.abs(fixed - held).max() < ISDF_GRADIENT_FLOOR
+    assert np.abs(fixed - held).max() < isdf_gradient_bar()
 
 
 # ------------------------------------------------ (c) the gate can fail
@@ -216,7 +216,7 @@ def test_other_rungs_follow_the_moving_grid(xc):
     gamma = partial(mf)
     moving = trace_difference(mf, g_ao_of(mf, gamma), moving=True)
     got = xc_skeleton(mf, gamma)
-    assert np.abs(got - moving).max() < ISDF_GRADIENT_FLOOR
+    assert np.abs(got - moving).max() < isdf_gradient_bar()
     assert np.abs(got.sum(axis=0)).max() < TRANSLATION_BAR
 
 

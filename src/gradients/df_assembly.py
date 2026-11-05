@@ -24,9 +24,11 @@ the electron coordinate: int3c2e_ip1 = (grad mu nu|P), int3c2e_ip2 =
 as d/dR_A = -grad, so every nuclear derivative built from them carries a minus.
 """
 import numpy as np
-from pyscf import df as pyscf_df
 
+from src.Base.factorization.ao_product_fit import three_centre_block
+from src.Base.factorization.shell_runs import functions_to_atoms
 from src.SingleReference.common.eri_blocks import df_integrals
+from src.gradients.isdf_adjoint_pieces import two_centre_adjoint
 
 
 def fit_coefficients(J, V):
@@ -62,26 +64,16 @@ def two_electron_skeleton_df(mol, auxmol, Gamma3_list, Gamma2_list):
     Gamma3 must be symmetric in (mu, nu), so the two AO-derivative terms of
     dJ are equal and enter once with a factor 2.
     """
-    nao, naux = mol.nao, auxmol.nao
-    d1 = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip1', aosym='s1',
-                                comp=3).reshape(3, nao, nao, naux)
-    d2 = pyscf_df.incore.aux_e2(mol, auxmol, intor='int3c2e_ip2', aosym='s1',
-                                comp=3).reshape(3, nao, nao, naux)
-    v1 = auxmol.intor('int2c2e_ip1', comp=3)
-    aoslices = mol.aoslice_by_atom()
-    auxslices = auxmol.aoslice_by_atom()
-
+    whole = (0, mol.nbas, 0, mol.nao)
+    d1 = three_centre_block(mol, auxmol, whole, 'int3c2e_ip1', 3)
+    d2 = three_centre_block(mol, auxmol, whole, 'int3c2e_ip2', 3)
     out = np.zeros((len(Gamma3_list), mol.natm, 3))
     for k, (G3, G2) in enumerate(zip(Gamma3_list, Gamma2_list)):
         # dJ on an AO centre, both index positions, and on the auxiliary centre
         t_ao = -2.0 * np.einsum('xmnP,mnP->xm', d1, G3, optimize=True)
         t_aux = -np.einsum('xmnP,mnP->xP', d2, G3, optimize=True)
-        # -Gamma2 dV, symmetric in (P, Q)
-        t_v = 2.0 * np.einsum('xPQ,PQ->xP', v1, G2, optimize=True)
-        for iatm in range(mol.natm):
-            p0, p1 = aoslices[iatm, 2:]
-            q0, q1 = auxslices[iatm, 2:]
-            out[k, iatm] = (2.0 * (t_ao[:, p0:p1].sum(axis=1)
-                                   + t_aux[:, q0:q1].sum(axis=1))
-                            + t_v[:, q0:q1].sum(axis=1))
+        # -Gamma2 dV, Gamma2 symmetric in (P, Q)
+        out[k] = (2.0 * (functions_to_atoms(t_ao, mol)
+                         + functions_to_atoms(t_aux, auxmol))
+                  + two_centre_adjoint(auxmol, -G2))
     return out

@@ -30,6 +30,7 @@ from src.CodeGeneration.codegen_common import density_out_idx
 from src.CodeGeneration.laplace_codegen import fuse_amplitude_into_consumer, assemble_laplace_fused
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import MPnDensityDriverRestricted, laplace_aaaaaa_contribution
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_antisymmetrized_spin_block_eri
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 def build_generic_t1_3_laplace():
@@ -42,7 +43,7 @@ def build_generic_t1_3_laplace():
         {'t2_aaaa': 't2_1_aaaa'}, 't1_3_lap', '(nv, no)', fused, ['a', 'i'],
         eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]')
     from src.Base.utils.grids.grids import minimax_time_grid
-    from src.SingleReference.CC.cached_einsum import einsum
+    from src.Base.utils.cached_einsum import einsum
     ns = {'np': np, 'minimax_time_grid': minimax_time_grid, 'einsum': einsum}
     # nv/no aren't in params; patch shape expr to use local shapes instead
     src = src.replace('(nv, no)', '(t2_1_aaaa.shape[0], t2_1_aaaa.shape[2])')
@@ -62,7 +63,7 @@ def build_generic_ov_laplace():
         eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]')
     src = src.replace('(no, nv)', '(t2_1_aaaa.shape[2], t2_1_aaaa.shape[0])')
     from src.Base.utils.grids.grids import minimax_time_grid
-    from src.SingleReference.CC.cached_einsum import einsum
+    from src.Base.utils.cached_einsum import einsum
     ns = {'np': np, 'minimax_time_grid': minimax_time_grid, 'einsum': einsum}
     exec(compile(src, '<laplace_ov_generic>', 'exec'), ns)
     return ns['laplace_ov_generic']
@@ -74,7 +75,7 @@ def main():
     laplace_ov_generic = build_generic_ov_laplace()
 
     for atom, basis in [('H 0 0 0; Li 0 0 1.6', 'sto-3g'),
-                        ('O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', '6-31g')]:
+                        (WATER_AT_ORIGIN_COARSE, '6-31g')]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()
         nocc = mol.nelectron // 2

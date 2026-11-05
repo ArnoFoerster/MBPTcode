@@ -25,9 +25,10 @@ from src.environments.solvent_screening import SolventScreening
 from src.properties.excitations import (SurfaceSpec, ground_surface_of,
                                         surface_of)
 from src.gradients.gwbse.surface_factory import compare_surfaces
+from tests.molecules import WATER_ROUNDED
 
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 STEP = 1e-3
 TOL = 1e-6
 

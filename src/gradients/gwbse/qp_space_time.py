@@ -27,10 +27,10 @@ the reverse pass costs one more factorization per frequency than holding it
 would -- naux^3 each, against the sweep's M^2 (norb + naux) per tau -- and
 removes the (nfreq, naux, norb) array.
 
-At the chlorophyllide hexamer (M 117762, naux 28236, ntau 24, four states)
-the reverse call's peak falls from 601 GB a rank with every block whole to
-181 GB by rows at 8 ranks; the explicit residue route is refused there, C_ov
-alone being 2197 GB.
+On a large chromophore aggregate at a triple-zeta basis the reverse call's
+peak falls from several hundred GB a rank with every block whole to about a
+third of that by rows at 8 ranks; the explicit residue route is refused there,
+C_ov alone being thousands of GB.
 
 Residues -- states whose root has crossed a neighbouring orbital energy, which
 is every state but the frontier pair -- need W at a REAL frequency. Below the
@@ -51,37 +51,41 @@ D once at entry, holds them for the solve and its reverse pass and drops them
 on return; the gathered arrays are the whole ones verbatim and every output is
 the whole factors' bit for bit.
 """
+import pickle
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 
-from src.Base.numerics.constants import (EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
+from src.Base.numerics.constants import (BYTES_PER_GB, CONTINUATION_ROUTE,
+                                         EXPLICIT_RESIDUE_MAX_GB, ISDF_TILE_GB,
+                                         QP_CHAIN_BATCH_GB,
                                          RESIDUE_ROUTES_ALL,
                                          LAPLACE_SCREENING_TOL, QP_ROOT_TOL,
                                          SOP_N_POLES)
-from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
-                                              contiguous_block, current_comm, lockstep,
-                                              mpi_map, ordered_chain_sum, ordered_sum,
+from src.Base.utils.parallel.mpi_grid import (OwnedSlices, agreement,
+                                              current_comm, lockstep,
+                                              mpi_map, ordered_sliced_sum, ordered_sum,
                                               partition, reduce_sum)
 from src.SingleReference.GW.contour_deformation import (
     cd_integral_weights, cd_pair_contraction_multi,
-    cd_screening_contraction_multi, contour_state_root, residue_route_auto,
-    screening_solver, static_term)
+    contour_state_root, frequency_groups,
+    residue_route_auto, screening_solver, static_term)
 from src.SingleReference.GW.qp_states import scissor_route
 from src.SingleReference.GW.sum_over_poles import (compressible,
                                                    pole_amplitudes, sop_from_wc)
 from src.gradients.gwbse.contour_deformation_adjoint import (
     ExplicitRealScreeningAdjoint as ExplicitRealScreening,
     LaplaceRealScreeningAdjoint as LaplaceRealScreening,
-    integral_term_backward, pair_term_backward, residue_terms_backward)
+    integral_term_backward, residue_terms_backward, subspace_terms_backward)
 from src.gradients.gwbse.sum_over_poles_adjoint import sigma_sop_backward
 from src.Solvers.qp_equation import qp_start, quasiparticle_weight
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors, whole_factor
 from src.Base.utils.timing import stage
 from src.SingleReference.LinearResponse.space_time import (
-    ProjRows, polarizability_projected_rows, three_index_ov, three_index_slice)
+    ProjRows, frequency_blocks, polarizability_projected_rows, three_index_ov,
+    three_index_slice)
 from src.gradients.rpa.space_time_adjoint import (
     polarizability_backward, polarizability_backward_rows,
     three_index_ov_backward, three_index_slice_backward,
@@ -94,8 +98,9 @@ ANALYTIC_ROUTES = frozenset({'sop', 'scissor'})
 #: `fallback_route` from the problem's dimensions alone.
 FALLBACK_ROUTE = 'fallback'
 #: The residue routes the kernels take: a residue backend, the pole model,
-#: 'none' (refuse a residue) or 'auto' (a backend decided per geometry).
-KERNEL_RESIDUE_ROUTES = frozenset(RESIDUE_ROUTES_ALL)
+#: 'none' (refuse a residue) or 'auto' (a backend decided per geometry); the
+#: continuation takes no contour and is solved by the chain itself.
+KERNEL_RESIDUE_ROUTES = frozenset(RESIDUE_ROUTES_ALL) - {CONTINUATION_ROUTE}
 
 
 
@@ -260,26 +265,21 @@ def sop_model(wc, nu_points, eps, nocc, p, sop_poles, n_poles, sop_stride):
 
 
 def slices_over_ranks(X, D, states, tile_gb, comm=None):
-    """[B_p for p in states], each slice built by one rank and gathered onto
-    every one; serially the list it always was. comm None is `current_comm()`.
+    """`OwnedSlices` of B_p for p in states, each slice built by its owner and
+    held there alone; serially every slice on the one rank. comm None is
+    `current_comm()`.
 
     A slice is O(M naux norb), one per state, so a window of hundreds of
-    states built on every rank is a cost no rank count divides. Each slice is
-    the same `three_index_slice` call on the same whole factors wherever it
-    runs and travels verbatim (`allgather_rows`): every rank holds the serial
-    slices bitwise, as views into one (nstates, naux, norb) array.
+    states built or held on every rank is a cost no rank count divides (35 MB
+    a state at 60 atoms on an augmented double-zeta basis). Each slice is the
+    serial `three_index_slice` call on the same whole factors, and a rank that
+    reads another's gets its bits verbatim (`OwnedSlices.fetch`).
     """
     comm = current_comm() if comm is None else comm
-    nranks = 1 if comm is None else comm.Get_size()
-    if nranks == 1:
-        return [three_index_slice(X, D, int(p), tile_gb=tile_gb)
-                for p in states]
-    out = np.zeros((len(states), D.shape[1], X.shape[1]))
-    start, stop = contiguous_block(len(states), comm.Get_rank(), nranks)
-    for i in range(start, stop):
-        out[i] = three_index_slice(X, D, int(states[i]), tile_gb=tile_gb)
-    allgather_rows(out, comm)
-    return list(out)
+    out = OwnedSlices(len(states), (D.shape[1], X.shape[1]), comm)
+    for i in out.mine():
+        out.put(i, three_index_slice(X, D, int(states[i]), tile_gb=tile_gb))
+    return out
 
 
 def pole_fits_needed(states, eps, nocc, residue_route, scissor, w0,
@@ -325,7 +325,30 @@ def fit_poles_over_ranks(states, wcs, nu_points, eps, nocc, residue_route,
     return out
 
 
-def integral_term_reverse(state, WtB, k):
+def pair_subspaces(pairs):
+    """The states joined by `pairs` [(i, j, ...)], in connected sets: each a
+    frozenset, in order of their first pair. A quasiparticle-Hamiltonian
+    pair joins two states of one subspace, so these are its subspaces."""
+    parent = {}
+
+    def root(s):
+        while parent[s] != s:
+            parent[s] = parent[parent[s]]
+            s = parent[s]
+        return s
+    for i, j, *_ in pairs:
+        for s in (int(i), int(j)):
+            parent.setdefault(s, s)
+        parent[root(int(j))] = root(int(i))
+    out = {}
+    for i, *_ in pairs:
+        out.setdefault(root(int(i)), set())
+    for s in parent:
+        out[root(s)].add(s)
+    return [frozenset(c) for c in out.values()]
+
+
+def integral_term_reverse(state, Bp, WtB, k, paired=False):
     """(Bp_bar, chi0_bar, eps_bar) of ONE contour-deformation frequency for one state.
 
     Sigma^int_p(w) = -(1/pi) sum_kq c[k,q] wc[k,q] with the weights of
@@ -336,11 +359,18 @@ def integral_term_reverse(state, WtB, k):
     third term. On the pole-model route the omega dependence is analytic and
     `wc_bar` already holds the whole weight, so that term is zero.
 
-    state: one entry of the reverse pass's active set -- the state's slice
-    `Bp`, its Z-weighted adjoint `zw`, the weights `c` and `dc` at its root
-    (`integral_state`) and `wc_bar` or None.
+    state: one entry of the reverse pass's active set -- its Z-weighted
+    adjoint `zw`, the weights `c` and `dc` at its root (`integral_state`) and
+    `wc_bar` or None; Bp its slice, WtB = W(i.nu_k) Bp. paired: the state's
+    Bp_bar and chi0_bar are taken with its subspace's pairs
+    (`subspace_terms_backward` on `integral_weights`); only eps_bar is
+    returned, with None for the other two.
     """
-    Bp = state['Bp']
+    if paired:
+        if state['wc_bar'] is not None:
+            return None, None, 0.0
+        wck = np.einsum('Pq,Pq->q', Bp, WtB - Bp)
+        return None, None, state['zw'] / np.pi * wck * state['dc'][k]
     if state['wc_bar'] is not None:
         bb, _, cb = integral_term_backward(Bp, WtB, state['wc_bar'][k])
         return bb, cb, 0.0
@@ -349,13 +379,22 @@ def integral_term_reverse(state, WtB, k):
     return bb, cb, -coeff * wck * state['dc'][k]
 
 
-def integral_state(Bp, zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
+def integral_weights(state, k):
+    """The weights (norb,) `integral_term_reverse` puts on the state's
+    contraction at frequency k."""
+    if state['wc_bar'] is not None:
+        return state['wc_bar'][k]
+    return -state['zw'] / np.pi * state['c'][k]
+
+
+def integral_state(zw, w_star, eps, nu_points, nu_weights, wc_bar=None,
                    **extra):
     """One entry of the reverse pass's active set (`integral_term_reverse`):
     the integral term's weights at the root are computed once, for every
     frequency, because the exact singular part puts the near-pole correction
-    on the two smallest nodes whichever rank owns them."""
-    state = dict(Bp=Bp, zw=zw, wc_bar=wc_bar, **extra)
+    on the two smallest nodes whichever rank owns them. The state's slice is
+    not in it: the slices stay with their owners (`OwnedSlices`)."""
+    state = dict(zw=zw, wc_bar=wc_bar, **extra)
     if wc_bar is None:
         state['c'], state['dc'] = cd_integral_weights(w_star - eps, nu_points,
                                                       nu_weights)
@@ -451,16 +490,29 @@ def qp_gradient_space_time(X, D, eps, nocc, grid, nu_points, nu_weights, p,
     return w_star, z, eps_bar, X_bar, D_bar
 
 
+def portable_error(err):
+    """`err` itself where it pickles, else a RuntimeError carrying its type
+    and text: an exception one rank hands the others in place of a result."""
+    try:
+        pickle.dumps(err)
+    except Exception:
+        return RuntimeError(f'{type(err).__name__}: {err}')
+    return err
+
+
 @dataclass
 class QPSetTape:
     """What `qp_set_gradient`'s forward built, for a later call to read back.
 
-    proj(tau) held by rows, the states' slices Bps and their contractions
-    wcs, with the arguments they were built from: the factor objects
+    proj(tau) held by rows, the states' slices Bps (`OwnedSlices`, each on
+    its owner) and their contractions wcs, with the arguments they were built from: the factor objects
     themselves, eps, mu, the tile budget, the states, the tau points and the
     transform onto the CD frequencies. A later call on the same objects and
     bits reads proj and Bps from here, and wcs as well when the frequency
-    axis is also the same -- the same arrays, so the same bits. `release`
+    axis is also the same -- the same arrays, so the same bits. pair_wcs:
+    {(i, j): wc_ij}, the off-diagonal contractions the frequency pass took
+    beside wcs (`qp_set_gradient`'s wc_pairs), read by `pair_contractions`.
+    `release`
     drops the arrays once no later call is to read them, and a released tape
     applies to nothing. C_ov, the explicit residues' three-index block, is
     kept only while the solve that built it repeats (`drop_residues`).
@@ -475,14 +527,15 @@ class QPSetTape:
     tau_points: np.ndarray
     cosft_wt: np.ndarray
     proj_tau: ProjRows
-    Bps: list
+    Bps: OwnedSlices
     wcs: list
     C_ov: object = None
+    pair_wcs: dict = None
 
     def release(self):
         """Drop what the tape holds."""
         self.X = self.D = self.proj_tau = self.Bps = self.wcs = None
-        self.C_ov = None
+        self.C_ov = self.pair_wcs = None
 
     def drop_residues(self):
         """Drop C_ov, once the solve that built it no longer repeats."""
@@ -534,6 +587,7 @@ class QPSetPass:
     pairs: object
     keep_tape: bool
     z0: object = None
+    wc_pairs: object = ()
 
     def __post_init__(self):
         (X, D, eps, nocc, grid, nu_points, nu_weights, states, weights,
@@ -550,6 +604,7 @@ class QPSetPass:
         eps = np.asarray(eps, float)
         self.X_in, self.D_in = X, D
         self.paired = {s for i, j, _ in pairs for s in (int(i), int(j))}
+        self.subspaces = pair_subspaces(pairs)
         states = np.atleast_1d(states)
         weights = np.atleast_1d(weights)
         require_static_terms(xc_correction, len(states))
@@ -565,9 +620,13 @@ class QPSetPass:
             # the weights' zeros they set the active set whose adjoints pass 2
             # reduces as one buffer.
             eps, weights = lockstep((eps, weights), comm)
+            # the pairs set the collective fetches of the frequency pass
+            self.wc_pairs = lockstep(
+                np.asarray(self.wc_pairs, int).reshape(-1, 2), comm)
             agreement((_audited(X), _audited(D), xc_correction, w0,
                        follow, scissor, sop_poles, self.z0),
                       comm, audit_only=True, label='qp_set_gradient inputs')
+        self.wc_pairs = [(int(i), int(j)) for i, j in self.wc_pairs]
         self.tau_mine = (partition(grid.ntau, rank, nranks) if nranks > 1
                          else None)
         self.nu_mine = (partition(len(nu_points), rank, nranks) if nranks > 1
@@ -624,31 +683,40 @@ class QPSetPass:
         self.z_of = np.zeros(len(states))
 
         if same_wc:
-            wcs = tape.wcs
+            wcs, pair_wcs = tape.wcs, tape.pair_wcs
         else:
+            # the off-diagonal pairs ride on the diagonal solves: at each
+            # frequency [W - 1] B_j serves wc_jj and every wc_ij alike
+            n = len(states)
             with stage(timer, 'qp_set.frequency_pass'):
-                wcs = cd_screening_contraction_multi(proj_tau, grid.cosft_wt,
-                                                     Bps, tile_gb=tile_gb,
-                                                     freq_indices=self.nu_mine)
+                wcs = cd_pair_contraction_multi(
+                    proj_tau, grid.cosft_wt, Bps,
+                    [(i, i) for i in range(n)] + self.wc_pairs,
+                    tile_gb=tile_gb, freq_indices=self.nu_mine)
                 if self.nranks > 1:
                     wcs = list(reduce_sum(np.stack(wcs), comm))
+            pair_wcs = dict(zip(self.wc_pairs, wcs[n:]))
+            wcs = wcs[:n]
         if route_out is not None and self.keep_tape:
             route_out['tape'] = QPSetTape(X_in, D_in, eps.copy(), mu, tile_gb,
                                           states.copy(),
                                           np.array(grid.tau_points),
                                           np.array(grid.cosft_wt), proj_tau,
-                                          Bps, wcs)
+                                          Bps, wcs, pair_wcs=pair_wcs)
         self.same, self.proj_tau, self.Bps, self.wcs = same, proj_tau, Bps, wcs
 
     def solve_states(self):
         """PASS 1 -- every state's route, root and residue set, and the
         states that carry an adjoint (`active`).
 
-        Replicated: a root search on wc and, for a residue, a rank-one push into
-        its backend. The pole fits are the exception, striped over the ranks
-        a round at a time, one fit a rank, as the loop reaches them: the same
-        owner and the same bits as one striped call, and a pass stopped at an
-        unresolved root leaves the later rounds unfitted.
+        The states go in rounds of one a rank. The pole-model roots, which
+        read wc alone, are taken one a rank and shared (`_pole_model_roots`);
+        the contour roots are replicated, each on its state's slice, fetched
+        only there; a scissor takes no root search. The pole fits are striped
+        over the ranks a round at a time, one fit a rank, as the loop reaches
+        them: the same owner and the same bits as one striped call. A pass
+        stopped at an unresolved root raises it at that state on every rank
+        and leaves the rounds after its own unfitted.
         """
         states, weights, eps, nocc, grid = (self.states, self.weights,
                                             self.eps, self.nocc, self.grid)
@@ -667,172 +735,314 @@ class QPSetPass:
         fit_round = {si: need[i - i % nranks:i - i % nranks + nranks]
                      for i, si in enumerate(need)}
         active = []
-        for si, (p, wgt) in enumerate(zip(states, weights)):
-            p = int(p)
-            Bp, wc = Bps[si], wcs[si]
-            if si in fit_round and (sop_poles is None or p not in sop_poles):
-                rnd = fit_round[si]
-                sop_poles = fit_poles_over_ranks(
-                    states[rnd], [wcs[i] for i in rnd], nu_points, eps, nocc,
-                    residue_route, scissor, w0, sop_poles,
-                    self.n_poles, self.sop_stride, self.comm)
-            # PER STATE. <p|Sigma_x - v_xc|p> is a different number for every
-            # orbital, so a scalar shared across the set would put the HOMO's
-            # correction on the LUMO. A scalar is still accepted, and is the
-            # right thing on Hartree-Fock, where every entry is zero.
-            xc_p = static_term(self.xc_correction, si)
-            # after the reference, every geometry follows the branch the last
-            # accepted one kept, whatever its weight
-            follow, branch = followed_branch(follow_of, w0, p), {}
-            # A state Eq. (27) does not admit cannot be carried by the pole
-            # model at any M, so it takes the residue route instead and the
-            # record says so. On a valence quasiparticle set some states
-            # always will.
-            route, shift, start = pole_model_route(residue_route, scissor, p,
-                                                   eps, nocc, w0, sop_poles)
-            if route == FALLBACK_ROUTE:
-                route = fallback_route(naux, nocc, len(eps) - nocc)
-            if route == 'auto':
-                route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
-            if route == 'laplace':
-                rs = LaplaceRealScreening(proj_tau, grid, eps, nocc,
-                                          tol=laplace_tol)
-            elif route == 'explicit':
-                if C_ov is None:
-                    require_explicit_fits(naux, nocc, len(eps) - nocc, p)
-                    C_ov = (tape.C_ov if same and tape.C_ov is not None else
-                            three_index_ov(*self.factors(), eps, nocc,
-                                           tile_gb=tile_gb))
-                    if route_out is not None and self.keep_tape:
-                        route_out['tape'].C_ov = C_ov
-                rs = ExplicitRealScreening(C_ov, eps, nocc)
-            elif route in ('sop', 'scissor', 'none'):
-                rs = None
-            else:
-                raise ValueError(f'residue_route {route!r}')
-            poles = amp = None
-            if route == 'scissor':
-                w_star, z, res = float(eps[p] + xc_p + shift), 1.0, []
-            else:
+        # the states in rounds of one a rank: a round's routes are set in
+        # state order on every rank, its pole-model roots, which read wc
+        # alone, are taken one a rank (`_pole_model_roots`), and the round
+        # is then finished in state order with every root in hand
+        for r0 in range(0, len(states), max(nranks, 1)):
+            prep = []
+            for si in range(r0, min(r0 + max(nranks, 1), len(states))):
+                p, wgt = int(states[si]), weights[si]
+                wc = wcs[si]
+                if si in fit_round and (sop_poles is None or p not in sop_poles):
+                    rnd = fit_round[si]
+                    sop_poles = fit_poles_over_ranks(
+                        states[rnd], [wcs[i] for i in rnd], nu_points, eps, nocc,
+                        residue_route, scissor, w0, sop_poles,
+                        self.n_poles, self.sop_stride, self.comm)
+                # PER STATE. <p|Sigma_x - v_xc|p> is a different number for every
+                # orbital, so a scalar shared across the set would put the HOMO's
+                # correction on the LUMO. A scalar is still accepted, and is the
+                # right thing on Hartree-Fock, where every entry is zero.
+                xc_p = static_term(self.xc_correction, si)
+                # after the reference, every geometry follows the branch the last
+                # accepted one kept, whatever its weight
+                follow = followed_branch(follow_of, w0, p)
+                # A state Eq. (27) does not admit cannot be carried by the pole
+                # model at any M, so it takes the residue route instead and the
+                # record says so. On a valence quasiparticle set some states
+                # always will.
+                route, shift, start = pole_model_route(residue_route, scissor, p,
+                                                       eps, nocc, w0, sop_poles)
+                if route == FALLBACK_ROUTE:
+                    route = fallback_route(naux, nocc, len(eps) - nocc)
+                if route == 'auto':
+                    route = residue_route_auto(grid, eps, nocc, start, laplace_tol)
+                if route == 'laplace':
+                    rs = LaplaceRealScreening(proj_tau, grid, eps, nocc,
+                                              tol=laplace_tol)
+                elif route == 'explicit':
+                    if C_ov is None:
+                        require_explicit_fits(naux, nocc, len(eps) - nocc, p)
+                        C_ov = (tape.C_ov if same and tape.C_ov is not None else
+                                three_index_ov(*self.factors(), eps, nocc,
+                                               tile_gb=tile_gb))
+                        if route_out is not None and self.keep_tape:
+                            route_out['tape'].C_ov = C_ov
+                    rs = ExplicitRealScreening(C_ov, eps, nocc)
+                elif route in ('sop', 'scissor', 'none'):
+                    rs = None
+                else:
+                    raise ValueError(f'residue_route {route!r}')
+                poles = amp = None
                 if route == 'sop':
                     # the poles ride on to the adjoint (`sigma_sop_backward`)
                     poles, amp = sop_model(wc, nu_points, eps, nocc, p,
                                            sop_poles, self.n_poles,
                                            self.sop_stride)
+                prep.append(dict(si=si, p=p, wgt=wgt, wc=wc, xc_p=xc_p,
+                                 follow=follow, route=route, shift=shift,
+                                 rs=rs, poles=poles, amp=amp))
+            roots = self._pole_model_roots(
+                [r for r in prep if r['route'] == 'sop'])
+            for r in prep:
+                si, p, wgt, route, rs = (r['si'], r['p'], r['wgt'], r['route'],
+                                         r['rs'])
+                poles, amp, follow, branch = r['poles'], r['amp'], r['follow'], {}
+                if route == 'scissor':
+                    w_star, z, res = float(eps[p] + r['xc_p'] + r['shift']), 1.0, []
+                elif route == 'sop':
                     fitted[p] = poles
-                # the one per-state root of the contour quasiparticle energy
-                w_star, z, res = contour_state_root(
-                    route, p, Bp, wc, eps, nocc, nu_points, nu_weights, xc_p,
-                    real_screening=rs, pole_model=(poles, amp), tol=tol,
-                    follow=follow, branch=branch,
-                    rescan=rescans_beside(self.z0, p))
-            self.w_stars[si] = w_star
-            self.z_of[si] = z
-            self.routes[p] = route
-            self.weights_of[p] = float(z)
-            self.roots[p] = float(w_star)
-            self.labels[p] = branch.get('labels')
-            if follow is not None:
-                self.branches[p] = branch
-            self.residues[p] = res
-            if wgt == 0.0 and si not in self.paired:
-                continue
+                    found = roots[si]
+                    if isinstance(found, BaseException):
+                        raise found
+                    w_star, z, res, taken = found
+                    branch.update(taken)
+                else:
+                    # the one per-state root of the contour quasiparticle
+                    # energy, on the state's slice (the route is the same on
+                    # every rank: the fetch stays collective)
+                    w_star, z, res = contour_state_root(
+                        route, p, Bps.fetch(si), r['wc'], eps, nocc, nu_points,
+                        nu_weights, r['xc_p'], real_screening=rs,
+                        pole_model=(poles, amp), tol=tol, follow=follow,
+                        branch=branch, rescan=rescans_beside(self.z0, p))
+                self.w_stars[si] = w_star
+                self.z_of[si] = z
+                self.routes[p] = route
+                self.weights_of[p] = float(z)
+                self.roots[p] = float(w_star)
+                self.labels[p] = branch.get('labels')
+                if follow is not None:
+                    self.branches[p] = branch
+                self.residues[p] = res
+                if wgt == 0.0 and si not in self.paired:
+                    continue
 
-            zw = z * wgt
-            if route == 'scissor':
-                if si in self.paired:
-                    raise ValueError(f'orbital {p} carries a frozen scissor '
-                                     f'and has no screening contraction to '
-                                     f'pair')
-                eps_bar[p] += zw
-                continue
-            wc_bar = None
-            if route == 'sop':
-                # The pole model's whole omega dependence is analytic, so its
-                # adjoint on the imaginary-axis data is one transpose and
-                # enters the screening exactly where the integral term's own
-                # weights do.
-                eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles,
-                                                        eps, nocc, nu_points,
-                                                        sigma_bar=zw)
-                eps_bar += eps_sop
-            active.append(integral_state(Bp, zw, w_star, eps, nu_points,
-                                         nu_weights, wc_bar, si=si, p=p,
-                                         res=res, rs=rs, route=route))
+                zw = z * wgt
+                if route == 'scissor':
+                    if si in self.paired:
+                        raise ValueError(f'orbital {p} carries a frozen scissor '
+                                         f'and has no screening contraction to '
+                                         f'pair')
+                    eps_bar[p] += zw
+                    continue
+                wc_bar = None
+                if route == 'sop':
+                    # The pole model's whole omega dependence is analytic, so its
+                    # adjoint on the imaginary-axis data is one transpose and
+                    # enters the screening exactly where the integral term's own
+                    # weights do.
+                    eps_sop, wc_bar, _ = sigma_sop_backward(w_star, amp, poles,
+                                                            eps, nocc, nu_points,
+                                                            sigma_bar=zw)
+                    eps_bar += eps_sop
+                active.append(integral_state(zw, w_star, eps, nu_points,
+                                             nu_weights, wc_bar, si=si, p=p,
+                                             res=res, rs=rs, route=route))
         self.active, self.sop_poles, self.C_ov = active, sop_poles, C_ov
 
+    def _pole_model_roots(self, prep):
+        """{si: (w_star, z, residues, branch)} of the pole-model states in
+        `prep`, one state a rank (`mpi_map`), the same on every rank. The
+        root reads the state's wc and poles alone, so the rank that takes it
+        needs nothing from the others and gets the bits any rank would. A
+        root search that raises hands its exception back in the state's
+        place, so every rank raises it at the same state."""
+        eps, nocc, tol = self.eps, self.nocc, self.tol
+        nu_points, nu_weights = self.nu_points, self.nu_weights
+
+        def root(r):
+            branch = {}
+            try:
+                w_star, z, res = contour_state_root(
+                    'sop', r['p'], None, r['wc'], eps, nocc, nu_points,
+                    nu_weights, r['xc_p'], real_screening=None,
+                    pole_model=(r['poles'], r['amp']), tol=tol,
+                    follow=r['follow'], branch=branch,
+                    rescan=rescans_beside(self.z0, r['p']))
+            except Exception as err:
+                return portable_error(err)
+            return w_star, z, res, branch
+
+        comm = self.comm if self.nranks > 1 else None
+        return {r['si']: got for r, got in zip(prep, mpi_map(root, prep, comm))}
+
     def reverse_frequencies(self):
-        """PASS 2 -- the integral term's reverse pass, frequency outside,
-        over the frequencies this rank owns. Each frequency's addends reach
-        every rank and are added in frequency order (`ordered_sum`): the
-        one-rank bits."""
-        active, eps, comm, rank = self.active, self.eps, self.comm, self.rank
+        """PASS 2 -- the integral term's reverse pass over the frequencies
+        this rank owns, in groups a rank can hold factorized
+        (`held_frequencies`); within a group the states pass by one slice at
+        a time (`OwnedSlices.fetch`), each taking its solves at the group's
+        frequencies. Every addend is the one of the frequency-outside loop
+        and joins its sum in the same order: chi0_bar(i.nu_k) the states in
+        set order and then the pairs, B_p_bar the frequencies in order
+        (`ordered_sliced_sum`, kept by the slice's owner), eps_bar by
+        (frequency, state) (`ordered_sum`): the one-rank bits."""
+        active, eps, comm = self.active, self.eps, self.comm
         proj_tau, grid, naux, eye = (self.proj_tau, self.grid, self.naux,
                                      self.eye)
-        pairs, Bps, paired = self.pairs, self.Bps, self.paired
+        Bps = self.Bps
         self.lap = _lap(self.timer, 'qp_set.routes', self.lap)
-        Bp_bars = {a['si']: np.zeros_like(a['Bp']) for a in active}
+        Bp_bars = Bps.zeros([a['si'] for a in active])
         eps_bar_part = np.zeros_like(eps)
         proj_bar = None
-
-        def chain_frequency(owner, terms):
-            """Every state's B_p_bar += its term at one frequency, added by
-            the frequency's owner and handed to every rank
-            (`ordered_chain_sum`)."""
-            for a in active:
-                si = a['si']
-                Bp_bars[si] = ordered_chain_sum(
-                    {0: terms[si]} if owner == rank else {}, [owner], comm,
-                    Bp_bars[si])
-
         if active:
             eps_terms = []
             proj_bar = proj_tau.zeros_like()
-            for fb in proj_tau.blocks(grid.cosft_wt, self.tile_gb,
-                                      self.nu_mine):
-                owned = {}
-                for m, k in enumerate(fb.ks):
-                    solve = screening_solver(eye - fb.chi0[m])
-                    chi0_bar = np.zeros((naux, naux))
-                    terms, wtbs = {}, {}
-                    for j, a in enumerate(active):
-                        WtB = solve(a['Bp'])
-                        bb, cb, e_k = integral_term_reverse(a, WtB, k)
-                        terms[a['si']] = bb
-                        chi0_bar += cb
-                        eps_terms.append(((k, j), e_k))
-                        if a['si'] in paired:
-                            wtbs[a['si']] = WtB
-                    # the off-diagonal contractions' adjoints, on the same
-                    # solves
-                    for i, j, wc_bar in pairs:
-                        bi, bj, cb = pair_term_backward(
-                            Bps[i], Bps[j], wtbs[i], wtbs[j], wc_bar[k])
-                        terms[i] = terms[i] + bi
-                        terms[j] = terms[j] + bj
-                        chi0_bar += cb
-                    fb.chi0[m] = chi0_bar
-                    if fb.owners is None:
-                        chain_frequency(rank, terms)
-                    else:
-                        owned[k] = terms
-                    terms = wtbs = None
-                # B_p_bar is (naux, nmo) a frequency, 0.34 GB at the
-                # chlorophyllide dimer/cc-pVTZ: a round's terms join the
-                # running sum in frequency order as soon as the round is
-                # solved, so a rank holds one frequency's, whatever the number
-                # of frequencies
-                if fb.owners is not None:
-                    for k, owner in zip(fb.block, fb.owners):
-                        chain_frequency(int(owner), owned.get(k))
-                owned = None
-                proj_bar.fold(grid.cosft_wt, fb)
-            fb = solve = chi0_bar = None
+            # a held frequency: its factor, chi0_bar and the pairs' chi0_bar,
+            # and the B_p_bar terms of the state passing by and of the
+            # largest subspace's states, with their solves
+            # (`_reverse_group`)
+            widest = max((len(c) for c in self.subspaces), default=0)
+            live = 3 + (2 * widest + 1) * Bps.shape[1] / naux
+            k0, k1 = frequency_blocks(len(grid.cosft_wt), naux, self.tile_gb,
+                                      live)[0]
+            cap = k1 - k0
+            blocks = proj_tau.blocks(grid.cosft_wt, self.tile_gb, self.nu_mine)
+            for group in frequency_groups(blocks, cap, self.nranks > 1):
+                self._reverse_group(group, eps_terms, Bp_bars)
+                for fb in group:
+                    proj_bar.fold(grid.cosft_wt, fb)
+                group = fb = None
             eps_bar_part = ordered_sum(eps_terms, comm, onto=eps_bar_part)
             eps_terms = None
         self.eps_bar += eps_bar_part
         self.lap = _lap(self.timer, 'qp_set.frequency_reverse', self.lap)
         self.Bp_bars, self.proj_bar = Bp_bars, proj_bar
+
+    def _reverse_group(self, group, eps_terms, Bp_bars):
+        """One group of pass 2: each held frequency's chi0 replaced by its
+        chi0_bar, every state's B_p_bar terms chained onto Bp_bars."""
+        active, comm, rank, eye = self.active, self.comm, self.rank, self.eye
+        Bps, paired, pairs = self.Bps, self.paired, self.pairs
+        held = []
+        for fb in group:
+            for m, k in enumerate(fb.ks):
+                held.append((fb.chi0, m, k, screening_solver(eye - fb.chi0[m])))
+                fb.chi0[m] = 0.0
+        # every frequency of the group in order, with the rank that holds it
+        chain = [(k, rank if fb.owners is None else int(owner))
+                 for fb in group
+                 for k, owner in zip(fb.block, fb.owners or fb.block)]
+
+        # states whose terms wait to be chained together: consecutive states
+        # of one slice owner, summed as one stacked sum, so one sum (two
+        # collectives of every rank, `ordered_sliced_sum`) carries all of them
+        pending, waiting = [], [0]
+        # what one pending state costs the busiest rank: its terms at that
+        # rank's frequencies, kept until the flush, stacked there, cut into
+        # slices and packed for the exchange, and the sum's slices received,
+        # its slice and the root's copy (replicated: the owners are)
+        busiest = max((sum(1 for _, owner in chain if owner == r)
+                       for r in set(owner for _, owner in chain)), default=0)
+        per_state = (4 * busiest + 4) * int(np.prod(Bp_bars.shape)) * 8
+
+        def flush():
+            """The pending states' terms joined onto their B_p_bar in
+            frequency order, at the slices' owner: the stacked sum adds each
+            state's terms element by element in the same order as a chain of
+            its own, so the same bits."""
+            if not pending:
+                return
+            root = Bp_bars.owner(pending[0][0])
+            shape = (len(pending),) + tuple(Bp_bars.shape)
+            onto = (np.stack([Bp_bars.held[si] for si, _ in pending])
+                    if rank == root else np.empty(shape))
+            total = ordered_sliced_sum(
+                {n: np.stack([terms[k] for _, terms in pending])
+                 for n, (k, owner) in enumerate(chain) if owner == rank},
+                [owner for _, owner in chain], comm, onto, root=root)
+            if rank == root:
+                for b, (si, _) in enumerate(pending):
+                    Bp_bars.held[si] = total[b]
+            pending.clear()
+            waiting[0] = 0
+
+        def chain_state(si, terms):
+            """terms {k: B_p_bar term} of state si, to be joined onto its
+            B_p_bar in frequency order at the slice's owner; batched with
+            the states before it while they share an owner and stay under
+            QP_CHAIN_BATCH_GB on the busiest rank (every rank decides alike:
+            the owners and shapes are replicated)."""
+            if pending and Bp_bars.owner(si) != Bp_bars.owner(pending[0][0]):
+                flush()
+            pending.append((si, terms))
+            waiting[0] += per_state
+            if waiting[0] >= QP_CHAIN_BATCH_GB * BYTES_PER_GB:
+                flush()
+
+        def close(subspace):
+            """A subspace's terms on its states' kept solves: at each held
+            frequency its states' own and its pairs' B_p_bar terms and
+            chi0_bar at once (`subspace_terms_backward`), the chi0_bar into
+            pairs_bar; then its states' terms are chained and its slices and
+            solves let go."""
+            near = [p for p in pairs if p[0] in subspace]
+            states = [a for a in active if a['si'] in subspace]
+            for n, (chi0, m, k, solve) in enumerate(held):
+                bars, term = subspace_terms_backward(
+                    {a['si']: solved[a['si']][0] for a in states},
+                    {a['si']: solved[a['si']][1][k] for a in states},
+                    {a['si']: integral_weights(a, k) for a in states},
+                    [(i, j, wc_bar[k]) for i, j, wc_bar in near], self.tile_gb)
+                for s, bar in bars.items():
+                    kept[s][k] = bar
+                pairs_bar[n] = term if pairs_bar[n] is None else pairs_bar[n] + term
+                bars = term = None
+            for s in subspace:
+                del solved[s]
+            for a in active:
+                if a['si'] in subspace:
+                    chain_state(a['si'], kept.pop(a['si']))
+
+        # a paired state keeps its slice and its solve at every held
+        # frequency until the last state of its subspace has passed: pairs
+        # join states of one subspace only, so one subspace's solves are held
+        # at a time where the subspaces pass one after another
+        closing = {}
+        for subspace in self.subspaces:
+            last = max(j for j, a in enumerate(active) if a['si'] in subspace)
+            closing.setdefault(last, []).append(subspace)
+        kept, solved, pairs_bar = {}, {}, [None] * len(held)
+        for j, a in enumerate(active):
+            si = a['si']
+            Bp = Bps.fetch(si)
+            terms, solves = {}, {}
+            for chi0, m, k, solve in held:
+                WtB = solve(Bp)
+                bb, cb, e_k = integral_term_reverse(a, Bp, WtB, k,
+                                                    paired=si in paired)
+                eps_terms.append(((k, j), e_k))
+                if si in paired:
+                    solves[k] = WtB
+                else:
+                    chi0[m] += cb
+                    terms[k] = bb
+                WtB = None
+            if si in paired:
+                kept[si], solved[si] = terms, (Bp, solves)
+            else:
+                chain_state(si, terms)
+            Bp = terms = solves = None
+            for subspace in closing.get(j, ()):
+                close(subspace)
+        flush()
+        # the subspaces' chi0_bar (their states' own and their pairs')
+        # after the unpaired states', in subspace order
+        for n, (chi0, m, k, solve) in enumerate(held):
+            if pairs_bar[n] is not None:
+                chi0[m] += pairs_bar[n]
+        pairs_bar = None
 
     def direct_terms(self):
         """PASS 3 -- per state: the direct term, the residues, the slice
@@ -863,10 +1073,11 @@ class QPSetPass:
                 D_bar = GridTileRows.zeros(D.shape[0], self.naux, rows_block,
                                            comm)
         for a in active:
-            p, zw, Bp, res, route = (a['p'], a['zw'], a['Bp'], a['res'],
-                                     a['route'])
+            p, zw, res, route = a['p'], a['zw'], a['res'], a['route']
+            Bp = self.Bps.fetch(a['si'])
+            Bp_bar = Bp_bars.fetch(a['si'])
+            Bp_bars.held.pop(a['si'], None)
             rs = a.pop('rs')
-            Bp_bar = Bp_bars[a['si']]
             eps_bar[p] += zw
             if res:
                 e_r, b_r, _ = residue_terms_backward(p, roots[p], Bp, eps,
@@ -997,20 +1208,28 @@ def _grid_shape(factor, name):
 
 def pair_contractions(tape, grid, pairs, tile_gb=None, comm=None):
     """The off-diagonal contractions wc_ij (`cd_pair_contraction_multi`) of
-    `pairs`, positions into the states of a `QPSetTape`, on its proj(tau) and
-    slices; split over the contour-deformation frequencies as the diagonal
-    ones are and reduced, so every rank holds the serial ones bitwise."""
-    comm = current_comm() if comm is None else comm
-    nranks = 1 if comm is None else comm.Get_size()
-    mine = (partition(len(grid.cosft_wt), comm.Get_rank(), nranks)
-            if nranks > 1 else None)
-    out = cd_pair_contraction_multi(
-        tape.proj_tau, grid.cosft_wt, tape.Bps, pairs,
-        tile_gb=ISDF_TILE_GB if tile_gb is None else tile_gb,
-        freq_indices=mine)
-    if nranks > 1:
-        out = list(reduce_sum(np.stack(out), comm))
-    return out
+    `pairs`, positions into the states of a `QPSetTape`: read from the tape
+    where its frequency pass took them (`QPSetTape.pair_wcs`), the rest on
+    its proj(tau) and slices, split over the contour-deformation frequencies
+    as the diagonal ones are and reduced, so every rank holds the serial ones
+    bitwise either way. The tape's pairs are known alike on every rank, so
+    the rest is one collective call or none."""
+    held = tape.pair_wcs or {}
+    pairs = [(int(i), int(j)) for i, j in pairs]
+    rest = [ij for ij in pairs if ij not in held]
+    if rest:
+        comm = current_comm() if comm is None else comm
+        nranks = 1 if comm is None else comm.Get_size()
+        mine = (partition(len(grid.cosft_wt), comm.Get_rank(), nranks)
+                if nranks > 1 else None)
+        out = cd_pair_contraction_multi(
+            tape.proj_tau, grid.cosft_wt, tape.Bps, rest,
+            tile_gb=ISDF_TILE_GB if tile_gb is None else tile_gb,
+            freq_indices=mine)
+        if nranks > 1:
+            out = list(reduce_sum(np.stack(out), comm))
+        held = dict(held, **dict(zip(rest, out)))
+    return [held[ij] for ij in pairs]
 
 
 def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
@@ -1021,7 +1240,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                     n_poles=SOP_N_POLES, sop_stride=None,
                     scissor=None, sop_poles=None, comm=None,
                     rows_block=None, tape=None, timer=None, pairs=(),
-                    keep_tape=True, z0=None):
+                    keep_tape=True, z0=None, wc_pairs=()):
     """(eps^QP values, eps_bar, X_bar, D_bar) for sum_p weights[p] eps^QP_p.
 
     A BSE@GW excitation energy carries a weight on EVERY quasiparticle on the
@@ -1063,8 +1282,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
     active set off the weights; X and D are identical by construction and are
     not broadcast again, an audited run comparing their digests on entry and
     the outputs' on exit. proj(tau) and projbar are held by auxiliary rows
-    (`ProjRows`, 19.1 GB a rank at the chlorophyllide hexamer over 8 ranks
-    where the whole array is 153): the tau sweep is split over tau and its
+    (`ProjRows`, a rank's share of the whole array): the tau sweep is split over tau and its
     slices exchanged into rows, its reverse split over tau and reduced once
     (the three adjoints); the forward contraction and the reverse pass are
     split over the contour-deformation frequencies, each frequency's chi0
@@ -1123,6 +1341,10 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                  `cd_pair_contraction_multi`, (nfreq, norb), folded into the
                  same reverse pass; both states are reversed even at a zero
                  weight, and must reach the factors through the integral term.
+    wc_pairs:    (i, j) positions into `states`: off-diagonal contractions
+                 wc_ij the forward frequency pass takes beside the diagonal
+                 ones, on the same solves, and keeps on the tape
+                 (`QPSetTape.pair_wcs`) for `pair_contractions`.
     """
     if residue_route not in KERNEL_RESIDUE_ROUTES:
         raise ValueError(f'residue_route {residue_route!r}: one of '
@@ -1131,7 +1353,7 @@ def qp_set_gradient(X, D, eps, nocc, grid, nu_points, nu_weights, states,
                     weights, residue_route, mu, xc_correction, w0, tol,
                     laplace_tol, tile_gb, follow, route_out, n_poles,
                     sop_stride, scissor, sop_poles, comm, rows_block, tape,
-                    timer, pairs, keep_tape, z0)
+                    timer, pairs, keep_tape, z0, wc_pairs)
     run.forward_contraction()
     run.solve_states()
     run.reverse_frequencies()

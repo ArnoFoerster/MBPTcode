@@ -36,7 +36,8 @@ from src.Base.declaration import (ChargedExcitation, Excitation,
                                   SurfacePhysics)
 from src.SingleReference.common.eri_blocks import MOEriBlocks, df_eri_mo, mo_eri
 from src.Base.environment_seam import environment_of
-from src.Base.factorization.isdf_jk import ISDFJK
+from src.Base.numerics.numerics import required_numerics
+from src.Base.factorization.isdf_jk import exchange_realization
 from src.gradients.isdf_mean_field import mean_field_skeleton_force
 from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.utils.parallel.mpi_grid import lockstep
@@ -238,12 +239,10 @@ def mean_field_integrals(mf, mol):
     None), ('df', its auxiliary molecule at `mol`) for a pyscf density-fitted
     SCF, or ('isdf', None) for an ISDF-K one (DF Coulomb, interpolated
     exchange), which no dense post-SCF step reproduces."""
-    with_df = getattr(mf, 'with_df', None)
-    if isinstance(with_df, ISDFJK):
-        return 'isdf', None
-    if with_df is not None:
-        return 'df', make_auxmol(mol, with_df.auxbasis)
-    return 'exact', None
+    realization = exchange_realization(mf)
+    if realization == 'df':
+        return 'df', make_auxmol(mol, mf.with_df.auxbasis)
+    return realization, None
 
 
 def refuse_mismatched_integrals(mf, mol, auxmol, surface, auxbasis=True):
@@ -322,14 +321,19 @@ class DenseRPASurface(PotentialEnergySurface):
     A mean field carrying a continuum is REFUSED rather than ignored: the
     interaction here is bare and a polarizable environment dresses it, so
     silently computing E_c[v] on one is `refuse_a_solvated_mean_field`'s job.
+
+    numerics: the run's `Numerics`, which the force's orbital-response
+    (multiplier) solve reads; a surface without one gives energies and
+    refuses a force.
     """
 
     #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field', 'physics'})
 
-    def __init__(self, mol, scf_factory=None):
+    def __init__(self, mol, scf_factory=None, numerics=None):
         self.mol0 = mol
         self._scf = scf_factory or tight_rhf
+        self.response_numerics = numerics
         # The starting point is free -- Kohn-Sham included -- so the functional
         # is read off the mean field rather than assumed.
         self.physics_ground_state = declared_ground_state(self._scf(mol), 'rpa')
@@ -371,6 +375,8 @@ class DenseRPASurface(PotentialEnergySurface):
     @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
         """(dE_0/dR, E_0, diagnostics), fully analytic."""
+        numerics = required_numerics(self.response_numerics,
+                                     'DenseRPASurface.total_gradient')
         mol = self.mol0 if mol is None else mol
         mf = self._scf(mol) if mf is None else mf
         refuse_mismatched_integrals(mf, mol, None, 'DenseRPASurface',
@@ -382,7 +388,7 @@ class DenseRPASurface(PotentialEnergySurface):
         y_extra, g_extra = kohn_sham_gradient_correction(mol, mf, nocc)
         (g_corr,), (diag,) = correlation_gradients(mol, mf,
                                                    [(g_fock, g_eri, y_extra)],
-                                                   eri_mo=eri)
+                                                   eri_mo=eri, numerics=numerics)
         grad = mean_field_skeleton_force(mf) + g_corr + g_extra
         return lockstep((grad, e0.total, {
             'e_corr': float(qp.qb.e_corr()),
@@ -392,7 +398,7 @@ class DenseRPASurface(PotentialEnergySurface):
     def refreeze(self, mol, mf=None):
         """Nothing is frozen on this surface; the copy is for the protocol.
         mf: not read; the surface converges its own SCF at `mol`."""
-        return DenseRPASurface(mol, self._scf)
+        return DenseRPASurface(mol, self._scf, numerics=self.response_numerics)
 
     def identity(self):
         """None: this surface freezes nothing that its forces could be told
@@ -420,13 +426,17 @@ class QuasiparticleSurface(PotentialEnergySurface):
     and the quasiparticle energy by <p|Sigma_x - v_xc|p>, and both travel with
     their nuclear derivatives (`kohn_sham_gradient_correction`), so the force
     stays the derivative of the energy this object reports.
+
+    numerics: the run's `Numerics`, which the force's orbital-response
+    (multiplier) solve reads; a surface without one gives energies and
+    refuses a force.
     """
 
     #: The ingredients this surface provides (`surface.INGREDIENT_DOCS`).
     INGREDIENTS = frozenset({'mean_field', 'physics'})
 
     def __init__(self, mol, scf_factory, charge_change=-1, screening='rpa',
-                 orbital=None):
+                 orbital=None, numerics=None):
         if charge_change not in (-1, +1):
             raise ValueError(f'charge_change {charge_change}: -1 removes an '
                              f'electron, +1 adds one')
@@ -434,6 +444,7 @@ class QuasiparticleSurface(PotentialEnergySurface):
             raise ValueError(f"screening {screening!r}: 'rpa' or 'tda'")
         self.mol0 = mol
         self._scf = scf_factory
+        self.response_numerics = numerics
         self.charge_change = charge_change
         self.screening = screening
         # eps enters with the sign of the electron count change reversed.
@@ -561,6 +572,8 @@ class QuasiparticleSurface(PotentialEnergySurface):
     @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
         """(dE/dR, E, diagnostics) for the N-/+1 state, fully analytic."""
+        numerics = required_numerics(self.response_numerics,
+                                     'QuasiparticleSurface.total_gradient')
         mol = self.mol0 if mol is None else mol
         mf = self._scf(mol) if mf is None else mf
         refuse_a_solvated_mean_field(mf, 'QuasiparticleSurface', force=True)
@@ -590,7 +603,7 @@ class QuasiparticleSurface(PotentialEnergySurface):
         y_extra, g_extra = kohn_sham_gradient_correction(mol, mf, nocc, shift)
         (g_corr,), (diag,) = correlation_gradients(mol, mf,
                                                    [(g_fock, g_eri, y_extra)],
-                                                   eri_mo=eri)
+                                                   eri_mo=eri, numerics=numerics)
         grad = mean_field_skeleton_force(mf) + g_corr + g_extra
         return lockstep((grad, float(energy), {
             'qp_energy_eV': float(w) * HARTREE_TO_EV,
@@ -602,7 +615,7 @@ class QuasiparticleSurface(PotentialEnergySurface):
         """The same process with the orbital re-chosen at `mol`. mf: not
         read; the surface converges its own SCF at `mol`."""
         return QuasiparticleSurface(mol, self._scf, self.charge_change,
-                                    self.screening)
+                                    self.screening, numerics=self.response_numerics)
 
     def identity(self):
         """None: this surface freezes nothing that its forces could be told
@@ -649,7 +662,7 @@ class DenseBSESurface(PotentialEnergySurface):
 
     def __init__(self, mol, variant='BSE@GW', state=0, qp_orbs=None,
                  filter_z=False, scf=None, auxbasis=None, eri_blocks=False,
-                 spin='singlet'):
+                 spin='singlet', numerics=None):
         """eri_blocks: build only the MO blocks the energy needs.
 
         The full (pq|rs) is nao^4, which is what puts the letter's own basis
@@ -660,8 +673,13 @@ class DenseBSESurface(PotentialEnergySurface):
         filter_z: True drops from the set the orbitals whose root has a pole
         strength at or below QP_WINDOW_Z_MIN at `mol` (warned and flagged);
         False, the default, keeps the whole window with every root.
+
+        numerics: the run's `Numerics`, which the forces' orbital-response
+        (multiplier) solve reads; a surface without one gives energies and
+        refuses a force.
         """
         self.eri_blocks = eri_blocks
+        self.response_numerics = numerics
         self.mol0 = mol
         self.variant = variant
         # Kappa weights the bare exchange alone; the screening and the
@@ -848,6 +866,8 @@ class DenseBSESurface(PotentialEnergySurface):
         Refuses a Kohn-Sham `mf` through `BSEqbAdjoint.partials`, per the class
         docstring: the shift's gradient on a BSE root is not carried here.
         """
+        numerics = required_numerics(self.response_numerics,
+                                     'DenseBSESurface.excitation_gradient')
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
         refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
@@ -865,7 +885,7 @@ class DenseBSESurface(PotentialEnergySurface):
             g_extra = qp_xc_correction_skeleton(mf, shift, nocc)
         aux = self._auxmol(mol)
         Gs, diags = correlation_gradients(mol, mf, [target], eri_mo=eri,
-                                          auxmol=aux)
+                                          auxmol=aux, numerics=numerics)
         omega = float(b.Omega[self.state])
         return lockstep((Gs[0] + g_extra, omega, {
             'omega': omega, 'stationarity': float(diags[0]['stationarity']),
@@ -880,12 +900,14 @@ class DenseBSESurface(PotentialEnergySurface):
         """
         if self.auxbasis is None:
             return None
-        return gto.M(atom=[(mol.atom_pure_symbol(i), tuple(c)) for i, c
+        return gto.M(atom=[(mol.atom_symbol(i), tuple(c)) for i, c
                            in enumerate(mol.atom_coords())],
                      unit='Bohr', basis=self.auxbasis, verbose=0)
 
     @flags_in_diagnostics
     def total_gradient(self, mol=None, mf=None):
+        numerics = required_numerics(self.response_numerics,
+                                     'DenseBSESurface.total_gradient')
         mol = mol or self.mol0
         mf = mf or self.scf_factory(mol)
         refuse_a_solvated_mean_field(mf, 'DenseBSESurface', force=True)
@@ -906,7 +928,8 @@ class DenseBSESurface(PotentialEnergySurface):
                                                              shift)
             target += (y_extra,)
         Gs, diags = correlation_gradients(mol, mf, [target], eri_mo=eri,
-                                          auxmol=self._auxmol(mol))
+                                          auxmol=self._auxmol(mol),
+                                          numerics=numerics)
         omega = float(b.Omega[self.state])
         return lockstep((mean_field_skeleton_force(mf) + Gs[0] + g_extra,
                          e0 + omega,
@@ -943,7 +966,8 @@ class DenseBSESurface(PotentialEnergySurface):
                                qp_orbs=self._qp_orbs_in,
                                filter_z=self.filter_z, scf=self._scf,
                                auxbasis=self.auxbasis,
-                               eri_blocks=self.eri_blocks, spin=self.spin)
+                               eri_blocks=self.eri_blocks, spin=self.spin,
+                               numerics=self.response_numerics)
 
     def identity(self):
         """None: this surface freezes nothing that its forces could be told

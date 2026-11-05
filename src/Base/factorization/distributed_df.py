@@ -156,26 +156,35 @@ pyscf's own blocking. They were checked against pyscf 2.12.1, the version the
 tests here run on; a pyscf that renames one fails at import, not in a result.
 """
 import contextlib
+import tempfile
 import time
 import weakref
 
 import numpy as np
 import scipy.linalg
 from pyscf import df, gto, lib
-from pyscf.df import addons, df_jk
-from pyscf.df.incore import _eig_decompose
+from pyscf.df import addons, df_jk, incore, outcore
+from pyscf.df.incore import LINEAR_DEP_THR, _eig_decompose
 from pyscf.df.outcore import _guess_shell_ranges
 from pyscf.dft import gen_grid, numint
 from pyscf.dft.gen_grid import ALIGNMENT_UNIT
 from pyscf.lib import logger
 
-from src.Base.numerics.constants import BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION
+from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_TRANSIENT_FRACTION, DF_JK_BLOCK_GB,
+                                         DF_JK_BLOCK_ROWS_MAX, XC_BLOCK_MAX_MB)
+from src.Base.environment_seam import attach_cavity_comm, detach_cavity_comm
+from src.Base.factorization.df_distribution import (InstalledWithDF, add_count, add_seconds,
+                                                   distributed_handles, lockstep_density,
+                                                   reduce_parts)
+from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
 from src.Base.factorization.isdf_jk import ISDFJK, omega_key
 from src.Base.utils.parallel import memory
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (broadcast, contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
                                               lockstep_mean_field, lockstep_stats,
-                                              partition, reduce_sum, replicate)
+                                              partition, reduce_max, reduce_sum,
+                                              replicate)
 from src.Base.utils.parallel.threads import blas_full_pool, blas_single_threaded
 
 #: What a distributed run leaves on `mf._distributed_timings`, on every rank.
@@ -260,18 +269,6 @@ _GRID_ARRAYS = ('coords', 'weights', 'atm_idx', 'quadrature_weights',
                 'non0tab', 'screen_index')
 
 
-def add_seconds(timings, key, since):
-    """Add the seconds since `since` to `key`. No dict, no timing."""
-    if timings is not None:
-        timings[key] = timings.get(key, 0.0) + (time.time() - since)
-
-
-def add_count(timings, key, n=1):
-    """`n` more of whatever `key` counts."""
-    if timings is not None:
-        timings[key] = timings.get(key, 0) + n
-
-
 def _timed(func, timings, key):
     """`func` with the clock read around it and nothing else changed."""
     def call(*args, **kwargs):
@@ -345,38 +342,107 @@ def _restore_methods(mf, saved):
             setattr(mf, name, original)
 
 
-def _metric_factor(mol, auxmol):
+def metric_factor(mol, auxmol, j2c=None, mode=None):
     """(L, mode) with (P|Q) = L L^T, or the eigen-replacement where it is not
-    positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes.
+    positive definite -- the choice `pyscf/df/incore.py::cholesky_eri` makes:
+    mode 'eig' and L^T the kept eigenvectors over the square roots of their
+    eigenvalues (above LINEAR_DEP_THR), so L L^T is the pseudo-inverse.
+    j2c: the metric matrix itself, by default pyscf's (hermi=1). mode 'cd'
+    or 'eig' takes that factor instead of pyscf's choice (a correlation fit's,
+    `correlation_metric_mode`).
 
-    Rank 0's alone, because `mode` is a discrete decision taken from threaded
-    dense arithmetic: a rank that fell back to the eigendecomposition holds a
-    factor with fewer rows than one that did not, and the ranks would then be
-    slicing auxiliary indices of different lengths.
+    Rank 0's alone across ranks (`rank0_metric_factor`), because `mode`
+    is a discrete decision taken from threaded dense arithmetic: a rank that
+    fell back to the eigendecomposition holds a factor with fewer rows than
+    one that did not, and the ranks would then be slicing auxiliary indices
+    of different lengths.
     """
-    j2c = auxmol.intor('int2c2e', hermi=1)
+    if j2c is None:
+        j2c = auxmol.intor('int2c2e', hermi=1)
+    if mode == 'eig':
+        return _eig_decompose(mol, j2c), 'eig'
+    if mode == 'cd':
+        return scipy.linalg.cholesky(j2c, lower=True), 'cd'
     try:
         return scipy.linalg.cholesky(j2c, lower=True), 'cd'
     except scipy.linalg.LinAlgError:
         return _eig_decompose(mol, j2c), 'eig'
 
 
-def _replicated_metric_factor(mol, auxmol, comm):
-    """Rank 0's metric factor and its mode on every rank.
+def correlation_metric_mode(auxmol, comm=None):
+    """The factor a correlation fit takes on the metric of auxmol: 'eig' (the
+    eigen-replacement) where an eigenvalue lies below LINEAR_DEP_THR, the cut
+    that replacement applies, and 'cd' otherwise.
+
+    pyscf's own choice (`metric_factor` without a mode) is whether the
+    Cholesky factorization happens to fail, and on a metric whose smallest
+    eigenvalues are round-off that is a property of the BLAS: one library
+    whitens directions another drops, and the energy and the force of the fit
+    move with it. From the spectrum the choice is the same on every library,
+    and a metric it gives 'cd' is positive definite far above round-off, so
+    its Cholesky factor is pyscf's. Rank 0's on every rank of comm (None: this
+    process alone), as `rank0_metric_factor`'s.
+    """
+    def decide():
+        j2c = auxmol.intor('int2c2e', hermi=1)
+        return 'eig' if scipy.linalg.eigvalsh(j2c)[0] < LINEAR_DEP_THR else 'cd'
+    if comm is None or comm.Get_size() == 1:
+        return decide()
+    return broadcast(decide() if comm.Get_rank() == 0 else None, comm)
+
+
+def correlation_df(mol, auxbasis, max_memory):
+    """A built `pyscf.df.DF` of the correlation fit auxbasis on mol, with the
+    factor `correlation_metric_mode` chooses on this process (pyscf's
+    `DF.build` takes pyscf's): in memory where the tensor fits, on disk as
+    `DF.build` would put it otherwise."""
+    with_df = df.DF(mol, auxbasis=auxbasis)
+    with_df.max_memory = max_memory
+    auxmol = addons.make_auxmol(mol, auxbasis)
+    if correlation_metric_mode(auxmol) == 'cd':
+        return with_df.build()
+    with_df.auxmol = auxmol
+    nao_pair = mol.nao_nr() * (mol.nao_nr() + 1) // 2
+    free = with_df.max_memory - lib.current_memory()[0]
+    int3c, int2c = mol._add_suffix('int3c2e'), mol._add_suffix('int2c2e')
+    if nao_pair * auxmol.nao_nr() * 8 / 1e6 < .9 * free:
+        with_df._cderi = incore.cholesky_eri(mol, int3c=int3c, int2c=int2c, auxmol=auxmol,
+                                             max_memory=free, decompose_j2c='eig',
+                                             lindep=LINEAR_DEP_THR)
+    else:
+        with_df._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        outcore.cholesky_eri_b(mol, with_df._cderi_to_save.name, dataname=with_df._dataname,
+                               int3c=int3c, int2c=int2c, auxmol=auxmol, max_memory=free,
+                               decompose_j2c='ED', lindep=LINEAR_DEP_THR)
+        with_df._cderi = with_df._cderi_to_save
+    return with_df
+
+
+def rank0_metric_factor(mol, auxmol, comm=None, j2c=None, mode=None):
+    """Rank 0's `metric_factor` and its mode on every rank of comm (default:
+    the current region's; None or one rank: this process alone). Every rank
+    takes rank 0's choice between the Cholesky factor and the
+    eigen-replacement, so no rank decides it alone; mode as `metric_factor`'s.
 
     L^-1 mixes the whole auxiliary index into every row, so rows built against
     two factors that differ in the last bits are rows of two different tensors
     and their partials are not partials of one sum. (naux, naux) doubles, one
     broadcast, once.
     """
+    comm = current_comm() if comm is None else comm
+    if comm is None or comm.Get_size() == 1:
+        return metric_factor(mol, auxmol, j2c, mode)
     if comm.Get_rank() == 0:
-        low, mode = _metric_factor(mol, auxmol)
-        header = (mode, low.shape, low.dtype.str)
+        low, mode = metric_factor(mol, auxmol, j2c, mode)
+        order = 'C' if low.flags.c_contiguous else 'F'
+        header = (mode, low.shape, low.dtype.str, order)
     else:
         low, header = None, None
-    mode, shape, dtype = broadcast(header, comm)
+    mode, shape, dtype, order = broadcast(header, comm)
     if low is None:
-        low = np.empty(shape, dtype=dtype)
+        # rank 0's memory order too: a triangular solve against the same
+        # factor in the other order takes another BLAS path and other bits
+        low = np.empty(shape, dtype=dtype, order=order)
     replicate(low, comm=comm)
     return low, mode
 
@@ -525,51 +591,6 @@ def _distributed_cderi(mol, auxmol, low, mode, blocks, comm, timings=None):
     return rows
 
 
-def lockstep_density(dms, comm, timings=None):
-    """Rank 0's density matrix, and the orbitals and occupations tagging it,
-    written into this rank's own arrays; the same object back.
-
-    The tag travels with the density because both `df_jk.get_jk` and
-    `numint._gen_rho_evaluator` read it -- K and rho from the orbitals, not
-    from D -- so a density locked without its orbitals would still hand the
-    partial this rank's own. In place, so the SCF loop that owns these arrays
-    decides its next step from rank 0's copy too.
-
-    Checked (`mpi_grid.lockstep(check=True)`): every rank diagonalized the
-    same all-reduced Fock matrix, so digests prove the density rank 0's and
-    only a drifted array is broadcast.
-    """
-    if np.iscomplexobj(dms):
-        raise NotImplementedError(
-            'the reduction moves float64; a complex density matrix would need '
-            'its halves reduced separately')
-    t0 = time.time()
-    lockstep((dms, getattr(dms, 'mo_coeff', None),
-              getattr(dms, 'mo_occ', None)), comm, check=True)
-    add_seconds(timings, 'scf_lockstep', t0)
-    return dms
-
-
-def reduce_parts(arrays, comm):
-    """The ranks' partials added, in one reduction for the whole Fock piece.
-
-    The sum is re-associated (rank boundaries first, then whatever order a
-    rank used inside its own block), so the result differs from the serial
-    one in the last bits. `reduce_sum` adds in rank order, so it differs in
-    the same last bits on every rank and in every repeat.
-    """
-    shapes = [np.shape(a) for a in arrays]
-    buf = np.concatenate([np.ravel(np.asarray(a, dtype=float))
-                          for a in arrays])
-    reduce_sum(buf, comm)
-    out, off = [], 0
-    for shape in shapes:
-        n = int(np.prod(shape, dtype=int))
-        out.append(buf[off:off + n].reshape(shape))
-        off += n
-    return out
-
-
 def _grid_slice(mol, coords, weights, cutoff, rank, size, make_mask):
     """A `Grids` carrying this rank's points and its own screening mask.
 
@@ -606,31 +627,12 @@ def _builds_no_grid(mf):
     return initialize_grids
 
 
-class InstalledWithDF:
-    """`install` / `uninstall` of a distributed `with_df` handle.
-
-    A rank's share is not the whole: a downstream caller that reads
-    `mf.with_df` (iterates `loop()` for the GW fit or the solvent screening,
-    takes the grid a gradient differentiates) would read one rank's rows or
-    tiles and call them the tensor. So the handle answers J/K only while a
-    distributed stage is running; `uninstall` puts the caller's own object
-    back and keeps this rank's share.
-    """
-
-    def install(self, mf):
-        """Answer this mean field's J/K until `uninstall`."""
-        if mf.with_df is not self:
-            self._replaced = (mf, mf.with_df)
-            mf.with_df = self
-        return self
-
-    def uninstall(self):
-        """Put the mean field's own `with_df` back, keeping this rank's share."""
-        pair, self._replaced = self._replaced, None
-        if pair is not None:
-            mf, with_df = pair
-            mf.with_df = with_df
-        return self
+def exchange_block_rows(nao):
+    """Auxiliary rows per block of a rank's J/K build at `nao` AOs: pyscf's
+    K loop holds (2, rows, nao, nao), kept under DF_JK_BLOCK_GB, between 4
+    and DF_JK_BLOCK_ROWS_MAX. Depends on nao alone, so the K sum's blocking,
+    and its bits, never depend on the free memory."""
+    return fits(DF_JK_BLOCK_GB, 16.0 * int(nao) ** 2, cap=DF_JK_BLOCK_ROWS_MAX, least=4)
 
 
 class DistributedDF(InstalledWithDF, df.df.DF):
@@ -692,7 +694,7 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         t_build = time.time()
         mol = self.mol
         auxmol = self.auxmol = addons.make_auxmol(mol, self.auxbasis)
-        low, mode = _replicated_metric_factor(mol, auxmol, self.comm)
+        low, mode = rank0_metric_factor(mol, auxmol, self.comm)
         naux = low.shape[0]
         rank, size = self.comm.Get_rank(), self.comm.Get_size()
         start, stop = contiguous_block(naux, rank, size)
@@ -703,16 +705,23 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         need = (stop - start) * nao_pair * 8 / 1e6
         peak = need * (1 + DF_EXCHANGE_TRANSIENT_FRACTION)
         whole = naux * nao_pair * 8 / 1e6
-        if peak > left:
-            fits = int(np.ceil(whole / left)) if left > 0 else None
+        # the slice and the free memory differ per rank: the verdict is the
+        # worst rank's, so every rank raises or none does
+        short = reduce_max(np.array([peak - left]), self.comm)[0]
+        if short > 0:
+            ranks_needed = int(np.ceil(whole / left)) if left > 0 else None
             raise MemoryError(
-                f"this rank's {stop - start} of {naux} auxiliary rows are "
-                f'{need:.0f} MB, {peak:.0f} MB while the exchange that fills '
-                f'them is in flight, and {left:.0f} MB of max_memory are '
-                f'left; the whole tensor is {whole:.0f} MB and {fits} ranks '
-                'or more would hold it in core. This route keeps its slice in '
-                'core by construction and will not spill it to disk, which is '
-                'the cost it exists to remove.')
+                f'one rank is {short:.0f} MB short of max_memory for its slice '
+                f"of the fitted tensor. This rank's {stop - start} of {naux} "
+                f'auxiliary rows are {need:.0f} MB, {peak:.0f} MB while the '
+                f'exchange that fills them is in flight, and {left:.0f} MB of '
+                f'max_memory are left here; the whole tensor is {whole:.0f} MB '
+                f'and {ranks_needed} ranks or more would hold it in core. This route '
+                'keeps its slice in core by construction and will not spill it '
+                'to disk, which is the cost it exists to remove.')
+        # pyscf's J/K loops block by min(blockdim, free memory): a block of
+        # this many rows keeps their buffers under DF_JK_BLOCK_GB
+        self.blockdim = exchange_block_rows(nao)
         blocks = self._blocks = _column_blocks(mol, nao_pair, naux, size)
         self.column_blocks = tuple(int(i) for i
                                    in partition(len(blocks), rank, size))
@@ -778,15 +787,46 @@ class DistributedDF(InstalledWithDF, df.df.DF):
         if self._cderi is None:
             self.build()
         t0 = time.time()
+        columns = getattr(dm, 'read_columns', None)
         if self._cderi.shape[0] == 0:
             zero = np.zeros(np.shape(dm))
             vj, vk = zero, zero.copy()
+        elif with_k and columns is not None and np.ndim(dm) == 2:
+            vj = (df_jk.get_jk(self, dm, hermi, True, False, direct_scf_tol)[0]
+                  if with_j else None)
+            vk = self._exchange_on_columns(np.asarray(dm), columns)
         else:
             vj, vk = df_jk.get_jk(self, dm, hermi, with_j, with_k,
                                   direct_scf_tol)
         add_seconds(self.timings, 'scf_fock_jk', t0)
         add_count(self.timings, 'scf_requests_jk')
         return (vj if with_j else None), (vk if with_k else None)
+
+    def _exchange_on_columns(self, dm, columns):
+        """This rank's rows' K[dm] where the caller reads it only as K C.
+
+        A density tagged `read_columns` = C (nao, k) belongs to a caller that
+        uses the potential only through v C (`multipliers.rotation_gradient`
+        reads the occupied columns of C^T G C). K C = sum_Q L_Q dm (L_Q C)
+        costs 3 naux nao^2 k against the 2 naux nao^3 of a general K, and
+        (K C) C^+ stands for K: it is linear in the rows, so the ranks'
+        partials add up to the total's, and (K C) C^+ C = K C because C has
+        full column rank. Any other reader of a tagged density's potential
+        would get a different matrix, which is why only the caller that
+        reads columns sets the tag.
+        """
+        C = np.ascontiguousarray(columns, dtype=float)
+        nao, k = C.shape
+        KC = np.zeros((nao, k))
+        for eri1 in self.loop(exchange_block_rows(nao)):
+            L = lib.unpack_tril(eri1).reshape(-1, nao)       # (nb nao, nao)
+            nb = L.shape[0] // nao
+            X = (L @ C).reshape(nb, nao, k)                  # L_Q C
+            T = dm @ X.transpose(1, 0, 2).reshape(nao, nb * k)
+            T = np.ascontiguousarray(
+                T.reshape(nao, nb, k).transpose(1, 0, 2)).reshape(nb * nao, k)
+            KC += L.T @ T                                    # L_Q symmetric
+        return KC @ np.linalg.pinv(C)
 
     def _reduce_jk(self, vj, vk, with_j, with_k):
         """The ranks' partials added, in one reduction of both matrices.
@@ -905,7 +945,8 @@ class DistributedNumInt(numint.NumInt):
 
     def _follow_grid(self, mol, grids, max_memory):
         """Rank 0's grid decision on every rank, this rank's points of it
-        taken where it is new; rank 0's `max_memory`. Collective."""
+        taken where it is new; rank 0's `max_memory`, at most XC_BLOCK_MAX_MB.
+        Collective."""
         t0 = time.time()
         header = None
         if self.comm.Get_rank() == 0 and grids.coords is not None:
@@ -923,7 +964,7 @@ class DistributedNumInt(numint.NumInt):
         if fresh:
             self._take_grid(mol, grids, npoints, cutoff)
         add_seconds(self.timings, 'scf_grid' if fresh else 'scf_lockstep', t0)
-        return max_memory
+        return min(max_memory, XC_BLOCK_MAX_MB)
 
     # -- the response quadrature an orbital-response solve calls -------------
 
@@ -1101,8 +1142,6 @@ def distributed_df_jk(mf, comm=None, timings=None):
         return with_df
     if (isinstance(with_df, ISDFJK)
             or isinstance(getattr(with_df, 'source', None), ISDFJK)):
-        # cycle: distributed_isdf_jk imports this module's lockstep and sum
-        from src.Base.factorization.distributed_isdf_jk import distributed_isdf_jk
         return distributed_isdf_jk(mf, comm, timings)
     if type(with_df) is not df.df.DF:
         raise NotImplementedError(
@@ -1147,27 +1186,6 @@ def distributed_numint(mf, comm=None, timings=None, split=True):
             'density whose partials this reduction does not describe.')
     return DistributedNumInt(ni, mf.mol, comm, timings=timings,
                              split=split).install(mf)
-
-
-def distributed_handles(mf, comm=None):
-    """`mf`'s (J/K, quadrature, comm) handles under `comm`, or None.
-
-    What a converged distributed SCF leaves on `mf._distributed`: the objects
-    holding this rank's slice of the fitted tensor and of the grid, so a later
-    stage that wants the same Fock pieces (the static exchange the
-    quasiparticle routes build once) reuses them instead of paying the slice
-    build again. They are not installed on the mean field between stages;
-    `distributed_fock` is the bracket that installs them.
-
-    None where the handles belong to another communicator, which is a mean
-    field carried over from a run with a different rank count: rows cut for
-    four ranks are not a partition over eight.
-    """
-    comm = current_comm() if comm is None else comm
-    handles = getattr(mf, '_distributed', None)
-    if comm is None or comm.Get_size() == 1 or handles is None:
-        return None
-    return handles if handles[2] is comm else None
 
 
 def share_distributed(source, *targets):
@@ -1221,12 +1239,18 @@ def _lock_solvent(mf, comm, timings):
     density, (e_solvent, v_solvent): `get_veff` only TAGS the J/K matrix with
     it and `get_fock` and `energy_elec` add it, once per cycle. `_B_dot_x(dm1)`
     is its linear response, which an equilibrium response function adds (a
-    Newton step on the solvated orbital Hessian). Both are replicated and
-    cheap -- a cavity of a few hundred points -- so every rank computes them
+    Newton step on the solvated orbital Hessian). Every rank computes them
     from the density the J/K entry lockstepped, and the result is
     lockstepped to rank 0's (checked: only a rank apart moves anything). The
     loop's energy, Fock matrix and DIIS then read the same reaction field on
     every rank, which is what keeps the replicated drivers in step.
+
+    Their cost is the surface potential, (nao, nao, n_surf) three-centre
+    integrals, which is not small on a large molecule. Every rank enters both
+    calls here at the same point, so the block attaches `comm` to the
+    continuum (`attach_cavity_comm`): a continuum that splits its surface points
+    over ranks (`environments.pcm_factorization.tile_cavity`) reads it, and
+    any other ignores it.
 
     None where `mf` carries no continuum, or an enclosing block already
     locked it.
@@ -1241,6 +1265,7 @@ def _lock_solvent(mf, comm, timings):
         saved.append((name, solvent.__dict__.get(name)))
         setattr(solvent, name, _locked_call(getattr(solvent, name), comm,
                                             timings))
+    attach_cavity_comm(solvent, comm)
     _RANK_LOCKED.add(solvent)
     return solvent, saved
 
@@ -1251,6 +1276,7 @@ def _unlock_solvent(locked):
         return
     solvent, saved = locked
     _restore_methods(solvent, saved)
+    detach_cavity_comm(solvent)
     _RANK_LOCKED.discard(solvent)
 
 

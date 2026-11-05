@@ -47,6 +47,12 @@ block norm cancels the term that carries reverse intersystem crossing in a
 multiresonance emitter. A single element differenced with root following keeps
 it; (1) is that element's derivative.
 
+NEAR DEGENERACY. d_{n1} grows as 1/(E_1 - E_n), and once the vibronic
+coupling is comparable to the gap the first-order mixing behind (1) is no
+longer small. `path_ratio` reads that coupling-to-gap ratio off a path's own
+derivative, and `mixed_weight` gives the exact thermal mixing of the two-state
+linear vibronic pair, which saturates at 1/2 where (1) diverges.
+
 SIGNS. Every d_{n1} V(S1, T_n) product is invariant under the sign of T_n, and
 the whole sum flips with T1 as V(S1, T1) does, so (1) is consistent provided
 the couplings and the elements come from the same Casida vectors: one
@@ -56,11 +62,13 @@ One evaluation serves every mode: the shared forward pass, one reverse pass
 and one Z-vector per coupling pair (T1-T2, S1-S2).
 """
 import numpy as np
+from scipy.special import k0e
 
-from src.Base.pyscf.pyscf_interface import occupied_count
+from src.Base.numerics.constants import BOLTZMANN_HARTREE_PER_KELVIN
+from src.Base.orbital_spaces import occupied_count
 from src.gradients.surface import require
 from src.properties.spin_orbit import soc_vectors
-from src.properties.franck_condon import require_vibrational_modes
+from src.properties.franck_condon import bose, require_vibrational_modes
 from src.properties.vibronic import project_coupling
 from src.SingleReference.LinearResponse.linear_response import (
     check_normalization)
@@ -93,6 +101,64 @@ def second_order_derivative(v_singlet_paths, v_triplet_paths, d_singlet,
     if not terms:
         raise ValueError('no path and no direct term: nothing to differentiate')
     return np.sum(terms, axis=0)
+
+
+def path_ratio(dv_dq_path, omega, v_path, temperature):
+    """r, the coupling-to-gap ratio of one second-order path.
+
+    A path derivative is dV/dq_k = kappa_k V_path / Delta E, kappa_k the
+    linear vibronic coupling <n|dH/dq_k|1> between the crossing's state and
+    the path state n a gap Delta E away, so
+
+        r^2 = sum_k (n_k + 1/2) |dV/dq_k|^2 / |V_path|^2
+            = <(kappa . q)^2> / Delta E^2
+
+    over the initial state's thermal ensemble (n_k its Bose factors): the
+    mixing second-order theory assumes small, read off the path itself.
+    dv_dq_path: |dV/dq_k| of the path (`mode_derivatives`), Hartree; omega:
+    those modes, Hartree; v_path: |V| between the other state of the
+    crossing and the path state, Hartree. inf where v_path is zero and the
+    path is not.
+    """
+    g = np.asarray(dv_dq_path, float)
+    w = np.asarray(omega, float)
+    require_vibrational_modes(w, 'path_ratio')
+    weight = float((g ** 2 * (bose(w, BOLTZMANN_HARTREE_PER_KELVIN
+                                   * float(temperature)) + 0.5)).sum())
+    if weight == 0.0:
+        return 0.0
+    if v_path == 0.0:
+        return np.inf
+    return float(np.sqrt(weight) / abs(v_path))
+
+
+def mixed_weight(ratio):
+    """<sin^2 theta>, the thermal weight of the path state in the crossing's
+    state of a two-state linear vibronic pair at coupling-to-gap ratio r
+    (`path_ratio`), exact.
+
+    The pair's 2 x 2 Hamiltonian [[0, u], [u, Delta E]] mixes by
+    cos 2 theta = Delta E / sqrt(Delta E^2 + 4 u^2), and u = kappa . q is
+    Gaussian over the harmonic ensemble with variance (r Delta E)^2, so with
+    a = 4 r^2
+
+        <cos 2 theta> = e^{1/4a} K_0(1/4a) / sqrt(2 pi a),
+
+    and <sin^2 theta> = (1 - <cos 2 theta>) / 2: r^2 - 9 r^4 + ... for a
+    weak coupling (second order is its first term), 1/2 at r -> inf (two
+    degenerate states fully mixed). Below r = 1e-3 the series is summed
+    (r^2 - 9 r^4 + 150 r^6), where the closed form would lose digits.
+    """
+    r = float(ratio)
+    if r < 0.0:
+        raise ValueError(f'a coupling-to-gap ratio is not negative: {r}')
+    if np.isinf(r):
+        return 0.5
+    if r < 1e-3:
+        r2 = r * r
+        return r2 * (1.0 - 9.0 * r2 + 150.0 * r2 * r2)
+    a = 4.0 * r * r
+    return 0.5 * (1.0 - k0e(0.25 / a) / np.sqrt(2.0 * np.pi * a))
 
 
 def mode_derivatives(dv_cart, modes, masses, omega, rotation=None):
@@ -137,6 +203,29 @@ def merge_scf_flags(held, flags):
     return held
 
 
+def _condon(ev, h_mo, singlet, triplet):
+    """(V(S, T), (X_S, Y_S), (X_T, Y_T)) off `ev`: the Condon element's
+    vector and the two roots it is taken between, each checked for its spin
+    and its normalization."""
+    for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
+        if ev.target[key][0] != spin:
+            raise ValueError(f'{key!r} is not a {spin}')
+    _, xs, ys, _ = _root(ev, singlet)
+    _, xt, yt, _ = _root(ev, triplet)
+    check_normalization(np.c_[xs], np.c_[ys])
+    check_normalization(np.c_[xt], np.c_[yt])
+    return (soc_vectors(h_mo, occupied_count(ev.mf), (xs, ys), (xt, yt)),
+            (xs, ys), (xt, yt))
+
+
+def condon_element(ev, h_mo, singlet, triplet):
+    """(|V(S, T)|, V(S, T)) off ONE evaluation, the spin-orbit element alone:
+    what an evaluation with no derivative coupling (no adjoint) still gives
+    of `spin_vibronic_coupling`."""
+    v0 = _condon(ev, h_mo, singlet, triplet)[0]
+    return float(np.linalg.norm(v0)), v0
+
+
 def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
                            triplet_paths=(), modes=None, masses=None,
                            omega=None, rotation=None, direct=None):
@@ -144,7 +233,8 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
 
         man = StateManifold(chain, states=(S1, S2, T1, T2))
         ev = man.evaluate(couplings=((S2, S1), (T2, T1)))
-        h_mo = spin_orbit.soc_operator_mo(ev.mf, ev.mol)
+        h_mo = spin_orbit.soc_operator_mo(
+            ev.mf, ev.mol, **spin_orbit.declared_operator(numerics))
         out = spin_vibronic_coupling(ev, h_mo, S1, T1, (S2,), (T2,),
                                      modes=modes, masses=masses, omega=omega)
         rates.spin_vibronic_rate(dE, out['v0'], out['dv_dq'], omega, rho, T)
@@ -164,14 +254,7 @@ def spin_vibronic_coupling(ev, h_mo, singlet, triplet, singlet_paths=(),
     """
     coupling = require(ev, 'coupling', 'spin_vibronic_coupling')
     nocc = occupied_count(ev.mf)
-    for key, spin in ((singlet, 'singlet'), (triplet, 'triplet')):
-        if ev.target[key][0] != spin:
-            raise ValueError(f'{key!r} is not a {spin}')
-    _, xs, ys, _ = _root(ev, singlet)
-    _, xt, yt, _ = _root(ev, triplet)
-    check_normalization(np.c_[xs], np.c_[ys])
-    check_normalization(np.c_[xt], np.c_[yt])
-    v0 = soc_vectors(h_mo, nocc, (xs, ys), (xt, yt))
+    v0, (xs, ys), (xt, yt) = _condon(ev, h_mo, singlet, triplet)
     v_s, d_s, v_t, d_t, labels = {}, {}, {}, {}, {}
     scf = []
     for key in triplet_paths:

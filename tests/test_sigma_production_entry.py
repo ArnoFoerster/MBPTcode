@@ -25,6 +25,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_two_electron_integrals_chemist,
     get_antisymmetrized_spin_eri)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(4)
 
@@ -44,7 +45,7 @@ def main(nroots=1):
 
     # ---- 1. ADC(3) parity, both sectors, LiH/H2O ----
     for atom, label in [('Li 0 0 0; H 0 0 1.6', 'LiH/sto-3g'),
-                        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'H2O/sto-3g')]:
+                        (WATER_RIGHT_ANGLE, 'H2O/sto-3g')]:
         solver, nocc = make_solver(atom)
         eGF_prod, _, _ = solver.solve_dense(nocc)
         homo, lumo = nocc - 1, nocc
@@ -89,12 +90,12 @@ def test_main():
     assert main()
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=False, reason=(
     "solve_symmetric's overlap following of more roots than the reference "
     "spans: on spin-orbital H2O/sto-3g the two extra roots have overlaps near "
     "zero among many satellites, the pick changes between iterations and no "
     "root converges (the hand-written route's davidson_follow fails the same "
-    "way)"))
+    "way); converges on some libraries, where it passes"))
 def test_three_followed_roots():
     assert main(nroots=3)
 

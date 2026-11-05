@@ -11,6 +11,7 @@ Oracles:
 
 Run from the repo root:  python tests/test_pbc_rpa.py
 """
+import inspect
 import os
 import sys
 
@@ -54,7 +55,12 @@ def _gdf_krpa_ecorr(kmf, nw=NW):
     einsum = lib.einsum
 
     gw = krgw_ac.KRGWAC(kmf); gw.fc = False
+    old_rho_response = 'gw' in inspect.signature(get_rho_response).parameters
     mf = gw._scf
+    # newer pyscf leaves these None until kernel(); nmo and the response read them
+    for name in ('mo_occ', 'mo_coeff', 'mo_energy'):
+        if getattr(gw, name, None) is None:
+            setattr(gw, name, np.array(getattr(mf, name), copy=True))
     mo_energy = np.array(mf.mo_energy); mo_coeff = np.array(mf.mo_coeff)
     nkpts = gw.nkpts; kpts = gw.kpts; nmo = gw.nmo; mydf = gw.with_df
     kscaled = gw.mol.get_scaled_kpts(kpts); kscaled -= kscaled[0]
@@ -77,7 +83,11 @@ def _gdf_krpa_ecorr(kmf, nw=NW):
                     Lij.append(Lij_out.reshape(-1, nmo, nmo))
         Lij = np.asarray(Lij); naux = Lij.shape[1]
         for w in range(nw):
-            Pi = get_rho_response(gw, freqs[w], mo_energy, Lij, kL, kidx)
+            if old_rho_response:     # pyscf < 2.14: (gw, omega, mo_energy, Lpq, kL, kidx)
+                Pi = get_rho_response(gw, freqs[w], mo_energy, Lij, kL, kidx)
+            else:                    # pyscf >= 2.14: (omega, mo_energy, Lia, kidx)
+                Lia = np.ascontiguousarray(Lij[:, :, :gw.nocc, gw.nocc:])
+                Pi = get_rho_response(freqs[w], mo_energy, Lia, kidx)
             sign, logdet = np.linalg.slogdet(np.eye(naux) - Pi)
             e_corr += wts[w] / (2.0 * np.pi) * (logdet + np.trace(Pi).real)
     return e_corr / nkpts

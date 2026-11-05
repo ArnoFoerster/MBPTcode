@@ -73,8 +73,9 @@ from src.SingleReference.LinearResponse.probe import (lowest_amb_eigenvalue,
                                                       lowest_amb_from_action)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from tests.test_distributed_fit_mpi import relative, roots_resolution
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, duchemin_blase
 from tests.pins import assert_same, bitwise
+from tests.molecules import WATER
 
 SIZES = [2, 3, 8]
 NROOTS = 5
@@ -94,7 +95,6 @@ DENSE_REL = 1e-13
 #: The action application the solve-level perturbation is planted in: the
 #: second iteration's X block, past the guess.
 PLANT_AT = 3
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -112,7 +112,8 @@ def water():
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
     nocc = mol.nelectron // 2
-    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
+    factors = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol),
+                                numerics=duchemin_blase())
     W_aux = isdf_bse_factors(mf, mol, nocc, factors=factors)[2]
     return dict(mol=mol, mf=mf, nocc=nocc, factors=factors, W_aux=W_aux,
                 eps=np.asarray(mf.mo_energy, float))

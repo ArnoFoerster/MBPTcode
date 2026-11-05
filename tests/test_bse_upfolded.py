@@ -15,13 +15,15 @@ from pyscf import gto, scf
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             get_two_electron_integrals_chemist,
                                             DFIntegrals)
+from src.Base.numerical_flags import collecting
 from src.SingleReference.BSE import bse_upfolded as B
 from src.Base.numerics.constants import HARTREE_TO_EV
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 SPINS = ('singlet', 'triplet')
 
 
-def _case(basis='sto-3g', atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'):
+def _case(basis='sto-3g', atom=WATER_AT_ORIGIN_COARSE):
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     mf = scf.RHF(mol).run()
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
@@ -106,7 +108,7 @@ def test_screening_matrix_is_the_repo_direct_rpa_casida_matrix():
     already builds that for the GW module, so compare rather than trust."""
     from src.SingleReference.LinearResponse.linear_response import (
         LinearResponseSolver)
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g',
                 verbose=0)
     mf = scf.RHF(mol).run()
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'))
@@ -158,7 +160,7 @@ def test_driver_end_to_end_with_gw_energies():
     """The full path: GW quasiparticle energies -> upfolded BSE."""
     from src.SingleReference.BSE.bse_upfolded import (solve_bse_upfolded,
                                                       qp_energies)
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g',
                 verbose=0)
     mf = scf.RHF(mol).run()
     e_qp = qp_energies(mf)
@@ -204,10 +206,22 @@ def test_a_complex_ritz_pair_is_nan_and_flagged():
                                           'upfolded_bse_not_converged']
 
 
+def test_the_upfolded_flags_reach_an_enclosing_collecting_block():
+    """With no `flags` list handed in, the named events still reach the
+    `collecting` block of the caller that keeps the record."""
+    H = np.diag([1.0, 1.0, 3.0, 4.0, 5.0, 6.0])
+    H[0, 1], H[1, 0] = 0.5, -0.5
+    block = []
+    with collecting(block), pytest.warns(RuntimeWarning, match='complex'):
+        B.davidson_nonsymmetric(lambda v: H @ v, np.diag(H).copy(), nroots=2)
+    assert [f['flag'] for f in block] == ['upfolded_bse_complex_roots',
+                                          'upfolded_bse_not_converged']
+
+
 def test_df_picks_the_integrals_and_size_only_the_solver(monkeypatch):
     """df=True puts the fitted integrals in every block on both paths, so the
     dense and the matrix-free solve return the same roots."""
-    mol = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='sto-3g',
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
                 verbose=0)
     mf = scf.RHF(mol).density_fit().run()
     w_dense, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
@@ -216,3 +230,42 @@ def test_df_picks_the_integrals_and_size_only_the_solver(monkeypatch):
     w_free, _ = B.solve_bse_upfolded(mf, mol, nroots=3, e_qp=mf.mo_energy,
                                      df=True)
     assert np.abs(np.sort(w_free) - w_dense).max() < 1e-7
+
+
+def test_a_non_positive_root_is_dropped_with_a_flag():
+    """A planted operator with one negative root: the solvers return the
+    lowest positive roots, and say that a root with Re <= 0 was left out
+    ('upfolded_bse_dropped_roots')."""
+    H = np.diag([-0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    H[2, 3] = 0.1
+    diag = np.diag(H).copy()
+    flags = []
+    with pytest.warns(RuntimeWarning, match='non-positive root'):
+        w, _ = B.davidson_nonsymmetric(lambda v: H @ v, diag, nroots=2,
+                                       max_space=6, flags=flags)
+    assert 'upfolded_bse_dropped_roots' in [f['flag'] for f in flags]
+    assert (w > 0).all() and abs(w[0] - 1.0) < 1e-6
+    ev = np.sort(np.linalg.eigvals(H).real)
+    assert abs(w[1] - ev[2]) < 1e-6
+
+
+def test_the_dense_solve_flags_a_dropped_root(monkeypatch):
+    """solve_dense keeps positive eigenvalues only and flags the others."""
+    n = 6
+    H = np.diag([-0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+    monkeypatch.setattr(B, 'build_hamiltonian', lambda *a, **k: H)
+    flags = []
+    with pytest.warns(RuntimeWarning, match='non-positive root'):
+        w, _ = B.solve_dense(None, None, None, 1, 1, nroots=2, flags=flags)
+    assert [f['flag'] for f in flags] == ['upfolded_bse_dropped_roots']
+    assert np.allclose(w, [1.0, 2.0])
+
+
+def test_missing_quasiparticle_energies_are_refused():
+    """The GW quasiparticle energies are an input: without them the solve is
+    refused, never run on the mean-field eigenvalues in their place."""
+    mol = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='sto-3g',
+                verbose=0)
+    mf = scf.RHF(mol).run()
+    with pytest.raises(ValueError, match='e_qp=qp_energies'):
+        B.solve_bse_upfolded(mf, mol, nroots=2)

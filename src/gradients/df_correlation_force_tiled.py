@@ -6,8 +6,8 @@ derivative-integral tensor fits whole.
 
 The factor provider. The force reads the RI factors of the correlation fit
 (B = X J, X = L^-1, V = L L^T) through one object, which the method hands
-over (`gradients.df_factors.mp2_factors` for MP2, `gradients.adc.fold_factors`
-for an ADC(2) state): `f` the factors
+over (`gradients.df_factors.mp2_factors` for MP2, `DFFactors.of_fold` of the
+fold for an ADC(2) state): `f` the factors
 (`L`, `LT`, `BooP`, `bvv(chunk, p0, p1)`, `eo`, `ev`, `naux`), `no` and `nv`,
 `comm`, the auxiliary `chunks` with this rank's `my_chunks`, their `owners`
 and `chunk_ranges`, `ints(k0, k1)` the (ia|jb) of an occupied tile, and
@@ -49,20 +49,26 @@ the SCF's auxiliary basis cut into fixed tiles over the ranks).
 Distribution. Every collective runs on the fold's communicator. A sum over
 occupied tiles, auxiliary chunks or AO shell blocks is taken in tile, chunk or
 block order (ordered_sum, ordered_chain_sum); arrays whose rows one owner
-computes travel verbatim (allgather_ranges); the replicated small pieces (the
-Z-vector, the metric factors, the SCF force) are rank 0's (lockstep). At one
+computes travel verbatim (allgather_ranges); the Z-vector is iterated by rank
+0 with every Fock build shared over the ranks in auxiliary blocks
+(Base.pyscf.cphf.ResponseKernel); the SCF force of a density-fitted
+restricted reference is assembled in fixed tiles over the same ranks
+(`isdf_mean_field.mean_field_skeleton_force`), any other is pyscf's on rank 0;
+the replicated small pieces (the metric factors) are rank 0's (lockstep). At one
 tile size and one chunk width the force has the same bits on every rank and at
 every rank count.
 """
 import numpy as np
 from pyscf import df as pyscf_df
-from pyscf.gto.moleintor import getints, make_cintopt
 
 from src.Base.numerics.constants import (BYTES_PER_GB, DF_FORCE_AUX_CHUNK, DF_FORCE_BLOCK_ARRAYS,
                                          DF_FORCE_BLOCK_GB, DF_FORCE_MP2_TILE_ARRAYS,
                                          DF_FORCE_PIECES_TILE_ARRAYS, EE_RI_AMPLITUDE_CACHE_GB,
                                          EE_RI_TILE_GB, MB_PER_GB)
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.numerics import Numerics, numerics_or_default
+from src.Base.factorization.ao_product_fit import three_centre_block
+from src.Base.factorization.shell_runs import function_atoms, shell_ranges
+from src.gradients.isdf_adjoint_pieces import two_centre_adjoint
 from src.Base.pyscf.pyscf_interface import auxmol_of
 from src.Base.utils.parallel.memory import tile_width
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, current_comm,
@@ -70,8 +76,10 @@ from src.Base.utils.parallel.mpi_grid import (allgather_ranges, broadcast, curre
                                               ordered_chain_sum, ordered_sum, reduce_sum)
 from src.gradients import df_correlation_force as dcf
 from src.SingleReference.common import df_amplitudes as dfa
-from src.gradients.grad_engine import one_electron_skeleton
-from src.gradients.skeleton_tiles import fitted_fock_skeleton, shell_runs
+from src.gradients.multipliers import lagrangian_skeleton
+from src.gradients.isdf_mean_field import (fitted_force_supported,
+                                           mean_field_skeleton_force)
+from src.gradients.skeleton_tiles import fitted_fock_skeleton
 
 
 
@@ -127,8 +135,9 @@ def estimate(mol, nfrozen, auxbasis, jk_auxbasis, ranks=1, tile_gb=EE_RI_TILE_GB
     # rho_o L, B_oo-shaped Goo; MP2 alone: GL
     pieces = (7.0 * A + no * no * naux * gb if excited else A) + tile
     # GL, X and their raw-basis copies; the fitted Fock skeleton's exchange
-    # tiles (L, g L, Kt, then g Kt over this rank's auxiliary tiles) and its
-    # metric inverse, T and one tile's V^-1 T V^-1 rows
+    # tiles (L solved in place to Kt, then g Kt over this rank's auxiliary
+    # tiles, and the streamed tile) and its metric, the metric's Cholesky
+    # factor and this rank's V^-1 T V^-1 rows
     exchange = 3.0 * nao * nocc * naux_jk * gb / ranks + 3.0 * naux_jk * naux_jk * gb
     engine = (4.0 if excited else 2.0) * A + exchange + block_gb
     held = factors + amplitudes + core + cderi_jk
@@ -160,10 +169,10 @@ def refuse_over(est, max_memory_mb):
 # MP2
 # ----------------------------------------------------------------------
 
-def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB):
+def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB, scaling=None):
     """(e_mp2, FactoredDerivatives) of closed-shell DF-MP2 on the provider's
-    factors (df_correlation_force.mp2_pieces one occupied tile at a time);
-    a collective over its ranks."""
+    factors (df_correlation_force.mp2_pieces one occupied tile at a time;
+    scaling (c_os, c_ss) of SCS-MP2 or None); a collective over its ranks."""
     f, no, nv, naux = factors.f, factors.no, factors.nv, factors.f.naux
     comm = factors.comm
     ranks = 1 if comm is None else comm.Get_size()
@@ -182,7 +191,7 @@ def mp2_pieces(factors, tile_gb=EE_RI_TILE_GB):
             continue
         I = factors.ints(k0, k1)
         D = dfa.doubles_denominator(f.eo, f.ev, f.eo[k0:k1])
-        tau = (2.0 * I - I.transpose(dfa.PAIR)) / D
+        tau = dfa.singlet_pairs(I, I.transpose(dfa.PAIR), scaling) / D
         oo, vv = dfa.tile_amplitude_fock(-I / D, tau)
         e = -float(np.sum(I * tau))
         del I, D
@@ -271,8 +280,13 @@ def metric_density(factors, d, Xw):
 
 
 def raw_basis(factors, A, Xw):
-    """(A Xw)^T (naux, rows), auxiliary-major, each chunk of columns from its
-    owner: a factored Gamma (rows, naux) taken to the raw auxiliary basis."""
+    """(A Xw)^T (naux, rows), auxiliary-major: a factored Gamma (rows, kept)
+    taken to the raw auxiliary basis (naux functions). With X = L^-1, square
+    and lower triangular, each chunk of columns comes from its owner; with
+    the eigen-replacement (`df_correlation_force.whitening`, fewer kept rows
+    than functions) every rank forms the whole product, the same call."""
+    if Xw.shape[0] != Xw.shape[1]:
+        return np.ascontiguousarray((A @ Xw).T)
     naux = Xw.shape[0]
     out = np.zeros((naux, A.shape[0]))
     for ch in factors.my_chunks:
@@ -287,26 +301,17 @@ def raw_basis(factors, A, Xw):
 # ----------------------------------------------------------------------
 
 def _int3c(mol, auxmol, intor):
-    """get(shls_slice) of (mu nu|P)-type integrals over shell ranges of mol,
-    mol, auxmol, as [comp,] [P, nu, mu] (C-contiguous)."""
-    pmol = mol + auxmol
-    name = mol._add_suffix(intor)
-    opt = make_cintopt(mol._atm, mol._bas, mol._env, name)
-    nbas = mol.nbas
+    """get(s0, s1, a0, a1) of (mu nu|P)-type integrals on the AO shells
+    [s0, s1) and the auxiliary shells [a0, a1) (`three_centre_block`), as
+    [comp,] [P, nu, mu] (C-contiguous)."""
+    comp = 3 if intor.endswith(('_ip1', '_ip2')) else 1
+    ao_loc = mol.ao_loc_nr()
 
     def get(s0, s1, a0, a1):
-        out = getints(name, pmol._atm, pmol._bas, pmol._env,
-                      (s0, s1, 0, nbas, nbas + a0, nbas + a1), aosym='s1',
-                      cintopt=opt, comp=3 if intor.endswith(('_ip1', '_ip2')) else 1)
+        out = three_centre_block(mol, auxmol, (s0, s1, ao_loc[s0], ao_loc[s1]),
+                                 intor, comp, aux_shells=(a0, a1))
         return out.transpose(0, 3, 2, 1) if out.ndim == 4 else out.transpose(2, 1, 0)
     return get
-
-
-def shell_blocks(ao_loc, width):
-    """(s0, s1, p0, p1) runs of consecutive shells of at most `width`
-    functions each (`skeleton_tiles.shell_runs`) with their function ranges."""
-    return [(s0, s1, int(ao_loc[s0]), int(ao_loc[s1]))
-            for s0, s1 in shell_runs(ao_loc, width)]
 
 
 def _owners(n, size):
@@ -320,7 +325,9 @@ def on_root(fn, shapes, comm):
     of on every rank, and never concurrently on one molecule (pyscf's
     one-electron derivatives move its rinv origin). A raise in fn() on rank 0
     (a refused input) is broadcast and raised on every rank, so the other
-    ranks do not wait in the lockstep for ever."""
+    ranks do not wait in the lockstep for ever. fn runs in a serial region
+    (`distributed(None)`), so a collective inside it is rank 0's alone and
+    never waits for the ranks that are not running it."""
     rank = 0 if comm is None else comm.Get_rank()
     if rank != 0:
         failed = broadcast(None, comm)
@@ -328,7 +335,8 @@ def on_root(fn, shapes, comm):
             raise failed
         return lockstep(tuple(np.zeros(s) for s in shapes), comm)
     try:
-        out = tuple(np.ascontiguousarray(a, dtype=float) for a in fn())
+        with distributed(None):
+            out = tuple(np.ascontiguousarray(a, dtype=float) for a in fn())
     except Exception as exc:
         broadcast(exc, comm)
         raise
@@ -346,7 +354,7 @@ class _RIFit:
     def __init__(self, auxmol, C, nf, no, d, Xw, factors):
         nocc = nf + no
         self.auxmol = auxmol
-        naux = Xw.shape[0]
+        naux = Xw.shape[1]
         nv = C.shape[1] - nocc
         self.Co, self.Cv = C[:, nf:nocc], C[:, nocc:]
         self.GL = raw_basis(factors, d.GL, Xw).reshape(naux, no, nv)
@@ -387,20 +395,15 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
     size = 1 if comm is None else comm.Get_size()
     rank = 0 if comm is None else comm.Get_rank()
     nao, natm = mol.nao, mol.natm
-    ao_atom = np.zeros(nao, dtype=int)
-    for a, (_, _, p0, p1) in enumerate(mol.aoslice_by_atom()):
-        ao_atom[p0:p1] = a
+    ao_atom = function_atoms(mol)
     nmu = max(1, int(block_gb * BYTES_PER_GB
                      / (8.0 * DF_FORCE_BLOCK_ARRAYS * nao * width)))
-    blocks = shell_blocks(mol.ao_loc, nmu)
+    blocks = shell_ranges(mol.ao_loc, nmu)
     owners = _owners(len(blocks), size)
     prepared = []
     for fit in fits:
         aux = fit.auxmol
-        aux_atom = np.zeros(aux.nao, dtype=int)
-        for a, (_, _, p0, p1) in enumerate(aux.aoslice_by_atom()):
-            aux_atom[p0:p1] = a
-        prepared.append((fit, shell_blocks(aux.ao_loc, width), aux_atom,
+        prepared.append((fit, shell_ranges(aux.ao_loc, width), function_atoms(aux),
                          _int3c(mol, aux, 'int3c2e_ip1'),
                          _int3c(mol, aux, 'int3c2e_ip2')))
     addends = []
@@ -430,19 +433,45 @@ def skeleton_pass(mol, fits, comm, block_gb=DF_FORCE_BLOCK_GB,
     return ordered_sum(addends, comm, shape=(natm, 3), onto=np.zeros((natm, 3)))
 
 
-def metric_force(auxmol, G2):
-    """-sum Gamma2 dV on the auxiliary centres, (natm, 3)."""
-    v1 = auxmol.intor('int2c2e_ip1', comp=3)
-    t_v = 2.0 * np.einsum('xPQ,PQ->xP', v1, G2, optimize=True)
-    out = np.zeros((auxmol.natm, 3))
-    for a, (_, _, q0, q1) in enumerate(auxmol.aoslice_by_atom()):
-        out[a] = t_v[:, q0:q1].sum(axis=1)
-    return out
-
-
 # ----------------------------------------------------------------------
 # the force
 # ----------------------------------------------------------------------
+
+def relaxed_gamma(mf, mol, factors, d, nf, Bc=None, Y_extra=None, numerics=None,
+                  flags=None):
+    """The `multipliers.ClosedLagrangian` (MO, relaxed gamma with the
+    multipliers included) of the factored derivatives d
+    (df_correlation_force.relax on the provider's factors), rank 0's on every
+    rank: a collective over its ranks, the Z-vector iterated by rank 0, every
+    rank building its share of each Fock matrix; Bc the core factors when nf."""
+    comm = factors.comm
+    nmo, nocc = nf + factors.no + factors.nv, mol.nelectron // 2
+    YG = orbital_gradient(factors, d, nf, Bc)
+    if Y_extra is not None:
+        YG = YG + Y_extra
+    gamma0 = np.zeros((nmo, nmo))
+    o, v = slice(nf, nocc), slice(nocc, nmo)
+    gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
+    with distributed(comm):
+        closed = dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
+    return closed._replace(**dict(zip(('gamma', 'M', 'Y', 'lam'), lockstep(
+        (closed.gamma, closed.M, closed.Y, closed.lam), comm))))
+
+
+def mp2_density_tiled(mf, mol, factors, frozen=0, auxbasis=None, numerics=None,
+                      flags=None, scaling=None):
+    """(e_mp2, gamma (MO, relaxed)) of DF-MP2 (SCS-MP2 with scaling (c_os,
+    c_ss)) on the provider's tiles and ranks: the tiled force's energy and
+    relaxed density without its derivative integrals, d E_MP2 / d h_pq, a
+    collective; the pieces in occupied tiles under the Numerics layout's
+    tile_gb (None: EE_RI_TILE_GB), as the state model's force takes them."""
+    tile_gb = numerics_or_default(numerics).layout.tile_gb
+    e2, d = mp2_pieces(factors, EE_RI_TILE_GB if tile_gb is None else tile_gb,
+                       scaling)
+    Bc = factors.core_factors(mol, mf, frozen, auxbasis) if frozen else None
+    gamma = relaxed_gamma(mf, mol, factors, d, frozen, Bc, None, numerics, flags).gamma
+    return e2, gamma
+
 
 def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
                       block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK,
@@ -454,34 +483,27 @@ def correlation_force(mol, mf, factors, auxmol, d, nf, Bc=None, Y_extra=None,
     C = np.asarray(mf.mo_coeff)
     nocc = mol.nelectron // 2
     nmo, no = C.shape[1], factors.no
-    if auxmol.nao != factors.f.naux:
-        raise ValueError(f'the factors hold {factors.f.naux} auxiliary functions, the fit '
-                         f'{auxmol.nao}: a linearly dependent metric was pruned')
+    # the correlation fit: X = L^-1, or the eigen-replacement the factors'
+    # fit took where the metric is not positive definite (X^T X = V^+)
+    with distributed(comm):
+        _, Xw = dcf.whitening(auxmol)
+    lockstep(Xw, comm)
+    if Xw.shape != (factors.f.naux, auxmol.nao):
+        raise ValueError(f'the factors hold {factors.f.naux} auxiliary rows, the '
+                         f'fit of {auxmol.nao} functions keeps {Xw.shape[0]}: they '
+                         'were made on another metric')
     if nmo != nf + factors.no + factors.nv:
         raise ValueError('the operator does not span the mean field\'s orbitals')
-    YG = orbital_gradient(factors, d, nf, Bc)
-    if Y_extra is not None:
-        YG = YG + Y_extra
-    gamma0 = np.zeros((nmo, nmo))
-    o, v = slice(nf, nocc), slice(nocc, nmo)
-    gamma0[o, o], gamma0[v, v] = d.g_oo, d.g_vv
-
-    def relaxed():
-        # rank 0 alone: its Z-vector solve is serial
-        with distributed(None):
-            return dcf.relax_gradient(mf, mol, YG, gamma0, nf, numerics, flags)
-    gamma, Y = on_root(relaxed, [(nmo, nmo)] * 2, comm)
-    asym = float(np.max(np.abs(Y - Y.T)))
-    W = 0.25 * (Y + Y.T)
-    gamma_ao, W_ao = C @ gamma @ C.T, C @ W @ C.T
-    f1, = on_root(lambda: one_electron_skeleton(mol, mf, [gamma_ao], [-W_ao]),
+    closed = relaxed_gamma(mf, mol, factors, d, nf, Bc, Y_extra, numerics, flags)
+    gamma, asym = closed.gamma, closed.stationarity
+    gamma_ao = C @ gamma @ C.T
+    f1, = on_root(lambda: lagrangian_skeleton(mol, mf, [closed]),
                   [(mol.natm, 3)], comm)
-    # the correlation fit
-    _, Xw = dcf.whitening(auxmol)
-    lockstep(Xw, comm)
     G2ri = metric_density(factors, d, Xw)
     ri = _RIFit(auxmol, C, nf, no, d, Xw, factors)
-    f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + metric_force(auxmol, G2ri)
+    # -sum Gamma2 dV on the auxiliary centres
+    f2 = skeleton_pass(mol, [ri], comm, block_gb, width) + two_centre_adjoint(auxmol,
+                                                                             -G2ri)
     # the SCF's JK fit
     dcf.jk_fit(mf)                 # refuses a mean field with no JK fit
     auxjk = auxmol_of(mf, mol)
@@ -511,14 +533,14 @@ def prepare(mf, mol, frozen, auxbasis, excited, tile_gb=EE_RI_TILE_GB,
 
 def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_GB,
           block_gb=DF_FORCE_BLOCK_GB, width=DF_FORCE_AUX_CHUNK, numerics=None,
-          flags=None):
+          flags=None, scaling=None):
     """df_correlation_force.mp2_force on the provider's tiles and ranks, a
     collective over its communicator with the same bits on every rank;
     excited(d, C, nocc, nmo) -> (d plus the excitation's factored derivatives,
-    Y_extra, extra)."""
+    Y_extra, extra); scaling (c_os, c_ss) of SCS-MP2 or None."""
     C = np.asarray(mf.mo_coeff)
     nmo, nocc = C.shape[1], mol.nelectron // 2
-    e2, d = mp2_pieces(factors, tile_gb)
+    e2, d = mp2_pieces(factors, tile_gb, scaling)
     Y_extra = extra = None
     if excited is not None:
         d, Y_extra, extra = excited(d, C, nocc, nmo)
@@ -526,22 +548,30 @@ def force(mf, mol, factors, frozen, auxbasis, excited=None, tile_gb=EE_RI_TILE_G
     auxmol = pyscf_df.addons.make_auxmol(mol, auxbasis)
     fc, gam, asym = correlation_force(mol, mf, factors, auxmol, d, frozen, Bc,
                                       Y_extra, block_gb, width, numerics, flags)
-    F = on_root(lambda: (dcf.hf_force(mf),), [(mol.natm, 3)], factors.comm)[0] + fc
+    if fitted_force_supported(mf):
+        # over the factors' ranks, the communicator the Z-vector and the
+        # correlation force above run over
+        with distributed(factors.comm):
+            F = mean_field_skeleton_force(mf) + fc
+    else:
+        F = on_root(lambda: (mean_field_skeleton_force(mf),), [(mol.natm, 3)],
+                    factors.comm)[0] + fc
     return F, (e2, gam, asym, extra)
 
 
 def mp2_force_tiled(mf, mol, factors, frozen=0, auxbasis=None, tile_gb=EE_RI_TILE_GB,
                     max_memory=None, block_gb=DF_FORCE_BLOCK_GB,
                     width=DF_FORCE_AUX_CHUNK, comm=None, aux_chunk=None,
-                    numerics=None, flags=None):
+                    numerics=None, flags=None, scaling=None):
     """(dE/dR, (e_mp2, gamma, max |Y - Y^T|, estimate)) of E_HF + E_MP2 on the
     tiled route over comm's ranks (prepare); factors(mol, mf, frozen,
     auxbasis, tile_gb, comm, aux_chunk) -> the factor provider (module
     docstring), built once the memory estimate has passed
-    (`gradients.df_factors.mp2_factors`)."""
+    (`gradients.df_factors.mp2_factors`); scaling (c_os, c_ss) of SCS-MP2 or
+    None."""
     comm, est = prepare(mf, mol, frozen, auxbasis, False, tile_gb, block_gb,
                         max_memory, comm)
     provider = factors(mol, mf, frozen, auxbasis, tile_gb, comm, aux_chunk)
     F, (e2, gam, asym, _) = force(mf, mol, provider, frozen, auxbasis, None, tile_gb,
-                                  block_gb, width, numerics, flags)
+                                  block_gb, width, numerics, flags, scaling)
     return F, (e2, gam, asym, est)

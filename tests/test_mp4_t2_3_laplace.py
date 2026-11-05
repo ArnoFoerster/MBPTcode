@@ -46,7 +46,7 @@ from src.CodeGeneration.generate_mpn_density import amp_out_indices
 from src.CodeGeneration.laplace_codegen import (
     fuse_amplitude_rank3_tags, assemble_laplace_fused)
 from src.Base.utils.grids.grids import minimax_time_grid
-from src.SingleReference.CC.cached_einsum import einsum
+from src.Base.utils.cached_einsum import einsum
 
 NTAU = 6
 TOL = 1e-7          # ntau=6 minimax accuracy on NH3 (converges with ntau)

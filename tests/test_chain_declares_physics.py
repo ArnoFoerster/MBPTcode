@@ -69,11 +69,12 @@ from src.properties.excitations import SurfaceSpec, surface_of
 from src.gradients.gwbse.surface_factory import declare_physics, potential_energy_surface
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.reference_scf import rhf_tight
+from tests.molecules import WATER_ROUNDED_LOW
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+H2O = WATER_ROUNDED_LOW
 
 #: Pair counts either side of the memory rule's boundary, which
 #: BSE_DENSE_MAX_NOV writes as a pair count.

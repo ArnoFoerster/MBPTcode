@@ -16,9 +16,11 @@ from pyscf import df, gto, scf
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.Base.numerics.constants import SOLVENT_RI_RESIDUAL_MAX
+from src.environments import solvent_screening
 from src.environments.solvent_screening import SolventScreening
+from tests.molecules import WATER
 
-H2O = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
+H2O = WATER
 
 
 def orbitals(mol):
@@ -75,18 +77,24 @@ def test_the_basis_own_ri_set_passes():
     assert residual < SOLVENT_RI_RESIDUAL_MAX
 
 
-def test_a_set_without_the_basis_diffuse_functions_is_refused():
-    """cc-pvdz-ri under aug-cc-pVDZ: by name, and -- where the names cannot
-    be compared -- by the measured residual (0.17 on water)."""
+def test_a_set_without_the_basis_diffuse_functions_is_refused(monkeypatch):
+    """cc-pvdz-ri under aug-cc-pVDZ: by name, on a plain and on a
+    per-element basis, and -- where the names cannot be compared, a basis
+    without a pyscf partner -- by the measured residual (0.17 on water)."""
     mol = gto.M(atom=H2O, basis='aug-cc-pvdz', verbose=0)
     mo, nocc = orbitals(mol)
     env = SolventScreening(mol, solvent='toluene')
-    with pytest.raises(ValueError, match='auxiliary partner'):
-        env.require_fit(mol, df.addons.make_auxmol(mol, 'cc-pvdz-ri'),
-                        mo, nocc)
     per_element = gto.M(atom=H2O, basis={'O': 'aug-cc-pvdz',
                                          'H': 'aug-cc-pvdz'}, verbose=0)
-    with pytest.raises(ValueError, match='SOLVENT_RI_RESIDUAL_MAX'):
-        env.require_fit(per_element,
-                        df.addons.make_auxmol(per_element, 'cc-pvdz-ri'),
-                        mo, nocc)
+    for named in (mol, per_element):
+        with pytest.raises(ValueError, match='auxiliary partner'):
+            env.require_fit(named, df.addons.make_auxmol(named, 'cc-pvdz-ri'),
+                            mo, nocc)
+
+    def no_partner(basis, elements):
+        raise ValueError(f'{basis} has no -ri set')
+    monkeypatch.setattr(solvent_screening, 'auxbasis_for', no_partner)
+    for named in (mol, per_element):
+        with pytest.raises(ValueError, match='SOLVENT_RI_RESIDUAL_MAX'):
+            env.require_fit(named, df.addons.make_auxmol(named, 'cc-pvdz-ri'),
+                            mo, nocc)

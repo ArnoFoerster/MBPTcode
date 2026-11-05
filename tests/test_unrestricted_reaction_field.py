@@ -39,8 +39,9 @@ from src.environments.solvent_screening import (SolventScreening,
 from src.SingleReference.GW import qp_energy
 from src.SingleReference.GW.qp_energy import calc_qp_energy
 from src.SingleReference.GW.reaction_field import environment_quasiparticle_shift
+from tests.molecules import WATER_ROUNDED_LOW
 
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 OH = 'O 0 0 0; H 0 0 0.97'
 AUX = 'cc-pvdz-jkfit'
 

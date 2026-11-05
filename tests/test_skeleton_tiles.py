@@ -6,8 +6,10 @@ references, at 1, 2, 3 and 8 simulated ranks:
 
   * the fitted Fock skeleton (`fock_partial_skeleton_df`) is the
     whole-tensor contraction to `ISDF_GRADIENT_FLOOR`: the tiles contract
-    (mn|P) in another order and the exchange applies an explicit Cholesky
-    inverse of the metric where the whole form solves against it;
+    (mn|P) in another order and the exchange solves against the metric's
+    Cholesky factor tile by tile where the whole form solves against the
+    metric at once (an ill-conditioned metric:
+    tests/test_fitted_exchange_conditioning.py);
   * over the ranks every rank holds the serial skeleton to a few ulp: every
     tile's (natm, 3) addend added in tile order (`ordered_sum`);
   * planted: a rank dropping one of its tiles, a rank counting one twice --
@@ -67,9 +69,9 @@ from src.gradients.skeleton_tiles import (FittedFockSkeleton,  # noqa: E402
                                           isdf_exchange_rows)
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed
 from src.Base.utils.parallel.simulated_comm import run_simulated
-from src.gradients.isdf_derivatives import (  # noqa: E402
-    isdf_exchange_skeleton, isdf_scf_handle, three_centre_adjoint,
-    two_centre_adjoint)
+from src.gradients.isdf_derivatives import (isdf_exchange_skeleton, isdf_scf_handle,
+                                            three_centre_adjoint)
+from src.gradients.isdf_adjoint_pieces import two_centre_adjoint
 from src.gradients.mean_field_response import (  # noqa: E402
     exchange_channel_skeleton, fock_partial_skeleton_df)
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient  # noqa
@@ -77,7 +79,7 @@ from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels  # noqa:
 from tests import test_force_serial_shaped as shaped  # noqa: E402
 from tests.test_mpi_routes import HeldCensus  # noqa: E402
 from tests.isdf_test_grid import g1
-from tests.pins import RECORDING_BLAS, assert_same, matches  # noqa: E402
+from tests.pins import RECORDING_BLAS, assert_same, isdf_gradient_bar, matches  # noqa: E402
 
 GEOMS = {
     'water': 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4492',
@@ -175,8 +177,8 @@ def whole_fitted_skeleton(mf, auxmol, gamma, channels, coulomb=True):
             continue
         K = np.linalg.solve(V, J.reshape(-1, naux).T).reshape(naux, nao, nao)
         GK = np.einsum('ab,Pbc,cd->Pad', g, K, D, optimize=True)
-        T = np.einsum('ab,bcP,cd,daQ->PQ', g, J, D, J, optimize=True)
-        VTV = np.linalg.solve(V, np.linalg.solve(V, T).T).T
+        # Vinv T Vinv, T_PQ = tr[g J^P D J^Q]
+        VTV = np.einsum('Pad,Qda->PQ', GK, K, optimize=True)
         grad += weight * (three_centre_adjoint(mol, auxmol,
                                                -GK.transpose(1, 2, 0))
                           + two_centre_adjoint(auxmol, 0.5 * VTV))
@@ -266,7 +268,7 @@ def test_fitted_skeleton_is_the_whole_contraction(case):
         d = float(np.abs(got - ref).max())
         print(f'{name} {xc} {label}: |tiled - whole| {d:.2e} of '
               f'{np.abs(ref).max():.2e}')
-        assert d <= ISDF_GRADIENT_FLOOR, (label, d)
+        assert d <= isdf_gradient_bar(), (label, d)
 
 
 @pytest.mark.parametrize('size', SIZES)
@@ -276,7 +278,7 @@ def test_fitted_skeleton_over_ranks(size):
         print(f'{size} ranks {case}: |d| {worst:.2e}, every rank the serial '
               f'skeleton to a few ulp: {same}')
         assert same, f'{case}: a rank holds another skeleton than the serial'
-        assert worst <= ISDF_GRADIENT_FLOOR, (case, worst)
+        assert worst <= isdf_gradient_bar(), (case, worst)
 
 
 @pytest.mark.parametrize('plant', ('dropped', 'doubled'))
@@ -372,7 +374,7 @@ def test_rows_is_replicated_where_every_pair_is_kept():
     whole = isdf_mean_field_gradient(mf, fit='replicated')
     d = float(np.abs(rows - whole).max())
     print(f'water PBE0 mean-field force, rows - replicated {d:.2e}')
-    assert d <= ISDF_GRADIENT_FLOOR
+    assert d <= isdf_gradient_bar()
 
 
 def test_the_distributed_screen_is_the_whole_screen():
@@ -534,12 +536,12 @@ def test_no_rank_holds_a_whole_skeleton_array(size):
         assert 'three-index' in got['rows, whole'][0]
 
 
-def rank_shaped_fit(fit_rows):
-    """`fit_rows` whose M^T tiles pass through one product over all of this
+def rank_shaped_fit(row_fit):
+    """`row_fit` whose M^T tiles pass through one product over all of this
     rank's tiles stacked, on the shape-sensitive BLAS: a GEMM whose shape is
     the rank's share, which the row kernel must not contain."""
     def fit(*args, **kwargs):
-        out = fit_rows(*args, **kwargs)
+        out = row_fit(*args, **kwargs)
         if out.mt:
             order = sorted(out.mt)
             stacked = shaped.shape_mm(np.vstack([out.mt[t] for t in order]),
@@ -562,7 +564,7 @@ def shape_main(size, plant=False):
     tiles = importlib.import_module('src.gradients.skeleton_tiles')
     sep = importlib.import_module('src.Base.factorization.separable_ri')
     if plant:
-        tiles.fit_rows = rank_shaped_fit(tiles.fit_rows)
+        tiles.row_fit = rank_shaped_fit(tiles.row_fit)
     ref = mean_field('ethylene', 'lrc-wpbeh', 'isdf')
     ref.with_df.build()
     crd, aux = ref.with_df.coords, auxmol_of(ref)

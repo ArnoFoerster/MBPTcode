@@ -134,7 +134,7 @@ def main():
             name, PARAMS, ALIASES, 'out', shape_expr(out_idx), fused, out_idx,
             eps_o_expr='eps_a[o]', eps_v_expr='eps_a[v]')
         ns = {}
-        exec('import numpy as np\nfrom src.SingleReference.CC.cached_einsum import einsum\n'
+        exec('import numpy as np\nfrom src.Base.utils.cached_einsum import einsum\n'
              'from src.Base.utils.grids.grids import minimax_time_grid\n' + src, ns)
         lapf = ns[name]
         largs = {p: lp[p] for p in inspect.signature(lapf).parameters if p != 'ntau'}

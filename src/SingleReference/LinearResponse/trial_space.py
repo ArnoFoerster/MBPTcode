@@ -57,13 +57,15 @@ pairs as space_inc instead, so it corrects fewer pairs a cycle than real_eig.
 import time
 
 import numpy as np
+import scipy.linalg
 from pyscf.lib import logger
 from pyscf.lib.linalg_helper import _sort_elast
 from pyscf.tdscf._lr_eig import (TDDFT_subspace_eigen_solver, _asym_dot,
                                  _sym_dot)
 
 from src.Base.numerics.constants import (DAVIDSON_ACTION_SYMMETRY_TOL, DAVIDSON_LINDEP,
-                                         DAVIDSON_PAIR_TILE)
+                                         DAVIDSON_PAIR_TILE,
+                                         DAVIDSON_SUBSPACE_RESIDUAL_TOL)
 from src.Base.utils.parallel.mpi_grid import (allgather_ranges, contiguous_block,
                                               lockstep, ordered_sum)
 
@@ -211,6 +213,43 @@ def _sym_skew_dot(V, U1, m0, m1):
     p += q
     p *= .5
     return p, skew
+
+
+def subspace_eigen(a, b, sigma, pi, n_lowest):
+    """(omega, x, y, refined): the `n_lowest` lowest positive roots of the
+    projected Casida pencil [[a, b], [b, a]] z = omega [[sigma, pi], [-pi,
+    -sigma]] z, z = [x, y] normalized to z^T M z = 1, by pyscf's
+    `TDDFT_subspace_eigen_solver`, its bits wherever that solution holds.
+
+    pyscf's solver inverts the LU factors of the scaled sigma - pi, so its
+    error grows as eps cond(sigma - pi)^2, and a trial pair with |x| close to
+    |y| makes that condition large. Where its solution leaves a residual
+    |H z - omega M z| above DAVIDSON_SUBSPACE_RESIDUAL_TOL of max |H| max |z|,
+    the pencil is solved again as the symmetric-definite M z = (1/omega) H z
+    (`scipy.linalg.eigh`), whose error grows with cond(H) alone, each vector
+    signed as pyscf's; `refined` says which one came back. H not positive definite (an unstable
+    reference) raises LinAlgError there, as pyscf's Cholesky does."""
+    omega, x, y = TDDFT_subspace_eigen_solver(a, b, sigma, pi, n_lowest)
+    h = np.block([[a, b], [b, a]])
+    metric = np.block([[sigma, pi], [-pi, -sigma]])
+    z = np.vstack([x, y])
+    if z.shape[1] == 0:
+        return omega, x, y, False
+    residual = np.abs(h.dot(z) - metric.dot(z) * omega).max(axis=0)
+    scale = np.abs(h).max() * np.abs(z).max(axis=0)
+    if np.all(residual <= DAVIDSON_SUBSPACE_RESIDUAL_TOL * scale):
+        return omega, x, y, False
+    lam, zh = scipy.linalg.eigh(metric, h)
+    keep = np.argsort(-lam)
+    keep = keep[lam[keep] > 0][:n_lowest]
+    omega = 1 / lam[keep]
+    zh = zh[:, keep] * np.sqrt(omega)
+    # each vector's sign is pyscf's, which is close to it, so a re-solved
+    # cycle does not turn a Ritz vector over
+    k = min(z.shape[1], zh.shape[1])
+    zh[:, :k] *= np.where(np.sum(z[:, :k] * zh[:, :k], axis=0) < 0, -1.0, 1.0)
+    m = len(a)
+    return omega, zh[:m], zh[m:], True
 
 
 def projection_addend(V, W, U1, U2, m0, m1):
@@ -480,7 +519,8 @@ def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
         Ritz vectors, at most space_inc.
     trace: optional list, one dict per cycle appended: the decisions the
         cycle took, every one the same on every rank; 'intervals' counts the
-        Ritz pairs whose r_S it measured, one block action each.
+        Ritz pairs whose r_S it measured, one block action each, and
+        'refined' the subspace solves `subspace_eigen` did again by eigh.
     symmetry_tol: the largest skew part V^T A V - (A V)^T V (and B's) of
         the projected blocks on each cycle's new trial pairs, relative to
         max |a|, that a symmetric action leaves (`projected_asymmetry`);
@@ -623,9 +663,10 @@ def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
         pi[m0:m1, :m1] = pi_block
 
         if x0sym is None:
-            omega, x, y = TDDFT_subspace_eigen_solver(
+            omega, x, y, refined = subspace_eigen(
                 a[:m1, :m1], b[:m1, :m1], sigma[:m1, :m1], pi[:m1, :m1],
                 space_inc)
+            refined = int(refined)
             v_ir = None
         else:
             # each symmetry sector diagonalized apart
@@ -634,11 +675,13 @@ def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
             y = np.zeros_like(x)
             v_ir = []
             i1 = 0
+            refined = 0
             for ir in set(xs_ir):
                 idx = np.nonzero(xs_ir[:m1] == ir)[0]
-                _w, _x, _y = TDDFT_subspace_eigen_solver(
+                _w, _x, _y, _refined = subspace_eigen(
                     a[idx[:, None], idx], b[idx[:, None], idx],
                     sigma[idx[:, None], idx], pi[idx[:, None], idx], idx.size)
+                refined += int(_refined)
                 i0, i1 = i1, i1 + idx.size
                 omega[i0:i1] = _w
                 x[idx, i0:i1] = _x
@@ -697,7 +740,7 @@ def casida_rows(aop, x0, precond, rows, tol_residual, nroots, max_cycle,
         step = {'cycle': icyc, 'fresh': bool(fresh_start), 'new': int(count),
                 'applied': int(count) if icyc == 0 or not fresh_start else 0,
                 'm1': int(m1), 'omega': w.copy(), 'r_norms': r_norms.copy(),
-                'asymmetry': asymmetry,
+                'asymmetry': asymmetry, 'refined': refined,
                 'conv': tuple(bool(c) for c in conv), 'kept': None,
                 'settled': tuple(bool(s) for s in settled),
                 'r_s': None if r_s is None else r_s.copy(),

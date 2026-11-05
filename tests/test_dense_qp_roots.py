@@ -44,6 +44,7 @@ from src.gradients.gwbse.surface_factory import potential_energy_surface
 from tests.pins import class_bar
 from tests.dense_qp import dense_max_weight_root
 from tests.test_dense_surfaces import FD_TOL
+from tests.molecules import WATER
 
 #: Roots and pole strengths of the two routes: the roots bar of tests/pins.py.
 ROOT_TOL = class_bar('root')
@@ -56,7 +57,7 @@ FD_STEPS = (2.5e-4, 1.25e-4)
 
 
 def water():
-    return gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    return gto.M(atom=WATER,
                  basis='cc-pvdz', verbose=0)
 
 

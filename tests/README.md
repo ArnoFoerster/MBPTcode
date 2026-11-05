@@ -32,7 +32,9 @@ optional third-party one.
 | a numerical fallback warns with its own class and leaves a named flag | `test_numerical_flags` |
 | thread and memory policy | `test_blas_single_threaded`, `test_allocation_memory` |
 | basis sets read from CP2K | `test_cp2k_basis` |
+| a per-element or per-atom basis on the photophysics route: the map and its atom labels, each key's auxiliary sets and grid row, a grid level on a map, the stamps and resume refusals, a uniform map bitwise the plain name and a per-atom map bitwise its per-element map, the S1 force of a hybrid basis against its energy | `test_hybrid_basis` |
 | the shared symmetric Davidson | `test_davidson_symmetric` |
+| active-space solvers: FCI, the determinant basis and DMRG on one interface; CCSDT and CCSDTQ against FCI, on a downfolded Hamiltonian and on a vertex without real-orbital symmetry, and their refusals | `test_active_space_solver`, `test_active_space_cc`, `test_qdpt_perturbative` |
 | ADC solvers | `test_adc3`, `test_adc3_restricted`, `test_adc2x_df`, `test_adc3_df_memory_fix`, `test_spin_adapt`, `test_screened_adc2x`, `test_downfolded_seeds`, `test_unrestricted_neon`, `test_bn_unrestricted_excitations` |
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |
@@ -42,23 +44,49 @@ optional third-party one.
 | eigenvalue self-consistency | `test_evgw` |
 | imaginary axis and time | `test_imaginary_axis_gw`, `test_imaginary_axis_gw_dft`, `test_mpi_grid_distribution`, `test_screening_frequency_grid` |
 | grids | `test_grids`, `test_minimax_tau_grid`, `test_time_frequency_grid`, `test_matsubara_ir` |
-| ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian` |
-| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
-| environment and solvent | `test_environment`, `test_solvent_screening`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_solvated_ground_surface` |
+| ISDF factorization | `test_frame_sign_convention`, `test_grid_radii_optimizer`, `test_isdf_fit_timings`, `test_separable_factors_grid_keywords`, `test_isdf_grid_keywords`, `test_metric_root_cache`, `test_isdf_one_grid_call`, `test_isdf_refuses_cartesian`, `test_ao_product_fit` |
+| BSE | `test_davidson_casida`, `test_davidson_isdf_bse`, `test_davidson_benzene_bse`, `test_bse_df_driver`, `test_bse_screening_energies`, `test_davidson_triplet`, `test_casida_normalization`, `test_davidson_residual_floor`, `test_davidson_small_pair_space`, `test_casida_subspace_eigen`, `test_davidson_timings`, `test_davidson_preconditioner`, `test_probe_after_davidson`, `test_davidson_trial_space`, `test_davidson_force_policy`, `test_davidson_one_body_lockstep`, `test_qp_hamiltonian_group_span`, `test_qp_hamiltonian_large_group`, `test_bse_force_residual_tolerance`, `test_davidson_warm_start` |
+| environment and solvent | `test_environment`, `test_solvent_screening`, `test_ground_state_cavity_check`, `test_solvent_mean_field`, `test_reaction_field`, `test_pcm_cavity_blocks`, `test_pcm_cavity_tiles`, `test_solvated_ground_surface` |
+| any medium by eps and n^2, the cavity conventions, their records and resume keys, the gas limit and forces in such a medium | `test_host_medium`, `test_host_medium_loops` (slow) |
 | a relaxed excited state in equilibrium with its solvent: full and split equilibrium, the dRPA ground state in both modes | `test_relaxed_equilibrium_solvation`, `test_split_equilibrium`, `test_drpa_equilibrium_solvation` |
-| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout` |
+| the state models' force of a Kohn-Sham reference carries the motion of its XC grid | `test_state_model_ks_force` |
+| the mean-field part of the MP2, ADC(2) and state-model forces is the tiled assembly, the same bits at every rank count | `test_correlated_mean_field_force` |
+| the stage pipeline's four named solvent schemes and scheme B: refusals, stamps, external S0 Hessian; forces against their own energy, the stages, their restart, the saddle check | `test_photophysics_scheme_b`, `test_photophysics_scheme_b_run` (slow) |
+| analytic gradients: the ISDF fit and its adjoint, the force's pieces in tiles, one SCF per record | `test_skeleton_tiles`, `test_xc_grid_response`, `test_mean_field_force_tiles`, `test_fitted_mean_field_force`, `test_one_fit_adjoint`, `test_fit_adjoint_stability`, `test_one_fit_forces_follow_their_energy`, `test_sop_force_follows_its_energy`, `test_adjoint_grid_tiles`, `test_one_scf_per_record`, `test_row_fit_frozen_layout`, `test_ao_product_fit_adjoint`, `test_ao_product_fit_rows`, `test_isdf_test_sets`, `test_ao_product_isdf_k`, `test_isdf_rows_census`, `test_exchange_skeleton_split`, `test_exchange_realization`, `test_fitted_exchange_conditioning` |
 | several states off one evaluation: one forward pass, one Casida solve per spin | `test_shared_states` |
 | couplings, spin-orbit and relaxation records read off one evaluation; a second forward at the reference is the first bit for bit; one sign convention for Casida vectors | `test_shared_evaluation_consumers`, `test_second_forward_bitwise`, `test_casida_phase` |
 | a frozen surface along a walk: interpolation frames that turn with the molecule, the mean field's pair layout kept | `test_body_fixed_frames`, `test_scf_frozen_pair_layout` |
 | the SCF record and its optional warm start and Newton finish; a relaxation's quasi-Newton Hessian | `test_scf_convergence`, `test_relax_hessian` |
 | the quasiparticle energy on the BSE diagonal: the pole model's frozen verdict, the scissors' static terms, the force against its own energy | `test_pole_model_route_frozen`, `test_inside_scissor_static_term`, `test_solvated_outside_scissor`, `test_qp_energy_assembly` (slow) |
+| the vertical stage's property set (--properties energies): no spin-orbit pass or coupling, the energies of the full set, its stamp, the stages that read couplings refused | `test_vertical_properties` (slow) |
+| R0 as the input geometry (--r0 input): the s0 stage records it with no SCF, the stamps say so and walked runs keep theirs, a later stage takes it unasked | `test_r0_from_input` |
+| the photophysics ISDF-K mean field on its own declared fit (--scf-isdf-test-set, --scf-pivot-points): it reaches the handle and the stamp, the factors' fit does not, a handle on another fit is refused, the s0 walk runs on a tabulated and on a pivoted mean field (the reference's selection frozen), the vertical stands on it | `test_isdfk_scf_numerics` (slow) |
+| the vertical stage on the analytic continuation (`--residues pade`): its energies beside the pole model's, no derivative in its record, every reverse pass, walk stage, scheme B, quasiparticle Hamiltonian and adaptive set refused, a per-element basis on a pivoted ISDF-K mean field | `test_vertical_continuation` (slow) |
 | vibronic band shapes and radiative rates | `test_band_shape`, `test_photoluminescence` |
+| bands with Duschinsky rotation and frequency change: the displaced-oscillator limit, a sum over states, the branch of the square root, the model from two Hessians | `test_duschinsky` |
+| the Duschinsky guard: a rectilinear model with soft modes turned into stretches (DMABN S1/T1), a sum-rule lambda or a band first moment far from the energies, is refused and the rate chain falls back to displaced oscillators; a rigid pair passes | `test_duschinsky_guard` |
+| the curvilinear Duschinsky matrix: the non-orthogonal band against a sum over states, water against the Wilson GF route, the Cartesian overlap at one geometry, a turned methyl kept on its torsion, DMABN S1/T1 soft modes kept out of the stretches | `test_curvilinear_duschinsky` |
+| the classical soft-mode block of the Duschinsky bath: a frequency-unchanged soft mode is its quantum band at 300 K, no soft mode is bitwise the quantum bath, DMABN RISC passes the guard at 300 K | `test_duschinsky_soft_modes` |
+| the band cumulants of a wide Duschinsky band read the closed-form mean (DMABN rectilinear and curvilinear), a narrow band keeps its first-step bits, a band that never settles is refused | `test_duschinsky_cumulants` |
+| the ablation ladder records a rung whose switches make no rate model (the MLJ rung of a gas ladder with a Gaussian width, and the rungs on it) as refused and goes on | `test_rate_ladder_refusals` |
+| the Herzberg-Teller band of a curvilinear (non-orthogonal) Duschinsky model against a sum over states, its independence of the expansion point, the rectilinear band at an orthogonal J | `test_herzberg_teller_curvilinear` |
+| the ISC/RISC rate chain of any method's minima: every ablation switch moves the rate as its physics says; the Condon, single-T1 and Marcus-Levich-Jortner limits bitwise; one mode set is the displaced oscillator; the gradient route is the displacement route on a harmonic surface; another method's minima through the same protocol; the diabatic two-state mixing of a near-degenerate path: its exact thermal weight against quadrature, the perturbative rate in the weak limit to O(r^2), the switch at the stated ratio, saturation as the gap closes, a manifold that moves coupling and creates none | `test_rate_chain` (about a minute) |
+| conformers beyond the torsional grid: ring puckering (Cremer-Pople), pyramidal inversion, mirror degeneracy and free-energy weights, the restrained torsion scan and its barrier, a sweep that halves its increment where the followed state is lost or a point does not converge, the twisted-triplet pairing | `test_conformer_space` (about 4 minutes) |
+| Herzberg-Teller intensity: off = Condon, a forbidden transition's false origin, a sum over states with Condon/Herzberg-Teller interference, the dipole derivative, the radiative rate over the band | `test_herzberg_teller` |
+| Herzberg-Teller dmu/dq of a BSE@GW state: phase tracking by the transported overlap, a rotated degenerate pair matched as a subspace, a solve without the roots refused, formaldehyde S1 stable under sign flips and step | `test_herzberg_teller_bse` |
+| Förster annihilation and transfer: dipoles between two excited states against a full-CI transition density (singlets and triplets), the overlap of many lines of one band by one lattice convolution against the direct sum, C6 against Gaussian bands, the golden-rule radius against the spectroscopic Förster equation and its textbook constant | `test_forster` (about 5 minutes) |
 | force constants by differencing the analytic gradient | `test_numerical_hessian`, `test_mode_hessian`, `test_hessian_frozen_pair_layout` |
 | fragment-diabatic BSE (Tamm-Dancoff and full) and its analytic gradient | `test_fragment_diabatic` (about an hour) |
+| the fragment-diabatic BSE with the quasiparticle Hamiltonian: A_eff does not depend on how a degenerate group's orbitals rotate into each other, the same pair solved diagonally is refused, the root gradient through the partition is the chain's, the element gradients match finite differences (Tamm-Dancoff and full) | `test_fragment_diabatic_qp_hamiltonian` (about 14 minutes) |
+| fragment-diabatic ADC(2) (singlets and triplets) and its analytic gradient | `test_fragment_adc2` |
+| the fragment population callback answers pyscf's full-tensor and `mode='pop'` (2.14) calls with the same localization cost | `test_population_tensor_pyscf_modes` |
+| the fragment partition's checkpoint over ranks: rank 0 reads, every rank gets its verdict and arrays bit for bit | `test_fragment_checkpoint_ranks` (thread-ranks under pytest; `mpirun -n 2` as a script) |
+| the triplet fragment partition (GW-BSE and ADC(2)) and the triplet-triplet (Dexter) coupling with its gradient | `test_fragment_triplet_transfer` |
+| triplet-triplet annihilation: the triplet-pair configuration model against full CI; golden-rule transfer rates between molecules | `test_tta_coupling`, `test_transfer_rates` |
 | an environment from a charged structure file, and the diabatic gradient in it | `test_protein_environment` (unit tests in seconds; the gradient gate about 10 minutes) |
 | distributed linear algebra | `test_numroc`, `test_elpa_casida` |
 | MPI: the context, `lockstep` and the collectives | `test_mpi_context`, `test_mpi_grid_primitives`, `test_mpi_map`, `test_layering`, `test_ordered_reductions` |
-| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
+| MPI: the GW/ISDF kernels over ranks | `test_kernel_lockstep`, `test_simulated_ranks`, `test_isdf_fit_ranks`, `test_dyson_over_frequencies`, `test_frequency_rows_serial_shaped`, `test_qp_states_over_ranks`, `test_sliced_factors`, `test_gw_tiles_distributed`, `test_frequency_rounds`, `test_sop_fits_over_ranks` |
 | MPI: the BSE Davidson over ranks | `test_block_action_split`, `test_isdf_block_action_rows`, `test_block_action_trims`, `test_davidson_lockstep`, `test_distributed_trial_space` |
 | MPI: the distributed SCF | `test_distributed_df`, `test_static_exchange_distributed`, `test_chain_distributed_scf`, `test_distributed_scf_grid`, `test_orbital_response_distributed`, `test_state_pair_force_distributed_ks` |
 | MPI: a solvated chain on the row fit and sliced factors, the solvated SCF over ranks | `test_solvated_row_fit`, `test_solvated_sliced_energy`, `test_solvated_scf_ranks`, `test_adaptive_solvated_ranks`, `test_tadf_rank_paths` |
@@ -182,11 +210,50 @@ OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_solvated_scf_mpi.py
 OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_solvated_scf_mpi.py
 ```
 
+`test_exchange_skeleton_mpi` checks the four-centre exchange skeleton with
+its atoms split over the ranks against two separate pyscf passes:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_exchange_skeleton_mpi.py
+```
+
+`test_df_factor_build_mpi` checks that the DF factors of the tiled MP2 force and
+of the folded ADC(2) operator are the same bytes on every rank:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_df_factor_build_mpi.py
+```
+
+`test_node_shared_mpi` builds node-shared arrays more often than an MPI
+process has communicator contexts, and checks that the node communicator is
+split once and that a window is freed only when no rank of the node still
+holds its array. Run it on at least two nodes with several ranks per node:
+
+```bash
+OMP_NUM_THREADS=1 srun --mpi=pmi2 -N 2 --ntasks-per-node=4 python tests/test_node_shared_mpi.py
+```
+
+`test_gw_tiles_mpi` runs the quasiparticle solve's grid-tile sweeps on the
+wire: W(0) and the self-energy's branch sums from sliced factors are the
+one-rank results bit for bit, the window on slices is the replicated one, and
+each rank holds its share of the tiles. Run it across nodes:
+
+```bash
+OMP_NUM_THREADS=1 srun --mpi=pmi2 -N 2 --ntasks-per-node=2 python tests/test_gw_tiles_mpi.py
+```
+
 `test_davidson_warm_start_mpi` checks the warm-started Davidson the same way:
 
 ```bash
 OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_davidson_warm_start_mpi.py
 OMP_NUM_THREADS=1 mpirun -n 3 python tests/test_davidson_warm_start_mpi.py
+```
+
+`test_spin_orbit_mpi` checks that the two-electron spin-orbit mean-field term
+is built on rank 0 alone and is rank 0's, bit for bit, on every rank:
+
+```bash
+OMP_NUM_THREADS=1 mpirun -n 2 python tests/test_spin_orbit_mpi.py
 ```
 
 `test_elpa_casida` is another script meant for several MPI ranks:

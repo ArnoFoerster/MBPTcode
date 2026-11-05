@@ -16,7 +16,8 @@ leaves a JSON whose arrays are on disk. Only classes of this package
 written.
 
 `git_commit` names the tree a record was produced on; `code_id` adds a digest
-of the edit on an edited tree, and `same_code` reads a record's stamp.
+of the edit on an edited tree (`record_compat.same_code` reads an older
+record's).
 """
 import dataclasses
 import hashlib
@@ -122,19 +123,6 @@ def code_id(root=None):
                           capture_output=True, timeout=GIT_PROVENANCE_TIMEOUT,
                           check=True).stdout
     return f'{code}:{hashlib.sha256(diff).hexdigest()[:12]}'
-
-
-def same_code(recorded, current):
-    """Whether a record's `code` names the code of this run: equal, or a full
-    40-digit commit (what `code_id` wrote before it stamped edited trees) that
-    a clean `current` short commit abbreviates. A record of the old form made
-    on an edited tree cannot be told from a clean one; it is accepted with its
-    commit, as it was before."""
-    if recorded == current:
-        return True
-    return (isinstance(recorded, str) and len(recorded) == 40
-            and '+' not in current and current != 'unknown'
-            and recorded.startswith(current))
 
 
 def encode(value):

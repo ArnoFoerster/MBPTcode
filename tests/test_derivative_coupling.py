@@ -41,16 +41,17 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
+from src.Base.geometry.geometry import displaced
 from src.Base.numerics.numerics import Numerics
 from src.Base.numerics.constants import AMU_TO_ME, NUCLEAR_FD_STEP
 from src.gradients.gwbse.bse_isdf import bse_blocks, bse_solve, interstate_backward
 from src.gradients.gwbse.derivative_coupling import (analytic_coupling,
                                                      analytic_ground_coupling,
-                                                     canonical_overlap_derivative,
                                                      configuration_coupling,
                                                      ov_coupling,
                                                      state_to_state_density)
 from src.gradients.gwbse.excited_state import ExcitedStateChain
+from src.gradients.state_identity import mo_overlap
 from src.photophysics import rates
 from src.properties import vibronic
 from src.properties import franck_condon
@@ -59,10 +60,11 @@ from src.properties.nonadiabatic import (derivative_couplings,
 from src.Base.numerics.constants import EXCITED_SPIN_FACTOR
 from tests.isdf_test_grid import g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: C2v, in the yz plane. The three lowest roots are well separated, so the
 #: assignment the reference makes across a displacement is never in doubt.
-WATER = 'O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469'
+WATER = WATER_ROUNDED_LOW
 #: Formaldehyde, in the yz plane. A second molecule, and the one the
 #: finite-difference reference's own conventions are gated on.
 CH2O = 'C 0 0 0.0; O 0 0 1.208; H 0 0.943 -0.588; H 0 -0.943 -0.588'
@@ -76,6 +78,29 @@ STEPS = (4.0, 2.0, 1.0, 0.5)
 #: ten times TIGHTER than gating the raw stencil, whose 1e-4 was a statement
 #: about the step rather than about the assembly.
 COUPLING_GATE = 1e-5
+
+
+def canonical_overlap_derivative(mol, mf, scf_factory, atom, axis,
+                                 step=NUCLEAR_FD_STEP):
+    """A_pq = <phi_p | d phi_q / dR> for the CANONICAL orbitals, by difference.
+
+    Mean fields only -- no GW and no BSE: the independent check that
+    `configuration_coupling`'s Z-vector reproduces, and the cheapest way to
+    SEE the gauge.
+
+    Each displaced solve returns its orbitals up to a sign, which is fixed by
+    making the diagonal of the overlap positive; a within-block ROTATION needs
+    no fixing, because it is exactly the canonical gauge this term carries.
+    """
+    crd = np.asarray(mol.atom_coords())
+    out = []
+    for sign in (-1.0, 1.0):
+        delta = np.zeros_like(crd)
+        delta[atom, axis] = sign * step
+        md = displaced(mol, delta, crd)
+        t = mo_overlap(mol, mf.mo_coeff, md, scf_factory(md).mo_coeff)
+        out.append(t * np.sign(np.diag(t))[None, :])
+    return (out[1] - out[0]) / (2 * step)
 
 
 def factory(mol):
@@ -202,7 +227,7 @@ def test_configuration_term_z_vector_matches_displaced_solves(chain):
     xn, yn, nocc = solution.x, solution.y, chain.nocc
     goo, gvv = state_to_state_density(nocc, xn[:, 0], yn[:, 0],
                                       xn[:, 1], yn[:, 1])
-    ana = configuration_coupling(mol, mf, nocc, goo, gvv)
+    ana = configuration_coupling(mol, mf, nocc, goo, gvv, Numerics())
     num = np.zeros_like(ana)
     for atom in range(mol.natm):
         for axis in range(3):
@@ -230,7 +255,7 @@ def test_ov_coupling_matches_displaced_solves(chain):
     nocc = chain.nocc
     w = np.random.default_rng(3).normal(size=(nocc,
                                               mf.mo_coeff.shape[1] - nocc))
-    ana = ov_coupling(mol, mf, nocc, w)
+    ana = ov_coupling(mol, mf, nocc, w, Numerics())
     num = np.zeros_like(ana)
     for atom in range(mol.natm):
         for axis in range(3):

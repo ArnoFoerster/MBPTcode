@@ -18,6 +18,9 @@ The hashes were re-recorded when the spin-orbital and restricted twins moved to
 one block emitter with the codegen_common header: the new modules are the old
 ones up to the header comment, the docstrings and the order of the functions --
 every function has the same name and the same AST body.
+They were re-recorded again when cached_einsum moved to src.Base.utils: the new
+modules are the old ones up to their einsum import line. A generatedADC/ cache
+written before that move imports the old path and must be deleted and regenerated.
 """
 import hashlib
 import os
@@ -34,9 +37,9 @@ pytestmark = pytest.mark.skipif(not pdaggerq_available(),
 
 EXPECTED = {
     'adc2_blocks.py':
-        'a9ff42c0db3da9a1efd2858c7be5b27889987d4e915bf379ecb0d4c77a9f563f',
+        '575e314d43eca32523ab6e3a6a437397310a972b0e38279316e86e2965ec6ff9',
     'adc2_blocks_restricted.py':
-        'e63c4005e3d1d33a7efb6f78cad96f35f4f9165d777bc6b0f187a0e4a6e861af',
+        '468ed44d382ad8b3b22785527f46829e13518763613798922a9fa8dbbf3da495',
 }
 
 

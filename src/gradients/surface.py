@@ -138,6 +138,16 @@ def commit(surface, mol):
         accept(mol)
 
 
+def confirm(surface, mol):
+    """Ask `surface` whether the walk's converged geometry `mol`, its last
+    evaluation, stands on the state the walk followed: the flags
+    ({'flag', 'message'} each) its `confirm(mol)` returns, empty for a
+    surface without one. A flag says the walk must not report that minimum
+    as converged (properties.optimize)."""
+    check = getattr(surface, 'confirm', None)
+    return [] if check is None else list(check(mol))
+
+
 #: What a property may ask of a surface, by name, and what each name is: the
 #: vocabulary of the ingredients a surface class declares it provides (its
 #: class attribute `INGREDIENTS`, which `provides` reads). A method that

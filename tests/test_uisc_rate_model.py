@@ -33,8 +33,9 @@ from src.photophysics import rates
 from src.properties import franck_condon
 from src.properties.curvilinear import huang_rhys_curvilinear
 from src.properties.vibronic import align_to
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
-WATER = 'O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59'
+WATER = WATER_AT_ORIGIN_COARSE
 #: Hartree; dyadic, so every energy difference below is exact
 OMEGA = np.array([0.004, 0.0075, 0.012, 0.018])
 E0, E_S1, E_T1 = -76.25, -76.0, -76.0078125

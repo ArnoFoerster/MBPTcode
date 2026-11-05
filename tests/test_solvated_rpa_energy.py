@@ -49,9 +49,10 @@ from src.SingleReference.LinearResponse.solvated_rpa_energy import (
 from src.SingleReference.LinearResponse.space_time import three_index_ov
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Far enough above every quadrature point (the grid tops out at 10.7 keV on
 #: this system) that g(iw) is 1 to machine precision, which is the adiabatic
 #: limit the identity F -> B + dispersion is stated in.

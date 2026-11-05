@@ -41,9 +41,10 @@ from src.SingleReference.GW.reaction_field import (
 from src.SingleReference.BSE.solve import isdf_bse_factors
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED
 
 BASIS, EPS_INF = 'cc-pvdz', 1.78
-WATER = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+WATER = WATER_ROUNDED
 
 
 def screened_interaction_difference(w_aux, d_mo, auxmol, environment):

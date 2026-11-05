@@ -3,7 +3,7 @@ ulp (two computations of each number: `assert_same` of tests/pins.py).
 
 `SingleReference/GW/contour_deformation.py` holds the forward physics,
 `SingleReference/GW/real_screening.py` the explicit real-frequency screening,
-and `gradients/contour_deformation_adjoint.py` the adjoints. Production must
+and `gradients/gwbse/contour_deformation_adjoint.py` the adjoints. Production must
 reproduce the reference numbers, so every gate here is a few ulp, not a
 physics tolerance -- except the root itself: the reference's pole-guarded Newton is
 replaced by the one root finder of `Solvers.qp_equation` (one quasiparticle
@@ -64,6 +64,7 @@ from src.gradients.gwbse import qp_space_time as qst
 from src.gradients.rpa import space_time_adjoint as sta
 from tests.test_frequency_rows_serial_shaped import RowCountSensitiveNumpy
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
 # --------------------------------------------------------- the reference code
 # Verbatim reference implementations: a gate that recomputed the reference
@@ -223,7 +224,7 @@ def water():
     pytest.importorskip('pyscf')
     from pyscf import gto, scf
     from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468',
+    mol = gto.M(atom=WATER_ROUNDED,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit().run(conv_tol=1e-10)
     eps = np.asarray(mf.mo_energy, float)
@@ -245,18 +246,26 @@ def states(nocc):
 def test_the_gradient_side_holds_no_second_copy():
     """A re-implementation on the gradient side would be a second route: the
     adjoint screening subclasses the forward one, and what qp_space_time and
-    space_time_adjoint import back from production is production's object."""
+    space_time_adjoint import back from production is production's object.
+    Every function production defines that qp_space_time also holds under the
+    same name has to be that object, so a copy cannot hide behind an import
+    that is no longer used."""
     assert issubclass(adjoint.ExplicitRealScreeningAdjoint,
                       ExplicitRealScreening)
-    for name in ('cd_screening_contraction_multi', 'residue_route_auto'):
+    for name in ('cd_integral_weights', 'cd_pair_contraction_multi',
+                 'residue_route_auto', 'screening_solver'):
         assert getattr(qst, name) is getattr(prod, name), name
+    for name, obj in vars(prod).items():
+        if (callable(obj) and getattr(obj, '__module__', None) == prod.__name__
+                and hasattr(qst, name)):
+            assert getattr(qst, name) is obj, name
     assert sta.owned_frequency_blocks is owned_frequency_blocks
 
 
 def test_frequency_factor_reproduces_the_old_formulas():
     """The dedup onto one function has to be a rounding-for-rounding copy (to
     a few ulp: the old formula is evaluated again)."""
-    rng = np.random.default_rng(20250918)
+    rng = np.random.default_rng(18)
     d = rng.uniform(0.05, 3.0, size=37)
     for w in (0.0, 1e-13, 0.017, 0.31, 2.5, -0.44):
         f, dfd, dfw = frequency_factor(d, w, True, slopes=True)
@@ -281,7 +290,7 @@ def test_the_rpa_frequency_factor_is_untouched():
     static limit, and eta = 0 is a/(a^2+0) - b/(b^2+0), which differs from
     1/a - 1/b in the last bits (5.7e-14 on these pair energies).
     """
-    rng = np.random.default_rng(20250918)
+    rng = np.random.default_rng(18)
     d = rng.uniform(0.05, 3.0, size=37)
     for eta in (0.0, 1e-3, 0.05):
         lr = type('LR', (), {'eta': eta})()

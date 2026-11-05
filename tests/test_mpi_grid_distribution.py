@@ -7,6 +7,10 @@ spread of the summed partials over the orders a reduction adds them in, whole
 and in windows: to a few ulp over simulated ranks, which add both in rank order,
 at that bar over MPI ranks, whose Reduce_scatter and Allreduce may add in
 different orders (tests/test_sliced_factors.py gates it under pytest).
+Moved through a staging buffer, as a communicator over several nodes moves
+them, the broadcasts keep their bits and the reductions agree to a few ulp.
+The sliced ordered sum is the chained one bit for bit over MPI ranks too,
+owners in runs or round-robin, broadcast or kept by one root.
 
     python tests/test_mpi_grid_distribution.py           # partition algebra
     mpirun -n 3 python tests/test_mpi_grid_distribution.py   # the real check
@@ -26,7 +30,8 @@ import src.Base.utils.parallel.mpi_grid as mpi_grid
 import src.SingleReference.LinearResponse.space_time as st
 from src.Base.numerical_flags import collecting, flag, gathered
 from src.Base.utils.parallel.mpi_grid import (
-    contiguous_block, grid_comm, partition, reduce_scatter_rows, reduce_sum)
+    contiguous_block, grid_comm, ordered_chain_sum, ordered_sliced_sum, partition,
+    reduce_scatter_rows, reduce_sum)
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW.space_time import (solve_qp_energy_space_time,
                                                separable_factors)
@@ -36,6 +41,7 @@ from tests.test_sliced_factors import (rank_partials, reassociation_bar,
                                        scatter_shapes)
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
 comm, rank, size = grid_comm()
 
@@ -84,6 +90,40 @@ else:
                  if not matches(b[k], a[k], RECORDING_BLAS, unit='1',
                                 quantity='root')]
         all_ok &= check(not moved, f'over {s} simulated ranks', f'moved: {moved}')
+
+if rank == 0:
+    print('\n-- every collective moved through a staging buffer of 7 doubles, as on '
+          'a communicator over several nodes: the broadcasts bit for bit, the '
+          'reductions to a few ulp')
+
+
+def staged(run):
+    """(direct, staged): what `run` returns as it is and with every rank's
+    data moved through a 7-double staging buffer."""
+    direct = run()
+    saved = mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES
+    mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES = (lambda c: True), 7
+    mpi_grid._STAGE.buf = None
+    try:
+        through = run()
+    finally:
+        mpi_grid._spans_nodes, mpi_grid.MPI_STAGE_DOUBLES = saved
+        mpi_grid._STAGE.buf = None
+    return direct, through
+
+
+if size > 1:
+    direct, through = staged(lambda: collectives(comm))
+    exact = ('broadcast_rows', 'lockstep.x', 'lockstep.y', 'replicate',
+             'reduce_max')
+    moved = [k for k in direct
+             if not (np.array_equal(through[k], direct[k]) if k in exact else
+                     matches(through[k], direct[k], RECORDING_BLAS, unit='1',
+                             quantity='root'))]
+    moved = [m for own in comm.allgather(moved) for m in own]
+    all_ok &= check(not moved, f'over {size} MPI ranks', f'moved: {moved}')
+else:
+    check(True, 'serial: nothing is staged', 'rerun under mpirun to compare')
 
 if rank == 0:
     print(f'\n-- reduce_scatter_rows: each rank\'s rows of the all-reduce, '
@@ -167,12 +207,46 @@ st.polarizability_projected_sweep, st.owned_frequency_blocks = sweep, blocks
 all_ok &= check(dets == {'nonpositive_det': [BAD]},
                 'every rank names the frequency one rank owns', str(dets))
 
-mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+mol = gto.M(atom=WATER,
             basis='cc-pvdz', verbose=0)
 mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri'); mf.kernel()
 nocc = mol.nelectron // 2
 F = separable_factors(mf, mol, auxbasis='cc-pvdz-ri', counts=g1(mol))
 serial = solve_qp_energy_space_time(mf, mol, nocc, nocc-1, factors=F) * HARTREE_TO_EV
+if rank == 0:
+    print('\n-- ordered_sliced_sum: ordered_chain_sum bit for bit')
+
+
+def sliced_against_chain(c):
+    """[(layout, root, equal)] over the ranks of c, random terms of
+    magnitudes 1e-8 to 1e8 onto a nonzero start."""
+    r, s = (0, 1) if c is None else (c.Get_rank(), c.Get_size())
+    rng = np.random.default_rng(29)
+    n = 17
+    terms = [rng.standard_normal((4, 9)) * 10.0 ** rng.integers(-8, 8) for _ in range(n)]
+    onto = rng.standard_normal((4, 9))
+    out = []
+    for layout, owners in (('runs', [q for q in range(s) for _ in range(*contiguous_block(n, q, s))]),
+                           ('round-robin', [k % s for k in range(n)])):
+        mine = {k: terms[k] for k in range(n) if owners[k] == r}
+        for root in (None, s - 1):
+            a = ordered_chain_sum(mine, owners, c, onto, root=root)
+            b = ordered_sliced_sum(mine, owners, c, onto, root=root)
+            same = (a is None and b is None) or (a is not None and b is not None
+                                                  and np.array_equal(a, b))
+            out.append((layout, root, same))
+    return out
+
+
+if size > 1:
+    bad = [x for x in sliced_against_chain(comm) if not x[2]]
+    bad = [m for own in comm.allgather(bad) for m in own]
+    all_ok &= check(not bad, f'over {size} MPI ranks', f'differs: {bad}')
+else:
+    for s in (2, 3, 5):
+        bad = [x for res in run_simulated(sliced_against_chain, s) for x in res if not x[2]]
+        all_ok &= check(not bad, f'over {s} simulated ranks', f'differs: {bad}')
+
 if rank == 0:
     print(f'\n-- QP energy, {size} rank(s)')
 if size > 1:

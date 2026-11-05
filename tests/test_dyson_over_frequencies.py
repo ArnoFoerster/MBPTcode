@@ -80,10 +80,10 @@ from src.SingleReference.GW.space_time import (_dyson_in_place, _dyson_owned,
                                                separable_factors,
                                                solve_qp_diagonal_space_time,
                                                solve_qp_energy_space_time)
-from tests.isdf_test_grid import g1
+from tests.isdf_test_grid import g1, duchemin_blase
 from tests.pins import RECORDING_BLAS, THREAD_CAPS, matches
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: (geometry, basis, continuum solvent or None for the gas phase).
 SYSTEMS = {
     'water': (WATER, 'cc-pvdz', None),
@@ -291,7 +291,8 @@ def systems():
         mf.kernel()
         if solvent is not None:
             attach_solvent_screening(mf, solvent=solvent, **CAVITY)
-        factors = separable_factors(mf, mol, auxbasis=basis + '-ri', counts=g1(mol))
+        factors = separable_factors(mf, mol, auxbasis=basis + '-ri', counts=g1(mol),
+                                    numerics=duchemin_blase())
         out[name] = dict(mol=mol, mf=mf, factors=factors,
                          nocc=mol.nelectron // 2)
     return out

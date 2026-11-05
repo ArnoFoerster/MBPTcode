@@ -42,7 +42,6 @@ This route holds the full four-index interaction (or its three blocks) rather
 than factorizing it, which bounds it at a few hundred basis functions and makes
 it the reference the cubic space-time route is checked against.
 """
-import warnings
 
 import numpy as np
 
@@ -147,7 +146,7 @@ class QPqb:
                 'largest': (None if largest is None
                             else [float(x) for x in largest]),
                 'labels': seen.get('labels')})
-            warnings.warn(
+            flag('qp_branch_flipped',
                 f'quasi-boson orbital {p}: the root {w:.10f} Ha followed from '
                 f'{float(w0):.10f} Ha has Z = {z:.4f}, the largest weight is '
                 f'elsewhere ({largest}); the branch is kept and logged in '

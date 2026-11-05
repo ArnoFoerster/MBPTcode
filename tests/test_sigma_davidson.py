@@ -30,6 +30,7 @@ from src.SingleReference.ADC.solve import follow_roots
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies, get_antisymmetrized_spin_block_eri)
 from tests.generated_runtime import requires_runtime
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(4)
 
@@ -98,7 +99,7 @@ def main():
     all_ok = True
     for atom, basis, label in [
         ('Li 0 0 0; H 0 0 1.6', 'sto-3g', 'LiH/sto-3g'),
-        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'sto-3g', 'H2O/sto-3g'),
+        (WATER_RIGHT_ANGLE, 'sto-3g', 'H2O/sto-3g'),
     ]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()

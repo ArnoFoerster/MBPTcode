@@ -51,7 +51,7 @@ from src.SingleReference.ADC.adc_r_utils import u_2h1p_unfold, u_2p1h_unfold
 from src.SingleReference.ADC.eeADC.ee_r_sigma_df import DFVvvvKernels
 from src.SingleReference.ADC.solve import (ADCNotConverged, apply_inverse_sqrt,
                                            inverse_sqrt_psd)
-from src.SingleReference.CC.diis import DIIS
+from src.Solvers.diis import DIIS
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.pp_rpa import (

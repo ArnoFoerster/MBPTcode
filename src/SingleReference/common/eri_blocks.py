@@ -42,6 +42,8 @@ skeleton (`gradients.df_assembly`) read one pair of integral builders.
 import numpy as np
 from pyscf import ao2mo
 from pyscf import df as pyscf_df
+from src.Base.utils.threaded_copies import ascontiguous_threaded
+from src.Base.utils.cached_einsum import einsum as cached_einsum
 
 
 class MOEriBlocks:
@@ -75,7 +77,7 @@ class MOEriBlocks:
 
     @classmethod
     def from_dense(cls, eri_mo, nocc):
-        """Slice a full (pq|rs). Bitwise what the route used to index itself."""
+        """Slice a full (pq|rs), bitwise the blocks the dense route indexes."""
         eri_mo = np.asarray(eri_mo)
         norb = eri_mo.shape[0]
         occ, virt = slice(0, nocc), slice(nocc, norb)
@@ -130,15 +132,39 @@ class MOEriBlocks:
         return self.dense
 
 
+def _as_slice(idx):
+    """A slice for a contiguous ascending integer index range (the occupied or
+    virtual block, or a chunk of one), else the index itself."""
+    if isinstance(idx, slice):
+        return idx
+    a = np.asarray(idx)
+    if (a.ndim == 1 and a.size and a.dtype.kind in 'iu'
+            and (a.size == 1 or np.all(np.diff(a) == 1))):
+        return slice(int(a[0]), int(a[-1]) + 1)
+    return idx
+
+
+def b_block(B, rows, cols):
+    """B[:, rows, cols] of a DF factor (naux, n, n): a view when rows and cols are
+    contiguous ranges, so a factor shared by several ranks is not copied per rank;
+    otherwise one copy by fancy indexing."""
+    r, c = _as_slice(rows), _as_slice(cols)
+    if isinstance(r, slice):
+        return B[:, r, c] if isinstance(c, slice) else B[:, r][:, :, c]
+    return B[:, r][:, :, c]
+
+
 def g_slice_df(B, p_idx, q_idx, r_idx, s_idx):
     """
     DF/RI build of one block g[p_idx,q_idx,r_idx,s_idx] of the bare
     (non-antisymmetrized) physicist Coulomb integral g[p,q,r,s] = <pq|rs> =
     sum_Q B[Q,p,r]*B[Q,q,s]
     """
-    Bpr = B[:, p_idx][:, :, r_idx]   # (naux, |p|, |r|)
-    Bqs = B[:, q_idx][:, :, s_idx]   # (naux, |q|, |s|)
-    return np.einsum('Qpr,Qqs->pqrs', Bpr, Bqs, optimize=True)
+    Bpr = b_block(B, p_idx, r_idx)   # (naux, |p|, |r|)
+    Bqs = b_block(B, q_idx, s_idx)   # (naux, |q|, |s|)
+    # the (p,r,q,s) product is transposed to (p,q,r,s): on a large block that copy is
+    # the cost, so it is made on the threaded-copy pool (identical values)
+    return ascontiguous_threaded(cached_einsum('Qpr,Qqs->pqrs', Bpr, Bqs, optimize=True))
 
 
 def g_slice(B, eri_chemist, p_idx, q_idx, r_idx, s_idx):

@@ -42,10 +42,11 @@ from src.gradients.rpa.ground_state import RPAGroundStateChain
 from src.gradients.rpa.solvated_energy import solvated_correlation_energies
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
 AUXBASIS = 'cc-pvdz-ri'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: Ha. The chain's ISDF factorization against the same RI matrices taken
 #: whole: measured 3.3e-5 to 3.5e-5 on the absolute A/B/F at the shipped
 #: radii of the default counts (they are chosen on BSE roots, not on the

@@ -43,6 +43,7 @@ class _SpyTargets:
 from src.SingleReference.EpsteinNesbet import (
     EpsteinNesbetDenominators, restricted_channel_shifts)
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, DFIntegrals
+from tests.molecules import WATER_AT_ORIGIN_COARSE
 
 
 if __name__ == '__main__':
@@ -430,7 +431,7 @@ if __name__ == '__main__':
     # --- (d) end-to-end: DF matrix-free operator == dense H@z for bare EN,
     # and the spy confirms the production path builds NO (O,O,V,V)/(V,V,O,O)
     # slice (the actual point of S4) ---
-    mol4 = gto.M(atom='O 0 0 0; H 0 0.76 0.59; H 0 -0.76 0.59', basis='6-31g', verbose=0)
+    mol4 = gto.M(atom=WATER_AT_ORIGIN_COARSE, basis='6-31g', verbose=0)
     mf4 = scf.RHF(mol4).run()
     nocc4 = mol4.nelectron // 2
     eps4 = get_orbital_energies(mf4, representation='spatial')

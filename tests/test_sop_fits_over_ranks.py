@@ -8,7 +8,8 @@ which is reduced and identical on every rank, so the poles, the roots and Z
 are gated to a few ulp against serial.
 
 Water/cc-pVDZ (HF, DF), the admitted window on the ISDF factors, a 24-point
-contour grid. Over n ranks every state is fitted once in all.
+contour grid. Over n ranks every state is fitted once in all, and the root
+search fetches no slice from its owner.
 """
 import os
 import sys
@@ -23,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from src.Base.declaration import QPStates
 from src.Base.utils.grids.grids import gauss_legendre_grid
+import src.Base.utils.parallel.mpi_grid as mpi_grid
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.qp_states import resolve_qp_states
@@ -31,6 +33,7 @@ import src.gradients.gwbse.qp_space_time as qp_space_time
 from src.gradients.gwbse.qp_space_time import qp_set_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 
 def same(got, want, label, unit='Ha', quantity='root'):
@@ -47,7 +50,7 @@ SIZES = [2, 3]
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()
@@ -143,8 +146,8 @@ def test_frozen_poles_are_not_fitted_again(water, monkeypatch):
 @pytest.mark.parametrize('size', SIZES)
 def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     """The three-index slices B_p, the O(M naux norb) per-state cost of the
-    sweep, are striped too: n slices in all over `size` ranks, and every
-    rank's are the serial ones to a few ulp."""
+    sweep, are striped too: n slices in all over `size` ranks, each held by
+    the rank that built it alone, and the serial ones to a few ulp."""
     n = len(water['states'])
     built, lock = [], threading.Lock()
     real = qp_space_time.three_index_slice
@@ -158,9 +161,65 @@ def test_each_slice_is_built_once_over_the_ranks(water, size, monkeypatch):
     got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
                         size)
     assert len(built) == n, f'{len(built)} slices for {n} states'
+    held = [i for _, route_out in got for i in route_out['tape'].Bps.held]
+    assert sorted(held) == list(range(n)), held
     for _, route_out in got:
-        for b, r in zip(route_out['tape'].Bps, ref):
-            same(b, r, 'B_p', unit='1')
+        for i, b in route_out['tape'].Bps.held.items():
+            same(b, ref[i], 'B_p', unit='1')
+
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_the_root_search_fetches_no_slice_on_the_pole_model(water, size,
+                                                            monkeypatch):
+    """The pole model's roots read the state's wc alone, so pass 1 broadcasts
+    no slice over the ranks on that route (a slice is O(M naux norb) per
+    state, the whole set many GB on a large molecule), and the roots and Z
+    are the serial ones."""
+    n = len(water['states'])
+    ref, ref_out = solve(water, np.zeros(n))
+    callers, lock = [], threading.Lock()
+    real = mpi_grid.OwnedSlices.fetch
+
+    def fetch(self, i):
+        with lock:
+            callers.append(sys._getframe(1).f_code.co_name)
+        return real(self, i)
+    monkeypatch.setattr(mpi_grid.OwnedSlices, 'fetch', fetch)
+    got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
+                        size)
+    assert 'solve_states' not in callers
+    for out, route_out in got:
+        same(out[0], ref[0], 'roots', quantity='energy')
+        same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
+
+
+@pytest.mark.parametrize('size', SIZES)
+def test_each_pole_model_root_is_searched_on_one_rank(water, size,
+                                                      monkeypatch):
+    """Pass 1 takes each pole-model root on one rank and shares it, so the
+    ranks together search as many roots as one rank alone (the search was
+    replicated, the same seconds per rank at every rank count), and the roots
+    and Z are the serial ones."""
+    n = len(water['states'])
+    calls, lock = [], threading.Lock()
+    real = qp_space_time.contour_state_root
+
+    def counted(route, *args, **kwargs):
+        with lock:
+            calls.append(route)
+        return real(route, *args, **kwargs)
+    monkeypatch.setattr(qp_space_time, 'contour_state_root', counted)
+    ref, ref_out = solve(water, np.zeros(n))
+    serial = calls.count('sop')
+    del calls[:]
+    got = run_simulated(lambda comm: solve(water, np.zeros(n), comm=comm),
+                        size)
+    assert serial > 0
+    assert calls.count('sop') == serial
+    for out, route_out in got:
+        same(out[0], ref[0], 'roots', quantity='energy')
+        same(route_out['z'], ref_out['z'], 'Z', unit='1', quantity='energy')
 
 
 if __name__ == '__main__':

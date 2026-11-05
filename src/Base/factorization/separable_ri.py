@@ -104,23 +104,25 @@ from scipy.optimize import minimize, basinhopping
 from pyscf import df, gto
 from pyscf.dft import gen_grid
 
-from src.Base.numerics.constants import (BYTES_PER_GB, AUX_METRIC_INDEFINITE_TOL, LEGACY_R_MAX,
+from src.Base.numerics.constants import (ISDF_DUCHEMIN_BLASE, BYTES_PER_GB,
+                                         AUX_METRIC_INDEFINITE_TOL, SINGLE_DESCENT_R_MAX,
                                          AUX_METRIC_ROOT_FLOOR, FIT_CHOLESKY_BLOCK,
-                                         METRIC_ROOT_CACHE_BYTES,
-                                         FIT_ROW_CHUNK_BYTES, FIT_TRANSPOSE_TILE,
-                                         FRAME_TURNING_RATE_BAR,
+                                         METRIC_ROOT_CACHE_BYTES, FIT_ROW_CHUNK_BYTES,
+                                         FIT_TRANSPOSE_TILE, FRAME_TURNING_RATE_BAR,
                                          ISDF_DENSITY_RESIDUAL_TOL, ISDF_GRID_ACCURACY,
-                                         ISDF_FITTED_DENSITY_ROWS,
-                                         ISDF_GRID_N_START, ISDF_ORBITAL_RESIDUAL_TOL,
+                                         ISDF_FITTED_DENSITY_ROWS, ISDF_GRID_N_START,
+                                         ISDF_ORBITAL_RESIDUAL_TOL,
                                          ISDF_REFUSED_ORBITALS_NAMED,
-                                         ISDF_RADII_MATCH_TOL,
-                                         ISDF_SPAN_OVERLAP_FLOOR, ISDF_TILE_GB,
-                                         THREE_CENTER_BLOCK_BYTES)
-from src.Base.geometry.geometry import elements_of
+                                         ISDF_RADII_MATCH_TOL, ISDF_SPAN_OVERLAP_FLOOR,
+                                         ISDF_TILE_GB, THREE_CENTER_BLOCK_BYTES)
+from src.Base.geometry.geometry import elements_of, grid_key
 from src.Base.numerics.numerics import numerics_or_default
 from src.Base.basis.ri_fallback import (element_auxbasis, element_basis_name,
-                                        missing_row_hint, paired_auxbasis)
+                                        missing_row_hint, paired_auxbasis,
+                                        pure_element)
+from src.Base.factorization.shell_runs import shell_runs
 from src.Base.factorization.sliced_factors import GridTileRows, SlicedFactors
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (agreement, allgather_ranges, broadcast,
                                               broadcast_rows, contiguous_block, current_comm,
                                               cyclic_tiles_to_blocks, distributed, lockstep,
@@ -145,6 +147,56 @@ def fit_settings(numerics, *names):
             'regularization': float(isdf.regularization),
             'block_memory_gb': ISDF_TILE_GB if gb is None else float(gb)}
     return tuple(held[name] for name in names)
+
+
+def point_tiles(n, block=FIT_CHOLESKY_BLOCK):
+    """[(t0, t1)]: the points in fixed tiles of `block`, the unit every row
+    fit and its adjoint work in, tile t owned by rank t % size (`row_layout`).
+    A tile's arithmetic is the same calls on the same shapes whoever owns it,
+    so every result is the same bits at every rank count."""
+    return [(t0, min(t0 + block, n)) for t0 in range(0, n, block)]
+
+
+def tile_edge(block):
+    """The tile edge of a row fit: `block`, FIT_CHOLESKY_BLOCK when None; an
+    edge below one point is refused."""
+    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
+    if block < 1:
+        raise ValueError(f'block={block}: a tile holds at least one point')
+    return block
+
+
+def row_extension(nk, block, rank, nranks):
+    """(e0, e1): the whole tiles over rank `rank`'s contiguous rows
+    (`contiguous_block`), the rows of the collocation a `RowFit` keeps."""
+    r0, r1 = contiguous_block(nk, rank, nranks)
+    if r1 <= r0:
+        return r0, r0
+    return (r0 // block) * block, min(-(-r1 // block) * block, nk)
+
+
+def row_layout(nk, block, comm):
+    """(tiles, owners, ext) of a row fit of `nk` points over the ranks of
+    `comm`: the `point_tiles`, owners[r] the tiles rank r owns
+    (round-robin, `partition`) and this rank's `row_extension`."""
+    rank, nranks = ((0, 1) if comm is None
+                    else (comm.Get_rank(), comm.Get_size()))
+    tiles = point_tiles(nk, block)
+    owners = [[int(t) for t in partition(len(tiles), r, nranks)]
+              for r in range(nranks)]
+    return tiles, owners, row_extension(nk, block, rank, nranks)
+
+
+class Held(dict):
+    """{array: most bytes of it this rank held at once}, every name a pass
+    may hold zero until it does, so the same keys on every rank; calling it
+    with (name, nbytes) records a peak."""
+
+    def __init__(self, names=()):
+        super().__init__(dict.fromkeys(names, 0))
+
+    def __call__(self, name, nbytes):
+        self[name] = max(self.get(name, 0), int(nbytes))
 
 
 class RowFit:
@@ -250,10 +302,14 @@ class FitTiles:
     The distributed ISDF-K SCF hands its own out
     (`DistributedISDFJK.fit_tiles`), and the gradient chain and the energy
     route's factor stage read the SCF's fit instead of repeating it.
+    `test_set` names the fit the tiles are (`IsdfNumerics.test_set`): the
+    AO-product row fit (`ao_product_fit.ao_product_fit_rows`) hands tiles
+    out the same way, and neither fit reads the other's.
     """
 
     def __init__(self, mol, auxmol, coords, block, mt, comm, held, settings,
-                 kept=None):
+                 kept=None, test_set=ISDF_DUCHEMIN_BLASE):
+        self.test_set = str(test_set)
         self.keys = (content_key(mol), content_key(auxmol))
         self.kept = None if kept is None else _read_only(kept)
         self.coords = _read_only(coords)
@@ -269,11 +325,11 @@ class FitTiles:
                          float(regularization), float(block_memory_gb))
 
     def row_fit(self, mol, auxmol, coords, block, comm, settings,
-                layout=None):
+                layout=None, test_set=ISDF_DUCHEMIN_BLASE):
         """The `RowFit` `fit_rows` would return for this call, read from
         these tiles, or None where the call asks for another fit: another
-        molecule, basis, point, tile edge, setting or rank layout, or a
-        frozen pair `layout` other than the columns these tiles kept.
+        test set, molecule, basis, point, tile edge, setting or rank layout,
+        or a frozen pair `layout` other than the columns these tiles kept.
 
         The collocation over this rank's contiguous rows is evaluated tile
         by tile, the calls the fit's own Gram pass makes for it, and the
@@ -281,7 +337,8 @@ class FitTiles:
         """
         ranks = (1, 0) if comm is None else (comm.Get_size(), comm.Get_rank())
         l_max, tol, reg, gb = settings
-        if (ranks != self.ranks or int(block) != self.block
+        if (str(test_set) != self.test_set or ranks != self.ranks
+                or int(block) != self.block
                 or (int(l_max), float(tol), float(reg), float(gb))
                 != self.settings
                 or (content_key(mol), content_key(auxmol)) != self.keys
@@ -294,10 +351,7 @@ class FitTiles:
                     self.kept):
                 return None
         nk = len(coords)
-        r0, r1 = contiguous_block(nk, ranks[1], ranks[0])
-        e0 = e1 = r0
-        if r1 > r0:
-            e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
+        e0, e1 = row_extension(nk, block, ranks[1], ranks[0])
         X_ext = np.empty((e1 - e0, mol.nao_nr()))
         for k0 in range(e0, e1, block):
             k1 = min(k0 + block, nk)
@@ -569,7 +623,7 @@ def ao_blocks(mol, nk, n2, naux, block_memory_gb):
     by up to the s-to-f ratio.
     """
     per_mu = (nk * n2 + mol.nao_nr() * naux) * 8
-    max_mu = max(1, int(block_memory_gb * BYTES_PER_GB / max(per_mu, 1)))
+    max_mu = fits(block_memory_gb, per_mu)
     ao_loc = mol.ao_loc_nr()
     blocks, sh0 = [], 0
     for sh in range(1, mol.nbas + 1):
@@ -801,7 +855,7 @@ def fit_M_streaming(mol, auxmol, coords, numerics=None,
     B = np.ascontiguousarray(ao[:, second] * w[None, :])
     S = np.zeros((nk, nk))
     FD = np.zeros((naux, nk))
-    rows = max(1, min(nk, int(block_memory_gb * BYTES_PER_GB / max(2 * nk * 8, 1))))
+    rows = fits(block_memory_gb, 2 * nk * 8, cap=nk)
     # The GEMMs are BLAS's; the Hadamard product, the auxiliary sum, the
     # transpose and the balancing are O(n_k^2) element-wise passes numpy runs
     # on one core, so they run in `row_map`'s threads, each element the same
@@ -1013,9 +1067,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
                     else (comm.Get_rank(), comm.Get_size()))
     if nranks > 1:
         coords = lockstep(coords, comm)
-    block = FIT_CHOLESKY_BLOCK if block is None else int(block)
-    if block < 1:
-        raise ValueError(f'block={block}: a tile holds at least one point')
+    block = tile_edge(block)
     if tiles is not None:
         _t = time.time()
         handed = tiles.row_fit(mol, auxmol, coords, block, comm,
@@ -1031,25 +1083,12 @@ def fit_rows(mol, auxmol, coords, numerics=None,
             return handed
     nao, naux = mol.nao_nr(), auxmol.nao_nr()
     nk = len(coords)
-    ntiles = -(-nk // block)
-    tiles = [(t * block, min((t + 1) * block, nk)) for t in range(ntiles)]
-    owners = [[int(t) for t in partition(ntiles, r, nranks)]
-              for r in range(nranks)]
+    tiles, owners, (e0, e1) = row_layout(nk, block, comm)
+    ntiles = len(tiles)
     mine = owners[rank]
-    r0, r1 = contiguous_block(nk, rank, nranks)
-    e0 = e1 = r0             # the whole tiles over this rank's contiguous rows
-    if r1 > r0:
-        e0, e1 = (r0 // block) * block, min(-(-r1 // block) * block, nk)
-    # every array the fit may hold, zero until it does
-    held = dict.fromkeys(('metric_lu', 'X_rows', 'B_rows', 'aux_rows', 'X_ext',
-                          'stream_tile', 'S_rows', 'FD_rows', 'shell_block',
-                          'F_block', 'panel'), 0)
-
-    def hold(name, nbytes):
-        held[name] = max(held[name], int(nbytes))
-
-    def total(arrays):
-        return sum(int(a.nbytes) for a in arrays)
+    hold = Held(('metric_lu', 'X_rows', 'B_rows', 'aux_rows', 'X_ext',
+                 'stream_tile', 'S_rows', 'FD_rows', 'shell_block', 'F_block',
+                 'panel'))
 
     def _say(msg):
         # Same reason as `fit_M_streaming`: hours at production size.
@@ -1077,7 +1116,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     del B_own, P_own
     if timings is not None:
         timings['fit_gram'] = time.time() - _t
-    _say(f'Gram tiles built: {total(S.values()) / BYTES_PER_GB:.2f} GB on rank 0')
+    _say(f'Gram tiles built: {total_bytes(S.values()) / BYTES_PER_GB:.2f} GB on rank 0')
 
     # The three-centre pass: F moves, each rank accumulates its own points.
     _t = time.time()
@@ -1094,7 +1133,7 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     # molecule alone and is the order every point accumulates in.
     order = sorted(range(len(blocks)), key=lambda ib: (-width[ib], ib))
     R = {i: np.zeros((tiles[i][1] - tiles[i][0], naux)) for i in mine}
-    hold('FD_rows', total(R.values()))
+    hold('FD_rows', total_bytes(R.values()))
     n_mine = n_kept = 0
     # the co-densities in `row_map`'s threads, as in the replicated pass
     threads = openmp_threads()
@@ -1163,90 +1202,25 @@ def fit_rows(mol, auxmol, coords, numerics=None,
     _say(f'three-centre pass done: {len(blocks)} blocks, {n_kept:,} of '
          f'{nao * n2:,} columns survived screening')
 
-    # Right-looking Cholesky, the forward substitution in the same sweep. Its
-    # GEMMs are BLAS's; each update's subtraction -- one flop an element
-    # against the GEMM's 2 `block`, which on a pool is as slow as the GEMM --
-    # is numpy's and runs in `row_map`'s threads, the same difference an
-    # element.
+    # Right-looking Cholesky, the forward substitution in the same sweep,
+    # then the backward one, each update's subtraction in `row_map`'s threads.
     _t = time.time()
-    t_solve = 0.0
-    diagonal, panels = {}, {}
-    for j, (j0, j1) in enumerate(tiles):
-        owner = j % nranks
-        LT = np.empty((j1 - j0, j1 - j0))
-        info = 0
-        if rank == owner:
-            # row tile j is down to its diagonal block
-            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
-            LT = L.T                                 # C order, L in F order
-        info = broadcast(info, comm, root=owner)
-        if info != 0:
-            raise np.linalg.LinAlgError(
-                f'Cholesky of the balanced Gram matrix failed at leading '
-                f'minor {j0 + info}: it is not positive definite, which for a '
-                f'Gram matrix plus a {regularization:g} shift means the grid '
-                'is degenerate -- points coincide, or a whole sub-shell '
-                'collapsed onto one radius.')
-        broadcast_rows(LT, owner, comm)
-        L = LT.T
-        _ts = time.time()
-        y = R[j] if rank == owner else np.empty((j1 - j0, naux))
-        if rank == owner:
-            trsm(L, y.T, side=1, trans_a=1)             # y^T L^T = R_j^T
-            diagonal[j] = L
-        broadcast_rows(y, owner, comm)
-        t_solve += time.time() - _ts
-        below = [i for i in mine if i > j]
-        Lcol = {}
-        for i in below:
-            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
-            trsm(L, Lcol[i].T, side=0, trans_a=0)       # L L_ij^T = S_ij^T
-        _ts = time.time()
-        for i in below:
-            _subtract(R[i], Lcol[i] @ y, threads)
-        t_solve += time.time() - _ts
-        del y
-        panel = np.empty((nk - j1, j1 - j0))
-        for i in below:
-            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
-        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
-                                  for i in own if i > j] for own in owners],
-                         comm)
-        for i in below:
-            # one GEMM per row tile; the consumed column block is dropped
-            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
-            S[i] = _difference(S[i][:, j1 - j0:], U, threads)
-            del U
-        if rank == owner:
-            panels[j] = panel
-        hold('panel', panel.nbytes)
-        hold('S_rows', total(S.values()) + total(panels.values())
-             + total(diagonal.values()))
-        del panel
-    # Backward substitution: z_j = L_jj^-T (y_j - sum_{k>j} L_kj^T z_k), the
-    # sum pushed by each solved block into the rows that own a panel.
+    clock = {'solve': 0.0}
+    diagonal, panels = cholesky_tiles(S, tiles, owners, rank, comm, [R],
+                                      regularization, hold, threads=threads,
+                                      clock=clock)
     _ts = time.time()
-    for j in reversed(range(ntiles)):
-        j0, j1 = tiles[j]
-        owner = j % nranks
-        z = R[j] if rank == owner else np.empty((j1 - j0, naux))
-        if rank == owner:
-            trsm(diagonal.pop(j), z.T, side=1, trans_a=0)   # z^T L = y^T
-            panels.pop(j, None)
-        broadcast_rows(z, owner, comm)
-        for i in mine:
-            if i < j:
-                i1 = tiles[i][1]
-                _subtract(R[i], panels[i][j0 - i1:j1 - i1].T @ z, threads)
-        del z
+    backward_tiles(diagonal, panels, R, tiles, owners, rank, comm, keep=False,
+                   threads=threads)
     for i in mine:
         R[i] *= d[slice(*tiles[i]), None]
-    t_solve += time.time() - _ts
+    t_solve = clock['solve'] + time.time() - _ts
     if timings is not None:
         timings['fit_cholesky'] = time.time() - _t - t_solve
         timings['fit_solve'] = t_solve
     _say('row-distributed fit done')
-    return RowFit(nk, block, comm, R, X_ext, (e0, e1), held, kept=kept_mask)
+    return RowFit(nk, block, comm, R, X_ext, (e0, e1), dict(hold),
+                  kept=kept_mask)
 
 
 def rows_transpose_product(rows, r0, x_bar, block=None, comm=None):
@@ -1354,6 +1328,141 @@ def gram_tiles(mol, auxmol, coords, tiles, owners, rank, second, w,
         S[i] *= d[None, :i1]
         S[i][:, i0:i1][np.diag_indices(i1 - i0)] += regularization
     return S, d, X_own, B_own, P_own, X_ext, screen_ref
+
+
+def cholesky_tiles(S, tiles, owners, rank, comm, rhs_sets, regularization,
+                    hold, threads=1, clock=None):
+    """(diagonal, panels): the right-looking Cholesky of the balanced Gram
+    tiles S (consumed) every row fit runs, with the forward substitution of
+    each right-hand side of `rhs_sets` riding in the sweep, and the factor
+    kept for later solves: the diagonal block and the gathered panel below
+    it of every tile this rank owns.
+
+    The owner of tile j (j % size) factors it (dpotrf), broadcasts it and
+    each solved right-hand side block; every rank solves its rows of the
+    panel (trsm), updates its right-hand sides, gathers the panel and
+    updates its trailing tiles one row tile per GEMM. Every call's shape is
+    fixed by the tiles alone, so the factor is the same bits at every rank
+    count. The GEMMs are BLAS's; each update's subtraction -- one flop an
+    element against the GEMM's 2 `block`, which on a pool is as slow as the
+    GEMM -- runs elementwise on `threads` threads (`row_map`), the same
+    difference an element at any thread count. clock: a dict whose 'solve'
+    gains the seconds of the forward substitution."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncols = [broadcast(next(iter(rhs.values())).shape[1] if rhs else 0, comm)
+             for rhs in rhs_sets]
+    diagonal, panels = {}, {}
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        LT = np.empty((j1 - j0, j1 - j0))
+        info = 0
+        if rank == owner:
+            # row tile j is down to its diagonal block
+            L, info = scipy.linalg.lapack.dpotrf(S.pop(j), lower=1, clean=1)
+            LT = L.T                                 # C order, L in F order
+        info = broadcast(info, comm, root=owner)
+        if info != 0:
+            raise np.linalg.LinAlgError(
+                f'Cholesky of the balanced Gram matrix failed at leading '
+                f'minor {j0 + info}: it is not positive definite, which for a '
+                f'Gram matrix plus a {regularization:g} shift means the grid '
+                'is degenerate -- points coincide, or a whole sub-shell '
+                'collapsed onto one radius.')
+        broadcast_rows(LT, owner, comm)
+        L = LT.T
+        _ts = time.time()
+        ys = []
+        for rhs, ncol in zip(rhs_sets, ncols):
+            y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+            if rank == owner:
+                trsm(L, y.T, side=1, trans_a=1)         # y^T L^T = R_j^T
+            broadcast_rows(y, owner, comm)
+            ys.append(y)
+        if rank == owner:
+            diagonal[j] = L
+        if clock is not None:
+            clock['solve'] += time.time() - _ts
+        below = [i for i in mine if i > j]
+        Lcol = {}
+        for i in below:
+            Lcol[i] = np.ascontiguousarray(S[i][:, :j1 - j0])
+            trsm(L, Lcol[i].T, side=0, trans_a=0)       # L L_ij^T = S_ij^T
+        _ts = time.time()
+        for rhs, y in zip(rhs_sets, ys):
+            for i in below:
+                _subtract(rhs[i], Lcol[i] @ y, threads)
+        if clock is not None:
+            clock['solve'] += time.time() - _ts
+        del ys
+        panel = np.empty((nk - j1, j1 - j0))
+        for i in below:
+            panel[tiles[i][0] - j1:tiles[i][1] - j1] = Lcol[i]
+        allgather_ranges(panel, [[(tiles[i][0] - j1, tiles[i][1] - j1)
+                                  for i in own if i > j] for own in owners],
+                         comm)
+        for i in below:
+            # one GEMM per row tile; the consumed column block is dropped
+            U = Lcol.pop(i) @ panel[:tiles[i][1] - j1].T
+            S[i] = _difference(S[i][:, j1 - j0:], U, threads)
+            del U
+        if rank == owner:
+            panels[j] = panel
+        hold('panel', panel.nbytes)
+        hold('S_rows', total_bytes(S.values()) + total_bytes(panels.values())
+             + total_bytes(diagonal.values()))
+        del panel
+    return diagonal, panels
+
+
+def forward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm, hold):
+    """rhs <- L^-1 rhs on the kept factor: the owner of tile j solves its
+    block and broadcasts it with its panel, and every rank updates its tiles
+    below with the call `cholesky_tiles` makes there."""
+    nk, nranks = tiles[-1][1], len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j, (j0, j1) in enumerate(tiles):
+        owner = j % nranks
+        y = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j], y.T, side=1, trans_a=1)
+        broadcast_rows(y, owner, comm)
+        panel = panels[j] if rank == owner else np.empty((nk - j1, j1 - j0))
+        broadcast_rows(panel, owner, comm)
+        hold('panel', panel.nbytes)
+        for i in mine:
+            if i > j:
+                rhs[i] -= panel[tiles[i][0] - j1:tiles[i][1] - j1] @ y
+        del y, panel
+
+
+def backward_tiles(diagonal, panels, rhs, tiles, owners, rank, comm,
+                    keep=True, threads=1):
+    """rhs <- L^-T rhs on the kept factor of `cholesky_tiles`:
+    z_j = L_jj^-T (y_j - sum_{k>j} L_kj^T z_k), each solved block broadcast
+    by its owner and pushed into the rows that own a panel, the subtraction
+    on `threads` threads as there. keep=False drops the factor as it goes."""
+    nranks = len(owners)
+    mine = owners[rank]
+    ncol = next(iter(rhs.values())).shape[1] if rhs else 0
+    ncol = broadcast(ncol, comm)
+    for j in reversed(range(len(tiles))):
+        j0, j1 = tiles[j]
+        owner = j % nranks
+        z = rhs[j] if rank == owner else np.empty((j1 - j0, ncol))
+        if rank == owner:
+            trsm(diagonal[j] if keep else diagonal.pop(j), z.T, side=1,
+                  trans_a=0)                            # z^T L = y^T
+            if not keep:
+                panels.pop(j, None)
+        broadcast_rows(z, owner, comm)
+        for i in mine:
+            if i < j:
+                i1 = tiles[i][1]
+                _subtract(rhs[i], panels[i][j0 - i1:j1 - i1].T @ z, threads)
+        del z
 
 
 def block_coefficients(integrals, lu, shells, a0, keep, second, w, hold):
@@ -1630,23 +1739,13 @@ def _balanced_gram(D, numerics):
 def fit_M(D, F, numerics=None):
     """Their eqs 8-9: balanced, Tikhonov-regularized least-squares estimator.
 
-    Cost is one (nk x nk) Gram matrix, one inversion and two products -- O(N^3)
-    with the test set linear in system size.
-    """
-    Dt, d, G = _balanced_gram(D, numerics)
-    return ((F @ Dt.T) @ np.linalg.inv(G)) * d[None, :]
-
-
-def fit_M_stable(D, F, numerics=None):
-    """`fit_M` with the explicit inverse replaced by a Cholesky solve.
-
-    The same estimator, a better numerical realization of it. `fit_M` forms
-    np.linalg.inv(G) at cond(G) ~ 2e8, which costs digits in the forward pass;
-    production's default `fit_M_streaming` already solves rather than inverts,
-    and `build_separable_ri` calls it "the better conditioned of the two". D is
-    explicit, so the estimator is whatever columns D and F carry: the fit
-    adjoints formed whole rebuild `fit_M_streaming`'s estimator with it from D
-    over every product pair and F zero on the screened ones.
+    The Gram matrix is solved with a Cholesky factorization, not inverted:
+    an explicit inverse at cond(G) ~ 2e8 costs digits, and production's
+    default `fit_M_streaming` solves too. Cost is one (nk x nk) Gram matrix,
+    one factorization and two products -- O(N^3) with the test set linear in
+    system size. D is explicit, so the estimator is whatever columns D and F
+    carry: the fit adjoints formed whole rebuild `fit_M_streaming`'s estimator
+    with it from D over every product pair and F zero on the screened ones.
     """
     Dt, d, G = _balanced_gram(D, numerics)
     cho = scipy.linalg.cho_factor(G, lower=True)
@@ -1940,11 +2039,7 @@ def _ri_density_coefficients(mol, auxmol, orbitals, V, comm=None):
     many = comm is not None and comm.Get_size() > 1
     rank, size = (comm.Get_rank(), comm.Get_size()) if many else (0, 1)
     out = np.zeros((auxmol.nao_nr(), n))
-    s0, block = 0, 0
-    while s0 < auxmol.nbas:
-        s1 = s0 + 1
-        while s1 < auxmol.nbas and offs[s1 + 1] - offs[s0] <= per_function:
-            s1 += 1
+    for block, (s0, s1) in enumerate(shell_runs(offs, per_function)):
         if block % size == rank:
             g = df.incore.aux_e2(mol, auxmol, intor='int3c2e', aosym='s1',
                                  shls_slice=(0, mol.nbas, 0, mol.nbas, s0, s1))
@@ -1952,7 +2047,6 @@ def _ri_density_coefficients(mol, auxmol, orbitals, V, comm=None):
             for q in range(g.shape[2]):
                 out[offs[s0] + q] = np.einsum('mp,mp->p', orbitals,
                                               g[:, :, q] @ orbitals)
-        s0, block = s1, block + 1
     if many:
         reduce_sum(out, comm)
     return scipy.linalg.solve(V, out, assume_a='pos')
@@ -2194,14 +2288,14 @@ def _start_radii(counts, r_min, r_max, k):
 
 
 #: Radial search box per element, Bohr, for a multi-start search. The single
-#: geometric descent keeps `LEGACY_R_MAX` so every cached and shipped grid keeps
-#: its key. Second-row values are measured: benzene's 23x exchange gain was
+#: geometric descent searches in `SINGLE_DESCENT_R_MAX`, the box every cached
+#: and shipped grid was searched in. Second-row values are measured: benzene's 23x exchange gain was
 #: found at 5.0, and widening to 16 made it worse. Magnesium's density reaches
 #: ~14 Bohr (its fit error is flat in point count and 8x better at 16, radii
 #: out to 13.7; Mg(OH)2 exchange error 0.72 -> 0.19 mHa/atom); the other
 #: diffuse-valence elements (groups 1-2, period 3) are given the same prior
 #: without a measurement of their own. Published carbon's largest A1 radius,
-#: 5.295, already lies outside the legacy box.
+#: 5.295, already lies outside the single-descent box.
 ELEMENT_R_MAX = {'H': 5.0, 'He': 5.0,
                  'B': 5.0, 'C': 5.0, 'N': 5.0, 'O': 5.0, 'F': 5.0, 'Ne': 5.0,
                  'Li': 16.0, 'Be': 16.0, 'Na': 16.0, 'Mg': 16.0,
@@ -2211,10 +2305,10 @@ ELEMENT_R_MAX = {'H': 5.0, 'He': 5.0,
 
 
 def search_r_max(element, n_start=1, r_max=None):
-    """The box a radii search runs in: explicit, legacy for one descent, else per element."""
+    """The box a radii search runs in: explicit, SINGLE_DESCENT_R_MAX for one descent, else per element."""
     if r_max is not None:
         return float(r_max)
-    return LEGACY_R_MAX if n_start == 1 else ELEMENT_R_MAX.get(element, 12.0)
+    return SINGLE_DESCENT_R_MAX if n_start == 1 else ELEMENT_R_MAX.get(element, 12.0)
 
 
 RADII_TABLE_SCHEMA = 2
@@ -2271,9 +2365,23 @@ def single_basis_name(basis):
     return names.pop()
 
 
+def validated_levels(basis):
+    """{level: counts} validated at `basis`. Levels are defined per basis
+    name; a per-element basis has a level where every set it names has that
+    level at the same four counts (aug-cc-pVDZ and cc-pVDZ agree at G1-G3),
+    so each element takes its own table row at one count tuple. A level whose
+    counts differ between the sets is absent: no one grid is that level."""
+    if not isinstance(basis, dict):
+        return ISDF_GRID_ACCURACY.get(single_basis_name(basis), {})
+    tables = [ISDF_GRID_ACCURACY.get(element_basis_name(basis, el), {})
+              for el in basis]
+    return {level: counts for level, counts in tables[0].items()
+            if all(t.get(level) == counts for t in tables[1:])}
+
+
 def _shipped_key(element, basis, auxbasis, counts):
     """Table key: the physics, and nothing about how the grid was found."""
-    return (f'{element}|{element_basis_name(basis, element)}|'
+    return (f'{pure_element(element)}|{element_basis_name(basis, element)}|'
             f'{element_basis_name(auxbasis, element)}|') + \
            ','.join(str(int((counts or {}).get(name, 0))) for name in SHELL_ORDER)
 
@@ -2288,7 +2396,7 @@ def _tabulated_counts(element, basis, auxbasis):
     auxbasis = element_auxbasis(element, basis, auxbasis)
     for key, row in shipped_radii().items():
         el, bas, aux, counts = key.split('|')
-        if (el, bas, aux) != (str(element), element_basis_name(basis, element),
+        if (el, bas, aux) != (pure_element(element), element_basis_name(basis, element),
                               element_basis_name(auxbasis, element)):
             continue
         out.append((row['points'], f'({counts}) {row["points"]} pts'
@@ -2323,7 +2431,7 @@ def atomic_grid(element, basis, auxbasis=None, counts=None):
     whether the nuclear cusp is sampled, which together are the grid.
     """
     auxbasis = auxbasis or paired_auxbasis(basis)
-    hit = shipped_radii_lookup(element, str(basis), str(auxbasis), counts)
+    hit = shipped_radii_lookup(element, basis, auxbasis, counts)
     if hit is None:
         raise KeyError(
             f'no tabulated grid for {element}/{basis}/{auxbasis} at counts '
@@ -2368,6 +2476,12 @@ def runtime_atomic_radii(element, basis, auxbasis, counts, n_start=1,
             f'or counts, add the row to the table, or declare the run-time '
             f'grid (IsdfNumerics(runtime_radii=True), or runtime_radii=True).'
             + missing_row_hint(element, basis, auxbasis, counts))
+    if element != pure_element(element):
+        # a per-atom key: the optimizer reads the element and its own sets
+        auxbasis = element_basis_name(element_auxbasis(element, basis, auxbasis),
+                                      element)
+        basis = element_basis_name(basis, element)
+        element = pure_element(element)
     r_max = search_r_max(element, n_start=max(int(n_start), 2))
     radii, fit_error = optimize_atomic_radii(element, basis, auxbasis,
                                              counts=counts, n_start=n_start,
@@ -2467,11 +2581,12 @@ def optimize_atomic_radii(element, basis, auxbasis, counts=None,
         criterion (the exchange-energy error on a probe) can choose among the local
         minima itself. The cache holds the best by fit error.
 
-    r_max:    None selects the box by `search_r_max`: the legacy 5.0 for a
-        single descent, `ELEMENT_R_MAX[element]` for a multi-start search. The
-        legacy box excludes published carbon's largest A1 radius (5.295) and
-        magnesium's density altogether; it is kept for n_start=1 only so that
-        every existing cached and shipped grid keeps its key.
+    r_max:    None selects the box by `search_r_max`: SINGLE_DESCENT_R_MAX
+        (5.0) for a single descent, `ELEMENT_R_MAX[element]` for a multi-start
+        search. The single-descent box excludes published carbon's largest A1
+        radius (5.295) and magnesium's density altogether; a single descent
+        searches in it because every cached and shipped grid was searched in it,
+        and their keys depend on it.
     """
     l_max_second, regularization = fit_settings(
         numerics, 'l_max_second', 'regularization')
@@ -2655,7 +2770,7 @@ def resolve_isdf_grid(grid, basis, elements=(), auxbasis=None,
             'or four shell counts.')
     if isinstance(grid, str) and ',' not in grid:
         level = grid.strip().upper()
-        validated = ISDF_GRID_ACCURACY.get(single_basis_name(basis), {})
+        validated = validated_levels(basis)
         if level not in validated:
             raise ValueError(
                 f'grid does not exist: no interpolation grid is validated at '
@@ -2724,7 +2839,7 @@ def grid_identity(level, basis, elements, auxbasis=None, counts=None,
     else:
         rows = {}
         for el in elements:
-            hit = shipped_radii_lookup(el, str(basis), str(auxbasis), counts)
+            hit = shipped_radii_lookup(el, basis, auxbasis, counts)
             rows[el] = (None if hit is None else
                         [{k: np.asarray(v).tolist()
                           for k, v in sorted(hit[0].items())}, hit[2]])
@@ -3089,7 +3204,7 @@ def points_on_frames(mol, radii, origins, frames):
     3) rows the axes: the same expression, so equal frames give the same bits."""
     out = []
     for ia in range(mol.natm):
-        sym = mol.atom_pure_symbol(ia)
+        sym = grid_key(mol, ia)
         pts = atomic_points(radii[sym], centre=(0.0, 0.0, 0.0),
                             origin=(origins or {}).get(sym, False))
         out.append(pts @ frames[ia] + mol.atom_coord(ia))

@@ -40,6 +40,7 @@ import src.gradients.gwbse.qp_set as qp_set_module
 from src.SingleReference.GW import contour_deformation
 from src.gradients.gwbse.excited_state import ExcitedStateChain
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER
 
 #: Cholesky against LU on the same chi0(i.nu): both backward stable on a
 #: matrix with eigenvalues in [1, ~2], so wc agrees to rounding, relative to
@@ -60,7 +61,7 @@ def factory(mol):
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     return mol, factory(mol)
 

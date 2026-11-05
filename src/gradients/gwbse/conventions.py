@@ -36,6 +36,18 @@ group's span, mixed with another unit, and which convention it carries is
 no longer a function of the geometry. Past the crossing, held again by one
 unit, it carries that unit's conventions.
 
+A SWAP IS A RELABEL, A MIX IS A REFREEZE. Two orbitals that trade places in
+the energy order and each stay above CONVENTION_SPAN_MIN in one unit's span
+are matched to their new indices and carry their conventions there: nothing
+is refrozen. An orbital whose weight is split between a unit and another
+below CONVENTION_SPAN_MIN is real mixing; the refusal names, per lost unit,
+the slots outside it that hold at least 1 - CONVENTION_SPAN_MIN of an
+orbital the unit needs (`ConventionsLost.mixing`). `absorb` records each such
+unit with its partners, and a refreeze (`ExcitedStateChain.refreeze`) makes
+the partners explicit and one quasiparticle-Hamiltonian group with the unit,
+so the mixed pair is matched by its span from there on; every later refreeze
+carries what was absorbed (`absorbed`).
+
 THE KEYS TRAVEL WITH THE WALK. `commit` (an accepted step) makes the orbitals
 matched there the keys, so every match is between neighbouring geometries
 and the overlaps stay near one over a long walk; a group's frozen
@@ -68,14 +80,24 @@ from src.Base.numerics.constants import (CONVENTION_SPAN_MIN, EVALUATION_CACHE_S
 from src.Base.geometry.geometry import molecule_at
 from src.Base.step_failed import StepFailed
 from src.Base.utils.parallel.mpi_grid import lockstep
-from src.SingleReference.GW.qp_selection import AdaptivePartition
+from src.SingleReference.GW.qp_selection import AdaptivePartition, merged_blocks
 from src.gradients.evaluation import geometry_hash
 from src.gradients.state_identity import body_overlap
 
 
 class ConventionsLost(StepFailed):
     """An orbital of the displaced geometry left the span of the frozen unit
-    it belongs to, so the convention it carries cannot be told."""
+    it belongs to, so the convention it carries cannot be told.
+
+    mixing: ((unit slots, partner slots), ...), the slots outside each lost
+    unit that took its weight, in the slots of `conventions`, the object that
+    refused (empty where no partner holds enough of it); what `absorb`
+    takes."""
+
+    def __init__(self, message, mixing=(), conventions=None):
+        super().__init__(message)
+        self.mixing = tuple(mixing)
+        self.conventions = conventions
 
 
 class ConventionsWriteRefused(AssertionError):
@@ -175,6 +197,11 @@ class FrozenConventions:
     # every accepted step that moved a slot: {'step', 'moved': {slot: index}}
     moves: list = field(default_factory=list)
     commits: int = 0
+    # slot -> index at the keys' geometry, None where they are the same
+    key_index: tuple = None
+    # slot tuples: units that mixed with orbitals outside them, each with
+    # those orbitals, which a refreeze makes explicit and one group (`absorb`)
+    absorbed: tuple = ()
 
     def __post_init__(self):
         # {geometry_hash: {slot: (w, labels)}}: the branch each solve kept at
@@ -280,6 +307,8 @@ class FrozenConventions:
                 self.group_seeds[g] = rot.T @ self.group_seeds[g] @ rot
         self.key_mol = mol
         self.key_mo = np.asarray(mf.mo_coeff, float)[:, perm].copy()
+        self.key_index = (None if view.perm is None
+                          else tuple(int(p) for p in perm))
         self.commits += 1
         if view.perm is not None:
             self.moves.append({'step': self.commits, 'moved': {
@@ -447,6 +476,27 @@ class FrozenConventions:
         self.group_seeds.clear()
         self.cd_sized = False
 
+    def absorb(self, mixing):
+        """Record each (unit, partners) of a `ConventionsLost.mixing` as one
+        slot tuple for the next refreeze to make explicit and one group,
+        joined with what is absorbed already; True when that grew anything
+        (a slot, or a link between two absorbed tuples)."""
+        new = [tuple(int(p) for p in u) + tuple(int(p) for p in q)
+               for u, q in mixing if len(q)]
+        members = sorted({p for b in (*self.absorbed, *new) for p in b})
+        out = tuple(b for b in merged_blocks(members, self.absorbed, new)
+                    if len(b) > 1)
+        grew = out != tuple(self.absorbed)
+        self.absorbed = out
+        return grew
+
+    def absorbed_at_keys(self):
+        """`absorbed` as orbital indices at the keys' geometry: what a chain
+        built afresh there takes in (`ExcitedStateChain.absorb_groups`)."""
+        at = (lambda s: int(s)) if self.key_index is None else (
+            lambda s: int(self.key_index[int(s)]))
+        return tuple(tuple(sorted(at(p) for p in g)) for g in self.absorbed)
+
     def group_slots(self):
         """The quasiparticle-Hamiltonian groups, as slot tuples."""
         return tuple(self.qp_subspaces[1]) if self.qp_subspaces else ()
@@ -487,7 +537,7 @@ class FrozenConventions:
         norb = t.shape[0]
         w = t ** 2
         perm = np.full(norb, -1)
-        lost = []
+        lost, mixing = [], []
         every = self.units()
         for occupied in (True, False):
             cols = (np.arange(self.nocc) if occupied
@@ -503,6 +553,8 @@ class FrozenConventions:
                                                 < CONVENTION_SPAN_MIN):
                     lost.append(_lost_unit(u, got, held, w, cols, units,
                                            owner, weight))
+                    mixing.append((u.slots, _partners(u, w, cols,
+                                                      weight[i])))
                     continue
                 perm[list(u.slots)] = _paired(u, got, w)
         if lost:
@@ -511,7 +563,9 @@ class FrozenConventions:
                 + '; '.join(lost)
                 + f' (each needs its own count of orbitals, each with at '
                 f'least {CONVENTION_SPAN_MIN} in the span). The orbital '
-                f'left its group; shorten the step or refreeze here.')
+                f'left its group; shorten the step or refreeze here.',
+                mixing=[m for m in mixing if m[0] and len(m[1])
+                        and _absorbable(m[0], self)], conventions=self)
         return perm
 
     def rebuild(self, mol, mf):
@@ -528,7 +582,9 @@ class FrozenConventions:
                                    for g in self.group_slots()),
                 'outside_shift_before': (None if view.outside_shift is None
                                          else dict(view.outside_shift)),
-                'outside_curve_before': dict(view.outside_curve) or None}
+                'outside_curve_before': dict(view.outside_curve) or None,
+                'absorbed': tuple(tuple(sorted(view.index(p) for p in g))
+                                  for g in self.absorbed)}
 
     def outside_record(self):
         """What the orbitals outside the quasiparticle set carry, in eV, per
@@ -586,6 +642,7 @@ class FrozenConventions:
             'span_min': CONVENTION_SPAN_MIN,
             'commits': self.commits,
             'moves': list(self.moves),
+            'absorbed': [list(g) for g in self.absorbed],
             'nfreq_cd': self.nfreq_cd, 'ntau_w': self.ntau_w}
 
 
@@ -815,6 +872,31 @@ def _paired(unit, got, w):
     out = np.empty(len(slots), int)
     out[rows] = got[cols]
     return out
+
+
+def _partners(unit, w, cols, held):
+    """The slots outside `unit` on its side of the gap that took its weight:
+    each holding at least 1 - CONVENTION_SPAN_MIN of an orbital here that
+    holds at least as much of the unit's span. `held`: the unit's weight in
+    each orbital of `cols`."""
+    leak = 1.0 - CONVENTION_SPAN_MIN
+    needed = cols[held >= leak]
+    inside = set(unit.slots)
+    side = [s for s in cols if s not in inside]
+    if not len(needed) or not side:
+        return ()
+    took = w[np.ix_(side, needed)].max(axis=1) >= leak
+    return tuple(int(s) for s, k in zip(side, took) if k)
+
+
+def _absorbable(slots, conventions):
+    """Whether a lost unit can take orbitals in: a quasiparticle-Hamiltonian
+    group, or an explicit orbital of a set that has such groups; an outside
+    unit is the one others are absorbed from."""
+    if conventions.qp_subspaces is None:
+        return False
+    return all(int(p) in set(int(q) for q in conventions.qp_set)
+               for p in slots)
 
 
 def _lost_unit(unit, got, held, w, cols, units, owner, weight):

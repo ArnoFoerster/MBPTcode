@@ -61,6 +61,8 @@ import warnings
 from pyscf.gto import basis as pyscf_basis
 from pyscf.gto.basis.parse_cp2k import parse
 
+from src.Base.numerical_flags import flag
+
 CP2K_REPO = 'https://github.com/cp2k/cp2k'
 FILES = {'orbital': 'BASIS_AUG_MOLOPT', 'ri': 'BASIS_RI_AUG_MOLOPT'}
 # cp2k_pin.json: the commit that last touched either file (2025-08-14), the two
@@ -422,8 +424,9 @@ def register(name, max_error=None):
                       f'element, which is {ri_name}, the set of max_error=None',
                       stacklevel=2)
     elif loose:
-        warnings.warn(f'{ri_name}: no tier within {max_error} for {", ".join(loose)}',
-                      stacklevel=2)
+        flag('ri_tier_short',
+             f'{ri_name}: no tier within {max_error} for {", ".join(loose)}',
+             UserWarning)
     out = os.path.join(_cache_dir(CP2K_COMMIT), 'pyscf')
     os.makedirs(out, exist_ok=True)
     for alias, table in sets.items():

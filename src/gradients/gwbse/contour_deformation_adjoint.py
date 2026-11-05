@@ -182,18 +182,75 @@ def integral_term_backward(Bp, WtB, weights, want_chi0=True):
     return 2.0 * WB * weights, wc, chi0_bar
 
 
-def pair_term_backward(Bi, Bj, WtBi, WtBj, weights):
+def pair_term_backward(Bi, Bj, WtBi, WtBj, weights, want_chi0=True):
     """(Bi_bar, Bj_bar, chi0_bar) of sum_q g_q Bi[:,q]^T (W - I) Bj[:,q] at
     ONE frequency, WtB = W B, weights = g, (norb,).
 
     W is symmetric, so each slice takes the other's (W - I) B; chi0 takes the
     symmetric part of W Bi diag(g) Bj^T W, the only part a symmetric chi0
     reads. With Bi = Bj it is `integral_term_backward`'s pair of terms.
+    want_chi0=False returns None for chi0_bar. The reverse pass takes a
+    subspace's pairs at once (`subspace_terms_backward`); this is its
+    one-by-one reference.
     """
     bi_bar = (WtBj - Bj) * weights
     bj_bar = (WtBi - Bi) * weights
+    if not want_chi0:
+        return bi_bar, bj_bar, None
     half = (WtBi * weights) @ WtBj.T
     return bi_bar, bj_bar, 0.5 * (half + half.T)
+
+
+def subspace_terms_backward(B, WtB, diagonal, pairs, block_gb):
+    """({state: B_bar}, chi0_bar) of one subspace at ONE frequency: its states'
+    own integral terms and its pairs' off-diagonal ones, taken at once.
+
+    B, WtB: {state: (naux, norb)} slices and W B; diagonal {state: g_s}, the
+    state's own weights (norb,) (`integral_term_backward`); pairs [(i, j, g)]
+    within the states. With H[q] the symmetric (g, g) matrix of each orbital's
+    weights -- g_s on the diagonal, g/2 on both sides of a pair (a pair (i, i)
+    gives g on the diagonal) -- the sum is sum_q sum_st H[q]_st
+    B_s[:, q]^T (W - I) B_t[:, q], so
+
+        B_bar_s = 2 sum_t H_st (W B_t - B_t),   chi0_bar = sum_st W B_s H_st (W B_t)^T,
+
+    the sum of `integral_term_backward`'s and `pair_term_backward`'s terms to
+    round-off. Both run as products over the states, one orbital block at a
+    time (three (naux, block, g) buffers within block_gb): g states cost two
+    products of naux norb g^2 and one of naux^2 norb g, where the terms one
+    by one are g(g + 1)/2 passes over (naux, norb) arrays and 2g products of
+    naux^2 norb. The order is fixed by the states' order and the block: the
+    bits do not depend on the ranks.
+    """
+    states = list(B)
+    at = {s: n for n, s in enumerate(states)}
+    g = len(states)
+    naux, norb = B[states[0]].shape
+    H = np.zeros((norb, g, g))
+    for s in states:
+        H[:, at[s], at[s]] += diagonal[s]
+    for i, j, w in pairs:
+        H[:, at[i], at[j]] += 0.5 * w
+        H[:, at[j], at[i]] += 0.5 * w
+    bars = {s: np.empty((naux, norb)) for s in states}
+    chi0_bar = np.zeros((naux, naux))
+    block = max(1, min(norb, int(block_gb * 1e9 / (3 * 8 * naux * g))))
+    for q0 in range(0, norb, block):
+        q1 = min(norb, q0 + block)
+        X = np.empty((naux, q1 - q0, g))
+        for s in states:
+            X[:, :, at[s]] = WtB[s][:, q0:q1]
+        Y = np.empty_like(X)
+        np.matmul(X.transpose(1, 0, 2), H[q0:q1], out=Y.transpose(1, 0, 2))
+        flat = (naux, (q1 - q0) * g)
+        chi0_bar += X.reshape(flat) @ Y.reshape(flat).T
+        for s in states:
+            X[:, :, at[s]] -= B[s][:, q0:q1]
+        np.matmul(X.transpose(1, 0, 2), H[q0:q1], out=Y.transpose(1, 0, 2))
+        for s in states:
+            np.multiply(Y[:, :, at[s]], 2.0, out=bars[s][:, q0:q1])
+        X = Y = None
+    return bars, 0.5 * (chi0_bar + chi0_bar.T)
 
 
 def residue_terms_backward(p, omega, Bp, eps, _nocc, residues, sigma_bar,

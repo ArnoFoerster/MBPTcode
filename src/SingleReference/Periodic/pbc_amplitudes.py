@@ -1,5 +1,5 @@
 """Periodic transition amplitudes chi_a / chi_b -- the k-point generalization of
-GW.transition_amplitudes.AmplitudeGenerator, built on the BSE (or RPA)
+LinearResponse.transition_amplitudes.AmplitudeGenerator, built on the BSE (or RPA)
 eigenpairs from pbc_casida.
 
 chi_a: the GW transition amplitude. Molecular form
@@ -47,7 +47,7 @@ def get_chi_b_vertex(dfints, q, W_all, X, Y, kp):
     """Vertex-correction transition amplitude chi_b^{S,q}[r @ kr, p @ kp] for
     target k-point kp, with kr = kp - q the internal k-point.
 
-    Periodic form of GW.transition_amplitudes.get_chi_b_vertex_df (restricted,
+    Periodic form of LinearResponse.transition_amplitudes.get_chi_b_vertex_df (restricted,
     W-dressed). The exciton S of transfer q is the eigenvector v_S of the pair
     space of that transfer, X on the excitations (a @ ki+q, i @ ki) and Y on
     the de-excitations (j @ k+q, b @ k), which the time-reversal-adapted layout

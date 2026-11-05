@@ -35,6 +35,7 @@ from src.SingleReference.ADC.cc_amplitudes import run_cc
 from src.SingleReference.DensityMatrix.mpn_density_driver_restricted import (
     MPnDensityDriverRestricted)
 from tests.adc_common import water_df  # noqa: F401  (fixture)
+from tests.molecules import WATER_ROUNDED_LOW
 
 EXACT_DF_TOL = 1e-10     # exact DF factor: a pure plumbing check
 RI_MIN = 1e-8            # a real auxiliary basis must differ by more than round-off
@@ -42,7 +43,7 @@ RI_MIN = 1e-8            # a real auxiliary basis must differ by more than round
 
 @pytest.fixture(scope='module')
 def water():
-    mol = gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    mol = gto.M(atom=WATER_ROUNDED_LOW,
                 basis='6-31g', verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-12          # f_ov noise leaks straight into T1^(2)

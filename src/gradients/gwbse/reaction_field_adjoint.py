@@ -54,8 +54,9 @@ def static_screening(x_mo, d, eps, nocc, grid=None, mu=None, comm=None,
     factors are identical by construction, and an audited run compares their
     digests and those of (A, W).
 
-    `SlicedFactors`: D is gathered whole once and the sweep gathers the two
-    branches of X_mo, so W is the whole factors' bit for bit. A is a sum over
+    `SlicedFactors`: d is gathered whole once (it may be another gauge than
+    the factors' own D) and the sweep reads X_mo through its grid tiles, so
+    W is the one-rank W of (X_mo, d) bit for bit. A is a sum over
     the grid of row products, formed from the rows (`density_projection`).
     """
     comm = current_comm() if comm is None else comm
@@ -99,7 +100,7 @@ def reaction_field_shift(x_mo, d_dressed, d_bare, eps, nocc, grid=None,
 
 def reaction_field_backward(weights, x_mo, d_dressed, d_bare, eps, nocc,
                             grid=None, mu=None, screening=None, block=None,
-                            dressed_chi0_bar=None):
+                            dressed_chi0_bar=None, bare_chi0_bar=None):
     """(eps_bar, x_bar, d_dressed_bar, d_bare_bar) of sum_p w_p Delta eps_p.
 
     The two D adjoints are separate because they land on DIFFERENT metrics:
@@ -115,6 +116,8 @@ def reaction_field_backward(weights, x_mo, d_dressed, d_bare, eps, nocc,
            (the BSE kernel's static W, screened on the same factors and
            grid), added to this one's before the sweep: chi0's adjoint is
            linear in its seed, so one sweep carries both.
+    bare_chi0_bar: (naux, naux), another adjoint on the bare chi0(0), the
+           same way (`offdiagonal_reaction_field_seeds`).
     """
     grid = static_screening_grid(eps, nocc) if grid is None else grid
     if screening is None:
@@ -125,14 +128,15 @@ def reaction_field_backward(weights, x_mo, d_dressed, d_bare, eps, nocc,
     u[:nocc] *= -1.0
     if isinstance(x_mo, SlicedFactors):
         return _backward_rows(u, x_mo, (d_dressed, d_bare), screening, eps,
-                              nocc, grid, mu, block, dressed_chi0_bar)
+                              nocc, grid, mu, block,
+                              (dressed_chi0_bar, bare_chi0_bar))
 
     rho = x_mo ** 2
     eps_bar = np.zeros(np.asarray(eps, float).shape)
     x_bar = np.zeros(x_mo.shape)
     rho_bar = np.zeros(rho.shape)
     d_bars = []
-    seeds = (dressed_chi0_bar, None)
+    seeds = (dressed_chi0_bar, bare_chi0_bar)
     for (a, w), d, sign, seed in zip(screening, (d_dressed, d_bare),
                                      (1.0, -1.0), seeds):
         au = a * u
@@ -167,7 +171,40 @@ def offdiagonal_reaction_field_backward(weights, pairs, x_mo, d_dressed,
                                         screening=None, block=None):
     """(eps_bar, x_bar, d_dressed_bar, d_bare_bar) of sum_k w_k Sigma^env_pk qk
     (`offdiagonal_reaction_field`), the same four adjoints
-    `reaction_field_backward` returns, whole or in grid tiles of `block`.
+    `reaction_field_backward` returns, whole or in grid tiles of `block`:
+    `offdiagonal_reaction_field_seeds` and the two chi0 sweeps of its seeds.
+    A reverse pass through Eq. (18) as well hands the seeds to
+    `reaction_field_backward` instead, whose two sweeps then carry both."""
+    grid = static_screening_grid(eps, nocc) if grid is None else grid
+    (eps_bar, x_bar, d_dressed_bar, d_bare_bar), seeds = \
+        offdiagonal_reaction_field_seeds(weights, pairs, x_mo, d_dressed,
+                                         d_bare, eps, nocc, grid, mu,
+                                         screening, block)
+    sliced = isinstance(x_mo, SlicedFactors)
+    d_bars = []
+    for chi_bar, d, d_rest in zip(seeds, (d_dressed, d_bare),
+                                  (d_dressed_bar, d_bare_bar)):
+        if sliced:
+            e_c, x_c, d_c = chi0_backward_rows(chi_bar[None], x_mo, d, eps,
+                                               nocc, grid, mu=mu, block=block)
+            d_c += d_rest
+        else:
+            e_c, x_c, d_c = chi0_backward(chi_bar[None], x_mo, d, eps, nocc,
+                                          grid, mu=mu)
+            d_c = d_c + d_rest
+        eps_bar += e_c
+        x_bar += x_c
+        d_bars.append(d_c)
+    return eps_bar, x_bar, d_bars[0], d_bars[1]
+
+
+def offdiagonal_reaction_field_seeds(weights, pairs, x_mo, d_dressed, d_bare,
+                                     eps, nocc, grid=None, mu=None,
+                                     screening=None, block=None):
+    """((eps_bar, x_bar, d_dressed_bar, d_bare_bar), (chi0_bar dressed,
+    chi0_bar bare)) of sum_k w_k Sigma^env_pk qk: the four adjoints
+    `offdiagonal_reaction_field_backward` returns but for the two chi0
+    sweeps, and the (naux, naux) seeds those sweeps take.
 
     Each element is bilinear, t (a_p + a_q)^T W a_pq, so the orbital
     densities take t W a_pq, the pair density t W (a_p + a_q), and chi0 the
@@ -192,7 +229,7 @@ def offdiagonal_reaction_field_backward(weights, pairs, x_mo, d_dressed,
     else:
         x_bar = np.zeros(x.shape)
     rho_bar = np.zeros(x.shape)
-    d_bars = []
+    d_bars, seeds = [], []
     for (a, w), d, sign in zip(screening, (d_dressed, d_bare), (1.0, -1.0)):
         pd = pair_densities(x_mo, d, pairs)
         v = a[:, p] + a[:, q]
@@ -203,7 +240,7 @@ def offdiagonal_reaction_field_backward(weights, pairs, x_mo, d_dressed,
         np.add.at(a_bar.T, q, (wpd * ts).T)
         pd_bar = wv
         half = wv @ wpd.T
-        chi_bar = (0.5 * (half + half.T))[None]
+        seeds.append(0.5 * (half + half.T))
         dd = d.D if sliced else d
         pair_bar = dd @ pd_bar
         rho_bar += dd @ a_bar
@@ -212,28 +249,22 @@ def offdiagonal_reaction_field_backward(weights, pairs, x_mo, d_dressed,
         np.add.at(xb.T, p, (x[:, q] * pair_bar).T)
         np.add.at(xb.T, q, (x[:, p] * pair_bar).T)
         if sliced:
-            e_c, x_c, d_c = chi0_backward_rows(chi_bar, x_mo, d, eps, nocc,
-                                               grid, mu=mu, block=block)
-            d_c += GridTileRows.from_blocks(rows, x_mo.npts, block, comm)
+            d_bars.append(GridTileRows.from_blocks(rows, x_mo.npts, block,
+                                                   comm))
             x_bar += GridTileRows.from_blocks(xb, x_mo.npts, block, comm)
         else:
-            e_c, x_c, d_c = chi0_backward(chi_bar, x_mo, d, eps, nocc, grid,
-                                          mu=mu)
-            d_c = d_c + rows
+            d_bars.append(rows)
             x_bar += xb
-        eps_bar += e_c
-        x_bar += x_c
-        d_bars.append(d_c)
     tail = 2.0 * x * rho_bar
     if sliced:
         x_bar += GridTileRows.from_blocks(tail, x_mo.npts, block, comm)
     else:
         x_bar += tail
-    return eps_bar, x_bar, d_bars[0], d_bars[1]
+    return (eps_bar, x_bar, d_bars[0], d_bars[1]), tuple(seeds)
 
 
 def _backward_rows(u, x_mo, factors, screening, eps, nocc, grid, mu, block,
-                   dressed_chi0_bar=None):
+                   seeds=(None, None)):
     """`reaction_field_backward` on `SlicedFactors`: (eps_bar, X_bar, D_bar
     dressed, D_bar bare), the three adjoints `GridTileRows` in tiles of
     `block`. A = D^T rho is linear in both, so its adjoints are row-local --
@@ -250,8 +281,7 @@ def _backward_rows(u, x_mo, factors, screening, eps, nocc, grid, mu, block,
     x_bar = GridTileRows.zeros(npts, rho.shape[1], block, comm)
     rho_bar = np.zeros(rho.shape)
     d_bars = []
-    for (a, w), d, sign, seed in zip(screening, factors, (1.0, -1.0),
-                                     (dressed_chi0_bar, None)):
+    for (a, w), d, sign, seed in zip(screening, factors, (1.0, -1.0), seeds):
         au = a * u
         a_bar = (2.0 * sign) * (w @ au)
         # W = [1 - chi0]^-1, so dW = W dchi0 W and the adjoint is sandwiched

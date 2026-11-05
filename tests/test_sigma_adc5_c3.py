@@ -43,6 +43,7 @@ from tests.generated_runtime import requires_runtime
 
 pytestmark = requires_runtime(5)
 from src.SingleReference.ADC.generated_modules import lazy
+from tests.molecules import WATER_RIGHT_ANGLE
 c1df = lazy('adc4_c1_self_apply_restricted_df_blocks')
 c2df = lazy('adc4_c2_apply_restricted_df_blocks')
 s2cdf = lazy('adc4_c2_s2c_apply_restricted_df_blocks')
@@ -52,7 +53,7 @@ TOL = 1e-11          # primary gate
 TOL_DF = 1e-8        # DF with an EXACT B factor -- plumbing, not fitting
 
 SYSTEMS = [('LiH/sto-3g', 'Li 0 0 0; H 0 0 1.6'),
-           ('H2O/sto-3g', 'O 0 0 0; H 0 0 0.96; H 0.96 0 0')]
+           ('H2O/sto-3g', WATER_RIGHT_ANGLE)]
 
 
 def _check(ok, msg):

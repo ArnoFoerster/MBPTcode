@@ -98,7 +98,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from src.Base.numerics.constants import KAPPA, CD_NFREQ
+from src.Base.numerics.constants import CD_NFREQ, CONTINUATION_ROUTE, KAPPA
 from src.gradients.rpa.chain_settings import CarriedGrids, chain_setting
 from src.gradients.gwbse.diagnostics import chain_diagnostics
 from src.Base.numerics.numerics import (numerics_identity, require_same_identity,
@@ -111,6 +111,7 @@ from src.Base.geometry.geometry import molecule_at
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
+from src.SingleReference.GW.qp_selection import contiguous_range, merged_blocks
 from src.SingleReference.LinearResponse.casida import solver_choice
 from src.SingleReference.LinearResponse.davidson import DavidsonWarmStart
 from src.SingleReference.LinearResponse.rpa_energy import declared_ground_state
@@ -125,8 +126,8 @@ from src.gradients.gwbse.reaction_field_adjoint import (added_reaction_field_adj
                                                         reaction_field_backward,
                                                         reaction_field_shift,
                                                         static_screening)
-from src.gradients.isdf_derivatives import GaugeAdjoint
-from src.gradients.mean_field_response import relaxed_density_mo
+from src.gradients.isdf_adjoint_pieces import GaugeAdjoint
+from src.gradients.mean_field_response import relaxed_multiplier
 from src.gradients.gwbse.static_correction import (qp_xc_correction_Y,
                                                    qp_xc_correction_skeleton)
 from src.gradients.gwbse.conventions import FrozenConventions, ResolvedConventions
@@ -136,8 +137,31 @@ from src.SingleReference.GW.qp_solve import (add_reaction_field,
                                              static_exchange_diagonal)
 from src.gradients.gwbse.adaptive_selection import QuasiparticleSelection
 from src.gradients.gwbse.qp_set import QuasiparticleSet
-from src.gradients.gwbse.reverse_fold import ReversePass
+from src.gradients.gwbse.reverse_fold import HeldReverse, ReversePass
 from src.gradients.gwbse.state_following import StateFollower
+
+
+def refuse_continuation_choices(numerics):
+    """Refuse what the continuation (residue_route CONTINUATION_ROUTE) does
+    not carry: the quasiparticle Hamiltonian, whose groups are solved on the
+    pole model's common poles, and the adaptive set, which budgets the pole
+    model's cost against the continuation's own shifts."""
+    qp = numerics.qp
+    if qp.residue_route != CONTINUATION_ROUTE:
+        return
+    if qp.hamiltonian:
+        raise ValueError(
+            f"residues={CONTINUATION_ROUTE!r} with the quasiparticle "
+            'Hamiltonian: its groups are solved on the pole model\'s common '
+            'poles fitted to the contour\'s screening, which the continuation '
+            "does not build; solve the set diagonally (qp.hamiltonian False, "
+            "--no-qp-hamiltonian) or take residues='sop'.")
+    if qp.select is not None:
+        raise ValueError(
+            f"residues={CONTINUATION_ROUTE!r} with an adaptive set: the "
+            'selection budgets the pole model against the continuation, '
+            'which here solves the set itself; declare the set by kind '
+            "(admitted, frontier, valence or all).")
 
 
 #: The records `surface_of` stamps on the surface it returns, which
@@ -360,6 +384,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # evaluation, so copies sharing the cache never adopt each other's;
         # a freed chain's identity, reused by another object, claims neither.
         self.selection_owner = object()
+        refuse_continuation_choices(numerics)
         self.selection.init_adaptive(numerics.qp.select, qp_partition)
 
     @property
@@ -432,8 +457,23 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
     @property
     def reverse(self):
         """The reverse pass (`ReversePass`): the Casida-level adjoints carried
-        back to the nuclei."""
+        back to the nuclei. Refused on the continuation, which has none
+        (`require_adjoint`)."""
+        self.require_adjoint()
         return held_part(self, 'reverse', ReversePass)
+
+    def require_adjoint(self):
+        """Refuse every reverse pass -- a force, a relaxed density, a
+        derivative coupling -- of a chain whose quasiparticle energies are
+        the analytic continuation's (residue_route CONTINUATION_ROUTE)."""
+        if self.residue_route == CONTINUATION_ROUTE:
+            raise NotImplementedError(
+                f"residues={CONTINUATION_ROUTE!r} has no adjoint: the "
+                'analytically continued quasiparticle energies are an energy '
+                'at one geometry, and no reverse pass differentiates the Pade '
+                'continuation. A force, a relaxed density, a derivative '
+                "coupling, a walk or a saddle check needs residues='sop' (or "
+                "'explicit').")
 
     @property
     def ntau_w(self):
@@ -636,7 +676,7 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             return self.solver
         return solver_choice(n_ov)
 
-    def xc_chain(self, mf, weights):
+    def xc_chain(self, mf, weights, pending=None):
         """(Y_extra, skeleton) of sum_p w_p <p|Sigma_x - v_xc|p>, or (None,
         zero) on Hartree-Fock, where the operator vanishes identically.
 
@@ -650,6 +690,11 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         the caller; adding the COHSEX operator's own adjoint would enter the
         reaction field twice. An environment that does not dress the
         interaction (gas phase, fixed charges) has no static term.
+
+        pending: the open fit-adjoint window of the force the skeleton joins;
+        its linear channels are then held there for the assembly
+        (`qp_xc_correction_skeleton`), so `nuclear_gradient` must follow
+        inside the same window.
         """
         if not self.is_ks:
             return None, np.zeros((mf.mol.natm, 3))
@@ -657,7 +702,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         if getattr(getattr(self, '_orbital_capture', None), 'density_only', False):
             # a relaxed density reads Y only; the skeleton is the force's
             return y, np.zeros((mf.mol.natm, 3))
-        return y, qp_xc_correction_skeleton(mf, weights, self.nocc)
+        return y, qp_xc_correction_skeleton(mf, weights, self.nocc,
+                                            pending=pending)
 
     def xc_correction(self, mf, states, reaction_field=None):
         """<p|Sigma_x - v_xc|p> for `states`: production's static term,
@@ -774,7 +820,12 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
 
     def excitation_gradient(self, mol=None, mf=None):
         """(dOmega/dR, diagnostics). Nothing larger than three-index; taken
-        once per geometry and root, and read back after that."""
+        once per geometry and root, and read back after that.
+
+        After a relaxed density of the root on the same mean field and
+        solution (a solvation loop's last cycle), the force finishes that
+        reverse pass: its integrals, with the multiplier the density solved
+        where the right-hand side is the same bits (`SolvedMultiplier`)."""
         self.require_differentiable_environment()
         mol, mf = self.mean_field(mol, mf)
         self.require_scf_quality(mf, 'excitation_gradient')
@@ -782,7 +833,18 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         held = self.follower.held(mol, mf)
         if held is not None and ('omega', root) in held.forces:
             return held.forces[('omega', root)]
-        out = self.reverse.root_gradient(shared, solution, root)
+        kept = None if held is None else held.reverse.pop(root, None)
+        if kept is not None and kept.solution is solution:
+            # the quasiparticle tape the density kept is read no further
+            shared.release()
+            self._held_multiplier = kept.multiplier
+            try:
+                out = self.reverse.integrals_gradient(shared, solution, root,
+                                                      kept.state)
+            finally:
+                self._held_multiplier = None
+        else:
+            out = self.reverse.root_gradient(shared, solution, root)
         if held is not None:
             held.forces[('omega', root)] = out
         return out
@@ -823,18 +885,24 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
             return C @ p_mo @ C.T
         # the reverse pass up to the orbital branch's inputs only: the
         # multiplier, collocation and fit branches past them are the force's
+        state = self.reverse.root_state(shared, solution, root,
+                                        release_tape=False)
         capture = OrbitalCapture(density_only=True)
         self._orbital_capture = capture
         try:
-            self.reverse.root_gradient(shared, solution, root, release_tape=False)
+            self.reverse.integrals_gradient(shared, solution, root, state)
         finally:
             self._orbital_capture = None
         gammas = [np.diag(e) if e.ndim == 1 else e for e, _ in capture]
-        p_mo, _ = relaxed_density_mo(mf, sum(gammas), nocc,
-                                     Y_extra=sum(y for _, y in capture),
-                                     environment=not frozen_field,
-                                     numerics=self.settings)
-        return C @ p_mo @ C.T
+        gamma, solved = relaxed_multiplier(mf, sum(gammas), nocc,
+                                           Y_extra=sum(y for _, y in capture),
+                                           environment=not frozen_field,
+                                           numerics=self.settings)
+        held = self.follower.held(mol, mf)
+        if held is not None:
+            # a force on this solution finishes the pass (excitation_gradient)
+            held.reverse[root] = HeldReverse(state, solution, solved)
+        return C @ (gamma + solved.lam) @ C.T
 
     def state_specific_correction(self, mol=None, mf=None):
         """Scheme B's record at one geometry (`ClassicalStateSpecific`):
@@ -976,8 +1044,8 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
                     reaction_field_backward(
                         w_env, x_mo, d, d_bare, eps, self.nocc,
                         grid=self.w_grid, screening=screening, block=block))
-        with self.one_fit_adjoint(mf):
-            y_xc, g_xc = self.xc_chain(mf, w_corr)
+        with self.one_fit_adjoint(mf) as pending:
+            y_xc, g_xc = self.xc_chain(mf, w_corr, pending=pending)
             grad, diags = self.nuclear_gradient(mol, mf, auxmol, crd, x_mo,
                                                 eps_bar, x_bar, d_bar,
                                                 y_extra=y_xc, g_extra=g_xc,
@@ -1136,6 +1204,10 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         which the conventions are carried over on; else this chain's own
         (`mean_field`). A composed surface hands both, so its refreeze
         stands on one new SCF and the one the walk already converged.
+
+        Orbitals a frozen group mixed with on the walk
+        (`FrozenConventions.absorb`) join the explicit set and that group
+        here, and every later refreeze carries them (`absorb_groups`).
         """
         # the tracked index as the starting guess; a followed state is handed
         # over as its eigenvector below
@@ -1175,9 +1247,44 @@ class ExcitedStateChain(FactorChain, PotentialEnergySurface):
         # its follow_log says how well the two surfaces' states agree.
         if self.following() is not None:
             chain.hand_over(self.following())
-        # what shared a quasiparticle Hamiltonian here still does
+        # what shared a quasiparticle Hamiltonian here still does, and the
+        # orbitals a group mixed with on the walk
         chain.conventions.carried_subspaces = carried['subspaces']
+        chain.absorb_groups(carried['absorbed'])
         return chain
+
+    def absorb_groups(self, groups):
+        """Before the first forward: each of `groups` (orbital tuples here)
+        one quasiparticle-Hamiltonian group, its orbitals in the explicit set
+        (an adaptive set's candidates and floor), joined with the groups
+        carried, and kept as `absorbed` for every later refreeze; the orbitals
+        a frozen group mixed with on a walk (`FrozenConventions.absorb`).
+
+        Each group is taken as the whole energy window it spans here
+        (`contiguous_range`): an orbital between a group and the partner it
+        mixed with joins too, since a group is a contiguous window
+        (`QuasiparticleSet._frozen_qp_subspaces`) and one left outside it
+        between two members is matched as a unit of its own, which the next
+        rotation inside the window refuses. A group reaching across the gap
+        is taken as given."""
+        groups = tuple(tuple(int(p) for p in g) for g in groups)
+        if not groups:
+            return
+        nocc = self.nocc
+        groups = tuple(
+            contiguous_range(g) if len({p < nocc for p in g}) == 1 else g
+            for g in groups)
+        c = self.conventions
+        members = {p for g in groups for p in g}
+        c.qp_set = np.asarray(sorted(set(int(p) for p in c.qp_set) | members),
+                              int)
+        if self.qp_select is not None:
+            c.qp_floor = tuple(sorted(set(c.qp_floor or ()) | members))
+        joined = tuple(c.carried_subspaces) + groups
+        c.carried_subspaces = tuple(
+            b for b in merged_blocks(sorted({p for g in joined for p in g}),
+                                     joined) if len(b) > 1)
+        c.absorbed = groups
 
     def carried_grids(self, window=None):
         """The grids this chain resolved, which a refrozen or restored chain

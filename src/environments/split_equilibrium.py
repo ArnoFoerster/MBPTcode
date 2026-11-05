@@ -57,6 +57,7 @@ interaction -- the dense and DF integral hand-outs, the COHSEX operator, a
 correlation energy's frequency fold -- is refused rather than handed the
 optical half alone.
 """
+from src.environments.solvent_vocabulary import SS_DENSITIES, SS_DENSITY_DEFAULT
 
 
 class SplitEquilibrium:
@@ -84,10 +85,23 @@ class SplitEquilibrium:
         static half (None where a subclass has none)."""
         self.optical, self.static = optical, static
 
+    #: What the split answers from the optical continuum it wraps: the ground
+    #: state, the cavity and the optical dressing of the exchange factor.
+    #: Everything that reads a response (`response_matrix`, the grid
+    #: potentials, `state_specific_energy`, `cohsex_correction`, `eps`,
+    #: `static_partner`) is the optical object's own answer to ONE interaction,
+    #: and the split has two, so it is not forwarded.
+    DELEGATED = frozenset({
+        'mean_field', 'aux_kernel', 'aux_kernel_adjoint', 'differentiable',
+        'screens', 'mol', 'method', 'eps_static', 'eps_optical', 'cavity_settings',
+        'cavity_spheres'})
+
     def __getattr__(self, name):
         optical = self.__dict__.get('optical')
-        if optical is None:
-            raise AttributeError(name)
+        if optical is None or name not in self.DELEGATED:
+            raise AttributeError(
+                f'{type(self).__name__} has no attribute {name!r}: it answers '
+                f'only {sorted(self.DELEGATED)} from its optical continuum')
         return getattr(optical, name)
 
     @property
@@ -148,15 +162,6 @@ class SplitEquilibrium:
                 f'direct term and Eq. (18))')
 
 
-#: The two ways an excitation reaches its state-specific solvation: Duchemin's
-#: (Eq. (18) and the dressed direct W, `SplitEquilibrium`) and the classical
-#: one (`ClassicalStateSpecific`).
-SOLVENT_SCHEMES = ('duchemin', 'classical-ss')
-
-#: Which density difference the classical state-specific energy reads.
-SS_DENSITIES = ('relaxed', 'unrelaxed')
-
-
 class ClassicalStateSpecific(SplitEquilibrium):
     """Scheme B: the BSE's state-specific-like part replaced by the classical
     state-specific energy of the excitation's density difference.
@@ -179,17 +184,22 @@ class ClassicalStateSpecific(SplitEquilibrium):
     eps_inf (vertical) or eps_static (equilibrium). E_SS is a single-point
     term: the force of a scheme B surface is omega_B's.
 
-    ss_density: 'relaxed' (default) or 'unrelaxed'. ss_equilibrium: False
+    ss_density: SS_DENSITY_DEFAULT ('relaxed') or 'unrelaxed'. ss_equilibrium: False
     (vertical, Q(eps_inf)) or True (Q(eps_static)).
     """
 
     scheme = 'classical-ss'
 
-    def __init__(self, optical, ss_density='relaxed', ss_equilibrium=False):
+    def __init__(self, optical, ss_density=SS_DENSITY_DEFAULT,
+                 ss_equilibrium=False):
         super().__init__(optical)
         if ss_density not in SS_DENSITIES:
             raise ValueError(f'ss_density={ss_density!r}: one of '
                              f'{SS_DENSITIES}')
+        if ss_density == 'relaxed+pcm':
+            raise ValueError("ss_density='relaxed+pcm' answers the ADC(2) "
+                             'routes only: the classical state-specific energy '
+                             "takes 'relaxed' or 'unrelaxed'")
         self._hold_ss(ss_density, bool(ss_equilibrium))
 
     def _hold_ss(self, ss_density, ss_equilibrium):
@@ -247,7 +257,7 @@ class LinearResponseOnly(ClassicalStateSpecific):
     (no continuum attached, nothing re-converged), as the gas phase does.
     """
 
-    # not a `SOLVENT_SCHEMES` choice of `environment.solvent_scheme`: the
+    # not a `CONSTRUCTION_SCHEMES` choice of `environment.solvent_scheme`: the
     # partition a state model reads inside a loop, built by the model itself
     scheme = 'loop'
 

@@ -1,14 +1,16 @@
-"""Finite-difference nuclear derivatives of the fragment-diabatic BSE matrix,
-Tamm-Dancoff or full (the chain's kernel): the test oracle.
+"""Finite-difference nuclear derivatives of a fragment-diabatic matrix, for any
+`FragmentMethod` (GW-BSE Tamm-Dancoff or full, ADC(2)): the test oracle.
 
-The reference the analytic diabatic gradient (`src.gradients.gwbse.fragment_diabatic`)
+The reference the analytic diabatic gradient (`src.gradients.fragment_diabatic`)
 has to reproduce, in the role `nonadiabatic.derivative_couplings` plays for the
 derivative coupling and `FiniteDifferenceGradient` for forces
-(tests/test_fragment_diabatic.py, tests/test_protein_environment.py).
+(tests/test_fragment_diabatic.py, tests/test_fragment_adc2.py,
+tests/test_protein_environment.py).
 
 AT EVERY DISPLACED GEOMETRY EVERYTHING IS REDONE: the mean field, the
-quasiparticle energies and screening, the fragment localization, the diabats
-and the resolvent. Nothing is frozen, so the difference is the derivative of
+method's singles operator (quasiparticle energies and screening, or the
+folded ADC(2) doubles), the fragment localization, the diabats and the
+resolvent. Nothing is frozen, so the difference is the derivative of
 the quantity as defined, localization response included. What is carried over
 from the reference geometry is IDENTITY, not values:
 
@@ -19,7 +21,8 @@ from the reference geometry is IDENTITY, not values:
 * each diabat's sign is fixed by its overlap with the reference diabat in that
   matched local basis, and a diabat that overlaps its reference by less than
   `DIABAT_OVERLAP_FLOOR` is refused rather than differenced;
-* Omega_0 is the reference's, held fixed.
+* Omega_0 is the reference's, held fixed (an energy-dependent operator is
+  built there).
 
 `derivative_ladder` repeats the central difference over a ladder of steps and
 Richardson-extrapolates; a localization that jumps between local maxima, or a
@@ -30,27 +33,27 @@ import numpy as np
 from src.Base.numerics.constants import DIABAT_OVERLAP_FLOOR, NUCLEAR_FD_STEP
 from src.Base.geometry.geometry import displaced
 from src.fragments.localization import FragmentOrbitals
-from src.gradients.gwbse.fragment_bse import BSEOperator, FragmentPartition
+from src.fragments.partition import FragmentPartition
 from src.gradients.state_identity import mo_overlap, state_overlap
 from src.properties.hessian import ladder_ratios
 from src.properties.vibronic import project_coupling
 
 
-def diabatic_matrix(chain, fragments, sites, ct=None, omega0=None, mol=None,
+def diabatic_matrix(method, fragments, sites, ct=None, omega0=None, mol=None,
                     mf=None, scheme='lowdin', reference=None, route='auto'):
-    """FragmentPartition of `chain`'s BSE at one geometry.
+    """FragmentPartition of `method`'s singles operator (a `FragmentMethod`)
+    at one geometry.
 
     `reference`, a FragmentPartition at another geometry, fixes the local
     orbitals' identity, the diabats' signs and Omega_0 (see module docstring).
     """
-    mol, mf = chain.mean_field(mol, mf)
-    op, _ = BSEOperator.from_chain(chain, mol, mf, route=route)
+    mol, mf = method.mean_field(mol, mf)
+    omega0 = omega0 if reference is None else reference.omega0
+    op, _ = method.singles(mol, mf, route=route, omega0=omega0)
     orbitals = FragmentOrbitals.from_mf(
         mf, fragments, scheme=scheme,
         reference=None if reference is None else reference.orbitals)
-    part = FragmentPartition.build(
-        op, orbitals, sites, ct,
-        omega0=omega0 if reference is None else reference.omega0)
+    part = FragmentPartition.build(op, orbitals, sites, ct, omega0=omega0)
     if reference is not None:
         _align(part, reference)
     return part
@@ -84,7 +87,7 @@ def _align(part, reference):
         setattr(part, name, getattr(part, name) * np.outer(s, s))
 
 
-def diabatic_derivative(chain, fragments, sites, direction, ct=None,
+def diabatic_derivative(method, fragments, sites, direction, ct=None,
                         omega0=None, step=NUCLEAR_FD_STEP, scheme='lowdin',
                         reference=None, route='auto'):
     """Central difference of A_eff(Omega_0), A_PP and Sigma along `direction`.
@@ -95,11 +98,11 @@ def diabatic_derivative(chain, fragments, sites, direction, ct=None,
     Cartesian gradient of every element.
     """
     direction = np.asarray(direction, float)
-    mol0 = chain.mol0
+    mol0 = method.mol0
     if reference is None:
-        reference = diabatic_matrix(chain, fragments, sites, ct, omega0,
+        reference = diabatic_matrix(method, fragments, sites, ct, omega0,
                                     scheme=scheme, route=route)
-    plus, minus = (diabatic_matrix(chain, fragments, sites, ct,
+    plus, minus = (diabatic_matrix(method, fragments, sites, ct,
                                    mol=displaced(mol0, s * step * direction),
                                    scheme=scheme, reference=reference,
                                    route=route)
@@ -112,7 +115,7 @@ def diabatic_derivative(chain, fragments, sites, direction, ct=None,
     return out, reference
 
 
-def derivative_ladder(chain, fragments, sites, direction, ct=None, omega0=None,
+def derivative_ladder(method, fragments, sites, direction, ct=None, omega0=None,
                 steps=None, scheme='lowdin', route='auto'):
     """Derivatives over a ladder of steps, and their Richardson extrapolation.
 
@@ -127,7 +130,7 @@ def derivative_ladder(chain, fragments, sites, direction, ct=None, omega0=None,
     ladder = []
     for h in steps:
         d, reference = diabatic_derivative(
-            chain, fragments, sites, direction, ct, omega0, step=h,
+            method, fragments, sites, direction, ct, omega0, step=h,
             scheme=scheme, reference=reference, route=route)
         ladder.append(d['a_eff'])
     ladder = np.array(ladder)

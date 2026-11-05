@@ -34,10 +34,11 @@ from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
 from tests.isdf_test_grid import g1, g1_numerics
 from tests.pins import assert_same
+from tests.molecules import WATER_CS
 
 BASIS = 'cc-pvdz'
 MOLECULES = {
-    'water': 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24',
+    'water': WATER_CS,
     'formaldehyde': 'C 0 0 0; O 0 0 1.205; H 0 0.94 -0.59; H 0 -0.94 -0.59'}
 BENZENE = ('C 0 1.396 0; C 1.209 0.698 0; C 1.209 -0.698 0; C 0 -1.396 0; '
            'C -1.209 -0.698 0; C -1.209 0.698 0; H 0 2.479 0; '

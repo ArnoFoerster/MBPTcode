@@ -15,10 +15,14 @@ class instead (`PIN_CROSS_BLAS_BARS`): an energy, a force or gradient, or a
 quasiparticle energy or pole strength read off a Pade continuation, which
 amplifies the fit's last bits.
 
-The identity has two parts, since numpy and pyscf's C kernels need not
+The identity has three parts, since numpy and pyscf's C kernels need not
 link the same library: numpy's BLAS as threadpoolctl reports it (vendor and
-version, MKL's instruction-set code path, OpenBLAS's core type), and the
-BLAS pyscf's libnp_helper links.
+version, MKL's instruction-set code path, OpenBLAS's core type), the
+BLAS pyscf's libnp_helper links, and the operating system's release. A
+system library such as Accelerate is named, not versioned, by the link: an
+upgrade of the operating system replaces it and moved quasiparticle energies
+on one workstation by up to 9e-13 eV with no other change, so a pin recorded
+under another release is read as recorded under another BLAS.
 """
 import ctypes
 import functools
@@ -32,7 +36,8 @@ import numpy as np
 import pyscf.lib
 from threadpoolctl import threadpool_info
 
-from src.Base.numerics.constants import (HARTREE_TO_EV, PIN_CROSS_BLAS_BAR,
+from src.Base.numerics.constants import (HARTREE_TO_EV, ISDF_GRADIENT_FLOOR,
+                                         PIN_CROSS_BLAS_BAR,
                                          PIN_CROSS_BLAS_CONTINUED_BAR,
                                          PIN_CROSS_BLAS_GRADIENT_BAR,
                                          PIN_CROSS_BLAS_ROOT_BAR,
@@ -49,6 +54,12 @@ PIN_CROSS_BLAS_BARS = {'energy': PIN_CROSS_BLAS_BAR,
                        'continued': PIN_CROSS_BLAS_CONTINUED_BAR,
                        'vector': PIN_CROSS_BLAS_VECTOR_BAR,
                        'root': PIN_CROSS_BLAS_ROOT_BAR}
+#: The relative bar between two DIFFERENT computation paths of one quantity
+#: (a batched against a looped contraction, other GEMM shapes, another split
+#: over ranks): equal in exact arithmetic, their round-off differs with the BLAS
+#: and its kernels' blocking, so they are compared to this, never to the bit.
+#: A same-path reproducibility pin on the recording machine stays bitwise.
+CROSS_PATH_RTOL = 1e-12
 #: The bar per pin unit.
 PIN_UNIT_SCALE = {'Ha': 1.0, 'eV': HARTREE_TO_EV, '1': 1.0}
 #: The thread caps of a subprocess gate: one thread count for every pool.
@@ -114,10 +125,19 @@ def pyscf_blas():
     return '; '.join(sorted(names)) or 'none linked'
 
 
+def os_release():
+    """The operating system's release, which ships its system libraries:
+    the macOS version, elsewhere the system and its C library's version."""
+    if platform.system() == 'Darwin':
+        return f'macOS {platform.mac_ver()[0]}'
+    libc, version = platform.libc_ver()
+    return ' '.join(part for part in (platform.system(), libc, version) if part)
+
+
 @functools.lru_cache(maxsize=None)
 def _identity():
     return (('numpy', numpy_blas()), ('pyscf', pyscf_blas()),
-            ('machine', platform.machine()))
+            ('machine', platform.machine()), ('os', os_release()))
 
 
 def blas_identity():
@@ -231,6 +251,15 @@ def assert_pin(got, pin, blas, unit='Ha', quantity='energy', label=None):
 #: (the pin file of the one fit, which is the workstation's).
 RECORDING_BLAS = recorded_blas(
     pathlib.Path(__file__).resolve().parent / 'one_fit_pins.json')
+
+
+def isdf_gradient_bar():
+    """What an ISDF force may miss another computation of itself by (the
+    finite difference of its energy, another fit layout, other ranks, a rotated
+    frame): ISDF_GRADIENT_FLOOR, measured on the recording workstation, under
+    `RECORDING_BLAS`; the gradient class bar under any other BLAS, where the
+    fit's conditioning turns other last bits into a larger miss."""
+    return bar_under(RECORDING_BLAS, ISDF_GRADIENT_FLOOR, quantity='gradient')
 
 
 def assert_same(got, want, unit='Ha', quantity='energy', label=None):

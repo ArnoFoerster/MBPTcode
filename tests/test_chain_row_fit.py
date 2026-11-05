@@ -67,13 +67,12 @@ from src.Base.numerics.constants import ISDF_FIT_REGULARIZATION
 from src.gradients.rpa.chain_settings import with_setting
 from src.Base.numerics.numerics import Numerics, numerics_of
 from src.Base.numerics.constants import (FIT_REASSOCIATION_FLOOR, FIT_REASSOCIATION_K,
-                                         HARTREE_TO_EV,
-                                         ISDF_GRADIENT_FLOOR)
+                                         HARTREE_TO_EV)
 from src.Base.declaration import Excitation, GroundState
 # the module, not its test_* helpers, which pytest would collect as tests
 from src.Base.factorization import separable_ri
 from src.gradients import isdf_fit_adjoint
-from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M_stable
+from src.Base.factorization.separable_ri import aux_metric_sqrt, fit_M
 from src.Base.factorization.sliced_factors import (GridTileRows, SlicedFactors,
                                                    whole_factor)
 from src.environments.solvent_screening import SolventScreening
@@ -97,8 +96,8 @@ from tests.test_chain_sliced_factors import (COMPOSED_GATHERS, H2O,
                                              H2O_DISPLACED, chain_scf,
                                              own_water, reachable_arrays,
                                              reachable_rows)
-from tests.isdf_test_grid import g1, g1_kw, g1_numerics
-from tests.pins import assert_same, bitwise_arrays
+from tests.isdf_test_grid import g1, g1_kw, g1_numerics, DUCHEMIN_BLASE_FIT, duchemin_blase
+from tests.pins import assert_same, bitwise_arrays, isdf_gradient_bar
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 #: The package the memory scan traces: every frame whose code lives here.
@@ -146,7 +145,7 @@ def state_pair(atom=H2O, bse_conv_tol=None, **layout):
         choices['bse_conv_tol'] = bse_conv_tol
     return RPABSESurface(
         mol, chain_scf, spin='singlet', mf=chain_scf(mol),
-        numerics=g1_numerics(mol, numerics_of(choices)))
+        numerics=duchemin_blase(g1_numerics(mol, numerics_of(choices))))
 
 
 def rows_of(factors):
@@ -171,7 +170,7 @@ def per_shell_reversed(mol, nk, n2, naux, block_memory_gb):
 
 
 def reassociated_fit(mol, layout):
-    """`fit_M_stable` with its three sums over the test set -- the row norms,
+    """`fit_M` with its three sums over the test set -- the row norms,
     the Gram matrix and F Dt^T -- cut per mu shell and accumulated in
     reverse: one reordering of the whole form's own sums, its anchor."""
     mu = np.asarray(layout[0])
@@ -514,7 +513,7 @@ def test_rows_through_the_chain_are_bitwise_across_rank_counts(size):
     def factors(comm):
         mol = own_water()
         chain = RPAGroundStateChain(mol, chain_scf, mf=chain_scf(mol),
-                                    numerics=numerics_of(g1_kw(mol, row_kw())))
+                                    numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT)))
         here, mf = chain.mean_field(own_water(H2O_DISPLACED))
         return (rows_of(chain.factors_at(chain.mol0, chain.mf0)),
                 rows_of(chain.factors_at(here, mf)))
@@ -656,7 +655,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
         """rows, replicated, whole and bar, on whatever `patch` holds."""
         rows, replicated = run(**row_kw()), run(sliced=True)
         patch.setattr(FactorChain, 'row_fit_factors',
-                      product_fit_factors(fit_M_stable))
+                      product_fit_factors(fit_M))
         whole = run(**row_kw())
         patch.setattr(FactorChain, 'row_fit_factors', product_fit_factors(
             reassociated_fit(mol, product_pairs(mol))))
@@ -666,7 +665,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
     with monkeypatch.context() as patch:
         rows, replicated, whole, bar = four(patch)
         patch.setattr(FactorChain, 'row_fit_factors',
-                      product_fit_factors(fit_M_stable, gram=False))
+                      product_fit_factors(fit_M, gram=False))
         retired = run(**row_kw())
     with monkeypatch.context() as patch:
         def bare_davidson(*args, numerics=None, **kwargs):
@@ -707,7 +706,7 @@ def test_ethylene_both_fits_are_the_one_estimator(monkeypatch):
     assert max(bare_beside.values()) <= FIT_REASSOCIATION_K, bare_same
     for key in ('force', 'drpa_force'):
         assert (np.abs(replicated[key] - rows[key]).max()
-                < ISDF_GRADIENT_FLOOR), key
+                < isdf_gradient_bar()), key
     assert min(apart.values()) > FIT_REASSOCIATION_K, other
 
 
@@ -723,10 +722,10 @@ def test_refreeze_carries_settings():
         assert fac is refrozen.excited.factorization
         chains = [RPAGroundStateChain(
                       own_water(), chain_scf,
-                      numerics=numerics_of(g1_kw(own_water(), row_kw()))),
+                      numerics=numerics_of(dict(g1_kw(own_water(), row_kw()), test_set=DUCHEMIN_BLASE_FIT))),
                   ExcitedStateChain(
                       own_water(), chain_scf,
-                      numerics=g1_numerics(own_water(), numerics_of({**row_kw()})))]
+                      numerics=duchemin_blase(g1_numerics(own_water(), numerics_of({**row_kw()}))))]
         alone = [c.refreeze(own_water(H2O_DISPLACED)).factorization
                  for c in chains]
         return [(f.sliced, f.fit, f.fit_block) for f in [fac] + alone]
@@ -773,32 +772,32 @@ def test_what_the_row_fit_cannot_serve_is_refused():
         return chain_scf(m)
 
     with pytest.raises(ValueError, match='sliced=True'):
-        FrozenFactorization(mol, Numerics(isdf={'fit': 'rows', 'counts': g1(mol)}))
+        FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'fit': 'rows', 'counts': g1(mol)}))
     with pytest.raises(ValueError, match='rows'):
         FrozenFactorization(mol, Numerics(isdf={'fit': 'cyclic', 'counts': g1(mol)},
                                           layout={'sliced': True}))
     with pytest.raises(ValueError, match='tile'):
-        FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+        FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                           layout={'sliced': True, 'fit_block': TILE}))
     with pytest.raises(ValueError, match='sliced=False'):
-        FactorChain(mol, counted, numerics=numerics_of(g1_kw(mol, row_kw())))
+        FactorChain(mol, counted, numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT)))
     with pytest.raises(ValueError, match='fit='):
         ExcitedStateChain(
-            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'counts': g1(mol)},
+            mol, counted, factorization=FrozenFactorization(mol, Numerics(isdf={'test_set': DUCHEMIN_BLASE_FIT, 'counts': g1(mol)},
                                                                           layout={'sliced': True})),
             numerics=Numerics(isdf={'fit': 'rows'}))
     with pytest.raises(ValueError, match='fit_block'):
         ExcitedStateChain(
-            mol, counted, factorization=FrozenFactorization(mol, numerics_of(g1_kw(mol, row_kw()))),
+            mol, counted, factorization=FrozenFactorization(mol, numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT))),
             numerics=Numerics(layout={'fit_block': 32}))
     assert built == [], 'a refusal came only after an SCF'
     # a continuum is a further gauge of the one fit, served by rows
     # (tests/test_solvated_row_fit.py)
     ExcitedStateChain(mol, chain_scf, environment=solvated,
-                      numerics=g1_numerics(mol, numerics_of(row_kw())))
+                      numerics=duchemin_blase(g1_numerics(mol, numerics_of(row_kw()))))
     with pytest.raises(ValueError, match='never forms the whole fit'):
         chain = RPAGroundStateChain(mol, chain_scf,
-                                    numerics=numerics_of(g1_kw(mol, row_kw())))
+                                    numerics=numerics_of(dict(g1_kw(mol, row_kw()), test_set=DUCHEMIN_BLASE_FIT)))
         chain.factors(mol, chain.auxmol(mol), chain.coords(mol))
     # one rank is the row fit too, and the whole grid
     x_mo, d, *_ = chain.factors_at(chain.mol0, chain.mf0)

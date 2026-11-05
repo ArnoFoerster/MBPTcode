@@ -294,6 +294,8 @@ def qsgw_eigenvalues(mf, mol=None, screening='updated', mixing='diis',
 
     eps, mo_coeff = eps0.copy(), c0.copy()
     dm = mf_hf.make_rdm1(mo_coeff, mo_occ)
+    # pyscf's CDIIS, not Solvers.diis: its error vector is the Fock-density
+    # commutator, the self-consistency condition of qsGW
     accel = scf_diis.CDIIS() if mixing == 'diis' else None
     if accel is not None:
         accel.space = int(diis_size)
@@ -450,6 +452,8 @@ def _qsgw_unrestricted(mf, mol, screening, mixing, converge_on, max_cycle,
 
     eps, mo_coeff = eps0.copy(), c0.copy()
     dm = mf_hf.make_rdm1(mo_coeff, mo_occ)
+    # pyscf's CDIIS, not Solvers.diis: its error vector is the Fock-density
+    # commutator, the self-consistency condition of qsGW
     accel = scf_diis.CDIIS() if mixing == 'diis' else None
     if accel is not None:
         accel.space = int(diis_size)

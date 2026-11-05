@@ -38,3 +38,8 @@ def ov_factor(coeff, occ, virt):
     """C_ov: the occupied-virtual block of a DF factor coeff[Q, p, q],
     (naux, nocc * nvirt) on the pair index of ov_energies."""
     return coeff[:, occ[:, None], virt].reshape(coeff.shape[0], -1)
+
+
+def occupied_count(mf):
+    """The closed-shell occupied count of the mean field `mf`."""
+    return int(np.count_nonzero(np.asarray(mf.mo_occ) > 0))

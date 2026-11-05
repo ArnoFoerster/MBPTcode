@@ -101,10 +101,10 @@ from tests.test_distributed_isdf_scf_mpi import memory_faults, tile_addends
 from tests.test_force_serial_shaped import racing_dgemm
 from tests.isdf_test_grid import g1
 from tests.pins import RECORDING_BLAS, assert_same, matches
+from tests.molecules import WATER
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 ETHYLENE = ('C 0 0 0.6695; C 0 0 -0.6695; H 0 0.9289 1.2321; '
             'H 0 -0.9289 1.2321; H 0 0.9289 -1.2321; H 0 -0.9289 -1.2321')
 #: Anthracene, the idealized D2h acene of three rings (C-C 1.40, C-H
@@ -160,8 +160,12 @@ _NOTE_LOCK = threading.Lock()
 #: The handle's GEMM stages of a distributed ISDF-K SCF, by the call `note`
 #: keys them on: each must run on the whole node pool.
 GEMM_STAGES = {
-    ('dpotrf', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's Cholesky",
-    ('trsm', 'src.Base.factorization.separable_ri', 'fit_rows'): "the fit's trsm",
+    ('dpotrf', 'src.Base.factorization.separable_ri', 'cholesky_tiles'):
+        "the fit's Cholesky",
+    ('trsm', 'src.Base.factorization.separable_ri', 'cholesky_tiles'):
+        "the fit's forward trsm",
+    ('trsm', 'src.Base.factorization.separable_ri', 'backward_tiles'):
+        "the fit's backward trsm",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_interaction_rows'):
         "G and Z's rows",
     ('dot', 'src.Base.factorization.distributed_isdf_jk', '_exchange_rows'): 'the K builds',

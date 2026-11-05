@@ -30,6 +30,7 @@ from src.Base.pyscf.pyscf_interface import (
 from src.Base.numerics.constants import HARTREE_TO_EV
 from tests.generated_runtime import requires_runtime
 from src.SingleReference.ADC.generated_modules import generated
+from tests.molecules import WATER_RIGHT_ANGLE
 
 pytestmark = requires_runtime(4)
 
@@ -49,7 +50,7 @@ def main():
 
     # ---- 1. full-spectrum parity vs build_supermatrix_adc3 (small) ----
     for atom, label in [('Li 0 0 0; H 0 0 1.6', 'LiH/sto-3g'),
-                        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'H2O/sto-3g')]:
+                        (WATER_RIGHT_ANGLE, 'H2O/sto-3g')]:
         r, mf, ns = rsolver(atom)
         op, _ = restricted_dyson_operator(r, 'adc3')
         n = op.shape[0]

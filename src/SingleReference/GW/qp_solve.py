@@ -14,25 +14,25 @@ Vidberg and Serene, J. Low Temp. Phys. 29, 179 (1977) -- Pade continuation of
 a function sampled on the imaginary axis via Thiele's continued fraction, the
 algorithm behind `Base.utils.grids.analytic_continuation.thiele_coefficients`.
 """
-import hashlib
-import threading
 import time as _time
-import weakref
 
 import numpy as np
-from pyscf import df as _pyscf_df, gto as _pyscf_gto, scf as _pyscf_scf
+from pyscf import df as _pyscf_df, scf as _pyscf_scf
 from pyscf.df import incore as _df_incore
 
 from src.Base.basis.ri_fallback import paired_auxbasis
-from src.Base.numerics.constants import (BYTES_PER_GB, DF_EXCHANGE_METRIC_FLOOR,
+from src.Base.numerics.constants import (DF_EXCHANGE_METRIC_FLOOR,
                                          DF_EXCHANGE_OCCUPATION_FLOOR)
 from src.Base.factorization.distributed_df import distributed_fock
+from src.Base.factorization.shell_runs import shell_ranges
 from src.Base.environment_seam import environment_of
 from src.Base.utils.grids.analytic_continuation import PadeFit
+from src.Base.utils.parallel.memory import fits
 from src.Base.utils.parallel.mpi_grid import (current_comm, lockstep,
-                                              lockstep_mean_field, partition,
-                                              reduce_max)
+                                              lockstep_mean_field, partition)
 from src.Base.utils.parallel.threads import blas_single_threaded
+from src.SingleReference.common.mean_field_operators import (mean_field_static_operator,
+                                                          xc_potential)
 from src.Solvers.qp_equation import (pole_strength,
                                      solve_qp_equation_pole_strength)
 
@@ -143,7 +143,7 @@ def _local_static_exchange(mf, mol, dm_correction, exchange):
     with blas_single_threaded():
         K = _exchange_k(mf, mol, dm_for_hx, exchange)
         sig_x = -K if unrestricted else -0.5 * K
-        v_xc, j_mf = _xc_potential(mf, mol, dm)
+        v_xc, j_mf = xc_potential(mf, mol, dm)
         op = sig_x - v_xc
         if dm_correction is not None:
             dm_x_total = (dm_for_hx[0] + dm_for_hx[1] if unrestricted
@@ -152,53 +152,6 @@ def _local_static_exchange(mf, mol, dm_correction, exchange):
     if unrestricted:
         return np.stack([mo[s].T @ op[s] @ mo[s] for s in (0, 1)])
     return mo.T @ op @ mo                                # a GEMM: BLAS wide
-
-
-#: each restricted mean field's Sigma_x - v_xc at its own density, with the
-#: content it was built for (`mean_field_static_operator`)
-_STATIC_OPERATORS = weakref.WeakKeyDictionary()
-_STATIC_OPERATORS_LOCK = threading.Lock()
-
-
-def mean_field_static_operator(mf, mol=None):
-    """Sigma_x - v_xc = -K/2 - (v_eff - J) in the AO basis at a restricted
-    mean field's own density, from its own K, v_eff and J; read-only.
-
-    THE ONE OPERATOR the quasiparticle static term (`_local_static_exchange`
-    at exchange='mf'), the Kohn-Sham static correction's orbital response and
-    the EXX double counting's (`gradients.isdf_derivatives`) all read: built
-    once per mean field and kept beside it (a weak reference, so it goes with
-    the mean field) for as long as its density, molecule, functional and
-    fit are the ones it was built from; any change rebuilds it.
-
-    Over ranks the build may be a collective (`distributed_fock`), so a
-    held operator is used only where every rank holds one.
-    """
-    mol = mf.mol if mol is None else mol
-    dm = mf.make_rdm1()        # tagged with its orbitals, as pyscf builds K
-    key = (hashlib.blake2b(np.ascontiguousarray(dm).data,
-                           digest_size=32).digest(),
-           mol._atm.tobytes(), mol._bas.tobytes(),
-           mol._env[_pyscf_gto.mole.PTR_ENV_START:].tobytes(),
-           getattr(mf, 'xc', None), id(getattr(mf, 'with_df', None)))
-    with _STATIC_OPERATORS_LOCK:
-        held = _STATIC_OPERATORS.get(mf)
-    hit = held is not None and held[0] == key
-    comm = current_comm()
-    if comm is not None and comm.Get_size() > 1:
-        hit = reduce_max(np.array([0.0 if hit else 1.0]), comm)[0] == 0.0
-    if hit:
-        return held[1]
-    # K and the exchange-correlation potential are pyscf's own OpenMP -- the
-    # fit's contraction and `nr_rks` on the DFT grid -- so BLAS is held at one
-    # thread across them and the two pools stop spinning against each other.
-    with distributed_fock(mf, build=False), blas_single_threaded():
-        K = mf.get_k(mol, dm)
-        op = -0.5 * K - _xc_potential(mf, mol, dm)[0]
-    op.setflags(write=False)
-    with _STATIC_OPERATORS_LOCK:
-        _STATIC_OPERATORS[mf] = (key, op)
-    return op
 
 
 def refuse_unshifted_environment(mf, mol, where):
@@ -244,17 +197,6 @@ def _exchange_k(mf, mol, dm, exchange):
         return _pyscf_df.DF(mol, auxbasis=aux).get_jk(dm, hermi=1,
                                                       with_j=False)[1]
     raise ValueError(f"exchange must be 'mf', 'exact' or 'df', got {exchange!r}")
-
-
-def _xc_potential(mf, mol, dm):
-    """(v_xc, J): v_xc = v_eff - J[D], exact exchange included, J of the
-    total density -- the operator the eigenvalues came from, less the Hartree
-    term every spin sees alike; restricted (nao, nao), unrestricted
-    (2, nao, nao) for dm (2, nao, nao)."""
-    total = dm[0] + dm[1] if np.ndim(dm) == 3 else dm
-    v_eff = mf.get_veff(mol, dm)
-    j = mf.get_j(mol, total)
-    return v_eff - j, j
 
 
 def _df_direct_block_gb(mf, given):
@@ -391,18 +333,12 @@ def _df_direct_exchange_diagonal(mol, auxbasis, mo_states, dm, block_memory_gb):
     T = np.zeros((naux, mo_states.shape[1], nao))
     # Big blocks: each aux_e2 call rebuilds a shell-pair list over
     # nbas x auxnbas, so the CALL COUNT costs at large nbas.
-    max_ao = max(1, int(block_memory_gb * BYTES_PER_GB / (nao * naux * 8)))
-    sh0 = 0
-    while sh0 < mol.nbas:
-        sh1 = sh0 + 1
-        while sh1 < mol.nbas and ao_loc[sh1 + 1] - ao_loc[sh0] <= max_ao:
-            sh1 += 1
+    max_ao = fits(block_memory_gb, nao * naux * 8)
+    for sh0, sh1, a0, a1 in shell_ranges(ao_loc, max_ao):
         ints = _df_incore.aux_e2(mol, auxmol, 'int3c2e', aosym='s1',
                                  shls_slice=(sh0, sh1, 0, mol.nbas, 0, auxmol.nbas))
-        a0, a1 = ao_loc[sh0], ao_loc[sh1]
         T += np.einsum('mnP,mp->Ppn', ints, mo_states[a0:a1], optimize=True)
         del ints
-        sh0 = sh1
     n, v = np.linalg.eigh(dm)
     keep = n > DF_EXCHANGE_OCCUPATION_FLOOR * n.max()
     B = np.einsum('Ppn,nk->Ppk', T, v[:, keep] * np.sqrt(n[keep]), optimize=True)
@@ -493,7 +429,7 @@ def static_exchange_diagonal(mf, mol, states, dm_correction=None, exchange='mf',
     aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx,
                                         _df_direct_block_gb(mf, block_memory_gb))
-    v_xc, j_mf = _xc_potential(mf, mol, dm)
+    v_xc, j_mf = xc_potential(mf, mol, dm)
     if dm_correction is not None:
         v_xc = v_xc - hartree_shift(mf, mol, dm_correction, j_mf)
     out = -0.5 * k_pp - np.einsum('mp,mn,np->p', mo, v_xc, mo, optimize=True)
@@ -516,7 +452,7 @@ def _df_direct_unrestricted(mf, mol, states, dm_correction, block_memory_gb,
     aux = getattr(mf.with_df, 'auxbasis', None) or paired_auxbasis(mol.basis)
     k_pp = _df_direct_exchange_diagonal(mol, aux, mo, dm_for_hx[spin],
                                         _df_direct_block_gb(mf, block_memory_gb))
-    v_xc, j_mf = _xc_potential(mf, mol, dm)
+    v_xc, j_mf = xc_potential(mf, mol, dm)
     v_xc = v_xc[spin]
     if dm_correction is not None:
         v_xc = v_xc - hartree_shift(mf, mol, dm_for_hx[0] + dm_for_hx[1], j_mf)

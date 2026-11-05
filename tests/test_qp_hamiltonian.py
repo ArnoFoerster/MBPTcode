@@ -25,6 +25,9 @@ the pole model admits 4-10 alone and the test widens the window to join
     to a few ulp (`assert_same` of tests/pins.py: two chains on two SCFs,
     so not bitwise); with the off-diagonal contractions zeroed H is diagonal and the
     energy is the diagonal route's but for the subspace's common poles;
+  - the off-diagonal contractions the set solve's frequency pass took on
+    its own solves are the ones a pass of their own takes, bitwise, and the
+    Hamiltonian takes no other;
   - the dense and the matrix-free Casida solves agree with the coupling on;
   - the force is the derivative of the energy, on Hartree-Fock (Sigma^c_pq
     alone) and on PBE0 (the static <p|Sigma_x - v_xc|q> as well);
@@ -42,10 +45,12 @@ import src.gradients.gwbse.adaptive_selection as adaptive_selection_module
 import src.gradients.gwbse.qp_set as qp_set_module
 from src.gradients.rpa.chain_settings import with_setting
 from src.Base.numerics.numerics import Numerics
-from src.Base.numerics.constants import (SCF_DIFFERENTIABLE_CONV_TOL,
+from src.Base.numerics.constants import (ISDF_TILE_GB,
+                                         SCF_DIFFERENTIABLE_CONV_TOL,
                                          SCF_DIFFERENTIABLE_GRAD_TOL)
 from src.environments.solvent_screening import SolventScreening
 from src.Base.utils.parallel.simulated_comm import run_simulated
+from src.SingleReference.GW.contour_deformation import cd_pair_contraction_multi
 from src.SingleReference.GW.reaction_field import (offdiagonal_reaction_field,
                                                    pair_densities,
                                                    projected_quasiparticle_shift)
@@ -173,6 +178,31 @@ def test_a_zero_coupling_is_the_diagonal_energy(monkeypatch):
     zeroed = chain(qp_hamiltonian=True)
     assert not coupling(zeroed).h.any()
     assert abs(zeroed.excitation() - om) < COMMON_POLES
+
+
+def test_the_set_solve_takes_the_pairs_on_its_own_solves(monkeypatch):
+    monkeypatch.setattr(qp_set_module, 'QP_HAMILTONIAN_WINDOW',
+                        PBE0_SUBSPACE_WINDOW)
+    monkeypatch.setattr(adaptive_selection_module, 'QP_HAMILTONIAN_WINDOW',
+                        PBE0_SUBSPACE_WINDOW)
+    taken = qp_set_module.pair_contractions
+    asked = []
+
+    def separately(tape, grid, pairs, tile_gb=None):
+        alone = cd_pair_contraction_multi(
+            tape.proj_tau, grid.cosft_wt, tape.Bps, pairs,
+            tile_gb=ISDF_TILE_GB if tile_gb is None else tile_gb)
+        asked.append((list(pairs), set(tape.pair_wcs or ())))
+        out = taken(tape, grid, pairs, tile_gb)
+        for wc, ref in zip(out, alone):
+            assert np.array_equal(wc, ref)
+        return out
+    monkeypatch.setattr(qp_set_module, 'pair_contractions', separately)
+    ch = chain(pbe0, qp_hamiltonian=True, qp_window=PBE0_WINDOW)
+    ch.excitation()
+    assert ch.resolved.qp_subspaces[1] == PBE0_SUBSPACES
+    assert asked and all(len(pairs) == 4 and set(pairs) <= held
+                         for pairs, held in asked)
 
 
 def test_dense_and_matrix_free_casida_agree():

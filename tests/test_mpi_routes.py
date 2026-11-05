@@ -158,7 +158,7 @@ Checks (path; standard):
     nothing reachable from it holding the grid whole beside a factor's or
     the fit's width, its rows the row fit's own at this rank's tiles
     (exact); the row fit's own adjoint in the nuclear assembly against the
-    whole adjoint, which refits the same estimator with `fit_M_stable`
+    whole adjoint, which refits the same estimator with `fit_M`
     (stated, FIT_REALIZATION_FORCE_TOL), and each assembly traced line by
     line in every frame under
     src/: no array of the grid by a factor's, the fit's or the test set's
@@ -273,9 +273,10 @@ from src.Base.utils.grids.time_frequency import sigma_transforms
 from src.SingleReference.GW.imaginary_time import selfenergy_diag
 from src.properties.hessian import numerical_hessian
 from tests.reduction_bounds import reduced_sum_verdict
-from tests.isdf_test_grid import g1, g1_numerics
+from tests.isdf_test_grid import DUCHEMIN_BLASE_FIT, g1, g1_numerics
 from tests.chain_stages import casida_args
 from tests.pins import RECORDING_BLAS, matches
+from tests.molecules import WATER
 
 warnings.simplefilter('ignore')
 
@@ -298,17 +299,16 @@ SOP_ANCHOR_K = 5
 #: Fixed ulp draws the anchor takes the largest response over: one draw alone
 #: spans 3.9e-12 to 5.9e-11 on the adjoints.
 SOP_ANCHOR_SEEDS = 3
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 #: The package whose frames the assembly scan traces.
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
     __file__))), 'src') + os.sep
 #: One hydrogen 0.03 A along y, where a surface fits and differentiates anew.
 WATER_DISPLACED = 'O 0 0 0.1173; H 0 0.7872 -0.4692; H 0 -0.7572 -0.4692'
 #: The whole-array gathers of one composed force on sliced factors: the dRPA
-#: sweep and assembly, then the static W, the quasiparticle solve, the
-#: Davidson, the BSE cache and adjoint, the quasiparticle and chi0 adjoints
-#: and the excited assembly, one each.
-SLICED_CHAIN_GATHERS = {'X_mo': 7, 'D': 8, 'X_o': 3, 'X_v': 2}
+#: sweep and assembly, then the quasiparticle solve, the Davidson, the BSE
+#: cache and adjoint, the quasiparticle and chi0 adjoints and the excited
+#: assembly, one each; the static W reads the grid tiles and gathers none.
+SLICED_CHAIN_GATHERS = {'X_mo': 7, 'D': 7, 'X_o': 2, 'X_v': 1}
 #: The row fit's tile edge here: water's 444 points in 7 tiles, so every rank
 #: count owns a different set of them and the tiled Cholesky crosses ranks.
 ROW_FIT_BLOCK = 64
@@ -319,10 +319,11 @@ ROW_FIT_BLOCK = 64
 ROW_FIT_BSE_CONV_TOL = 1e-9
 #: Trial vectors in the batch the recorded block action is applied to.
 RECORDED_BATCH = 3
-#: The grid-row section's working-set budget: water's 444 points in 16 chi0
-#: tiles and 4 self-energy blocks, so ranks share a tau point's tiles and
-#: block pairs, not whole points.
-ROW_TILE_GB = 3e-4
+#: The grid-row section's working-set budget: water's 600 points in 11 grid
+#: tiles of 57 rows (the last 30), so ranks share a tau point's tiles, not
+#: whole points; no tile edge is naux (84), so no tile block takes the shape
+#: of a whole (naux, naux) slice in the census.
+ROW_TILE_GB = 2e-4
 #: Its tau points: 3 and 8 ranks leave a last window of the sweep that splits
 #: a point's tiles and block pairs over the ranks.
 ROW_NTAU = 14
@@ -587,9 +588,10 @@ def grid_tag(chain, m):
     radii = repr([(el, [(s, np.asarray(chain.radii[el][s]).tolist())
                         for s in sorted(chain.radii[el])])
                   for el in sorted(chain.radii)])
+    # the AO-product fit screens no pair: its layout is None
     return (digest(chain.coords(m)),
             hashlib.sha1(radii.encode()).hexdigest()[:12],
-            digest(*chain.layout))
+            'no pair layout' if chain.layout is None else digest(*chain.layout))
 
 
 def scf_mean_field(mol, xc):
@@ -982,9 +984,9 @@ def sliced_factors_routes(gate, mf, mol, F):
                f'max|d| {np.abs(om_s - om_w).max() * HARTREE_TO_EV:.2e} eV')
     same_davidson(gate, 'BSE [context] on sliced factors', om_s, info_s)
     gathers = gate.everyone(dict(Fs.gathers))
-    # the window; the BSE's GW diagonal; its Davidson's action, which the
-    # probe after it reuses
-    once = {'D': 3, 'X_o': 3, 'X_v': 2, 'X_ao': 2}
+    # the window and the BSE's GW diagonal read the grid tiles and gather
+    # none; the Davidson's action gathers X_o once, which the probe reuses
+    once = {'X_o': 1}
     gate.check(all(g == once for g in gathers),
                'each whole-array gather once per solve or sweep, every rank',
                f'{gathers[0]} on rank 0')
@@ -1149,13 +1151,17 @@ def grid_row_sums(gate, mf, mol, F, w0_route):
 
 
 def planted_whole_slice(kernel):
-    """`kernel` with the whole Pi(tau) = Go * Gv of its tau point formed
-    beside it, (M, M): what the grid-row sweep exists not to hold."""
-    def whole_slice(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs):
-        Pi = ((X_o * np.exp(e_o * tau)) @ X_o.T) * ((X_v * np.exp(-e_v * tau))
-                                                    @ X_v.T)
-        out = kernel(X_o, X_v, e_o, e_v, D, tau, *args, **kwargs)
-        del Pi
+    """`kernel`, the grid-tile sweep's `_proj_items`, with the whole
+    Pi(tau) = Go * Gv of its first tau point formed beside it, (M, M): what
+    the grid-tile sweep exists not to hold. Every rank calls the kernel in
+    lockstep, so the tiles' gather is collective."""
+    def whole_slice(tiled, tau_points, items, on_done):
+        F, no, nmo = tiled.tiles.gather(), tiled.nocc, tiled.nmo
+        tau = tau_points[items[0][0] if items else 0]
+        Pi = (((F[:, :no] * np.exp(tiled.e_o * tau)) @ F[:, :no].T)
+              * ((F[:, no:nmo] * np.exp(-tiled.e_v * tau)) @ F[:, no:nmo].T))
+        out = kernel(tiled, tau_points, items, on_done)
+        del F, Pi
         return out
     return whole_slice
 
@@ -1213,16 +1219,16 @@ def gw_grid_rows(gate, mf, mol, F):
     gate.check(n == 1, "the window and W(0) rank 0's on every rank, bitwise",
                f'{n} distinct of {gate.size}')
 
-    real = ls_space_time.polarizability_projected_tau
+    real = ls_space_time._proj_items
     gate.everyone(None)                        # every rank's run is done
-    ls_space_time.polarizability_projected_tau = planted_whole_slice(real)
+    ls_space_time._proj_items = planted_whole_slice(real)
     gate.everyone(None)                        # ...and every rank is planted
     try:
         planted = HeldCensus(solve_qp_energy_space_time.__code__, M, naux, nao)
         planted.trace(window_and_w0, Fs, gate.comm)
     finally:
         gate.everyone(None)                    # every planted run is done
-        ls_space_time.polarizability_projected_tau = real
+        ls_space_time._proj_items = real
     found = gate.everyone(sorted(planted.flags.get('grid square', ())))
     gate.check(all((M, M) in f for f in found), 'the census finds a planted '
                'whole Pi(tau) slice on every rank', f'{found}')
@@ -1742,7 +1748,7 @@ def row_fit_chain_routes(gate, mol):
     `fit='rows'` builds each rank's rows with `separable_ri.fit_rows`, so no
     rank forms the fit whole; it is another realization of the whole fit's
     estimator (`fit_M_streaming` on the frozen layout, every product pair in
-    the Gram matrix), and so is the whole assembly's `fit_M_stable`: both
+    the Gram matrix), and so is the whole assembly's `fit_M`: both
     forces are gated at FIT_REALIZATION_FORCE_TOL, the resolution of the
     fit's Gram solve. A different estimator on either side (the Gram matrix
     over the screened pairs alone, say, on a molecule whose screen drops
@@ -1758,7 +1764,8 @@ def row_fit_chain_routes(gate, mol):
     def force(scan=None, **layout):
         surface = RPABSESurface(
             mol, chain_scf, spin='singlet', mf=mf_ref,
-            numerics=g1_numerics(mol, numerics_of({'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
+            # the row fit's ledgers and pair layout are the Duchemin-Blase fit's
+            numerics=g1_numerics(mol, numerics_of({'test_set': DUCHEMIN_BLASE_FIT, 'solver': 'davidson', **layout, 'bse_conv_tol': ROW_FIT_BSE_CONV_TOL})))
         if scan is not None:
             scan(surface)
         g, e, _ = surface.total_gradient(here, mf_here)               # context
@@ -1802,7 +1809,7 @@ def row_fit_chain_routes(gate, mol):
     nrows = len(rows)
     del arrays, rows
     # the nuclear assembly: the row fit's adjoint in its tiles against the
-    # whole adjoint, which refits the estimator with fit_M_stable
+    # whole adjoint, which refits the estimator with fit_M
     whole_asm = [(FactorChain, 'row_fit_branches', whole_row_fit_branches),
                  (factor_chain, 'orbital_rotation_rows', gathered_rotation)]
     g_asm = swapped(gate, whole_asm, lambda: force(**rows_kw)[1])

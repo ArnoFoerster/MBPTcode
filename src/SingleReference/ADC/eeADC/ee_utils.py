@@ -30,7 +30,7 @@ opposite sign, and the singles denominator additionally carries a factor 2.
 import numpy as np
 
 from src.SingleReference.ADC import adc_order_rule
-from src.SingleReference.CC.cached_einsum import einsum as _einsum
+from src.Base.utils.cached_einsum import einsum as _einsum
 
 
 # ----------------------------------------------------------------------

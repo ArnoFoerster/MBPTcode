@@ -15,7 +15,8 @@ by implementing this call (src.gradients.adc.ee_state_model for
 ADC(2)).
 
     HFState    the mean field in the field (the SCF re-converged): Hartree-Fock,
-               or a Kohn-Sham reference (its force is its own gradient class)
+               or a Kohn-Sham reference (its force `isdf_mean_field.
+               mean_field_skeleton_force`, the quadrature's motion included)
     MP2State   + DF-MP2 and its relaxed correlation density (Hartree-Fock
                references only: its CPHF answers with the HF kernel)
 
@@ -34,26 +35,33 @@ answers state.checkpoint() -> its warm start as arrays, state.restore(saved)
 takes it back, and state.identity() says what it computes (model, basis,
 reference, method settings, root), the key a checkpoint is written for.
 
+A mean-field model also answers state.loop_response(h, field): the
+response of its density, equilibrated in the medium, contracted with a fixed
+operator (src.gradients.scf_loop_response), which the force of a state in
+its slow charges reads (src.environments.solvation_loop.force_neq).
+
 A model that can be optimized also answers state.force(h, e) -> (F, info):
 its nuclear force in the fixed field with the external operator's own
 derivative left out (the medium adds it, src.environments.reaction_field.force), and
 info['dm_eff'], info['lr'] = [(weight, transition density)] for its LR terms.
 Forces take the dense reference (src.gradients.df_correlation_force) or,
 above EE_FORCE_DENSE_MAX_NAO basis functions or when asked (force_route), the
-tiled route over the current MPI ranks (df_correlation_force_tiled).
+tiled route over the current MPI ranks (df_correlation_force_tiled); an MP2
+call's energy and relaxed density come from the same engine and route
+(mp2_density / mp2_density_tiled), which also serve a mean field that dropped
+linearly dependent AO combinations (nmo < nao).
 
 Over MPI ranks (src.Base.utils.parallel.mpi_grid.current_comm) every rank calls the
 model with the same field; every call and force returns rank 0's bits on every
 rank (lockstep), the mean field included (lockstep_mean_field), so the loop
-above takes one decision on all ranks. The replicated pieces (the SCF, pyscf's
-DF-MP2) run on every rank; serially the locksteps are no-ops.
+above takes one decision on all ranks. The replicated pieces (the SCF and the
+dense reference) run on every rank; serially the locksteps are no-ops.
 """
 import warnings
 
 import numpy as np
 from pyscf import lib
 from pyscf.dft.rks import KohnShamDFT
-from pyscf.mp import dfmp2_native
 
 from src.Base.numerics.constants import (EE_FORCE_DENSE_MAX_NAO, EE_RI_TILE_GB,
                                          STATE_MODEL_SCF_GRAD_TOL)
@@ -63,7 +71,9 @@ from src.Base.utils.parallel.mpi_grid import (broadcast, current_comm, distribut
 from src.gradients import df_correlation_force as dcf
 from src.gradients import df_correlation_force_tiled as tcf
 from src.gradients.df_factors import mp2_factors
-from src.gradients.multipliers import rotation_gradient, solve_orbital_multipliers
+from src.gradients.isdf_mean_field import mean_field_skeleton_force
+from src.SingleReference.common.df_amplitudes import spin_scaling_factors
+from src.gradients.scf_loop_response import loop_density_response
 
 
 FORCE_ROUTES = ('auto', 'dense', 'tiled')
@@ -92,6 +102,8 @@ class HFState:
                              'density and the force assume stationary orbitals)')
         self._h0 = self.mf.get_hcore()
         self._dm = None
+        # the last call's flags
+        self.flags = []
 
     def __call__(self, h, e):
         h1 = self._h0 + h
@@ -104,14 +116,24 @@ class HFState:
             text = 'the SCF in the external field did not converge; kept where it stopped'
             warnings.warn(text, RuntimeWarning, stacklevel=2)
             flags.append({'flag': 'scf_not_converged', 'message': text})
+        self.flags = flags
         self._dm = self.mf.make_rdm1()
         return StateResult(self.mf.e_tot + e, self._dm,
                            {'e_hf': self.mf.e_tot + e, 'flags': flags})
 
     def force(self, h, e):
         r = self(h, e)
-        return lockstep(dcf.hf_force(self.mf)), dict(dm_eff=r.dm_eff, lr=[],
+        return lockstep(mean_field_skeleton_force(self.mf)), dict(dm_eff=r.dm_eff, lr=[],
                                                      flags=r.info['flags'])
+
+    def loop_response(self, h, field, numerics):
+        """(natm, 3) Tr[h dD/dR] of this mean field equilibrated in `field`
+        (its last call the loop's converged cycle): the density's response
+        with the continuum's at eps_static (`scf_loop_response`), its
+        Z-vector solved on `numerics`, the run's."""
+        return lockstep(loop_density_response(self.mf, self._h0,
+                                              field.scf_continuum(), h,
+                                              numerics))
 
     def checkpoint(self):
         """The SCF warm start (module docstring) with the orbitals it is
@@ -142,25 +164,39 @@ class HFState:
 
 class MP2State:
     """MP2 (density-fitted, `auxbasis`, `frozen` core orbitals) on an HFState.
-    force_route, tile_gb, max_memory (MB, default mol.max_memory): the force's
-    route (tiled_force_route) and the tiled route's tiles and memory bound;
-    factors: the tiled route's factor provider
+    numerics: the one `Numerics` of the calculation, required (the Z-vector's
+    tolerances, scf; the RI tiles, layout.tile_gb, None: EE_RI_TILE_GB; and an
+    ADC2State's solve on this model, adc); force_route, max_memory (MB, default
+    mol.max_memory): the force's route (tiled_force_route) and the tiled
+    route's memory bound; factors: the tiled route's factor provider
     (`df_correlation_force_tiled.mp2_force_tiled`), by default the fit's own
-    RI factors (`df_factors.mp2_factors`); numerics: the caller's `Numerics`
-    (the Z-vector's tolerances)."""
+    RI factors (`df_factors.mp2_factors`); spin_scaling: None (MP2), 'scs', 'sos'
+    (ADC2_SPIN_SCALING) or (c_os, c_ss): SCS-MP2, the ground state of an
+    ADC2State on this model, which is then SCS-ADC(2) with the same factors."""
 
     def __init__(self, hf, frozen=0, auxbasis=None, force_route='auto',
-                 tile_gb=EE_RI_TILE_GB, max_memory=None, numerics=None, factors=None):
+                 max_memory=None, numerics=None, factors=None, spin_scaling=None):
+        if numerics is None:
+            raise ValueError('MP2State needs its Numerics (the Z-vector\'s tolerances, '
+                             'the RI tiles, the ADC solve of a state on it): there are '
+                             'no defaults to fall back on')
         if isinstance(hf.mf, KohnShamDFT):
             raise ValueError('MP2State needs a Hartree-Fock reference: its relaxed '
                              'density and force solve the CPHF with the HF kernel, '
                              f'not {type(hf.mf).__name__}\'s')
+        # its force differentiates a density-fitted reference: none, or an
+        # interpolated (ISDF-K) one, is refused here, before any solve
+        dcf.jk_fit(hf.mf)
         self.hf, self.frozen, self.auxbasis = hf, frozen, auxbasis
         self.mol = hf.mol
         tiled_force_route(force_route, self.mol)
-        self.force_route, self.tile_gb, self.max_memory = force_route, tile_gb, max_memory
+        tile_gb = numerics.layout.tile_gb
+        self.tile_gb = EE_RI_TILE_GB if tile_gb is None else tile_gb
+        self.force_route, self.max_memory = force_route, max_memory
         self.numerics = numerics
         self.factors = mp2_factors if factors is None else factors
+        self.spin_scaling = spin_scaling
+        self.scaling = spin_scaling_factors(spin_scaling)
 
     @property
     def mf(self):
@@ -169,18 +205,42 @@ class MP2State:
     def __call__(self, h, e):
         r = self.hf(h, e)
         flags = list(r.info['flags'])
-        e2, D2 = mp2_relaxed(self.hf.mf, self.frozen, self.auxbasis, self.numerics, flags)
-        e2, D2 = lockstep((e2, D2))
+        e2, D2 = lockstep(self._relaxed(flags))
         flags = broadcast(flags, current_comm())
         return StateResult(r.energy + e2, r.dm_eff + D2,
                            dict(r.info, e_mp2=e2, flags=flags))
+
+    def _relaxed(self, flags):
+        """(e_mp2, D): D the orbital-relaxed correlation density (AO,
+        spin-summed, the SCF part removed), d E_MP2 / d h, from the force's
+        own engine (no derivative integrals): the tiled route over the ranks or
+        the dense reference, as force_route decides; a short Z-vector solve
+        flagged into flags."""
+        mf, mol = self.hf.mf, self.mol
+        if tiled_force_route(self.force_route, mol):
+            comm, _ = tcf.prepare(mf, mol, self.frozen, self.auxbasis, False,
+                                  self.tile_gb, max_memory=self.max_memory)
+            provider = self.factors(mol, mf, self.frozen, self.auxbasis, self.tile_gb,
+                                    comm, None)
+            e2, gam = tcf.mp2_density_tiled(mf, mol, provider, self.frozen,
+                                            self.auxbasis, self.numerics, flags,
+                                            self.scaling)
+        else:
+            with distributed(None):   # the dense reference: serial, on every rank
+                e2, gam = dcf.mp2_density(mf, mol, self.frozen, self.auxbasis,
+                                          self.numerics, flags, self.scaling)
+        C = np.asarray(mf.mo_coeff)
+        return float(e2), C @ gam @ C.T
 
     def checkpoint(self):
         return self.hf.checkpoint()
 
     def identity(self):
-        return dict(self.hf.identity(), model='MP2', frozen=self.frozen,
-                    auxbasis=str(self.auxbasis))
+        out = dict(self.hf.identity(), model='MP2', frozen=self.frozen,
+                   auxbasis=str(self.auxbasis))
+        if self.scaling is not None:
+            out['spin_scaling'] = list(self.scaling)
+        return out
 
     def restore(self, saved):
         self.hf.restore(saved)
@@ -193,49 +253,16 @@ class MP2State:
                                                     self.auxbasis,
                                                     tile_gb=self.tile_gb,
                                                     max_memory=self.max_memory,
-                                                    numerics=self.numerics, flags=flags)
+                                                    numerics=self.numerics, flags=flags,
+                                                    scaling=self.scaling)
         else:
             with distributed(None):   # the dense reference: serial, on every rank
                 F, (_, gam, _, _) = dcf.mp2_force(mf, mol, self.frozen, self.auxbasis,
-                                                  numerics=self.numerics, flags=flags)
+                                                  numerics=self.numerics, flags=flags,
+                                                  scaling=self.scaling)
         C = np.asarray(mf.mo_coeff)
         F, info = lockstep((F, dict(dm_eff=mf.make_rdm1() + C @ gam @ C.T, lr=[])))
         return F, dict(info, flags=broadcast(flags, current_comm()))
-
-
-def mp2_relaxed(mf, frozen, auxbasis, numerics=None, flags=None):
-    """(e_mp2, D) of DF-MP2 on mf: D the orbital-relaxed correlation density
-    (AO, spin-summed, the SCF part removed), d E_MP2 / d h, the orbitals
-    responding through mf's own kernel. pyscf's DF-MP2 builds the density;
-    its CPHF is the one Z-vector entry of every gradient (`multipliers`, its
-    tolerances from `numerics`, a short solve flagged into `flags`), where
-    pyscf's own krylov stops near a residual of 3e-6."""
-    mp = dfmp2_native.DFRMP2(mf, frozen=frozen or None, auxbasis=auxbasis)
-    mp.verbose = 0
-    e_mp2 = mp.kernel()
-
-    def cphf(mf, Lvo, _cycles, _tol, _logger):
-        # pyscf's call, its own cycles, tolerance and logger unread:
-        # (e_a - e_i) z + R[z] = -Lvo is antisym(Y_E + Y[Lambda]) = 0
-        # on the virtual-occupied pairs with Y_E[a, i] = Lvo and z = 2 Lambda
-        C, eps = np.asarray(mf.mo_coeff), np.asarray(mf.mo_energy, float)
-        nmo, nocc = C.shape[1], int(np.count_nonzero(mf.mo_occ > 0))
-        kernel, fock = dcf.scf_kernel(mf), np.diag(eps)
-        Y_E = np.zeros((nmo, nmo))
-        Y_E[nocc:, :nocc] = Lvo
-        free = np.zeros((nmo, nmo), bool)
-        free[:nocc, nocc:] = True
-        Lam, _ = solve_orbital_multipliers(
-            lambda L: rotation_gradient(C, fock, L, nocc, kernel), Y_E, eps,
-            numerics=numerics, free=free, flags=flags)
-        return 2.0 * Lam[nocc:, :nocc]
-    with lib.temporary_env(dfmp2_native, solve_cphf_rhf=cphf):
-        rdm1 = mp.make_rdm1(relaxed=True)
-    nocc = mp.nocc
-    rdm1[:nocc, :nocc] -= 2.0 * np.eye(nocc)
-    C = mf.mo_coeff
-    mp.delete()
-    return float(e_mp2), C @ rdm1 @ C.T
 
 
 def tiled_force_route(route, mol):

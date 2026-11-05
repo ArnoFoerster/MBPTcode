@@ -16,7 +16,26 @@ being excluded.
     vibronic    normal modes, Huang-Rhys factors by two independent routes,
                 adiabatic gaps and the Marcus reorganization energy
     curvilinear Huang-Rhys factors in curvilinear normal coordinates
-    band_shape  the vibronic band shape of a transition
+    band_shape  the vibronic band shape of a transition, for any model on
+                its `VibronicModel` protocol
+    duschinsky  the band with each state on its own modes and frequencies:
+                the Duschinsky matrix and displacement from two supplied
+                Hessians, and the thermal correlation function
+    herzberg_teller
+                the transition dipole's derivative along the modes (given or
+                by finite differences, the phase of a BSE state tracked
+                between displaced solves) and the intensity it lends a band
+    state_moments
+                transition dipoles between two excited states of one singles
+                solve, for excited-state absorption
+    ring_conformers
+                ring-pucker and nitrogen-inversion starts for the search
+    conformer_weights
+                populations from free energies (vibrations, rotation,
+                symmetry number, mirror degeneracy)
+    torsion_scan
+                relaxed torsion scans under a restraint: barriers, and one
+                state followed through a large twist
     conformers  the torsional minima a soft emitter has, their Boltzmann
                 populations, and a property averaged over them
     characters  the whole spectrum at one geometry and its charge-transfer
@@ -28,8 +47,12 @@ being excluded.
                 the Franck-Condon weighted density of states of displaced
                 oscillators, which the golden-rule rates of the physics layer
                 (`src.photophysics.rates`) multiply by the squared coupling
-    spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors -- the coupling
+    spin_orbit  <S_I|H_SO|T_J> over any solver's Casida vectors, or over any
+                method's spin transition densities -- the coupling
                 `photophysics.rates` receives
+    transition_moments
+                transition dipoles and oscillator strengths of any method's
+                charge transition densities
     spin_vibronic
                 the nuclear derivative of one <S|H_SO|T> element through the
                 higher states, for the Herzberg-Teller term of the rates

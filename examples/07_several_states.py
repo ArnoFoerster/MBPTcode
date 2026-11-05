@@ -7,6 +7,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import ADCSolver, build_static_correction
 
 QP_Z_MIN = 0.05
@@ -17,7 +18,7 @@ mf = scf.RHF(mol).run()
 nocc = mol.nelectron // 2
 
 solver = ADCSolver(mf, level='adc3')
-static = build_static_correction(mf, kind='mp2_relaxed')
+static = build_static_correction(mf, kind='mp2_relaxed', numerics=Numerics())
 
 # never match states by nearest eigenvalue -- it silently jumps roots
 states = []

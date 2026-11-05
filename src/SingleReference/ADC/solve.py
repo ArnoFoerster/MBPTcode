@@ -5,7 +5,8 @@ Lanczos/continued-fraction spectral solver."""
 import numpy as np
 
 from src.Base.numerical_flags import flag
-from src.Base.numerics.constants import INV_SQRT_LANCZOS_MAX_STEPS, INV_SQRT_LANCZOS_TOL
+from src.Base.numerics.constants import (DAVIDSON_MAX_CYCLE, INV_SQRT_LANCZOS_MAX_STEPS,
+                                         INV_SQRT_LANCZOS_TOL)
 from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
 from src.Base.utils.linear_algebra.matrix_functions import eigh_sym, invsqrtm_sym
 from src.Solvers.davidson import overlap_pick, solve_symmetric
@@ -33,7 +34,7 @@ def koopmans_seed(n, homo_index, v0=None, space='the operator space'):
 
 
 def follow_roots(op, diag, x0, nroots=1, tol=1e-8, follow=True, label='ADC Davidson',
-                 max_cycle=200, max_subspace=None, max_memory=None, verbose=0):
+                 max_cycle=DAVIDSON_MAX_CYCLE, max_subspace=None, max_memory=None, verbose=0):
     """(w, X, conv) of a matrix-free ADC operator by MBPTcode's one symmetric
     Davidson, src.Solvers.davidson.solve_symmetric, started from x0: with
     follow=True the nroots roots whose Ritz vectors overlap most with
@@ -54,10 +55,12 @@ def follow_roots(op, diag, x0, nroots=1, tol=1e-8, follow=True, label='ADC David
 
 
 def davidson_follow(aop_vec, diag, nH, norb, homo_index, ref_vec, nroots,
-                    tol=1e-6, max_cycle=200, max_subspace=40, verbose=0):
+                    tol, max_cycle=DAVIDSON_MAX_CYCLE, max_subspace=None, verbose=0):
     """Root-following Davidson (follow_roots) from ref_vec, or the Koopmans
-    unit vector at homo_index (koopmans_seed). Returns (eGF, Z, Reigv, conv)
-    sorted ascending in eGF, Z the orbital-block weight of each root."""
+    unit vector at homo_index (koopmans_seed). tol is the residual norm the
+    caller asks for; max_subspace=None takes the solver's own size. Returns
+    (eGF, Z, Reigv, conv) sorted ascending in eGF, Z the orbital-block weight
+    of each root."""
     x0 = koopmans_seed(nH, homo_index, ref_vec)
     eGF, Reigv, conv = follow_roots(aop_vec, diag, x0, nroots=nroots, tol=tol,
                                     max_cycle=max_cycle, max_subspace=max_subspace,

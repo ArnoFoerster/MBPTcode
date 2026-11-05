@@ -71,9 +71,10 @@ from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.gradients.rpa.ground_state import RPAGroundStateChain
 from tests.test_mpi_routes import recorded
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_ROUNDED
 
 BASIS = 'cc-pvdz'
-H2O = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+H2O = WATER_ROUNDED
 #: The displaced geometry: one hydrogen moved 0.03 A along y, which is where
 #: the chain calls its factory. The reference geometry reads `mf0` and runs no
 #: SCF at all, so it would gate nothing here.

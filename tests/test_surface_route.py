@@ -56,6 +56,7 @@ from src.gradients.mean_field_surface import MeanFieldSurface
 from src.gradients.gwbse.surface_factory import compare_surfaces, potential_energy_surface
 from tests.isdf_test_grid import g1_numerics
 from tests.reference_scf import rhf_tight
+from tests.molecules import WATER_ROUNDED_LOW
 
 #: The G2 counts water/cc-pVDZ must resolve to, read off the validated table
 #: rather than respelled here.
@@ -68,7 +69,7 @@ DFT_PBE0 = GroundState('dft', 'pbe0')
 
 def water():
     """The one geometry every surface below is built at."""
-    return gto.M(atom='O 0 0 0.117; H 0 0.757 -0.469; H 0 -0.757 -0.469',
+    return gto.M(atom=WATER_ROUNDED_LOW,
                  basis='cc-pvdz', verbose=0)
 
 

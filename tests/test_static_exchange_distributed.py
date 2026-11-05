@@ -48,9 +48,8 @@ import pytest
 
 from tests.pins import assert_same, assert_within_class, class_bar
 from src.Base.factorization import distributed_df
-from src.Base.factorization.distributed_df import (DistributedDF, distributed_handles,
-                                                   distributed_mean_field,
-                                                   release_distributed)
+from src.Base.factorization.df_distribution import distributed_handles
+from src.Base.factorization.distributed_df import (DistributedDF, distributed_mean_field, release_distributed)
 from src.Base.utils.parallel.mpi_grid import current_comm, distributed, lockstep_stats
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from src.SingleReference.GW import qp_solve

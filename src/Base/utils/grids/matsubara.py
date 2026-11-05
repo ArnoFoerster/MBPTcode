@@ -58,11 +58,11 @@ Gauss-Legendre discretization of the kernel and a dense SVD. GreenX, which
 supplies the T = 0 minimax tables this repo already uses, has no
 finite-temperature grids to borrow.
 """
-import warnings
 
 import numpy as np
 from scipy.special import spherical_jn
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import IR_EPS
 
 #: Matsubara statistics -> the zeta in omega_n = (2n + zeta) pi / beta.
@@ -535,7 +535,7 @@ class IRBasis:
             self.last_fit = {'condition': cond,
                              'ill_conditioned': bool(cond > _COND_WARN)}
             if cond > _COND_WARN:
-                warnings.warn(
+                flag('matsubara_fit_ill_conditioned',
                     f"IRBasis.fit_matsubara: the fit at these {len(np.atleast_1d(n))} "
                     f"points is conditioned at {cond:.1e}, so about "
                     f"{cond * np.finfo(float).eps:.0e} of the coefficients is "

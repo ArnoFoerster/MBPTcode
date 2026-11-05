@@ -51,14 +51,19 @@ Range-separated hybrids are covered: one exchange channel per operator, each
 attenuated metric with its own two-centre derivative.
 
 This module assembles the force from the exchange pieces of
-`src.gradients.isdf_derivatives`, and holds the exchange-free reference
+`src.gradients.isdf_derivatives`; the force of a density-fitted reference
+from the same fixed-density terms with the fitted exchange in place of the
+interpolated one (`fitted_mean_field_gradient`), so neither is held whole on
+every rank; and it holds the exchange-free reference
 (`exchange_free_reference`) and the refusal of pySCF's own force on an ISDF
 mean field (`refuse_isdf_jk_gradient`).
 """
 import types
 
 import numpy as np
+from pyscf import df as pyscf_df
 from pyscf import dft
+from pyscf.dft import gen_grid
 from pyscf import scf as pyscf_scf
 from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import rks as rks_grad
@@ -66,10 +71,12 @@ from pyscf.scf.dispersion import parse_disp
 from pyscf.solvent import pcm as pyscf_pcm
 
 from src.Base.pyscf.dispersion import dispersion_gradient
-from src.Base.pyscf.pyscf_interface import auxmol_of
+from src.Base.pyscf.pyscf_interface import auxmol_of, exchange_channels
+from src.Base.utils.parallel.mpi_grid import current_comm
 from src.environments.pcm_derivatives import solvation_gradient
-from src.Base.factorization.isdf_jk import ISDFJK, isdf_jk
-from src.gradients.skeleton_tiles import (fitted_coulomb_energy_skeleton,
+from src.Base.factorization.isdf_jk import (exchange_realization, interpolated_exchange,
+                                            isdf_jk)
+from src.gradients.skeleton_tiles import (fitted_energy_skeleton,
                                           one_electron_energy_skeleton,
                                           xc_energy_grid_skeleton)
 from src.gradients.isdf_derivatives import (
@@ -81,7 +88,7 @@ from src.gradients.one_electron import one_electron_gradient
 def require_isdf_gradient_support(mf, what):
     """Raise unless this ISDF mean field is one whose force is built here."""
     with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
+    if not interpolated_exchange(mf):
         raise TypeError(
             f'{what} needs a mean field whose exchange comes from ISDF factors '
             f'(with_df an ISDFJK, got {type(with_df).__name__}); pyscf\'s own '
@@ -161,41 +168,84 @@ def mean_field_skeleton_force(mf):
     One call site for every correlated chain that adds a Lagrangian on top of
     the mean-field force. pyscf's gradient is right for a fitted reference and
     wrong for an interpolated one, and the correct interpolated force exists,
-    so the choice is a dispatch and not a refusal.
+    so the choice is a dispatch and not a refusal. A density-fitted restricted
+    reference (`fitted_force_supported`) takes `fitted_mean_field_gradient`,
+    pyscf's force term for term in fixed tiles over the ranks of the current
+    region (every rank calling); any other takes pyscf's own, whole on every
+    rank. The one-electron term is the vacuum core Hamiltonian's derivative
+    (pyscf's `hcore_generator`), so an external operator added to the SCF's
+    core Hamiltonian enters through the orbitals alone and its own derivative
+    is the caller's.
     """
-    if isinstance(getattr(mf, 'with_df', None), ISDFJK):
+    if interpolated_exchange(mf):
         return np.asarray(isdf_mean_field_gradient(mf))
+    if fitted_force_supported(mf):
+        return np.asarray(fitted_mean_field_gradient(mf))
     g0 = mf.Gradients()
     if hasattr(mf, 'xc'):
         g0.grid_response = True
     return np.asarray(g0.kernel())
 
 
-def isdf_mean_field_gradient(mf, fit=None):
-    """(natm, 3) force of a converged SCF whose exchange is from ISDF factors.
+def fitted_force_supported(mf):
+    """Whether `fitted_mean_field_gradient` covers this mean field: restricted
+    closed shell, its J and K density fitted (a pyscf DF, not ISDF), on the
+    bare operator, in no continuum or a pyscf PCM, and on Kohn-Sham the
+    original Becke partition `xc_energy_grid_skeleton` differentiates."""
+    with_df = getattr(mf, 'with_df', None)
+    if (exchange_realization(mf) != 'df' or not isinstance(with_df, pyscf_df.DF)
+            or not isinstance(mf, pyscf_scf.hf.RHF)
+            or isinstance(mf, pyscf_scf.rohf.ROHF) or mf.mol.omega):
+        return False
+    solvent = getattr(mf, 'with_solvent', None)
+    if solvent is not None and not isinstance(solvent, pyscf_pcm.PCM):
+        return False
+    return (not hasattr(mf, 'xc')
+            or mf.grids.becke_scheme is gen_grid.original_becke)
 
-    The module docstring's sum, each term at fixed density in fixed tiles over
-    the ranks, plus the empirical dispersion correction named by the mean
-    field. The xc quadrature moves with the atoms; a VV10 kernel's term is
-    pyscf's full response, whole.
 
-    A pure functional with `j_route='df-direct'` has no interpolation in its
-    energy, so no factorization is built. With the row fit (`fit`,
-    `exchange_fit`'s choice when None) the whole factorization is not built
-    either; its skeleton reads the tiles alone.
+def fitted_mean_field_gradient(mf):
+    """(natm, 3) force of a converged density-fitted restricted SCF: pyscf's
+    `mf.Gradients()` with the grid response, term for term, each term at
+    fixed density in fixed tiles over the ranks of the current region (every
+    rank calling), so no rank holds a whole three-centre derivative block and
+    the force is the same bits at every rank count.
+
+    The Coulomb and exact-exchange terms are `fitted_energy_skeleton` over
+    the auxiliary tiles, one fit per operator of `exchange_channels`, each
+    metric solved as pyscf's density-fitted gradient solves it; the rest is
+    `fixed_density_force`'s. Two differences from pyscf's: the xc term
+    differentiates the SCF's own grid (pruned by density) where pyscf's grid
+    response regenerates the unpruned atomic grids, so this one is the
+    derivative of the reported energy; and the sums run in another order.
     """
-    require_isdf_gradient_support(mf, 'the ISDF mean-field gradient')
+    channels = exchange_channels(mf) if hasattr(mf, 'xc') else [(0.0, 1.0)]
+    return fixed_density_force(mf, auxmol_of(mf), channels)
+
+
+def fixed_density_force(mf, auxmol, channels):
+    """(natm, 3) of every term of a restricted mean field's force at fixed
+    density but the interpolated exchange, each in fixed tiles over the
+    ranks of the current region: the nuclei, Tr[D dh] - Tr[W dS] by atoms,
+    the fitted Coulomb energy and the fitted exchange `channels` (empty: none)
+    by auxiliary tiles, the xc energy on the moving grid by grid tiles (a
+    VV10 kernel whole), the dispersion correction, and a PCM's reaction field
+    by cavity blocks."""
     mol = mf.mol
     dm = np.asarray(mf.make_rdm1(mf.mo_coeff, mf.mo_occ))
     dme = rhf_grad.make_rdm1e(mf.mo_energy, mf.mo_coeff, mf.mo_occ)
-    handle = isdf_scf_handle(mf)
-    auxmol = handle.auxmol if handle is not None else auxmol_of(mf)
     one_electron = one_electron_gradient(mf)
     grad = one_electron.grad_nuc(mol)
     # the generator's with_rinv_at_nucleus writes its molecule: a private one
     grad = grad + one_electron_energy_skeleton(
         mol, one_electron.hcore_generator(mol.copy()), dm, dme)
-    grad = grad + fitted_coulomb_energy_skeleton(mol, auxmol, dm)
+    occ = None
+    if any(w for _, w in channels):
+        mo_occ = np.asarray(mf.mo_occ)
+        occ = (np.asarray(mf.mo_coeff)[:, mo_occ > 0]
+               * np.sqrt(mo_occ[mo_occ > 0]))
+    grad = grad + fitted_energy_skeleton(mol, auxmol, dm, occ=occ,
+                                         channels=channels)
     if hasattr(mf, 'xc'):
         grad = grad + xc_energy_grid_skeleton(
             mol, mf.grids, mf._numint, base_functional(mf.xc), dm)
@@ -204,6 +254,26 @@ def isdf_mean_field_gradient(mf, fit=None):
     grad = grad + dispersion_gradient(mf)
     if getattr(mf, 'with_solvent', None) is not None:
         grad = grad + reaction_field_gradient(mf.with_solvent, dm)
+    return grad
+
+
+def isdf_mean_field_gradient(mf, fit=None):
+    """(natm, 3) force of a converged SCF whose exchange is from ISDF factors.
+
+    The module docstring's sum: `fixed_density_force` with the fitted
+    Coulomb alone, plus the interpolated exchange on the row fit's tiles.
+    The xc quadrature moves with the atoms; a VV10 kernel's term is pyscf's
+    full response, whole.
+
+    A pure functional with `j_route='df-direct'` has no interpolation in its
+    energy, so no factorization is built. With the row fit (`fit`,
+    `exchange_fit`'s choice when None) the whole factorization is not built
+    either; its skeleton reads the tiles alone.
+    """
+    require_isdf_gradient_support(mf, 'the ISDF mean-field gradient')
+    handle = isdf_scf_handle(mf)
+    auxmol = handle.auxmol if handle is not None else auxmol_of(mf)
+    grad = fixed_density_force(mf, auxmol, ())
     if not mean_field_exchange_wanted(mf):
         return grad
     fit = exchange_fit(fit)
@@ -226,13 +296,15 @@ def reaction_field_gradient(solvent, dm):
 
     The potential-integral term runs on `cavity_blocks`, not on pyscf's
     `grad_qv`, whose blocks overrun libcint's int-sized index from ~90 atoms
-    in cc-pVDZ at 120 GB a rank (a segfault in the first force).
+    in cc-pVDZ at 120 GB a rank (a segfault in the first force); its
+    blocks are divided over the ranks of the current region, every rank
+    calling.
     """
     if not isinstance(solvent, pyscf_pcm.PCM):
         raise NotImplementedError(
             f'the reaction-field force is built for pyscf PCM continua, and '
             f'this mean field carries a {type(solvent).__name__}')
-    return solvation_gradient(solvent, dm)
+    return solvation_gradient(solvent, dm, comm=current_comm())
 
 
 def _nlc_gradient(mf, dm):
@@ -351,8 +423,7 @@ def refuse_isdf_jk_gradient(mf, what):
     half is built from the auxiliary basis, and `exx_double_counting_skeleton`
     differences two fitted pyscf gradients. Energies are unaffected.
     """
-    with_df = getattr(mf, 'with_df', None)
-    if not isinstance(with_df, ISDFJK):
+    if not interpolated_exchange(mf):
         return
     raise NotImplementedError(
         f'{what} takes a nuclear force from a mean field whose exchange comes '

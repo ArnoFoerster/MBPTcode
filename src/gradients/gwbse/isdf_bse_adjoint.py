@@ -61,31 +61,23 @@ not the bits of one. The rows go back to their `contiguous_block` owners,
 and `isdf_bse_backward` gathers them whole once (`adjoints_at_the_boundary`)
 for the consumers that read X_bar and D_bar whole.
 
-AT THE CHLOROPHYLLIDE HEXAMER / cc-pVTZ (M 117762, nmo 10980, nocc 972,
-nvir 10008, naux 28236; 461 tiles, rank 0 computing 58 of them over 14721
-rows at 8 ranks and 29 over 7361 at 16), per rank, GB, replicated (every
-rank the whole kernel on gathered factors) against distributed:
-
-                                          replicated        distributed
-                                          8 rk   16 rk      8 rk   16 rk
-    X_mo, D gathered whole               36.94   36.94       0      0
-    X_o, X_v rows (column copies)            -       -       1.29   0.65
-    (D W), (S D) of the owned tiles          -       -       6.71   3.35
-    X_v T^T and the Pbar products         3.66    3.66       1.04   0.52
-    b, bn tile partials (before pass 1)      -       -       0.21   0.21
-    streamed tiles, blocks, halo          3.01    3.01       0.47   0.47
-    W_aux, W, W_bar (two at once here)   19.13   19.13      12.76  12.76
-    X_bar, D_bar (rows here)             36.94   36.94       4.62   2.31
-    peak inside this adjoint              99.7    99.7       23.3   18.1
-    X_bar, D_bar whole at the boundary       -       -      36.94  36.94
-    peak with the boundary gather         99.7    99.7       54.3   52.0
+PER RANK, with M grid points, nmo orbitals, naux auxiliaries and R = M / ranks
+rows, the replicated route holds X_mo and D whole (M (nmo + naux) doubles),
+the same again for X_bar and D_bar, and the products of the kernel on top; the
+distributed route holds R rows of X_o, X_v, D W, S D and X_bar, D_bar instead,
+so those terms fall with the rank count, and what stays is the (naux, naux)
+arrays below plus X_bar and D_bar whole at the boundary. A few hundred GB a
+rank at the largest sizes become a few tens, flat past the point where the
+(naux, naux) arrays dominate. Size the run from M, nmo and naux with these
+terms; the figures of a particular molecule go stale with its grid.
 
 Whole on every rank: the (naux, naux) arrays -- W_aux, the input; W, its
 symmetric part, which every tile's D W and S D W read; W_bar, filled by
 slabs and gathered because chi0's adjoint reads it whole -- and at the
 boundary X_bar and D_bar, until their consumers read rows. Received per
-rank: 27.2 / 29.2 GB in the column pass (D, X_o, X_v T^T), 46.5 / 49.8 in
-the W_bar pass (D, S D). Flops per rank 3.2e14 / 1.6e14 against 2.6e15.
+rank: R rows of D, X_o and X_v T^T in the column pass, R rows of D and S D in
+the W_bar pass. Flops per rank are the replicated kernel's divided by the rank
+count.
 """
 import numpy as np
 

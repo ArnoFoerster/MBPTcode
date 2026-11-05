@@ -40,6 +40,9 @@ from src.properties.spin_orbit import soc_operator_mo, soc_vectors
 from src.properties.spin_vibronic import spin_vibronic_coupling
 from tests.isdf_test_grid import g1_numerics
 
+# the exact SOMF with X2C, which the couplings here were recorded with
+EXACT = {'two_electron': 'somf', 'one_electron': 'x2c'}
+
 BASIS, AUX = 'cc-pvdz', 'cc-pvdz-ri'
 S1, S2, S3, T1, T2 = (('singlet', 0), ('singlet', 1), ('singlet', 2),
                       ('triplet', 0), ('triplet', 1))
@@ -85,7 +88,7 @@ def displaced_elements(man, ev, mol, u, h):
         assert abs(ov[j]) > 0.99, (spin, ov)
         followed.append((j, np.sign(ov[j])))
     (js, ss), (jt, st) = followed
-    h_mo = soc_operator_mo(e.mf, m)
+    h_mo = soc_operator_mo(e.mf, m, **EXACT)
     _, xs, ys = e.spectrum['singlet']
     _, xt, yt = e.spectrum['triplet']
     single = ss * st * soc_vectors(h_mo, nocc, (xs[:, js], ys[:, js]),
@@ -113,7 +116,7 @@ def case(request):
         mol, rhf, mf=rhf(mol), numerics=g1_numerics(mol, Numerics(bse={'solver': 'davidson', 'adjoint': 'grid', 'nroots': 3})))
     man = StateManifold(chain, states=(S1, S2, S3, T1, T2))
     ev = man.evaluate(couplings=((S2, S1), (S3, S1), (T2, T1)))
-    out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol), S1, T1,
+    out = spin_vibronic_coupling(ev, soc_operator_mo(ev.mf, ev.mol, **EXACT), S1, T1,
                                  (t2_partner(ev),), (T2,))
     u = direction(mol.natm)
     b0 = float(out['v0_vector'] @ out['v0_vector']
@@ -156,7 +159,16 @@ def test_block_norm_is_another_quantity(case):
     single = np.linalg.norm(case['single'])
     off_old = abs(case['block'] - single) / single
     off_new = np.linalg.norm(case['analytic'] - case['single']) / single
-    assert off_old > 0.05 and off_new < 0.5 * off_old
+    # The block norm misses the element's derivative by an order more than
+    # the T2 + partner truncation does: at r = 1.45 off_old 0.053 (0.043 on
+    # another machine: the block norm's second difference moves with where
+    # the Davidson stops, 0.045 to 0.061 in `case`) against off_new 0.0028 on
+    # the AO-product fit, 0.080 against 0.0025 on the Duchemin-Blase one.
+    # The ratio is the claim; an absolute floor on off_old sat inside that
+    # solver noise.
+    assert off_new < 0.5 * off_old
+    if case['r'] == 1.45:
+        assert off_new < 0.1 * off_old
     if case['r'] == 1.38:
         # where T2 does not dominate, the block norm is ten times the element
         assert case['block'] > 3.0 * single

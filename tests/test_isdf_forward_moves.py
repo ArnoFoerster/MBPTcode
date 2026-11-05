@@ -35,7 +35,7 @@ Each gate rejects a perturbation:
     the rebuilt fit              M from `fit_M_streaming`          yes
 
 The whole-form `isdf_exchange_skeleton` refits M rather than taking the mean
-field's own: `fit_adjoint` reverses `fit_M_stable` on an explicit test set,
+field's own: `fit_adjoint` reverses `fit_M` on an explicit test set,
 while the SCF's M comes from `fit_M_streaming`, another realization. On
 water/cc-pVDZ, where the pair screen keeps every pair, the two fit matrices
 differ by 1.1e-8 relative in the fit's near-null space, and substituting one
@@ -60,10 +60,9 @@ from src.Base.pyscf.pyscf_interface import (fock_mo,
                                             response_kernel)
 from src.Base.factorization.separable_ri import atomic_frames, molecular_points_covariant
 from src.Base.pyscf.pyscf_interface import xc_hybrid_coeff
-from src.gradients.isdf_derivatives import (continued_frames,
-                                            isdf_exchange_skeleton,
-                                            isdf_fock_partial_exchange,
-                                            point_layout)
+from src.gradients.isdf_derivatives import (continued_frames, isdf_exchange_skeleton,
+                                            isdf_fock_partial_exchange)
+from src.gradients.isdf_adjoint_pieces import point_layout
 from src.gradients.isdf_mean_field import isdf_mean_field_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
@@ -235,20 +234,20 @@ def test_the_frame_continuation_is_a_no_op_at_its_own_reference():
 
 def test_the_skeletons_fit_from_the_mean_field_moves_the_force(monkeypatch):
     """Two realizations of the fit inside one adjoint: `fit_adjoint`
-    reverses `fit_M_stable` on an explicit test set; `fit_M_streaming`
+    reverses `fit_M` on an explicit test set; `fit_M_streaming`
     realizes the same estimator otherwise, and substituting it moves the
     Hartree-Fock skeleton force below the reproducibility floor."""
     mf = interpolated(None)
     reference = isdf_exchange_skeleton(mf, fit='replicated')
     streaming = mf.with_df.M               # what the SCF itself fitted
-    stable = derivatives.fit_M_stable
+    stable = derivatives.fit_M
     rebuilt = {}
 
     def substituted(D, F, regularization):
         rebuilt['M'] = stable(D, F, regularization)
         return streaming
 
-    monkeypatch.setattr(derivatives, 'fit_M_stable', substituted)
+    monkeypatch.setattr(derivatives, 'fit_M', substituted)
     moved = isdf_exchange_skeleton(mf, fit='replicated')
     monkeypatch.undo()
 
@@ -285,6 +284,20 @@ def test_the_two_gradient_modules_import_in_either_order():
         assert proc.returncode == 0, proc.stderr
     source = (REPO / 'src' / 'gradients' / 'isdf_derivatives.py').read_text()
     assert 'isdf_mean_field' not in source
+
+
+def test_the_fit_adjoint_modules_import_first_with_no_deferred_import():
+    """The ISDF adjoint modules form no import cycle: each imports first in a
+    fresh process, and none defers an import of another to a call."""
+    names = ('isdf_adjoint_pieces', 'ao_product_fit_adjoint', 'skeleton_tiles',
+             'isdf_derivatives', 'isdf_fit_adjoint')
+    for name in names:
+        proc = subprocess.run([sys.executable, '-c', f'import src.gradients.{name}'],
+                              cwd=str(REPO), capture_output=True, text=True)
+        assert proc.returncode == 0, (name, proc.stderr)
+        source = (REPO / 'src' / 'gradients' / f'{name}.py').read_text()
+        assert not any(line.startswith((' ', '\t')) and line.strip().startswith(
+            'from src.gradients') for line in source.splitlines()), name
 
 
 def test_every_gate_rejects_its_own_perturbation():

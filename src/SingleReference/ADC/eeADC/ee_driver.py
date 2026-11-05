@@ -23,8 +23,8 @@ from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_fold, ee_ri_fold, ee_u_r_sigma_df)
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
 from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis, csf_isometry
-from src.Base.numerics.constants import (ADC2_SPIN_SCALING, EE_ADC_DENSE_LIMIT,
-                                         EE_FOLD_RESIDUAL_GAP)
+from src.Base.numerics.constants import EE_ADC_DENSE_LIMIT, EE_FOLD_RESIDUAL_GAP
+from src.environments.solvent_vocabulary import SS_DENSITY_DEFAULT
 from src.Base.environment_seam import attached_environment, resolve_environment
 from src.Base.utils.parallel import memory
 from src.Base.utils.linear_algebra.diagonalization import eigh_symmetric
@@ -57,21 +57,26 @@ def spin_orbital_arrays(mf, mol=None):
     return eps, g, mol.nelectron
 
 
-SS_DENSITIES = ('unrelaxed', 'relaxed', 'relaxed+pcm')
-
-
 def reaction_field_environment(mf, mol, environment, route):
     """The continuum whose optical reaction field dresses the singles, or None.
 
     An environment that does not respond (none, point charges) acts through
     the mean field alone and needs nothing here. One that screens must be a
-    surface-charge continuum, the route a closed-shell spin-free one, and the
+    surface-charge continuum in its non-equilibrium (optical) mode, the route
+    a closed-shell spin-free one, and the
     mean field relaxed in that continuum's eps_static: without it the result
     would be the frozen-polarization half of the shift, not the solvated
     excitation."""
     env = resolve_environment(environment, mf)
     if not getattr(env, 'screens', False):
         return None
+    if getattr(env, 'equilibrium', False):
+        raise ValueError(
+            f'{env!r}: the EE-ADC routes dress the singles with the optical '
+            'reaction field, and an equilibrium-mode continuum answers at '
+            'eps_static; pass the non-equilibrium continuum (the state-specific '
+            "term takes eps_static from its own partner, state_specific="
+            "'equilibrium')")
     if not hasattr(env, 'ov_grid_potential'):
         raise NotImplementedError(
             f'{env!r}: the EE-ADC routes take a surface-charge continuum '
@@ -99,24 +104,14 @@ def _bare(mf):
     return attached_environment(mf, None)
 
 
-def spin_scaling_factors(spin_scaling):
-    """(c_os, c_ss) of a spin_scaling argument, or None for ADC(2)."""
-    if spin_scaling is None:
-        return None
-    if isinstance(spin_scaling, str):
-        if spin_scaling not in ADC2_SPIN_SCALING:
-            raise ValueError(f'spin_scaling={spin_scaling!r}; expected one of '
-                             f'{sorted(ADC2_SPIN_SCALING)} or (c_os, c_ss)')
-        return ADC2_SPIN_SCALING[spin_scaling]
-    c_os, c_ss = (float(c) for c in spin_scaling)
-    return c_os, c_ss
-
-
 def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     auxbasis, dense_limit, return_fold, env, tile_gb, route,
-                    numerics=None, state_specific='off', ss_density='unrelaxed',
-                    scaling=None, relaxed_density=False):
-    """fold=True: the density-fitted tiled fold of ee_ri_fold."""
+                    numerics=None, state_specific='off',
+                    ss_density=SS_DENSITY_DEFAULT, scaling=None,
+                    relaxed_density=False, start=None, residual_tol=None,
+                    full_check=False):
+    """fold=True: the density-fitted tiled fold of ee_ri_fold; start and
+    full_check the block solver's (ee_fold.solve_folded), level 'adc2'."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
         raise ValueError('fold=True is a closed-shell spin-free route')
     if level not in ee_ri_fold.LEVELS:
@@ -143,12 +138,15 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
 
     def solve(o):
         if level == 'adc2':
-            # the roots' error goes as the residual squared
+            # the roots' error goes as the residual squared; a density read
+            # off them is linear in it (residual_tol)
+            tol_residual = (max(conv_tol, np.sqrt(conv_tol * EE_FOLD_RESIDUAL_GAP))
+                            if residual_tol is None else residual_tol)
             r = ee_fold.solve_folded(o.pieces(), nroots, spin=spin, tol_omega=conv_tol,
-                                     tol_residual=max(conv_tol, np.sqrt(
-                                         conv_tol * EE_FOLD_RESIDUAL_GAP)),
+                                     tol_residual=tol_residual,
                                      dense_limit=dense_limit, solver='block',
-                                     verbose=int(mol.verbose >= logger.INFO))
+                                     verbose=int(mol.verbose >= logger.INFO),
+                                     start=start, full_check=full_check)
         else:
             r = _solve_cis_ri(o, nroots, conv_tol, dense_limit)
         return dict(omega=r.omega, y=r.y, t1=r.t1, steps=r.steps,
@@ -162,30 +160,35 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                              out['loop'], out['converged'], embed, out['level'],
                              out.get('flags'))
     Z = np.column_stack([embed(res.x1[:, k]) for k in range(res.omega.size)])
-    res.operator = op
+    res.operator, res.environment = op, env
     e = res.omega
     if state_specific != 'off':
         _state_specific(res, op, env, mol, mf, frozen, state_specific, tile_gb,
-                        ss_density, auxbasis)
+                        ss_density, auxbasis, numerics)
         e = res.omega_ss
     elif relaxed_density:
-        res.delta_density_relaxed = _relaxed_densities(res, op, env, mol, mf,
-                                                       frozen, tile_gb, False,
-                                                       auxbasis)
+        res.delta_density_relaxed = relaxed_densities(res, mol, mf, frozen,
+                                                      tile_gb, auxbasis,
+                                                      numerics=numerics)
     return EEResult((e, Z, res) if return_fold else (e, Z), res.converged)
 
 
-def _relaxed_densities(res, op, env, mol, mf, frozen, tile_gb, pcm_response,
-                       auxbasis):
-    """Each root's orbital-relaxed difference density (ee_relaxed_density),
-    full MO basis; a collective over op's ranks."""
+def relaxed_densities(res, mol, mf, frozen, tile_gb, auxbasis, roots=None,
+                      pcm_response=False, numerics=None):
+    """The orbital-relaxed difference density (ee_relaxed_density) of each
+    root in `roots` (default: every root) of a fold result solved on mf
+    (res.operator, res.environment), full MO basis, its orbital response
+    solved on `numerics`, the run's; a collective over the operator's ranks,
+    every rank asking for the same roots."""
+    op, env = res.operator, res.environment
+    roots = range(res.omega.size) if roots is None else roots
     with _bare(mf):
         Bc = erd.core_factors(mol, mf, frozen, auxbasis) if frozen else None
         return [erd.relaxed_density(
                     erd.tiled_pieces(op, res.y[:, k], res.omega[k], tile_gb),
                     op, mf, mol, frozen, res.t1[k], Bc=Bc, env=env,
-                    pcm_response=pcm_response)
-                for k in range(res.omega.size)]
+                    pcm_response=pcm_response, numerics=numerics)
+                for k in roots]
 
 
 def _active_orbitals(mol, mf, frozen, op):
@@ -198,27 +201,34 @@ def _active_orbitals(mol, mf, frozen, op):
 
 
 def _state_specific(res, op, env, mol, mf, frozen, mode, tile_gb,
-                    ss_density='unrelaxed', auxbasis=None):
+                    ss_density=SS_DENSITY_DEFAULT, auxbasis=None, numerics=None):
     """res with the roots' difference densities and state-specific shifts
     (ee_state_specific); a collective over op's ranks, every rank holding the
-    same roots after ee_ri_fold.drive."""
-    res.delta_density = [
-        ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
-                                         res.t1[k], tile_gb=tile_gb)
-        for k in range(res.omega.size)]
+    same roots after ee_ri_fold.drive. A spin-scaled operator (op.scs) has
+    no unrelaxed (ISR) difference density: solve_ee_adc takes it with a
+    relaxed one only, and its unrelaxed entries are None."""
     modes = ee_state_specific.shift_modes(env, mode)
-    mo_act = _active_orbitals(mol, mf, frozen, op)
-    res.ss_shifts = ee_state_specific.state_specific_energies(
-        env, mol, mo_act, res.delta_density, modes)
+    res.delta_density = shifts = None
+    if op.scs is None:
+        res.delta_density = [
+            ee_ri_density.difference_density(op, res.y[:, k], res.omega[k],
+                                             res.t1[k], tile_gb=tile_gb)
+            for k in range(res.omega.size)]
+        mo_act = _active_orbitals(mol, mf, frozen, op)
+        shifts = ee_state_specific.state_specific_energies(
+            env, mol, mo_act, res.delta_density, modes)
+    res.ss_shifts = shifts
     res.ss_density = ss_density
     if ss_density != 'unrelaxed':
-        res.delta_density_relaxed = _relaxed_densities(
-            res, op, env, mol, mf, frozen, tile_gb,
-            ss_density == 'relaxed+pcm', auxbasis)
+        res.delta_density_relaxed = relaxed_densities(
+            res, mol, mf, frozen, tile_gb, auxbasis,
+            pcm_response=ss_density == 'relaxed+pcm', numerics=numerics)
         C = np.asarray(mf.mo_coeff)
+        mo_act = (None if res.delta_density is None
+                  else _active_orbitals(mol, mf, frozen, op))
         res.delta_dipole = ee_state_specific.delta_dipoles(
             mol, mo_act, C, res.delta_density, res.delta_density_relaxed)
-        res.ss_shifts_unrelaxed = res.ss_shifts
+        res.ss_shifts_unrelaxed = shifts
         res.ss_shifts = ee_state_specific.state_specific_energies(
             env, mol, C, res.delta_density_relaxed, modes)
     res.ss_mode = mode

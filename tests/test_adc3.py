@@ -10,10 +10,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.SingleReference.ADC import (
     ADCSolver, ADCSolverUnrestricted, build_mp2_static_correction,
     ADCSolverRestricted, build_mp2_static_correction_restricted)
 from src.Base.pyscf.pyscf_interface import get_orbital_energies, get_two_electron_integrals_chemist, get_antisymmetrized_spin_eri
+from tests.molecules import WATER_RIGHT_ANGLE
 
 HARTREE_TO_EV = 27.211386245988
 
@@ -22,7 +24,7 @@ if __name__ == '__main__':
 
     for atom, basis, label in [
         ('H 0 0 0; H 0 0 0.74', 'sto-3g', 'H2/sto-3g'),
-        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'sto-3g', 'H2O/sto-3g'),
+        (WATER_RIGHT_ANGLE, 'sto-3g', 'H2O/sto-3g'),
     ]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()
@@ -63,7 +65,7 @@ if __name__ == '__main__':
         print()
 
     # --- 5. Core-orbital (weakly correlated) Koopmans check on water ---
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.96 0 0', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_RIGHT_ANGLE, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     nocc = mol.nelectron // 2
     eGF, Z = ADCSolver(mf, mol, spin='spinorbital', matrix_free=False).solve()
@@ -90,7 +92,7 @@ if __name__ == '__main__':
           f"({ip_2p_eV:.4f} eV vs {ref_ip_2p_eV} eV): {'OK' if ok else 'FAIL'}\n")
 
     # --- 7. MP2-density static correction: symmetry and structural sum rules preserved ---
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.96 0 0', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_RIGHT_ANGLE, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     nocc = mol.nelectron // 2
     eps_spin = get_orbital_energies(mf, representation='spin')
@@ -98,7 +100,7 @@ if __name__ == '__main__':
     solver = ADCSolverUnrestricted.from_arrays(eps_spin, g)
 
     for relax, rlabel in [(False, 'unrelaxed'), (True, 'relaxed')]:
-        dF = build_mp2_static_correction(mf, mol, nocc, relax=relax)
+        dF = build_mp2_static_correction(mf, mol, nocc, relax=relax, numerics=Numerics())
         ok = np.max(np.abs(dF - dF.T)) < 1e-8
         all_ok &= ok
         print(f"H2O/sto-3g static correction ({rlabel}) is symmetric "
@@ -128,7 +130,7 @@ if __name__ == '__main__':
 
     # --- 9. Restricted MP2 static correction: symmetry, sum rules, and cross-check
     #     against the (already-validated) spin-orbital build_mp2_static_correction ---
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.96 0 0', basis='sto-3g', verbose=0)
+    mol = gto.M(atom=WATER_RIGHT_ANGLE, basis='sto-3g', verbose=0)
     mf = scf.RHF(mol).run()
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
@@ -136,13 +138,14 @@ if __name__ == '__main__':
     solver_r = ADCSolverRestricted.from_arrays(eps, eri_chemist)
 
     for relax, rlabel in [(False, 'unrelaxed'), (True, 'relaxed')]:
-        dF_r = build_mp2_static_correction_restricted(mf, mol, nocc, relax=relax)
+        dF_r = build_mp2_static_correction_restricted(mf, mol, nocc, relax=relax,
+                                                      numerics=Numerics())
         ok = np.max(np.abs(dF_r - dF_r.T)) < 1e-8
         all_ok &= ok
         print(f"H2O/sto-3g restricted static correction ({rlabel}) is symmetric "
               f"(max|dF-dF.T|={np.max(np.abs(dF_r - dF_r.T)):.2e}): {'OK' if ok else 'FAIL'}")
 
-        dF_so = build_mp2_static_correction(mf, mol, nocc, relax=relax)
+        dF_so = build_mp2_static_correction(mf, mol, nocc, relax=relax, numerics=Numerics())
         d_cross = np.max(np.abs(dF_r - dF_so[0::2, 0::2]))
         ok = d_cross < 1e-10
         all_ok &= ok

@@ -13,7 +13,9 @@ import numpy as np
 from src.Base.orbital_spaces import ov_energies
 from src.Base.numerics.constants import BYTES_PER_GB, DAVIDSON_DIAGONAL_TILE, ISDF_TILE_GB, KAPPA
 from src.Base.factorization.sliced_factors import SlicedFactors
-from src.Base.utils.parallel.mpi_grid import (allgather_blocks, contiguous_block,
+from src.Base.utils.parallel.memory import fits
+from src.Base.utils.parallel.mpi_grid import (allgather_blocks, broadcast_rows,
+                                              contiguous_block,
                                               current_comm, exchange_blocks, lockstep,
                                               ordered_chain_sum, reduce_scatter_rows,
                                               reduce_sum)
@@ -187,7 +189,7 @@ def df_block_action(lr_solver, nocc, lBSE, W_aux,
     naux = C_ov.shape[0]
     no, nv = len(occ), len(virt)
     per_vec = 8 * naux * nv * max(no, nv)
-    chunk = max(1, int(tile_memory_gb * BYTES_PER_GB / max(per_vec, 1)))
+    chunk = fits(tile_memory_gb, per_vec)
 
     def apply_exchange_direct(z):
         # Explicit 2-step contraction (a single 3-operand einsum silently costs
@@ -259,7 +261,7 @@ def _screened_vv(coeff, virt, W_aux, tile_memory_gb=ISDF_TILE_GB):
     straight out of the full factor `coeff`: no unscreened naux n_vir^2 copy
     is held beside the screened one."""
     naux, nv = coeff.shape[0], len(virt)
-    rows = max(1, int(tile_memory_gb * BYTES_PER_GB / (8 * naux * nv)))
+    rows = fits(tile_memory_gb, 8 * naux * nv)
     if rows >= nv:
         # one tile: the product exactly as it was formed whole
         return np.einsum('PQ,Qab->Pab', W_aux, coeff[:, virt[:, None], virt],
@@ -280,18 +282,38 @@ def _screened_rows(D_mine, D, W_aux, comm=None):
     (naux, M) inner product whole on every rank, naux^2 M multiply-adds and
     naux M doubles that no rank count divides, while `(D_mine W) D^T` gives
     the same matrix through an (nmine, naux) intermediate, both falling with
-    the rank count.
+    the rank count. Its columns are formed one rank's `contiguous_block` of
+    grid rows at a time, D's rows sent by their owner when D is
+    `SlicedFactors` (cut from the whole array otherwise, the same calls), so
+    no rank holds D whole.
 
     The two associations are not bitwise equal, so the serial path keeps
     `D_mine (W D^T)` and the reassociation is taken only where there is a
     rank count to divide. Every rank reads the same size and takes the same
     branch, which the partials being summed across ranks requires.
     """
-    if W_aux is None:
-        return D_mine @ D.T
-    if comm is not None and comm.Get_size() > 1:
-        return (D_mine @ W_aux) @ D.T
-    return D_mine @ (W_aux @ D.T)
+    if comm is None or comm.Get_size() == 1:
+        if W_aux is None:
+            return D_mine @ D.T
+        return D_mine @ (W_aux @ D.T)
+    size, rank = comm.Get_size(), comm.Get_rank()
+    sliced = isinstance(D, SlicedFactors)
+    npts = D.npts if sliced else D.shape[0]
+    # fresh copies on both layouts: a GEMM's bits follow its operands'
+    # alignment, and a view into the whole D is not aligned as a copy is
+    DW = np.array(D_mine) if W_aux is None else D_mine @ W_aux
+    out = np.empty((D_mine.shape[0], npts))
+    for s in range(size):
+        s0, s1 = contiguous_block(npts, s, size)
+        if sliced:
+            block = (np.array(D.D) if s == rank
+                     else np.empty((s1 - s0, D_mine.shape[1])))
+            broadcast_rows(block, s, comm)
+        else:
+            block = np.array(D[s0:s1])
+        out[:, s0:s1] = DW @ block.T
+        del block
+    return out
 
 
 def self_pair_densities(D_rows, X_o_rows, X_v_rows, tiles, first=0):
@@ -436,10 +458,11 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
     shortens them by less than half.
 
     `SlicedFactors` in `isdf_factors`: once Zt is built the action reads only
-    this rank's rows of X_v and D; D is gathered whole once for the Zt
-    product and dropped, and X_o, which (Zt * P) X_o reads whole, is gathered
-    once. The gathered arrays are the replicated ones, so the output is
-    bitwise the replicated-factor action's.
+    this rank's rows of X_v and D; the Zt product reads D one owner's rows
+    at a time (`_screened_rows`), so D is whole on no rank, and X_o, which
+    (Zt * P) X_o reads whole, is gathered once. The rows arrive verbatim and
+    the replicated factors take the same calls, so the output is bitwise the
+    replicated-factor action's.
 
     The returned action carries `comm_clock` (a `_CommClock`: seconds in the
     lockstep, the gather and the reductions, reported as `davidson_comm`),
@@ -522,11 +545,10 @@ def isdf_block_action(lr_solver, nocc, lBSE, W_aux, isdf_factors,
             if asym > 1e-10 * np.abs(W_aux).max():
                 raise ValueError(f"W_aux is not symmetric (max asymmetry "
                                  f"{asym:.2e}); the B block below relies on it.")
-        # Sliced, D is whole only for this product and gone after it.
-        Zt = _screened_rows(D_mine, isdf_factors.gather('D') if sliced else D,
-                            W_aux, comm)                # (nmine, M)
-        rows = max(1, min(max(nmine, 1),
-                          int(tile_memory_gb * BYTES_PER_GB / max(npts * 8, 1))))
+        # Sliced, D's rows reach this product one owner's block at a time.
+        Zt = _screened_rows(D_mine, isdf_factors if sliced else D, W_aux,
+                            comm)                       # (nmine, M)
+        rows = fits(tile_memory_gb, npts * 8, cap=max(nmine, 1))
         S = np.empty((rows, npts))            # one row block of Zt * P
         # X_o^T (Zt * P), accumulated; under a rank count in owner order, rank
         # s's (n_occ, its columns) block in rows [s0, s1) of an (M, n_occ) one

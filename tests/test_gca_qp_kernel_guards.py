@@ -21,6 +21,7 @@ from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER
 
 NTAU, NFREQ = 8, 16
 
@@ -29,7 +30,7 @@ NTAU, NFREQ = 8, 16
 def kernel_args():
     """(X, D, eps, nocc, grid, nu, wt) of water and the states nocc-2..nocc."""
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

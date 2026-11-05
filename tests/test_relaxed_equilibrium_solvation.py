@@ -23,8 +23,9 @@ from src.Base.numerics.numerics import numerics_of
 from tests.blas_bar import assert_same
 from tests.isdf_test_grid import g1
 from tests.reference_scf import rhf_tight
+from tests.molecules import WATER_CS
 
-WATER = 'O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24'
+WATER = WATER_CS
 
 
 @pytest.fixture(scope='module')

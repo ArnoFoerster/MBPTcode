@@ -27,19 +27,28 @@ _SYMBOLS = ('H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe
 _registered = {}
 
 
+def pure_element(key):
+    """The element of a grid key: an element symbol, or an atom label that
+    carries its own basis ('C@1' is carbon)."""
+    from pyscf.gto.mole import _std_symbol_without_ghost
+    return _std_symbol_without_ghost(key)
+
+
 def element_basis_name(basis, element):
     """The name of the basis one element carries, lower-cased, for a table key.
 
     A basis is a name for every element or a dict of per-element names (pyscf
     accepts both; a lithium-containing molecule in an augmented set needs the
     dict, since the auxiliary sets that cover Li differ from the rest). A dict
-    gives this element's entry, or its 'default'. Lower-cased because the
+    gives this element's entry, else its element's (`element` may be an atom
+    label such as 'C@1', which a per-atom basis keys), or its 'default'. Lower-cased because the
     table's keys are and pyscf's names are case-insensitive: 'cc-pVDZ' and
     'cc-pvdz' are one basis and must be one row. An explicit basis definition
     (shells, not a name) has no row to look up and is refused by name.
     """
-    name = basis.get(element, basis.get('default')) if isinstance(basis, dict) \
-        else basis
+    name = basis.get(element, basis.get(pure_element(element),
+                                        basis.get('default'))) \
+        if isinstance(basis, dict) else basis
     if not isinstance(name, str):
         raise TypeError(f'the basis for {element} is not a named set '
                         f'({type(name).__name__}); the radii table is keyed on '
@@ -56,6 +65,17 @@ def paired_auxbasis(basis):
         return {el: paired_auxbasis(element_basis_name(basis, el))
                 for el in basis}
     return f'{basis}-ri'
+
+
+def paired_jk_auxbasis(basis):
+    """The auxiliary basis of a density-fitted mean field's J and K:
+    `<basis>-jkfit`, since -ri fits only the occupied-virtual products of
+    MP2. A per-element basis pairs element by element, like `paired_auxbasis`,
+    so each element's -jkfit set matches its own orbital set."""
+    if isinstance(basis, dict):
+        return {el: paired_jk_auxbasis(element_basis_name(basis, el))
+                for el in basis}
+    return f'{basis}-jkfit'
 
 
 def fallback_elements(basis):
@@ -76,11 +96,12 @@ def fallback_name(basis):
 
 def element_auxbasis(element, basis, auxbasis):
     """Auxiliary set `element`'s atomic grid is keyed on; the fallback name resolves per element."""
-    basis = str(basis).lower()
+    basis = element_basis_name(basis, element)
     if auxbasis is None or not fallback_elements(basis) \
             or str(auxbasis) != fallback_name(basis):
         return auxbasis
-    return ISDF_AUX_FALLBACK.get((element, basis), paired_auxbasis(basis))
+    return ISDF_AUX_FALLBACK.get((pure_element(element), basis),
+                                 paired_auxbasis(basis))
 
 
 def fallback_auxbasis(basis):

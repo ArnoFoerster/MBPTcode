@@ -36,8 +36,9 @@ from src.properties.hessian import (check_step_scaling, displacement_list,
 from src.gradients.mean_field_surface import mean_field_force
 from src.properties.vibronic import normal_modes
 from tests.pins import assert_same
+from tests.molecules import WATER_ROUNDED
 
-ATOM = 'O 0 0 0.117; H 0 0.757 -0.468; H 0 -0.757 -0.468'
+ATOM = WATER_ROUNDED
 #: Its carbon's frame turns fastest of the four atoms (2.8 rad/Bohr), which is
 #: what makes the coarse-grid ISDF surface rough here and not on water.
 FORMALDEHYDE = ('C 0.0 0.0 -0.6035; O 0.0 0.0 0.7349; '

@@ -5,8 +5,8 @@ Duchemin, Guido, Jacquemin and Blase, Chem. Sci. 9, 4430 (2018) Eq. (18)
 contracts the orbital densities A = D^T X_mo^2 twice with the static
 screening. On `SlicedFactors` A is a sum over the grid of row products in
 fixed tiles (`reaction_field.density_projection`), so no rank gathers X_mo,
-and the bare-gauge factor D T the self-energy screens with is the solve's own
-gather of D carried over in place.
+and the bare-gauge factor D T the self-energy screens with is formed one grid
+tile at a time (`imaginary_time.sigma_factor_tiles`), so no rank gathers D.
 
 Gated on water/cc-pVDZ Hartree-Fock in PCM(toluene), the quasiparticle window
 HOMO-1..LUMO+1, the Eq. (18) shift of every orbital and the three lowest
@@ -25,7 +25,7 @@ ISDF BSE roots (`solve_bse_isdf`):
       is swept on the branches the window gathered already, X_mo never
       among them,
       the densities are formed from this rank's rows, and the bare gauge is
-      the gathered D's own buffer;
+      formed on the grid tiles, never on a whole D;
   (d) the gas phase never reaches the densities.
 
 Measured: (a) the shift 3.3e-12, the roots 2.9e-13 relative, the window
@@ -62,8 +62,8 @@ from src.SingleReference.GW.space_time import (separable_factors,
 from src.SingleReference.BSE.solve import solve_bse_isdf
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 BASIS, AUXBASIS = 'cc-pvdz', 'cc-pvdz-ri'
 SOLVENT = 'toluene'
 TILE = 64
@@ -234,7 +234,8 @@ def test_the_continuum_gathers_what_the_gas_phase_does(water, spies, size):
                 (r1 - r0, naux))
         # the window's solve and the BSE diagonal's, each on this rank's rows
         assert spies[r]['densities'] == [(rows, rows)] * 2, spies[r]
-        assert spies[r]['bare_in_place'] == [True, True]
+        # D T on the self-energy's grid tiles: no whole D to carry over
+        assert spies[r]['bare_in_place'] == []
 
 
 def test_the_gas_phase_reaches_no_densities(water, spies):

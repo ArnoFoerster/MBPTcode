@@ -33,6 +33,7 @@ from tests.generated_runtime import requires_runtime
 
 pytestmark = requires_runtime(4)
 from src.SingleReference.ADC.generated_modules import lazy
+from tests.molecules import WATER_RIGHT_ANGLE
 dense = lazy('adc4_u3_blocks_restricted')
 dfm = lazy('adc4_u3_blocks_restricted_df')
 
@@ -43,7 +44,7 @@ def main():
     all_ok = True
     for atom, basis, label in [
         ('H 0 0 0; H 0 0 0.74', 'sto-3g', 'H2/sto-3g'),
-        ('O 0 0 0; H 0 0 0.96; H 0.96 0 0', 'sto-3g', 'H2O/sto-3g'),
+        (WATER_RIGHT_ANGLE, 'sto-3g', 'H2O/sto-3g'),
     ]:
         mol = gto.M(atom=atom, basis=basis, verbose=0)
         mf = scf.RHF(mol).run()

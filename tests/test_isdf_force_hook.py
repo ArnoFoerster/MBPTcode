@@ -17,13 +17,14 @@ from pyscf import gto, scf
 from src.Base.factorization.isdf_jk import ISDFForceNotAttached, isdf_jk
 from src.gradients.isdf_mean_field import attach_isdf_gradient, isdf_jk_with_force
 from tests.isdf_test_grid import g1
+from tests.molecules import WATER_AT_ORIGIN
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture(scope='module')
 def mol():
-    return gto.M(atom='O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587',
+    return gto.M(atom=WATER_AT_ORIGIN,
                  basis='cc-pvdz', verbose=0)
 
 

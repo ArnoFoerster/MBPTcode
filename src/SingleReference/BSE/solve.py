@@ -1118,9 +1118,9 @@ def isdf_bse_factors(mf, mol, nocc, eps=None,
             raise ValueError("screening='df' forms the three-index factor "
                              'from X_mo and D whole; sliced factors take the '
                              "'imaginary-time' route")
-        # The sweep gathers the branches of X_mo itself; D is whole for it
-        # alone and is not handed back.
-        X_mo, D = factors, factors.gather('D')
+        # The sweep reads the factors' rows through its grid tiles; no array
+        # is gathered whole.
+        X_mo, D = factors, None
     else:
         X_mo, D = unpack_factors(factors)[:2]
     if eps is None:

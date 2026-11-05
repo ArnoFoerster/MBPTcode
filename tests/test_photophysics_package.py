@@ -6,6 +6,10 @@ method-neutral minimum through the rate table.
     a default), and so is a numerical choice the chain could not read;
   * a record written under one declaration is refused under another, by the
     fields it differs in, and read back to the bit under its own;
+  * a record stamped while the scf section held the retired orbital-response
+    fields at their only values is read under today's stamp, the Hessian's
+    scf section inside a later stage's stamp too; one at another value is
+    refused, and a current stamp is read as it is;
   * `run_tadf` on a store that holds s0 and hess runs neither again: no walk,
     no Hessian, the records as written;
   * the command line refuses a run without its policies and, given them, makes
@@ -19,6 +23,7 @@ method-neutral minimum through the rate table.
     two methods are not mixed in one table.
 """
 import pathlib
+import shlex
 import subprocess
 import sys
 from dataclasses import replace
@@ -29,22 +34,22 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import HARTREE_TO_EV
 from src.Base.declaration import Excitation
+from src.Base.utils.record_io import record_hash
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
+from tests.adc_common import ee_numerics
 from src.photophysics import cli, stages
 from src.photophysics.declaration import DeclarationRefused, Policies
 from src.photophysics.minimum import (GroundModes, StateMinimum, from_adc2,
                                       from_gw_bse_record)
 from src.photophysics.rate_models import RateRefused, tadf_rate_table
 from src.photophysics.stages import Run, run_tadf
-from src.photophysics.store import Store, StoreRefused
+from src.photophysics.store import Store, StoreRefused, stamp_as_read
 from src.properties.excitations import surface_of
 from src.properties.vibronic import normal_modes
 from tests.photophysics_cases import (REQUIRED, argv, declaration, refusing,
                                       run_in)
+from tests.molecules import WATER
 
-#: Water, its two displaced stand-in minima (Angstrom), small enough for a
-#: dense ADC(2) and an analytic Hessian in seconds.
-WATER = 'O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692'
 S1_AT = 'O 0 0 0.1273; H 0 0.7872 -0.4892; H 0 -0.7872 -0.4892'
 T1_AT = 'O 0 0 0.1223; H 0 0.7772 -0.4792; H 0 -0.7772 -0.4792'
 
@@ -108,6 +113,48 @@ def test_a_record_of_another_declaration_is_refused(tmp_path):
         run_in(tmp_path, nudged).read('s1')
 
 
+#: The scf fields stamps held before the orbital response read the
+#: multiplier_* fields, at the one value each always had.
+RETIRED_SCF = {'cphf_tol': 1e-9, 'cphf_max_cycle': 100, 'cphf_refinements': 10}
+
+
+def with_old_scf(stamp, **fields):
+    """`stamp` as written while the scf sections held `fields`: the stage's,
+    and the Hessian's inside a later stage's."""
+    old = dict(stamp, scf=dict(stamp['scf'], **fields))
+    if 'hess' in old:
+        old['hess'] = with_old_scf(old['hess'], **fields)
+    return old
+
+
+def test_a_record_stamped_with_the_retired_scf_fields_is_read(tmp_path):
+    d = declaration()
+    run = run_in(tmp_path, d)
+    coords = run.mol_in.atom_coords()
+    for name in ('s0', 's1_progress', 'rate'):
+        run.store.write(name, {'coords_bohr': coords},
+                        with_old_scf(run.stamp(name), **RETIRED_SCF))
+        assert np.array_equal(run.read(name)['coords_bohr'], coords)
+        assert run.reusable(name)
+    # rewritten under today's stamp, without the retired fields
+    run.store.update('s0', run.stamp('s0'), x=1)
+    stamp = run.stamp('s0')
+    assert run.store.held('s0')['stamp'] == dict(stamp,
+                                                 identity=record_hash(stamp))
+    assert not set(RETIRED_SCF) & set(run.store.held('s0')['stamp']['scf'])
+    # a retired field at another value than it always held is refused
+    for name, field in (('s0', 'cphf_tol'), ('rate', 'cphf_max_cycle')):
+        moved = dict(RETIRED_SCF, **{field: 2 * RETIRED_SCF[field]})
+        run.store.write(name, {'k': 1}, with_old_scf(run.stamp(name), **moved))
+        with pytest.raises(StoreRefused, match=f'scf.{field}, a retired'):
+            run.read(name)
+    # a current stamp is read as it is
+    run.write('vert', {'k': 2})
+    held = run.store.held('vert')['stamp']
+    assert stamp_as_read(held) is held
+    assert run.read('vert')['k'] == 2
+
+
 # ---------------------------------------------------------------- resume
 def test_run_tadf_reuses_what_the_store_holds(tmp_path, monkeypatch):
     d = declaration()
@@ -139,6 +186,52 @@ def test_the_command_line_needs_every_policy(tmp_path, capsys):
     assert '--no-far-start' in REQUIRED
 
 
+def test_the_command_line_has_no_default_grid(tmp_path, capsys):
+    """No ISDF grid is a default: a run without --grid-accuracy is refused
+    and the refusal names the option."""
+    full = argv(out=tmp_path)
+    k = full.index('--grid-accuracy')
+    with pytest.raises(SystemExit):
+        cli.parser().parse_args(full[:k] + full[k + 2:])
+    assert '--grid-accuracy' in capsys.readouterr().err
+    assert cli.parser().parse_args(full).grid_accuracy == 'G3'
+
+
+def test_the_help_example_is_a_declaration():
+    """The first command line of the help (the module docstring) parses
+    into a `Declaration`: every required option is in it."""
+    lines = cli.__doc__.split('python -m src.photophysics', 1)[1]
+    line = lines.split('\n\n', 1)[0].replace('\\\n', ' ')
+    d = cli.declaration_of(cli.parser().parse_args(shlex.split(line)))
+    assert d.system.name == 'formaldehyde'
+
+
+def drop(full, flag):
+    """The command line `full` without `flag` and its value."""
+    k = full.index(flag)
+    return full[:k] + full[k + 2:]
+
+
+def test_the_isdf_mean_field_has_no_default_grid(tmp_path):
+    """--scf isdf without --scf-grid is refused, naming the option; the DF
+    mean field takes no grid."""
+    full = drop(argv(out=tmp_path), '--scf-grid')
+    with pytest.raises(SystemExit, match='--scf-grid'):
+        cli.declaration_of(cli.parser().parse_args(full + ['--scf', 'isdf']))
+    d = cli.declaration_of(cli.parser().parse_args(full + ['--scf', 'df']))
+    assert d.numerics.scf.grid_level is None
+
+
+def test_the_numerical_hessian_has_no_default_grid(tmp_path):
+    """--hessian numerical without --hessian-grid is refused, naming the
+    option; with it the Hessian's numerics carry that grid."""
+    full = argv('--hessian', 'numerical', out=tmp_path)
+    with pytest.raises(SystemExit, match='--hessian-grid'):
+        cli.declaration_of(cli.parser().parse_args(full))
+    d = cli.declaration_of(cli.parser().parse_args(full + ['--hessian-grid', 'GH']))
+    assert d.hessian_numerics.scf.grid_level == 'GH'
+
+
 def test_the_command_line_dry_run(tmp_path, capsys):
     assert cli.main(argv('--dry-run', '--threads', '2', '--max-memory',
                          '2000', out=tmp_path)) == 0
@@ -158,9 +251,14 @@ def test_python_m_runs_both_command_lines():
         assert out.returncode == 0, out.stderr[-2000:]
         return out.stdout
     staged, solvated = help_of(), help_of('solvated')
-    assert '--rate-model' in staged and '--solvent' not in staged
+    assert '--rate-model' in staged and '--solvent-arm' not in staged
     assert 'python -m src.photophysics solvated' in solvated
-    assert '--solvent' in solvated and '--rate-model' not in solvated
+    assert '--solvent-arm' in solvated and '--rate-model' not in solvated
+    # the options both take have one name and type (`cli`'s groups)
+    for option in ('--environment ENVIRONMENT', '--grid-accuracy GRID_ACCURACY',
+                   '--refreeze {0,1}', '--saddle-check {0,1}',
+                   '--loop-tol-q LOOP_TOL_Q'):
+        assert option in staged and option in solvated
 
 
 def test_the_default_stages_are_the_rate_model_s(tmp_path):
@@ -188,7 +286,7 @@ def adc2_at(atom, where):
     mp2 = mf.MP2().run()
     omega = {spin: np.asarray(solve_ee_adc(
         mf, level='adc2', nroots=3, spin=spin, fold=True, frozen=1,
-        auxbasis='cc-pvdz-ri', conv_tol=1e-9)[0])
+        auxbasis='cc-pvdz-ri', numerics=ee_numerics(conv_tol=1e-9))[0])
         for spin in ('singlet', 'triplet')}
     rng = np.random.default_rng(len(where))
     return from_adc2(where, mol.atom_coords(), mp2.e_tot, omega['singlet'],

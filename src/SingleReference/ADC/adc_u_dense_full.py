@@ -2,7 +2,7 @@
 first-order C-block batch builders (g-free capable via GProxy)."""
 import numpy as np
 
-from src.SingleReference.CC.cached_einsum import einsum as _cached_einsum
+from src.Base.utils.cached_einsum import einsum as _cached_einsum
 
 
 def build_supermatrix(s, nocc, static_correction=None, g=None):

@@ -40,6 +40,7 @@ the same arrangement that validated the closed-shell DF path.
 """
 import numpy as np
 
+from src.Base.numerics.constants import FLOAT64_PER_GB
 from src.SingleReference.ADC.eeADC import ee_equations as _eq
 from src.SingleReference.ADC.eeADC import ee_spin_blocks as _sb
 from src.SingleReference.ADC.eeADC import ee_r_sigma as _r
@@ -48,6 +49,7 @@ from src.SingleReference.ADC.eeADC import ee_utils
 from src.SingleReference.ADC.eeADC.ee_equations import Backend
 from src.SingleReference.ADC.eeADC.ee_spin_blocks import SB, anti4_uhf
 from src.SingleReference.EpsteinNesbet import coulomb_exchange_diagonals_uhf_df
+from src.SingleReference.common import df_ladder
 
 LEVELS = _r.LEVELS
 SCALE = _r.SCALE
@@ -161,7 +163,8 @@ def g_blocks_df_uhf(Ba, Bb, no_a, no_b, norb_a, norb_b):
 class UDFVvvvKernels(_eq.VvvvKernels):
     """ee_equations.VvvvKernels from (B_a, B_b), never forming <ab||cd>.
 
-    Identical Q-factorization to DFVvvvKernels; the only change is that every
+    Identical to DFVvvvKernels (the particle ladder through common.df_ladder,
+    'auto' kernel); the only change is that every
     B index now carries a spin, chosen from the spin string of the block being
     contracted. The rule is read straight off
 
@@ -178,21 +181,14 @@ class UDFVvvvKernels(_eq.VvvvKernels):
 
     def _chunks(self, per_aux_elems):
         naux = self.Bvv['a'].shape[0]
-        n = max(1, min(naux, int(self.mem_gb * 1.25e8 / max(per_aux_elems, 1))))
+        n = max(1, min(naux, int(self.mem_gb * FLOAT64_PER_GB / max(per_aux_elems, 1))))
         return [slice(k, min(k + n, naux)) for k in range(0, naux, n)]
 
     # ---- particle ladder -------------------------------------------------
     def ladder_direct(self, Y, sa, sb):
         """sum_cd (sum_Q B_sa[Q,a,c] B_sb[Q,b,d]) Y[i,j,c,d], c of spin sa
         and d of spin sb."""
-        no2 = Y.shape[0] * Y.shape[1]
-        out = np.zeros(Y.shape[:2] + (self.nv[sa], self.nv[sb]))
-        Ba, Bb = self.Bvv[sa], self.Bvv[sb]
-        for sl in self._chunks(no2 * self.nv[sa] * self.nv[sb]):
-            Bc, Bd = Ba[sl], Bb[sl]
-            U = np.einsum('Qac,ijcd->Qijad', Bc, Y, optimize=True)
-            out += np.einsum('Qijad,Qbd->ijab', U, Bd, optimize=True)
-        return out
+        return df_ladder.ladders(self.Bvv[sa], self.Bvv[sb], [Y], self.mem_gb)[0]
 
     def ladder(self, X):
         """R[key] = Ldir(X[key]) - Ldir(X[key, a<->b]) transposed in (a,b).

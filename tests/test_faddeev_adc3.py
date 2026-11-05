@@ -57,6 +57,7 @@ from src.SingleReference.ADC import cc_amplitudes as CA
 from src.SingleReference.CC import amplitudes as CCA
 from src.SingleReference.ADC.adc_u_dense_full import C_2h1p_block, C_2p1h_block
 from src.SingleReference.LinearResponse.pp_rpa import build_pprpa_matrices
+from tests.molecules import WATER
 
 
 def check(ok, label, detail=''):
@@ -65,7 +66,7 @@ def check(ok, label, detail=''):
 
 
 def build(basis='6-31g'):
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis=basis, verbose=0)
     mf = scf.RHF(mol).density_fit()
     mf.conv_tol = 1e-12

@@ -13,7 +13,9 @@ Gated here:
     whose own arithmetic differs, every rank applies the operator the same
     number of times and ends on rank 0's solution, which is the serial one;
     rank 0 raising raises on every rank instead of leaving them in a
-    reduction;
+    reduction; an operator with a round-off floor above the tolerance stops
+    on rank 0's stall test (`stall=`), on every rank after the same number
+    of applications, serially and under ranks on the same solution;
   * `ISDFJK.build` refuses under ranks once a `DistributedISDFJK` divides it,
     and builds serially;
   * `DistributedNumInt.nr_rks_fxc` on the kernel `cache_xc_kernel` returned
@@ -27,6 +29,7 @@ import os
 import sys
 import copy
 import threading
+import zlib
 
 import numpy as np
 import pytest
@@ -44,8 +47,9 @@ from src.Base.utils.linear_algebra.krylov import lgmres_root_driven
 from src.Base.utils.parallel.mpi_grid import distributed, reduce_sum
 from src.Base.utils.parallel.simulated_comm import run_simulated
 from tests.pins import assert_same
+from tests.molecules import WATER_DISTORTED
 
-WATER = 'O 0.0 0.0 0.1173; H 0.03 0.7572 -0.4692; H -0.02 -0.7472 -0.4492'
+WATER = WATER_DISTORTED
 BASIS = 'cc-pvdz'
 N = 40
 ATOL = 1e-12
@@ -111,6 +115,56 @@ def test_every_rank_ends_on_rank_zeros_solution(size):
         assert np.array_equal(x, out[0][0])
     assert np.abs(out[0][0] - x_ref).max() < 1e-10
     assert np.abs(a @ out[0][0] - rhs).max() < 1e-10
+
+
+def floored(a, rows, floor):
+    """The rows `rows` of a @ v plus a deterministic error of size `floor`
+    drawn from v's bits: lgmres cannot lower the residual below it."""
+    def matvec(v):
+        noise = np.random.default_rng(zlib.crc32(np.asarray(v).tobytes()))
+        out = np.zeros(N)
+        out[rows] = a[rows] @ v + floor * noise.standard_normal(N)[rows]
+        return out
+    return matvec
+
+
+@pytest.mark.parametrize('size', (1, 3))
+def test_a_stalled_solve_stops_on_rank_zeros_test(size):
+    """Floor 1e-10 above ATOL: without `stall` lgmres runs to MAX_ITER;
+    with it every rank stops after the same applications, with info 0, on
+    the serial solution."""
+    a, precond, rhs = system()
+    bar = 1e-7 * np.linalg.norm(rhs)
+    with distributed(None):
+        x_ref, info_ref = lgmres_root_driven(floored(a, np.arange(N), 1e-10),
+                                             rhs, precond, ATOL, MAX_ITER,
+                                             stall=(bar, 0.1))
+        _, info_cap = lgmres_root_driven(floored(a, np.arange(N), 1e-10),
+                                         rhs, precond, ATOL, MAX_ITER)
+    assert info_ref == 0 and info_cap == MAX_ITER
+    assert np.linalg.norm(a @ x_ref - rhs) < bar
+    calls = {}
+
+    def solve(comm):
+        rank = comm.Get_rank()
+        rows = np.array_split(np.arange(N), comm.Get_size())[rank]
+        mine = floored(a, rows, 1e-10)
+
+        def matvec(v):
+            with _LOCK:
+                calls[rank] = calls.get(rank, 0) + 1
+            out = mine(v)
+            reduce_sum(out, comm)
+            return out
+        return lgmres_root_driven(matvec, rhs, precond, ATOL, MAX_ITER,
+                                  stall=(bar, 0.1))
+
+    out = run_simulated(solve, size)
+    assert len(set(calls.values())) == 1, calls
+    for x, info in out:
+        assert info == 0
+        assert np.array_equal(x, out[0][0])
+    assert np.abs(out[0][0] - x_ref).max() < 1e-9
 
 
 def test_a_raise_on_rank_zero_reaches_every_rank():

@@ -32,6 +32,7 @@ from src.SingleReference.GW.space_time import separable_factors
 from src.gradients.gwbse.qp_space_time import qp_gradient_space_time, qp_set_gradient
 from tests.isdf_test_grid import g1
 from tests.pins import assert_same
+from tests.molecules import WATER
 
 NTAU = 8
 #: two contour-deformation quadratures, three times apart
@@ -44,7 +45,7 @@ WEIGHTS = np.array([0.3, -1.1, 0.8])
 @pytest.fixture(scope='module')
 def water():
     warnings.simplefilter('ignore')
-    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+    mol = gto.M(atom=WATER,
                 basis='cc-pvdz', verbose=0)
     mf = scf.RHF(mol).density_fit(auxbasis='cc-pvdz-ri')
     mf.kernel()

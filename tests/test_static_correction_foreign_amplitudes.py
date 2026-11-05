@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import DFIntegrals
 from src.SingleReference.ADC.cc_adc_amplitudes import (cc_amplitudes_restricted,
                                                        mbpt_amplitudes_restricted)
@@ -68,9 +69,9 @@ def main():
             for tag, kw, tol in (('dense', {}, IDENTITY_TOL),
                                  ('df', {'B_aa': B_aa}, DF_TOL)):
                 ref = build_mp2_static_correction_restricted(
-                    mf, mol, nocc, relax=relax, **kw)
+                    mf, mol, nocc, relax=relax, **kw, numerics=Numerics())
                 got = build_mp2_static_correction_restricted(
-                    mf, mol, nocc, relax=relax, amplitudes=mbpt, **kw)
+                    mf, mol, nocc, relax=relax, amplitudes=mbpt, **kw, numerics=Numerics())
                 d = float(np.max(np.abs(ref - got)))
                 good = d < tol
                 ok &= good
@@ -79,9 +80,9 @@ def main():
 
         # 2. DF vs dense at foreign amplitudes
         dense = build_mp2_static_correction_restricted(
-            mf, mol, nocc, relax=True, amplitudes=ccsd)
+            mf, mol, nocc, relax=True, amplitudes=ccsd, numerics=Numerics())
         dfval = build_mp2_static_correction_restricted(
-            mf, mol, nocc, relax=True, amplitudes=ccsd, B_aa=B_aa)
+            mf, mol, nocc, relax=True, amplitudes=ccsd, B_aa=B_aa, numerics=Numerics())
         d = float(np.max(np.abs(dense - dfval)))
         good = d < DF_TOL
         ok &= good
@@ -89,7 +90,8 @@ def main():
               f'  max|d| = {d:.2e}')
 
         # 3. non-triviality: CCSD amplitudes must actually change the answer
-        base = build_mp2_static_correction_restricted(mf, mol, nocc, relax=True)
+        base = build_mp2_static_correction_restricted(mf, mol, nocc, relax=True,
+                                                      numerics=Numerics())
         d = float(np.max(np.abs(dense - base)))
         good = d > 1e-6
         ok &= good
@@ -104,17 +106,17 @@ def main():
     checks = [
         ('EN dressing + amplitudes', ValueError,
          lambda: build_mp2_static_correction_restricted(
-             mf, mol, nocc, relax=True, amplitudes=ccsd, u2_denom_dress=en)),
+             mf, mol, nocc, relax=True, amplitudes=ccsd, u2_denom_dress=en, numerics=Numerics())),
         ('non-MP2 kind + amplitudes', ValueError,
          lambda: build_static_correction(mf, mol, kind='ccsd', amplitudes=ccsd)),
         ('shape mismatch', ValueError,
          lambda: build_mp2_static_correction_restricted(
              mf, mol, nocc, relax=True,
-             amplitudes=dict(ccsd, t1_aa=np.zeros((3, 3))))),
+             amplitudes=dict(ccsd, t1_aa=np.zeros((3, 3))), numerics=Numerics())),
         ('missing key', KeyError,
          lambda: build_mp2_static_correction_restricted(
              mf, mol, nocc, relax=True,
-             amplitudes={k: v for k, v in ccsd.items() if k != 't2_abab'})),
+             amplitudes={k: v for k, v in ccsd.items() if k != 't2_abab'}, numerics=Numerics())),
     ]
     for name, exc, fn in checks:
         try:

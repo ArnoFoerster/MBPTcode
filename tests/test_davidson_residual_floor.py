@@ -35,6 +35,7 @@ from src.SingleReference.LinearResponse.block_actions import bse_pair_diagonal
 from src.SingleReference.LinearResponse.linear_response import (
     LinearResponseSolver)
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER_CS
 
 NOCC, NVIR, NAUX = 10, 50, 20
 
@@ -175,7 +176,7 @@ def test_the_gradient_chain_keeps_and_logs_rather_than_refuses(monkeypatch):
         return solve_casida_davidson(*args, **kwargs)
 
     monkeypatch.setattr(state_following, 'solve_casida_davidson', recording)
-    mol = gto.M(atom='O 0 0 0; H 0 0 0.96; H 0.93 0 -0.24', basis='cc-pvdz',
+    mol = gto.M(atom=WATER_CS, basis='cc-pvdz',
                 verbose=0)
 
     def factory(m):
