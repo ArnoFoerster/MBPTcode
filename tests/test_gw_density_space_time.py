@@ -31,6 +31,7 @@ G1, so the floor is not the ISDF grid's density; the time grid does not move
 it either (HF 'dyson' on GH unchanged to 3 digits from 16 to 26 tau points,
 tau_target 1e-8 .. 1e-14).
 """
+import copy
 import os
 import sys
 
@@ -183,12 +184,30 @@ def check_open_shell_refused():
                   f'({type(st).__name__}: {st})')
 
 
+def check_smeared_refused(hf):
+    """The matrix Sigma itself refuses a thermally smeared RHF, before any
+    ISDF work (a bare Numerics() has no grid, so reaching it would raise the
+    other error)."""
+    name = 'smeared RHF refused by the space-time matrix Sigma'
+    smeared = copy.copy(hf)
+    smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
+    try:
+        correlation_self_energy_matrix_space_time(
+            smeared, smeared.mol, 5, np.array([0.5]), Numerics())
+    except NotImplementedError as err:
+        return report(name, 'T = 0' in str(err), f'({err})')
+    except Exception as err:  # noqa: BLE001 -- wrong type
+        return report(name, False, f'({type(err).__name__}: {err})')
+    return report(name, False)
+
+
 def run():
     hf = fitted(scf.RHF(water()))
     pbe0 = fitted(dft.RKS(water(), xc='pbe0'))
     results = [check_matrix_diagonal_matches_qp(hf),
                check_space_time_needs_an_isdf_grid(hf),
-               check_open_shell_refused()]
+               check_open_shell_refused(),
+               check_smeared_refused(hf)]
     for mf, name in ((hf, 'HF'), (pbe0, 'PBE0')):
         for relaxation in ('none', 'dyson'):
             results.append(check_space_time_vs_imagfrequency(

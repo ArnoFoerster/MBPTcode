@@ -55,6 +55,7 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
 from src.Base.factorization.ao_product_fit import pivoted_points, placed
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.grids.analytic_continuation import pade_nodes
+from src.Base.utils.grids.matsubara import beta_from_mf
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
                                         minimax_supported_sizes)
 from src.Base.utils.parallel.mpi_grid import (agreement,
@@ -925,6 +926,9 @@ def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numeri
     if separable_gauge_transform(mol, environment_of(mf), auxbasis) is not None:
         raise NotImplementedError('correlation_self_energy_matrix_space_time is '
                                   'gas phase only; mf carries an environment.')
+    if beta_from_mf(mf) is not None:
+        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
+                                  'T = 0 only; mf is thermally smeared.')
     q = numerics.quadrature
     tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None
                else numerics.layout.tile_gb)

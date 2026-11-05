@@ -145,15 +145,6 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
                      + static_ov_term(mf, mol, eps, nocc))
         return dgamma_oo, dgamma_ov, dgamma_vv
 
-    def solve_relaxation(self, mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics):
-        """Solve the CPHF/CPKS Z-vector equation A.X=Y for the ov block; return the full relaxed MO-basis Delta_gamma.
-
-        Pass mf for its own (gKS) Hessian, or hf_kernel_mean_field(mf) for the
-        HF-kernel Hessian on mf's orbitals and J/K backend; numerics as in
-        solve_cphf_relaxation.
-        """
-        return solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics)
-
 
 def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=True,
                                mode='casida', relaxation='zvector', eta=DEFAULT_BROADENING_ETA,

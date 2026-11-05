@@ -29,8 +29,9 @@ IMAGFREQ_NFREQ = 20
 
 # Outer imaginary-frequency points of the GW density's dynamic integral
 # (`GW.density_matrix`), Gauss-Legendre by default. Set by the grid study of
-# tests/test_gw_density_imagfrequency.py: with the exact Sigma, 32 points
-# leave 1.8e-5 on PBE0 water/cc-pVDZ, 48 leave 7.5e-7.
+# tests/test_gw_density_imagfrequency.py: the full pipeline (fitted Sigma on
+# the default minimax-20 W grid) against the Casida route on PBE0 water/cc-pVDZ
+# leaves 1.8e-5 with 32 points, 7.5e-7 with 48.
 GW_DENSITY_NFREQ = 48
 
 # The Lorentzian fit of W_c(i w') on the W grid of the GW density's

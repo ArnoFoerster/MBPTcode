@@ -29,7 +29,8 @@ def hf_kernel_mean_field(mf):
     HF-kernel relaxation (`solve_cphf_relaxation`) on a gKS reference.
 
     The backend is the one `mf` builds J and K with: exact four-centre
-    integrals where `mf` has no `with_df`; the same `with_df` object
+    integrals where `mf` has no `with_df` (its `_eri` is carried over, so a
+    custom or incore Hamiltonian is kept and not rebuilt); the same `with_df` object
     (density fit or ISDF-K, `isdf_jk`) where `mf` is a pyscf density-fitted
     mean field. Any other backend is refused rather than replaced by exact
     integrals. Only the kernel changes: no exchange-correlation kernel, full
@@ -40,6 +41,7 @@ def hf_kernel_mean_field(mf):
     with_df = getattr(mf, 'with_df', None)
     if with_df is None:
         hf = scf.RHF(mf.mol)
+        hf._eri = getattr(mf, '_eri', None)
     elif isinstance(mf, df_jk._DFHF):
         hf = scf.RHF(mf.mol).density_fit()
         hf.with_df = with_df

@@ -171,7 +171,10 @@ def check_dense_eq23(ks):
 
 def check_dyson_backend(hf_df):
     numerics = Numerics()
-    ok = report('HF-kernel object shares the DF object',
+    exact = scf.RHF(hf_df.mol).run()
+    ok = report("HF-kernel object keeps the exact mean field's _eri",
+                hf_kernel_mean_field(exact)._eri is exact._eri)
+    ok &= report('HF-kernel object shares the DF object',
                 hf_kernel_mean_field(hf_df).with_df is hf_df.with_df)
     dyson = compute_gw_density_matrix(hf_df, relaxation='dyson', numerics=numerics)
     zvec = compute_gw_density_matrix(hf_df, relaxation='zvector', numerics=numerics)
