@@ -917,6 +917,8 @@ def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numeri
     `self_energy_matrix_imaginary_time` with `query_freqs` as its output axis
     and C^T Sigma C. At the Pade nodes its diagonal is the QP route's.
     """
+    require_closed_shell_or_unrestricted(
+        mf, 'correlation_self_energy_matrix_space_time', mol=mol)
     if isinstance(mf, pyscf_scf.uhf.UHF):
         raise NotImplementedError('correlation_self_energy_matrix_space_time is '
                                   'restricted-spin only.')

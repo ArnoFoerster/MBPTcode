@@ -162,11 +162,33 @@ def check_space_time_needs_an_isdf_grid(mf):
                   '(nothing raised)')
 
 
+def check_open_shell_refused():
+    """An ROHF reference (OH radical): mode='space-time' raises the named
+    closed-shell error mode='imagfrequency' raises."""
+    mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, verbose=0)
+    rohf = scf.ROHF(mol).density_fit(auxbasis=AUXBASIS).run()
+
+    def raised(mode, numerics):
+        try:
+            compute_gw_density_matrix(rohf, mode=mode, relaxation='none',
+                                      numerics=numerics)
+        except Exception as err:  # noqa: BLE001 -- compared below
+            return err
+        return None
+    imag = raised('imagfrequency', Numerics())
+    st = raised('space-time', g1_numerics(rohf))
+    ok = (isinstance(imag, NotImplementedError) and type(st) is type(imag)
+          and 'closed-shell' in str(st))
+    return report('ROHF refused on space-time as on imagfrequency', ok,
+                  f'({type(st).__name__}: {st})')
+
+
 def run():
     hf = fitted(scf.RHF(water()))
     pbe0 = fitted(dft.RKS(water(), xc='pbe0'))
     results = [check_matrix_diagonal_matches_qp(hf),
-               check_space_time_needs_an_isdf_grid(hf)]
+               check_space_time_needs_an_isdf_grid(hf),
+               check_open_shell_refused()]
     for mf, name in ((hf, 'HF'), (pbe0, 'PBE0')):
         for relaxation in ('none', 'dyson'):
             results.append(check_space_time_vs_imagfrequency(
