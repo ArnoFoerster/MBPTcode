@@ -24,6 +24,7 @@ from src.SingleReference.DensityMatrix.density_matrix import (
 )
 from src.SingleReference.GW.imaginary_axis import (
     correlation_self_energy_matrix_imaginary_axis)
+from src.SingleReference.GW.space_time import correlation_self_energy_matrix_space_time
 from src.Base.environment_seam import NoEnvironment, environment_of
 from src.Base.numerics.numerics import required_numerics
 from src.Base.utils.grids.matsubara import beta_from_mf
@@ -164,7 +165,9 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     mode: how the unrelaxed Delta_gamma^GW is obtained; 'casida' (the
     analytic pole sum) or 'imagfrequency' (N^4: the full Sigma_c,pq(mu + i w)
     of the imaginary-axis QP route on the outer grid `numerics.gwdensity`,
-    `imagfrequency_unrelaxed_blocks`). 'space-time' is not implemented yet.
+    `imagfrequency_unrelaxed_blocks`) or 'space-time' (N^3: the same on the
+    space-time QP route's Sigma, `space_time_unrelaxed_blocks`, on the ISDF
+    grid numerics.isdf names).
     The numerical modes take RPA screening on a density-fitted three-index
     object (df=True) of a gas-phase, T = 0 mean field only, and always need
     numerics.
@@ -186,8 +189,6 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     for name, value in (('auxbasis', auxbasis), ('screen_r_cut', screen_r_cut)):
         if value is not None and mode != 'space-time':
             raise ValueError(f"{name} is a 'space-time' mode setting; got mode={mode!r}.")
-    if mode == 'space-time':
-        raise NotImplementedError(f"compute_gw_density_matrix mode={mode!r} is not implemented yet.")
     if isinstance(mf, scf.uhf.UHF):
         raise NotImplementedError("compute_gw_density_matrix is currently restricted-spin only.")
     if mode == 'casida':
@@ -204,6 +205,10 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
 
     if mode == 'imagfrequency':
         blocks = imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics)
+    elif mode == 'space-time':
+        blocks = space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics,
+                                             auxbasis=auxbasis,
+                                             screen_r_cut=screen_r_cut)
     else:
         if df:
             df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
@@ -256,6 +261,20 @@ def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
     points, weights = outer_frequency_grid(eps, nocc, numerics)
     sigma, mu = correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, points,
                                                               numerics)
+    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
+    return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
+
+
+def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
+                                screen_r_cut=None):
+    """`imagfrequency_unrelaxed_blocks` on the space-time route's full
+    Sigma_c,pq(mu + i w) (`correlation_self_energy_matrix_space_time`, per
+    spin): separable factors on numerics.isdf's grid and the QP route's
+    tau <-> omega transforms."""
+    points, weights = outer_frequency_grid(eps, nocc, numerics)
+    sigma, mu = correlation_self_energy_matrix_space_time(
+        mf, mol, nocc, points, numerics, auxbasis=auxbasis,
+        screen_r_cut=screen_r_cut)
     oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
     return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
 

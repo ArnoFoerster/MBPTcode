@@ -903,6 +903,51 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                       after_solve=shift_after_solve(eps_anchor))
 
 
+def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numerics,
+                                              auxbasis=None, screen_r_cut=None):
+    """(sigma, mu): the full MO-basis correlation self-energy
+    Sigma_c,pq(mu + i w) on `query_freqs` (w >= 0), shape (nquery, nmo, nmo),
+    per spin, and mu the particle-hole midpoint it is centred on.
+
+    The space-time QP route's Sigma (`solve_qp_energy_space_time`, serial,
+    restricted, gas phase) with both indices kept: the same time and
+    frequency axes (`_space_time_grids` on `numerics.quadrature`), the same
+    factors (`separable_factors`, whose grid is `numerics.isdf`'s alone), chi0
+    and the Dyson inversion in the bare gauge, then
+    `self_energy_matrix_imaginary_time` with `query_freqs` as its output axis
+    and C^T Sigma C. At the Pade nodes its diagonal is the QP route's.
+    """
+    if isinstance(mf, pyscf_scf.uhf.UHF):
+        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
+                                  'restricted-spin only.')
+    if separable_gauge_transform(mol, environment_of(mf), auxbasis) is not None:
+        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
+                                  'gas phase only; mf carries an environment.')
+    q = numerics.quadrature
+    tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None
+               else numerics.layout.tile_gb)
+    eps = get_orbital_energies(mf, representation='spatial')
+    mu = particle_hole_window(eps, nocc)[2]
+    axes = _space_time_grids(
+        [eps], [nocc], [eps],
+        dict(ntau=q.ntau_st, nfreq=q.nfreq_st, pade_freq=pade_nodes(q),
+             tau_target=q.tau_target), q.w0_gl, None)
+    X_mo, D, X_ao, coords = unpack_factors(
+        separable_factors(mf, mol, auxbasis=auxbasis, numerics=numerics))
+    W_omega = chi0_imaginary_frequency(X_mo, D, eps, nocc, axes['grid'], mu=mu,
+                                       tile_memory_gb=tile_gb)
+    _dyson_in_place(W_omega, range(W_omega.shape[0]), transform=None)
+    if X_ao is None:
+        X_ao = _ao_collocation(X_mo, mf)
+    sigma_ao = self_energy_matrix_imaginary_time(
+        X_ao, D, W_omega, mf.mo_coeff, eps, nocc, axes['tau_points'],
+        axes['freq_points'], np.asarray(query_freqs, dtype=float), mu=mu,
+        coords=coords, screen_r_cut=screen_r_cut, block_memory_gb=tile_gb)
+    del W_omega
+    C = mf.mo_coeff
+    return np.einsum('mp,wmn,nq->wpq', C, sigma_ao, C, optimize=True), mu
+
+
 def _space_time_unrestricted(mf, mol, nocc, p_state, spin, ntau, nfreq, pade_freq,
                              w0, auxbasis, radii, factors, greedy,
                              dm_correction, timings, mpi, freq_block,

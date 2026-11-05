@@ -68,6 +68,7 @@ script test_density_matrix_small.py
 pytest test_gw_density_imagfrequency.py
 pytest test_gw_density_quadrature.py
 pytest test_gw_density_relaxation.py
+pytest test_gw_density_space_time.py
 pytest test_docs_parallel_example.py
 pytest test_df_check.py
 pytest test_df_ladder.py
