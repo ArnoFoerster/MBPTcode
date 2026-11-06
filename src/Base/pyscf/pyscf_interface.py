@@ -960,8 +960,13 @@ def freeze_core(mf, ncore=None):
     mol_fc = mol.copy()
     mol_fc.energy_nuc = lambda *args, **kwargs: e_nuc_fc
 
+    # copy.copy goes through pyscf's __getstate__/__setstate__, which set
+    # _opt and _eri to None; reset() restores _opt for the direct-SCF get_jk
+    # (taken once nao**4 integrals exceed max_memory), and the in-core _eri,
+    # if any, is the same AO tensor and is shared.
     mf_fc = copy.copy(mf)
-    mf_fc.mol = mol_fc
+    mf_fc.reset(mol_fc)
+    mf_fc._eri = getattr(mf, '_eri', None)
     mf_fc.mo_coeff = mf.mo_coeff[:, ncore:]
     mf_fc.mo_energy = mf.mo_energy[ncore:]
     mf_fc.mo_occ = mf.mo_occ[ncore:]
