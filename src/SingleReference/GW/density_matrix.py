@@ -16,10 +16,7 @@ from src.Base.pyscf.pyscf_interface import (
     require_restricted,
     require_zero_temperature,
 )
-from src.Base.numerics.constants import (
-    DEFAULT_BROADENING_ETA,
-    DEFAULT_BLOCK_SIZE,
-)
+from src.Base.numerics.constants import DEFAULT_BLOCK_SIZE
 from src.SingleReference.DensityMatrix.density_matrix import (
     hf_kernel_mean_field,
     solve_cphf_relaxation,
@@ -68,9 +65,8 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
     one used for qp_energy.py's self-energy -- see build_screening.
     """
 
-    def __init__(self, eps, df_coeff=None, eri_chemist=None, eta=DEFAULT_BROADENING_ETA, block_size=DEFAULT_BLOCK_SIZE):
+    def __init__(self, eps, df_coeff=None, eri_chemist=None, block_size=DEFAULT_BLOCK_SIZE):
         self.spin_mode = 'restricted'
-        self.eta = eta
         self.block_size = block_size
         self.eps = eps
         self.df_coeff = df_coeff
@@ -90,7 +86,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         """
         lr_solver = LinearResponseSolver(
             self.eps, coeff_df=self.df_coeff, eri_chemist=self.eri_chemist,
-            spin_mode='restricted', eta=self.eta
+            spin_mode='restricted'
         )
         mode = polarizability.upper()
         if mode == 'RPA':
@@ -148,7 +144,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
 
 
 def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=True,
-                               mode='casida', relaxation='zvector', eta=DEFAULT_BROADENING_ETA,
+                               mode='casida', relaxation='zvector',
                                numerics=None, auxbasis=None, screen_r_cut=None):
     """Build the total AO 1-particle density matrix gamma = gamma_mf + Delta_gamma^GW, restricted spin only.
 
@@ -196,7 +192,7 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
 
     if mode == 'casida':
         numerics = relaxation_numerics(relaxation != 'none', numerics, where)
-        blocks = casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability, df, eta)
+        blocks = casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability, df)
     else:
         numerics = required_numerics(numerics, where)
         _refuse_casida_only_options(where, polarizability, df)
@@ -234,8 +230,7 @@ def _refuse_casida_only_options(where, polarizability, df):
                                   "(four-centre integrals) is not supported.")
 
 
-def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True,
-                            eta=DEFAULT_BROADENING_ETA):
+def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True):
     """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW from the
     Casida poles of `polarizability` screening (`GWDensityMatrixSolver`), on
     the mean field's density fit (df) or on four-centre integrals."""
@@ -246,7 +241,7 @@ def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True,
         df_coeff = None
         eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
     return GWDensityMatrixSolver(
-        eps, df_coeff=df_coeff, eri_chemist=eri_chemist, eta=eta
+        eps, df_coeff=df_coeff, eri_chemist=eri_chemist
     ).compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability)
 
 

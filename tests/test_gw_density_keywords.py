@@ -14,7 +14,8 @@ of the message that names the reason:
   Casida route whenever it relaxes;
 - references outside the scope, in every mode: UHF, an open-shell (ROHF)
   reference, an environment and a thermally smeared mean field;
-- the removed keywords `relax` and `relax_kernel`.
+- the removed keywords `relax`, `relax_kernel` and `eta` (no route of the
+  density has a real-axis denominator for a broadening to act on).
 
 NH3/cc-pVDZ HF, density-fitted (`gw_density_routes.mean_field`).
 """
@@ -72,7 +73,8 @@ def test_unknown_option(hf, keyword, value, choices):
     refused(ValueError, [keyword, repr(value), *choices], hf, **{keyword: value})
 
 
-@pytest.mark.parametrize('keyword, value', [('relax', True), ('relax_kernel', 'tdhf')])
+@pytest.mark.parametrize('keyword, value', [('relax', True), ('relax_kernel', 'tdhf'),
+                                            ('eta', 1e-3)])
 def test_removed_keywords(hf, keyword, value):
     refused(TypeError, [keyword], hf, **{keyword: value})
 

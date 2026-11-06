@@ -33,7 +33,6 @@ from pyscf import dft, scf
 
 from src.Base import numerical_flags
 from src.Base.environment_seam import attach_environment
-from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
@@ -83,8 +82,7 @@ def test_spin_factor(pbe0):
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(ks, representation='spatial')
     solver = GWDensityMatrixSolver(
-        eps, df_coeff=get_density_fitting_coefficients(mol, ks, representation='spatial'),
-        eta=DEFAULT_BROADENING_ETA)
+        eps, df_coeff=get_density_fitting_coefficients(mol, ks, representation='spatial'))
     omega, X, Y = solver.build_screening(nocc)
     oo, ov, vv = solver.compute_unrelaxed_blocks(nocc, ks, mol, omega=omega, X=X, Y=Y)
     static = static_ov_term(ks, mol, eps, nocc)
