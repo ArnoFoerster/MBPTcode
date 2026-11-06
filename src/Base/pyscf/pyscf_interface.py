@@ -229,6 +229,7 @@ def spin_index(spin_channel):
     return 0 if spin_channel == 'alpha' else 1
 
 
+
 def require_restricted(mf, who):
     """Refuse an unrestricted (UHF/UKS) reference on a restricted-only route."""
     if isinstance(mf, scf.uhf.UHF):
@@ -277,6 +278,20 @@ def require_closed_shell_or_unrestricted(mf, who, mol=None):
             f'one; this one has spin {mol.spin} and {off} occupations off that '
             f'pattern. Run an open shell as UHF/UKS.')
 
+
+
+def require_gas_phase_ground_state(mf, who, mol=None, unrestricted=False):
+    """Refuse every reference a gas-phase, T = 0 ground-state route would
+    misread: an open shell run restricted or non-aufbau occupations
+    (`require_closed_shell_or_unrestricted`), an unrestricted one unless the
+    route takes it (`unrestricted`), an attached environment
+    (`require_gas_phase`) and a thermal smearing (`require_zero_temperature`).
+    A route that gains unrestricted spin passes unrestricted=True."""
+    require_closed_shell_or_unrestricted(mf, who, mol=mol)
+    if not unrestricted:
+        require_restricted(mf, who)
+    require_gas_phase(mf, who)
+    require_zero_temperature(mf, who)
 
 def get_orbital_energies(mf, representation='spatial'):
     mo_energy = mf.mo_energy

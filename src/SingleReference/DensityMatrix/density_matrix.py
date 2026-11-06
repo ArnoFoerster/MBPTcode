@@ -5,10 +5,7 @@ from pyscf.df import df_jk
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_antisymmetrized_spin_block_eri,
-    require_closed_shell_or_unrestricted,
-    require_gas_phase,
-    require_restricted,
-    require_zero_temperature,
+    require_gas_phase_ground_state,
 )
 from src.Base.numerics.constants import MPN_DENSITY_LAPLACE_NTAU
 from src.Base.numerics.numerics import required_numerics
@@ -45,10 +42,7 @@ def hf_kernel_mean_field(mf):
     (its screening would be lost) and a thermally smeared one (the Z-vector
     solve splits the orbitals on integer occupations)."""
     where = 'hf_kernel_mean_field'
-    require_closed_shell_or_unrestricted(mf, where)
-    require_restricted(mf, where)
-    require_gas_phase(mf, where)
-    require_zero_temperature(mf, where)
+    require_gas_phase_ground_state(mf, where)
     if not isinstance(mf, scf.hf.RHF):
         raise TypeError(f'{where} takes a pyscf RHF/RKS mean field, got '
                         f'{type(mf).__name__}')

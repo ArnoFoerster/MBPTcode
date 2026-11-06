@@ -47,8 +47,7 @@ from pyscf import scf as pyscf_scf
 
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_closed_shell_or_unrestricted,
-                                            require_gas_phase, require_restricted,
-                                            require_zero_temperature, spin_index)
+                                            require_gas_phase_ground_state, spin_index)
 from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  molecular_points_covariant,
@@ -920,10 +919,7 @@ def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numeri
     and C^T Sigma C. At the Pade nodes its diagonal is the QP route's.
     """
     where = 'correlation_self_energy_matrix_space_time'
-    require_closed_shell_or_unrestricted(mf, where, mol=mol)
-    require_restricted(mf, where)
-    require_gas_phase(mf, where)
-    require_zero_temperature(mf, where)
+    require_gas_phase_ground_state(mf, where, mol=mol)
     q = numerics.quadrature
     tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None
                else numerics.layout.tile_gb)

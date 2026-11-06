@@ -24,8 +24,7 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      get_density_fitting_coefficients,
                                      get_df_coefficients_ov,
                                      require_closed_shell_or_unrestricted,
-                                     require_gas_phase, require_restricted,
-                                     require_zero_temperature, spin_index)
+                                     require_gas_phase_ground_state, spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.Base.orbital_spaces import (get_occ_virt_indices,
                                      particle_hole_window, transition_range)
@@ -140,10 +139,7 @@ def correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, nu
     log-spaced over [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span],
     one per W-grid point, regularized by GW_DENSITY_W_FIT_TIKHONOV."""
     where = 'correlation_self_energy_matrix_imaginary_axis'
-    require_closed_shell_or_unrestricted(mf, where, mol=mol)
-    require_restricted(mf, where)
-    require_gas_phase(mf, where)
-    require_zero_temperature(mf, where)
+    require_gas_phase_ground_state(mf, where, mol=mol)
     nfreq = numerics.imagfreq.nfreq
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')

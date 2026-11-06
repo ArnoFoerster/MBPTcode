@@ -11,10 +11,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_density_fitting_coefficients,
     get_two_electron_integrals_chemist,
-    require_closed_shell_or_unrestricted,
-    require_gas_phase,
-    require_restricted,
-    require_zero_temperature,
+    require_gas_phase_ground_state,
 )
 from src.Base.numerics.constants import DEFAULT_BLOCK_SIZE, IMAGINARY_FREQUENCY_GRIDS
 from src.SingleReference.DensityMatrix.density_matrix import (
@@ -180,10 +177,7 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
     where = f"compute_gw_density_matrix mode={mode!r}"
     # The reference's scope, one set for every mode (the numerical modes'
     # Sigma builders carry the same guards for their own callers).
-    require_closed_shell_or_unrestricted(mf, where, mol=mol)
-    require_restricted(mf, where)
-    require_gas_phase(mf, where)
-    require_zero_temperature(mf, where)
+    require_gas_phase_ground_state(mf, where, mol=mol)
 
     mol = mol if mol is not None else mf.mol
     nocc = mol.nelectron // 2
