@@ -4,6 +4,9 @@
   (oo, ov, vv) of the MO-basis density.
 - Every route's natural occupations sum to N and lie in [0, 2].
 - The numerical routes reproduce the Casida occupations.
+- On HF the Casida occupations reproduce MOLGW's relaxed ones to every
+  printed digit ('zvector' is 'dyson' there); MOLGW's relaxation is the
+  iterated-Dyson one, so PBE0 has no MOLGW reference and is skipped.
 
 Setup and the checks: gw_density_routes. NH3/cc-pVDZ, DF on cc-pvdz-ri, HF
 and PBE0; default quadratures, space-time on the G1 ISDF grid. Run with `-s`
@@ -39,6 +42,7 @@ import pytest
 from tests.gw_density_routes import (MODES, NUMERICAL_MODES, REFERENCES,
                                      check_blocks_match_casida,
                                      check_occupations_match_casida,
+                                     check_casida_matches_molgw,
                                      check_occupations_physical, route_densities)
 
 RELAXATION = 'zvector'
@@ -69,6 +73,11 @@ def test_natural_occupations_physical(routes, mode):
 def test_natural_occupations_match_casida(routes, mode):
     mf, densities = routes
     check_occupations_match_casida(mf, densities, mode, RELAXATION, OCCUPATION_BAR[mode])
+
+
+def test_casida_matches_molgw(routes):
+    mf, densities = routes
+    check_casida_matches_molgw(mf, densities, RELAXATION)
 
 
 if __name__ == '__main__':
