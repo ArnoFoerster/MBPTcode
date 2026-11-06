@@ -13,6 +13,9 @@ test_gw_density_keywords.
   object shares the mean field's J/K backend.
 - 'dyson' on a PBE0 reference is Eq. 23 of the iterated-Dyson paper, checked
   against a dense solve, and differs from 'zvector' there.
+- The HF-kernel object refuses a reference whose Hamiltonian it cannot carry
+  (UHF, open-shell ROHF, an environment, a thermal smearing) rather than
+  dropping part of it.
 
 Water/cc-pVDZ (DF on an explicit auxiliary basis) and water/6-31G (exact
 integrals) for the dense check.
@@ -22,11 +25,14 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import copy
+
 import numpy as np
 import pytest
 from pyscf import dft, scf
 
 from src.Base import numerical_flags
+from src.Base.environment_seam import attach_environment
 from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
 from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
@@ -38,6 +44,7 @@ from src.SingleReference.DensityMatrix.density_matrix import hf_kernel_mean_fiel
 from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
                                                     compute_gw_density_matrix,
                                                     static_ov_term)
+from src.environments.solvent_screening import SolventScreening
 from tests.gw_density_routes import AUXBASIS, converged, fitted, mo_dgamma, water
 
 
@@ -200,6 +207,39 @@ def test_dyson_on_pbe_flags_or_converges():
     assert not names
     assert np.all(np.isfinite(dm))
     assert abs(n - pbe.mol.nelectron) < 1e-6
+
+
+def _uhf(mf):
+    return scf.UHF(mf.mol)
+
+
+def _rohf_cation(mf):
+    cation = mf.mol.copy()
+    cation.charge, cation.spin = 1, 1
+    cation.build()
+    return scf.ROHF(cation)
+
+
+def _solvated(mf):
+    return attach_environment(copy.copy(mf),
+                              SolventScreening(mf.mol, eps=2.0, eps_static=2.0))
+
+
+def _smeared(mf):
+    smeared = copy.copy(mf)
+    smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
+    return smeared
+
+
+@pytest.mark.parametrize('make, word', [(_uhf, 'restricted'),
+                                        (_rohf_cation, 'closed-shell'),
+                                        (_solvated, 'gas phase'),
+                                        (_smeared, 'T = 0')])
+def test_hf_kernel_refuses_out_of_scope_references(hf_df, make, word):
+    with pytest.raises(NotImplementedError) as err:
+        hf_kernel_mean_field(make(hf_df))
+    print(f'{make.__name__}: {err.value}')
+    assert word in str(err.value)
 
 
 if __name__ == '__main__':

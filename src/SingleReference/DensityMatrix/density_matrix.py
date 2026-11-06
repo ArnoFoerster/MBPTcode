@@ -5,6 +5,10 @@ from pyscf.df import df_jk
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_antisymmetrized_spin_block_eri,
+    require_closed_shell_or_unrestricted,
+    require_gas_phase,
+    require_restricted,
+    require_zero_temperature,
 )
 from src.Base.numerics.constants import MPN_DENSITY_LAPLACE_NTAU
 from src.Base.numerics.numerics import required_numerics
@@ -34,10 +38,20 @@ def hf_kernel_mean_field(mf):
     (density fit or ISDF-K, `isdf_jk`) where `mf` is a pyscf density-fitted
     mean field. Any other backend is refused rather than replaced by exact
     integrals. Only the kernel changes: no exchange-correlation kernel, full
-    exact exchange (no fraction, no range separation)."""
-    if isinstance(mf, (scf.uhf.UHF, scf.rohf.ROHF)) or not isinstance(mf, scf.hf.RHF):
-        raise TypeError('hf_kernel_mean_field takes a restricted closed-shell '
-                        f'mean field, got {type(mf).__name__}')
+    exact exchange (no fraction, no range separation).
+
+    A reference whose Hamiltonian the bare RHF cannot carry is refused, not
+    dropped: an open shell, an unrestricted one, an attached environment
+    (its screening would be lost) and a thermally smeared one (the Z-vector
+    solve splits the orbitals on integer occupations)."""
+    where = 'hf_kernel_mean_field'
+    require_closed_shell_or_unrestricted(mf, where)
+    require_restricted(mf, where)
+    require_gas_phase(mf, where)
+    require_zero_temperature(mf, where)
+    if not isinstance(mf, scf.hf.RHF):
+        raise TypeError(f'{where} takes a pyscf RHF/RKS mean field, got '
+                        f'{type(mf).__name__}')
     with_df = getattr(mf, 'with_df', None)
     if with_df is None:
         hf = scf.RHF(mf.mol)
