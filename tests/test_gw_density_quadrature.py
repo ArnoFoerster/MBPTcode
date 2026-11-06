@@ -6,8 +6,8 @@
 - The `gwdensity` section is a later section: its defaults leave the identity
   what it was without it; a changed setting changes it.
 - The outer grid: tabulated minimax (the default, 34 points) or
-  Gauss-Legendre at any size, with its own w0. A bad setting (unknown grid,
-  non-positive nfreq, untabulated minimax size, non-positive w0, a w0 with
+  Gauss-Legendre at any size, with its own w0_gl. A bad setting (unknown grid,
+  non-positive nfreq, untabulated minimax size, non-positive w0_gl, a w0_gl with
   minimax) is refused when the Numerics is built, naming the setting.
 """
 import os
@@ -94,7 +94,7 @@ def test_outer_grid_choices():
         EPS, NOCC, Numerics(gwdensity={'nfreq': size, 'grid': 'minimax'}))
     assert len(points) == size
     points, _ = outer_frequency_grid(
-        EPS, NOCC, Numerics(gwdensity={'nfreq': 48, 'grid': 'gauss_legendre', 'w0': 0.3}))
+        EPS, NOCC, Numerics(gwdensity={'nfreq': 48, 'grid': 'gauss_legendre', 'w0_gl': 0.3}))
     assert len(points) == 48
 
 
@@ -102,8 +102,8 @@ def test_outer_grid_choices():
     ({'grid': 'no-such-grid'}, 'no-such-grid'),
     ({'nfreq': 0}, 'positive number'),
     ({'nfreq': max(minimax_supported_sizes()) + 1, 'grid': 'minimax'}, 'supported sizes'),
-    ({'grid': 'gauss_legendre', 'w0': -0.1}, 'positive energy'),
-    ({'grid': 'minimax', 'w0': 0.3}, 'Gauss-Legendre'),
+    ({'grid': 'gauss_legendre', 'w0_gl': -0.1}, 'positive energy'),
+    ({'grid': 'minimax', 'w0_gl': 0.3}, 'Gauss-Legendre'),
 ])
 def test_gwdensity_settings_refused_when_built(settings, words):
     """A bad outer-grid setting fails when the Numerics is built, before any

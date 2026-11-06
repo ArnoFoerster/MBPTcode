@@ -83,9 +83,9 @@ def test_every_choice_moves_the_identity(section, name):
     if (section, name) == ('properties', 'soc_one_electron'):
         other = 'breit-pauli'
     if section == 'gwdensity':
-        other = {'nfreq': 24, 'grid': 'gauss_legendre', 'w0': 0.3}[name]
-        if name == 'w0':
-            # w0 is the Gauss-Legendre scale alone; a minimax grid refuses it
+        other = {'nfreq': 24, 'grid': 'gauss_legendre', 'w0_gl': 0.3}[name]
+        if name == 'w0_gl':
+            # w0_gl is the Gauss-Legendre scale alone; a minimax grid refuses it
             base = base.derive('a Gauss-Legendre outer grid',
                                gwdensity={'grid': 'gauss_legendre'})
     changed = base.derive('test', **{section: {name: other}})

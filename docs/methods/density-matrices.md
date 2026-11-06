@@ -72,7 +72,7 @@ integrals use the existing sections: `imagfreq` for W, and `isdf`,
 there, as for `solve_qp_energy_space_time`). The outer frequency integral of
 G Sigma G reads the `gwdensity` section: `nfreq` (default 34), `grid`
 (`'minimax'`, the default, available only at tabulated sizes up to 34, or
-`'gauss_legendre'`, at any size) and `w0` (the Gauss-Legendre scale, by
+`'gauss_legendre'`, at any size) and `w0_gl` (the Gauss-Legendre scale, by
 default scaled to the gap). The minimax grid is fitted to the particle-hole
 window, so it holds where the window is wide (deep cores, large basis sets,
 small gaps); the mapped Gauss-Legendre grid has one scale and degrades there

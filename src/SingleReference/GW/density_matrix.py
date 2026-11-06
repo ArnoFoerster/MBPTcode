@@ -267,7 +267,7 @@ def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
 
 def outer_frequency_grid(eps, nocc, numerics):
     """(points, weights) on omega >= 0 of the outer integral of the GW
-    density, by `numerics.gwdensity`: 'gauss_legendre' (w0 the gap-scaled
+    density, by `numerics.gwdensity`: 'gauss_legendre' (w0_gl, or the gap-scaled
     one when None) or 'minimax' (a tabulated size, fitted to [gap/2, span]
     of the particle-hole window of `eps`).
 
@@ -278,7 +278,7 @@ def outer_frequency_grid(eps, nocc, numerics):
     orbital energies."""
     cfg = numerics.gwdensity
     if cfg.grid == 'gauss_legendre':
-        w0 = gap_scaled_w0(eps, nocc) if cfg.w0 is None else cfg.w0
+        w0 = gap_scaled_w0(eps, nocc) if cfg.w0_gl is None else cfg.w0_gl
         return gauss_legendre_grid(cfg.nfreq, w0)
     if cfg.grid == 'minimax':
         gap, span, _ = particle_hole_window(eps, nocc)

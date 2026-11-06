@@ -477,15 +477,15 @@ class GWDensityNumerics:
     (`GW.density_matrix`): nfreq points of its quadrature on omega >= 0; grid,
     'minimax' (the default; a tabulated size, fitted to [gap/2, span] of the
     particle-hole window) or 'gauss_legendre' (scaled to the gap, any size);
-    w0, the Gauss-Legendre energy scale, Hartree, None for half the gap
+    w0_gl, the Gauss-Legendre energy scale, Hartree, None for half the gap
     (Gauss-Legendre only: a minimax grid has no free scale).
 
     Refused when built, whichever mode later reads it: a grid outside
     IMAGINARY_FREQUENCY_GRIDS, a non-positive nfreq, a minimax size with no table, a
-    non-positive w0, and a w0 with grid='minimax'."""
+    non-positive w0_gl, and a w0_gl with grid='minimax'."""
     nfreq: int = GW_DENSITY_NFREQ
     grid: str = GW_DENSITY_GRID
-    w0: Optional[float] = None
+    w0_gl: Optional[float] = None
 
     def __post_init__(self):
         if self.grid not in IMAGINARY_FREQUENCY_GRIDS:
@@ -496,13 +496,13 @@ class GWDensityNumerics:
         if self.grid == 'minimax' and self.nfreq not in minimax_supported_sizes():
             raise ValueError(f'nfreq={self.nfreq} has no tabulated minimax grid; '
                              f'supported sizes: {minimax_supported_sizes()}')
-        if self.w0 is not None:
+        if self.w0_gl is not None:
             if self.grid == 'minimax':
-                raise ValueError(f"w0={self.w0!r} is the Gauss-Legendre scale; a "
+                raise ValueError(f"w0_gl={self.w0_gl!r} is the Gauss-Legendre scale; a "
                                  "minimax grid is fitted to the particle-hole "
                                  "window and has none (grid='minimax')")
-            if not self.w0 > 0:
-                raise ValueError(f'w0={self.w0!r}: a positive energy, Hartree')
+            if not self.w0_gl > 0:
+                raise ValueError(f'w0_gl={self.w0_gl!r}: a positive energy, Hartree')
 
 
 @dataclass(frozen=True)
