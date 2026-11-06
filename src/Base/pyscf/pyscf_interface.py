@@ -229,6 +229,17 @@ def spin_index(spin_channel):
     return 0 if spin_channel == 'alpha' else 1
 
 
+def get_spin_factor(spin_mode):
+    """The number of spin channels one computed channel stands for: 2 for
+    'restricted' (one spatial channel carries both spins: the spatial density
+    sums two identical channels, and the restricted screening amplitudes
+    restore their sqrt(2) in every term quadratic in them), 1 for
+    'unrestricted' (each channel is its own)."""
+    if spin_mode not in ('restricted', 'unrestricted'):
+        raise ValueError(f"spin_mode must be 'restricted' or 'unrestricted', "
+                         f"got {spin_mode!r}")
+    return 2.0 if spin_mode == 'restricted' else 1.0
+
 
 def require_restricted(mf, who):
     """Refuse an unrestricted (UHF/UKS) reference on a restricted-only route."""

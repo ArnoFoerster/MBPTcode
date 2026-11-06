@@ -10,6 +10,7 @@ from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
 from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_density_fitting_coefficients,
+    get_spin_factor,
     get_two_electron_integrals_chemist,
     require_gas_phase_ground_state,
 )
@@ -23,9 +24,6 @@ from src.SingleReference.GW.imaginary_axis import (
     self_energy_matrix_imaginary_axis)
 from src.SingleReference.GW.space_time import self_energy_matrix_space_time
 from src.Base.numerics.numerics import required_numerics
-
-#: The restricted spin sum: the spatial density is twice each channel's.
-SPIN_SUM = 2.0
 
 MODES = ('casida', 'imagfrequency', 'space-time')
 RELAXATIONS = ('none', 'dyson', 'zvector')
@@ -64,6 +62,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
 
     def __init__(self, eps, df_coeff=None, eri_chemist=None, block_size=DEFAULT_BLOCK_SIZE):
         self.spin_mode = 'restricted'
+        self.spin_factor = get_spin_factor(self.spin_mode)
         self.block_size = block_size
         self.eps = eps
         self.df_coeff = df_coeff
@@ -103,7 +102,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
     def compute_unrelaxed_blocks(self, nocc, mf, mol, polarizability='RPA', omega=None, X=None, Y=None):
         """
         Per-channel MO blocks (dgamma_oo, dgamma_ov, dgamma_vv) of the unrelaxed GW density
-        correction; the spatial density is SPIN_SUM times these.
+        correction; the spatial density is `get_spin_factor` times these.
 
         The ov block includes the static term (`static_ov_term`), so on HF it is purely dynamic.
         """
@@ -125,17 +124,16 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         t_ic = w_ic / den_ic
         t_ak = w_ak / den_ak
 
-        # get_chi_a builds the restricted w without its sqrt(2); the restricted
-        # self-energy restores it with a prefactor 2 (SelfEnergySolver._spin,
-        # GW/self_energy.py), and so do the w-quadratic terms here. The static
-        # term below is already per channel and takes no such factor.
-        w_norm = 2.0
-        dgamma_oo = -w_norm * np.einsum('sic,sjc->ij', t_ic, t_ic)
-        dgamma_vv = w_norm * np.einsum('sak,sbk->ab', t_ak, t_ak)
+        # get_chi_a builds the restricted w without its sqrt(2); the
+        # w-quadratic terms restore it with the spin factor, as the restricted
+        # self-energy does (SelfEnergySolver._spin, GW/self_energy.py). The
+        # static term below is already per channel and takes no such factor.
+        dgamma_oo = -self.spin_factor * np.einsum('sic,sjc->ij', t_ic, t_ic)
+        dgamma_vv = self.spin_factor * np.einsum('sak,sbk->ab', t_ak, t_ak)
 
         term1 = np.einsum('sik,sbk->ib', w_ik, t_ak)
         term2 = np.einsum('sic,sbc->ib', t_ic, w_bc)
-        dgamma_ov = (w_norm * (term1 + term2) / (ei[:, None] - ea[None, :])
+        dgamma_ov = (self.spin_factor * (term1 + term2) / (ei[:, None] - ea[None, :])
                      + static_ov_term(mf, mol, eps, nocc))
         return dgamma_oo, dgamma_ov, dgamma_vv
 
@@ -181,6 +179,8 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
 
     mol = mol if mol is not None else mf.mol
     nocc = mol.nelectron // 2
+    # the spatial density sums the channels: restricted, so twice the one
+    spin_factor = get_spin_factor('restricted')
     eps = get_orbital_energies(mf, representation='spatial')
     nmo = len(eps)
 
@@ -195,7 +195,7 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
         else:
             blocks = space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics,
                                                  auxbasis=auxbasis, screen_r_cut=screen_r_cut)
-    dgamma_oo, dgamma_ov, dgamma_vv = (SPIN_SUM * block for block in blocks)
+    dgamma_oo, dgamma_ov, dgamma_vv = (spin_factor * block for block in blocks)
 
     mo = mf.mo_coeff
     if relaxation == 'none':
