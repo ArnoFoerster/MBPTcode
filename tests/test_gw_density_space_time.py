@@ -1,6 +1,6 @@
 """The GW density on the space-time route (mode='space-time', N^3).
 
-- `correlation_self_energy_matrix_space_time`: the full MO Sigma_c,pq(mu + i w)
+- `self_energy_matrix_space_time`: the full MO Sigma_c,pq(mu + i w)
   of the space-time QP route on any query frequencies; its diagonal at the
   Pade nodes is the QP route's `_sigma_mo_diagonal` on the same factors.
 - No ISDF grid (a bare Numerics()): the exception `separable_factors` raises.
@@ -38,7 +38,7 @@ from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.SingleReference.GW import space_time
 from src.SingleReference.GW.density_matrix import compute_gw_density_matrix
 from src.SingleReference.GW.space_time import (
-    correlation_self_energy_matrix_space_time, separable_factors)
+    self_energy_matrix_space_time, separable_factors)
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 from tests.isdf_test_grid import g1_numerics
 from tests.gw_density_routes import AUXBASIS, fitted, water
@@ -57,7 +57,7 @@ def test_matrix_diagonal_matches_qp(hf):
     nocc = mol.nelectron // 2
     numerics = g1_numerics(mf)
     pade = pade_nodes(numerics.quadrature)
-    sigma, mu = correlation_self_energy_matrix_space_time(mf, mol, nocc, pade, numerics)
+    sigma, mu = self_energy_matrix_space_time(mf, mol, nocc, pade, numerics)
 
     eps = get_orbital_energies(mf, representation='spatial')
     q = numerics.quadrature
@@ -117,7 +117,7 @@ def test_smeared_refused(hf):
     smeared = copy.copy(hf)
     smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
     with pytest.raises(NotImplementedError, match='T = 0'):
-        correlation_self_energy_matrix_space_time(
+        self_energy_matrix_space_time(
             smeared, smeared.mol, 5, np.array([0.5]), Numerics())
 
 

@@ -55,7 +55,7 @@ GW_DENSITY_NFREQ = 34
 GW_DENSITY_GRID = 'minimax'
 
 # The Lorentzian fit of W_c(i w') on the W grid of the GW density's
-# imaginary-frequency Sigma (`GW.imaginary_axis.self_energy_matrix_imaginary_axis`):
+# imaginary-frequency Sigma (`GW.imaginary_axis.fitted_self_energy_matrix_imaginary_axis`):
 # one pole 2 Omega/(w'^2 + Omega^2) per W-grid point, the Omega log-spaced over
 # [LOW * gap, HIGH * span] of the particle-hole window, and a Tikhonov
 # regularization relative to the largest singular value squared of the

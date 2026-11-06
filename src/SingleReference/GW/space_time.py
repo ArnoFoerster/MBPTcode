@@ -904,8 +904,8 @@ def solve_qp_energy_space_time(mf, mol, nocc, p_state, numerics=None,
                       after_solve=shift_after_solve(eps_anchor))
 
 
-def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numerics,
-                                              auxbasis=None, screen_r_cut=None):
+def self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numerics,
+                                  auxbasis=None, screen_r_cut=None):
     """(sigma, mu): the full MO-basis correlation self-energy
     Sigma_c,pq(mu + i w) on `query_freqs` (w >= 0), shape (nquery, nmo, nmo),
     per spin, and mu the particle-hole midpoint it is centred on.
@@ -918,7 +918,7 @@ def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numeri
     `self_energy_matrix_imaginary_time` with `query_freqs` as its output axis
     and C^T Sigma C. At the Pade nodes its diagonal is the QP route's.
     """
-    where = 'correlation_self_energy_matrix_space_time'
+    where = 'self_energy_matrix_space_time'
     require_gas_phase_ground_state(mf, where, mol=mol)
     q = numerics.quadrature
     tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None

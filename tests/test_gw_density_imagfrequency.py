@@ -2,7 +2,7 @@
 
 - The full-matrix correlation self-energy Sigma_c,pq(mu + i w): its pair
   weights w^m_pq are the QP route's (their diagonal under the plain W-grid
-  quadrature is `self_energy_imaginary_axis`'s Sigma_pp); its inner integral
+  quadrature is `self_energy_diagonal_imaginary_axis`'s Sigma_pp); its inner integral
   is a Tikhonov-regularized Lorentzian fit of W_c on the W grid convolved
   exactly with G (the one-pole kernel against scipy quad), and it matches the
   Sigma summed over the Casida RPA poles.
@@ -106,8 +106,8 @@ from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
                                                    compute_gw_density_matrix,
                                                    outer_frequency_grid)
 from src.SingleReference.GW.imaginary_axis import (
-    correlation_self_energy_matrix_imaginary_axis, one_pole_convolution,
-    screened_pair_weights, self_energy_imaginary_axis)
+    self_energy_matrix_imaginary_axis, one_pole_convolution,
+    screened_pair_weights, self_energy_diagonal_imaginary_axis)
 from tests.gw_density_routes import converged, fitted, mo_dgamma, water
 
 TOL = 1e-5
@@ -142,7 +142,7 @@ def reference(request, hf):
 
 def test_pair_weights_diagonal_matches_qp_sigma(hf):
     """screened_pair_weights is the QP convolution's weight: its diagonal p = q,
-    under the plain quadrature, is self_energy_imaginary_axis's Sigma_pp."""
+    under the plain quadrature, is self_energy_diagonal_imaginary_axis's Sigma_pp."""
     mf = hf
     mol = mf.mol
     nocc = mol.nelectron // 2
@@ -160,7 +160,7 @@ def test_pair_weights_diagonal_matches_qp_sigma(hf):
         g = 1.0 / (1j * (query[:, None] + wk) - em) + 1.0 / (1j * (query[:, None] - wk) - em)
         full += weights[k] * np.einsum('qm,mpr->qpr', g, screened_pair_weights(coeff, W[k]))
     full *= -1.0 / (2.0 * np.pi)
-    err = max(np.abs(full[:, p, p] - self_energy_imaginary_axis(
+    err = max(np.abs(full[:, p, p] - self_energy_diagonal_imaginary_axis(
         coeff, em, nocc, p, points, weights, W, query)).max() for p in range(len(eps)))
     print(f'plain-quadrature diagonal vs QP Sigma_pp (5 points): max |diff| {err:.2e}')
     assert err < 1e-12
@@ -192,7 +192,7 @@ def test_fitted_sigma_matches_casida_poles(reference):
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
     points, _ = outer_frequency_grid(eps, nocc, Numerics())
-    sigma, mu = correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, points, Numerics())
+    sigma, mu = self_energy_matrix_imaginary_axis(mf, mol, nocc, points, Numerics())
     solver = GWDensityMatrixSolver(
         eps, df_coeff=get_density_fitting_coefficients(mol, mf, representation='spatial'))
     omega, X, Y = solver.build_screening(nocc)

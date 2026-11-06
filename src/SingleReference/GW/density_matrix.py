@@ -20,8 +20,8 @@ from src.SingleReference.DensityMatrix.density_matrix import (
     relaxation_numerics,
 )
 from src.SingleReference.GW.imaginary_axis import (
-    correlation_self_energy_matrix_imaginary_axis)
-from src.SingleReference.GW.space_time import correlation_self_energy_matrix_space_time
+    self_energy_matrix_imaginary_axis)
+from src.SingleReference.GW.space_time import self_energy_matrix_space_time
 from src.Base.numerics.numerics import required_numerics
 
 #: The restricted spin sum: the spatial density is twice each channel's.
@@ -242,11 +242,10 @@ def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True):
 def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
     """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW on the
     imaginary axis: the dynamic blocks of the full Sigma_c,pq(mu + i w)
-    (`correlation_self_energy_matrix_imaginary_axis`, already per spin, so no
+    (`self_energy_matrix_imaginary_axis`, already per spin, so no
     w-normalization) on the outer grid, plus the closed-form static ov term."""
     points, weights = outer_frequency_grid(eps, nocc, numerics)
-    sigma, mu = correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, points,
-                                                              numerics)
+    sigma, mu = self_energy_matrix_imaginary_axis(mf, mol, nocc, points, numerics)
     oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
     return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
 
@@ -254,11 +253,11 @@ def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
 def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
                                 screen_r_cut=None):
     """`imagfrequency_unrelaxed_blocks` on the space-time route's full
-    Sigma_c,pq(mu + i w) (`correlation_self_energy_matrix_space_time`, per
+    Sigma_c,pq(mu + i w) (`self_energy_matrix_space_time`, per
     spin): separable factors on numerics.isdf's grid and the QP route's
     tau <-> omega transforms."""
     points, weights = outer_frequency_grid(eps, nocc, numerics)
-    sigma, mu = correlation_self_energy_matrix_space_time(
+    sigma, mu = self_energy_matrix_space_time(
         mf, mol, nocc, points, numerics, auxbasis=auxbasis,
         screen_r_cut=screen_r_cut)
     oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
