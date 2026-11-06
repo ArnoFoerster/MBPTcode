@@ -13,8 +13,7 @@
   comparison, per relaxation on all three routes, is in test_gw_density_none,
   test_gw_density_dyson and test_gw_density_zvector.
 - The fit's regularization: lambda 1e-10 -> 1e-8 moves Delta gamma < 1e-6.
-- Refusals: a polarizability other than RPA, df=False, an environment, no
-  numerics, a thermally smeared mean field, an unrestricted reference.
+- Refusals are in test_gw_density_keywords.
 
 - The default outer grid (minimax 34) reproduces 'casida' to 1e-6 on HBr,
   the widest particle-hole window of the outer-grid study, where
@@ -70,7 +69,6 @@ largest tabulated size, reaches the floor everywhere at the cost of minimax
 route alike), so it is the default. Raising the W grid to minimax 34 moves
 the floor by < 1e-8 (H2S PBE0 8.5e-9 -> 2.0e-9).
 """
-import copy
 import os
 import sys
 
@@ -81,7 +79,6 @@ import pytest
 from pyscf import dft, gto, scf
 from scipy.integrate import quad
 
-from src.Base.environment_seam import attach_environment
 from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
 from src.Base.numerics.numerics import Numerics
 from src.Base.orbital_spaces import particle_hole_window
@@ -96,36 +93,9 @@ from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
 from src.SingleReference.GW.imaginary_axis import (
     correlation_self_energy_matrix_imaginary_axis, one_pole_convolution,
     screened_pair_weights, self_energy_imaginary_axis)
-from src.environments.solvent_screening import SolventScreening
-from tests.molecules import WATER
+from tests.gw_density_routes import converged, fitted, mo_dgamma, water
 
-AUXBASIS = 'cc-pvdz-ri'
 TOL = 1e-5
-
-
-def water(basis='cc-pvdz'):
-    return gto.M(atom=WATER, basis=basis, verbose=0)
-
-
-def tight(mf):
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
-    return mf.run()
-
-
-def fitted(mf):
-    return tight(mf.density_fit(auxbasis=AUXBASIS))
-
-
-def mo_dgamma(mf, dm):
-    """C^T S (dm - gamma_mf) S C: the MO-basis density correction."""
-    S = mf.mol.intor('int1e_ovlp')
-    C = mf.mo_coeff
-    return C.T @ S @ (dm - mf.make_rdm1()) @ S @ C
-
-
-def report(name, ok, detail=''):
-    print(f"{name}: {'OK' if ok else 'FAIL'} {detail}")
-    return ok
 
 
 def block_errors(mf, relaxation, numerics=None):
@@ -143,9 +113,22 @@ def block_errors(mf, relaxation, numerics=None):
             np.abs(casida).max())
 
 
-def check_pair_weights_diagonal_matches_qp_sigma(mf):
+@pytest.fixture(scope='module')
+def hf():
+    return fitted(scf.RHF(water()))
+
+
+@pytest.fixture(scope='module', params=['HF', 'PBE0'])
+def reference(request, hf):
+    """The density-fitted water mean field of each reference, with its name."""
+    mf = hf if request.param == 'HF' else fitted(dft.RKS(water(), xc='pbe0'))
+    return request.param, mf
+
+
+def test_pair_weights_diagonal_matches_qp_sigma(hf):
     """screened_pair_weights is the QP convolution's weight: its diagonal p = q,
     under the plain quadrature, is self_energy_imaginary_axis's Sigma_pp."""
+    mf = hf
     mol = mf.mol
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
@@ -164,11 +147,11 @@ def check_pair_weights_diagonal_matches_qp_sigma(mf):
     full *= -1.0 / (2.0 * np.pi)
     err = max(np.abs(full[:, p, p] - self_energy_imaginary_axis(
         coeff, em, nocc, p, points, weights, W, query)).max() for p in range(len(eps)))
-    return report('pair weights: plain-quadrature diagonal == QP Sigma_pp (5 points)',
-                  err < 1e-12, f'(max |diff| {err:.2e})')
+    print(f'plain-quadrature diagonal vs QP Sigma_pp (5 points): max |diff| {err:.2e}')
+    assert err < 1e-12
 
 
-def check_one_pole_kernel():
+def test_one_pole_kernel():
     """-(1/2pi) int G(i(w + w')) 2 Om/(w'^2 + Om^2) dw' against scipy quad."""
     worst = 0.0
     for e in (0.5, -0.3, 2.0, -7.0):
@@ -182,13 +165,14 @@ def check_one_pole_kernel():
                                     epsabs=1e-13, epsrel=1e-12)[0]) / (2 * np.pi)
                 ana = one_pole_convolution(np.array([e]), np.array([om]), w)[0, 0, 0]
                 worst = max(worst, abs(num - ana) / abs(ana))
-    return report('one-pole kernel == direct integral (36 cases)', worst < 1e-9,
-                  f'(max rel diff {worst:.2e})')
+    print(f'one-pole kernel vs direct integral (36 cases): max rel diff {worst:.2e}')
+    assert worst < 1e-9
 
 
-def check_fitted_sigma_matches_casida_poles(mf, name):
+def test_fitted_sigma_matches_casida_poles(reference):
     """The fitted Sigma_pq(mu + i w) on the outer nodes against the exact
     sum over the Casida RPA poles of the same screening."""
+    name, mf = reference
     mol = mf.mol
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
@@ -204,92 +188,38 @@ def check_fitted_sigma_matches_casida_poles(mf, name):
         1.0 / (1j * x - (eps - mu)[None, :] + shift[None, :] * omega[:, None]))
         for x in points])
     err = np.abs(sigma - exact).max()
-    return report(f'{name}: fitted Sigma_pq == Casida-pole Sigma_pq on the outer grid',
-                  err < 1e-4, f'(max |diff| {err:.2e}, max |Sigma| {np.abs(exact).max():.2e})')
+    print(f'{name}: fitted vs Casida-pole Sigma_pq on the outer grid: max |diff| '
+          f'{err:.2e}, max |Sigma| {np.abs(exact).max():.2e}')
+    assert err < 1e-4
 
 
-def check_non_df_mean_field(hf_exact):
-    errs, scale = block_errors(hf_exact, 'none')
-    ok = all(e <= TOL for e in errs.values())
-    return report("RHF without density fitting: imagfrequency == casida per block",
-                  ok, '(' + ', '.join(f'{k} {e:.2e}' for k, e in errs.items()) + ')')
+def test_non_df_mean_field():
+    """Without density fitting, imagfrequency == casida per block."""
+    hf_exact = converged(scf.RHF(water()))
+    errs, _ = block_errors(hf_exact, 'none')
+    print('RHF without density fitting: '
+          + ', '.join(f'{k} {e:.2e}' for k, e in errs.items()))
+    assert all(e <= TOL for e in errs.values()), errs
 
 
-def check_tikhonov_robustness(mf, name):
+@pytest.mark.parametrize('relaxation', ['none', 'dyson'])
+def test_tikhonov_robustness(reference, relaxation):
     """The density moves < 1e-6 between the fit's lambda = 1e-10 and 1e-8."""
-    def dgamma(relaxation):
+    name, mf = reference
+
+    def dgamma():
         return mo_dgamma(mf, compute_gw_density_matrix(
             mf, mode='imagfrequency', relaxation=relaxation, numerics=Numerics()))
-    ok = True
-    for relaxation in ('none', 'dyson'):
-        base = dgamma(relaxation)
-        saved = imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV
-        imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV = 1e-8
-        try:
-            moved = dgamma(relaxation)
-        finally:
-            imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV = saved
-        err = np.abs(moved - base).max()
-        ok &= report(f'{name} {relaxation!r}: lambda 1e-10 -> 1e-8 moves dgamma < 1e-6',
-                     err < 1e-6, f'(max |diff| {err:.2e})')
-    return ok
-
-
-def raises(exc, words, call):
+    base = dgamma()
+    saved = imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV
+    imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV = 1e-8
     try:
-        call()
-    except exc as err:
-        if all(w in str(err) for w in words):
-            return True
-        print(f'   wrong message: {err}')
-        return False
-    except Exception as err:  # noqa: BLE001 -- report the wrong type
-        print(f'   wrong exception: {type(err).__name__}: {err}')
-        return False
-    return False
-
-
-def check_refusals(hf):
-    numerics = Numerics()
-
-    def imag(mf, **kw):
-        kw.setdefault('numerics', numerics)
-        return lambda: compute_gw_density_matrix(mf, mode='imagfrequency',
-                                                 relaxation='none', **kw)
-    ok = report("polarizability='BSE' refused", raises(
-        NotImplementedError, ['RPA'], imag(hf, polarizability='BSE')))
-    ok &= report('df=False refused', raises(
-        NotImplementedError, ['df=False'], imag(hf, df=False)))
-    solvated = attach_environment(copy.copy(hf),
-                                  SolventScreening(hf.mol, eps=2.0, eps_static=2.0))
-    ok &= report('an environment refused', raises(
-        NotImplementedError, ['environment'], imag(solvated)))
-    ok &= report('missing numerics refused', raises(
-        TypeError, ['Numerics'], imag(hf, numerics=None)))
-    smeared = copy.copy(hf)
-    smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
-    ok &= report('a thermally smeared mean field refused', raises(
-        NotImplementedError, ['T = 0'], imag(smeared)))
-    ok &= report('UHF refused', raises(
-        NotImplementedError, ['restricted'], imag(scf.UHF(hf.mol))))
-    return ok
-
-
-def run():
-    hf = fitted(scf.RHF(water()))
-    pbe0 = fitted(dft.RKS(water(), xc='pbe0'))
-    hf_exact = tight(scf.RHF(water()))
-    results = [check_pair_weights_diagonal_matches_qp_sigma(hf), check_one_pole_kernel()]
-    for mf, name in ((hf, 'HF'), (pbe0, 'PBE0')):
-        results.append(check_fitted_sigma_matches_casida_poles(mf, name))
-        results.append(check_tikhonov_robustness(mf, name))
-    results.append(check_non_df_mean_field(hf_exact))
-    results.append(check_refusals(hf))
-    return all(results)
-
-
-def test_gw_density_imagfrequency():
-    assert run()
+        moved = dgamma()
+    finally:
+        imaginary_axis.GW_DENSITY_W_FIT_TIKHONOV = saved
+    err = np.abs(moved - base).max()
+    print(f'{name} {relaxation!r}: lambda 1e-10 -> 1e-8 moves dgamma {err:.2e}')
+    assert err < 1e-6
 
 
 #: HBr/cc-pVDZ, span/gap 881 (HF) and 1529 (PBE0): the widest window of the
@@ -310,6 +240,4 @@ def test_default_outer_grid_on_a_wide_window(reference):
 
 
 if __name__ == '__main__':
-    ok = run()
-    print("\nALL PASSED" if ok else "\nFAILURES DETECTED")
-    sys.exit(0 if ok else 1)
+    sys.exit(pytest.main([__file__, '-s', '-v']))

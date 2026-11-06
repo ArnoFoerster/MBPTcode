@@ -27,6 +27,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import pytest
 from pyscf import gto, scf
 
 from src.Base.factorization.sliced_factors import unpack_factors
@@ -40,28 +41,18 @@ from src.SingleReference.GW.space_time import (
     correlation_self_energy_matrix_space_time, separable_factors)
 from src.SingleReference.LinearResponse.space_time import chi0_imaginary_frequency
 from tests.isdf_test_grid import g1_numerics
-from tests.molecules import WATER
-
-AUXBASIS = 'cc-pvdz-ri'
-
-def water(basis='cc-pvdz'):
-    return gto.M(atom=WATER, basis=basis, verbose=0)
+from tests.gw_density_routes import AUXBASIS, fitted, water
 
 
-def fitted(mf):
-    mf = mf.density_fit(auxbasis=AUXBASIS)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
-    return mf.run()
+@pytest.fixture(scope='module')
+def hf():
+    return fitted(scf.RHF(water()))
 
 
-def report(name, ok, detail=''):
-    print(f"{name}: {'OK' if ok else 'FAIL'} {detail}")
-    return ok
-
-
-def check_matrix_diagonal_matches_qp(mf):
+def test_matrix_diagonal_matches_qp(hf):
     """The diagonal of the full Sigma_c,pq at the Pade nodes is the QP
     route's `_sigma_mo_diagonal` for every state on the same factors."""
+    mf = hf
     mol = mf.mol
     nocc = mol.nelectron // 2
     numerics = g1_numerics(mf)
@@ -83,84 +74,52 @@ def check_matrix_diagonal_matches_qp(mf):
         pade, mu, states, X_ao=X_ao, coords=coords)
     diag = np.einsum('wpp->pw', sigma)
     err = np.abs(diag - qp).max()
-    ok = (sigma.shape == (len(pade), len(eps), len(eps))
-          and mu == particle_hole_window(eps, nocc)[2] and err < 1e-10)
-    return report('Sigma_c,pq diagonal at the Pade nodes == _sigma_mo_diagonal',
-                  ok, f'(max |diff| {err:.2e}, max |Sigma| {np.abs(qp).max():.2e})')
+    print(f'max |diag Sigma_c,pq - _sigma_mo_diagonal| {err:.2e}, '
+          f'max |Sigma| {np.abs(qp).max():.2e}')
+    assert sigma.shape == (len(pade), len(eps), len(eps))
+    assert mu == particle_hole_window(eps, nocc)[2]
+    assert err < 1e-10
 
 
-def check_space_time_needs_an_isdf_grid(mf):
+def test_space_time_needs_an_isdf_grid(hf):
     """A Numerics() naming no ISDF grid: the exception separable_factors
     raises, with its message."""
-    try:
-        separable_factors(mf, mf.mol, numerics=Numerics())
-    except Exception as err:  # noqa: BLE001 -- whatever the factors raise
-        expected = err
-    else:
-        return report('separable_factors refuses Numerics() without a grid', False)
-    try:
-        compute_gw_density_matrix(mf, mode='space-time', relaxation='none',
+    with pytest.raises(Exception) as expected:
+        separable_factors(hf, hf.mol, numerics=Numerics())
+    with pytest.raises(Exception) as got:
+        compute_gw_density_matrix(hf, mode='space-time', relaxation='none',
                                   numerics=Numerics())
-    except Exception as err:  # noqa: BLE001 -- compared below
-        ok = type(err) is type(expected) and str(err) == str(expected)
-        return report('space-time without an ISDF grid raises as separable_factors',
-                      ok, f'({type(err).__name__}: {err})')
-    return report('space-time without an ISDF grid raises as separable_factors', False,
-                  '(nothing raised)')
+    print(f'{type(got.value).__name__}: {got.value}')
+    assert type(got.value) is type(expected.value)
+    assert str(got.value) == str(expected.value)
 
 
-def check_open_shell_refused():
+def test_open_shell_refused():
     """An ROHF reference (OH radical): mode='space-time' raises the named
     closed-shell error mode='imagfrequency' raises."""
     mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, verbose=0)
     rohf = scf.ROHF(mol).density_fit(auxbasis=AUXBASIS).run()
-
-    def raised(mode, numerics):
-        try:
-            compute_gw_density_matrix(rohf, mode=mode, relaxation='none',
-                                      numerics=numerics)
-        except Exception as err:  # noqa: BLE001 -- compared below
-            return err
-        return None
-    imag = raised('imagfrequency', Numerics())
-    st = raised('space-time', g1_numerics(rohf))
-    ok = (isinstance(imag, NotImplementedError) and type(st) is type(imag)
-          and 'closed-shell' in str(st))
-    return report('ROHF refused on space-time as on imagfrequency', ok,
-                  f'({type(st).__name__}: {st})')
+    with pytest.raises(NotImplementedError) as imag:
+        compute_gw_density_matrix(rohf, mode='imagfrequency', relaxation='none',
+                                  numerics=Numerics())
+    with pytest.raises(Exception) as st:
+        compute_gw_density_matrix(rohf, mode='space-time', relaxation='none',
+                                  numerics=g1_numerics(rohf))
+    print(f'{type(st.value).__name__}: {st.value}')
+    assert type(st.value) is type(imag.value)
+    assert 'closed-shell' in str(st.value)
 
 
-def check_smeared_refused(hf):
+def test_smeared_refused(hf):
     """The matrix Sigma itself refuses a thermally smeared RHF, before any
     ISDF work (a bare Numerics() has no grid, so reaching it would raise the
     other error)."""
-    name = 'smeared RHF refused by the space-time matrix Sigma'
     smeared = copy.copy(hf)
     smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
-    try:
+    with pytest.raises(NotImplementedError, match='T = 0'):
         correlation_self_energy_matrix_space_time(
             smeared, smeared.mol, 5, np.array([0.5]), Numerics())
-    except NotImplementedError as err:
-        return report(name, 'T = 0' in str(err), f'({err})')
-    except Exception as err:  # noqa: BLE001 -- wrong type
-        return report(name, False, f'({type(err).__name__}: {err})')
-    return report(name, False)
-
-
-def run():
-    hf = fitted(scf.RHF(water()))
-    results = [check_matrix_diagonal_matches_qp(hf),
-               check_space_time_needs_an_isdf_grid(hf),
-               check_open_shell_refused(),
-               check_smeared_refused(hf)]
-    return all(results)
-
-
-def test_gw_density_space_time():
-    assert run()
 
 
 if __name__ == '__main__':
-    ok = run()
-    print("\nALL PASSED" if ok else "\nFAILURES DETECTED")
-    sys.exit(0 if ok else 1)
+    sys.exit(pytest.main([__file__, '-s', '-v']))

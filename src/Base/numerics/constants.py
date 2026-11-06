@@ -27,18 +27,19 @@ DF_MO_BLOCK = 200
 # (`GW.imaginary_axis`): its W(i omega) quadrature, minimax by default.
 IMAGFREQ_NFREQ = 20
 
-# Outer imaginary-frequency points of the GW density's dynamic integral
-# (`GW.density_matrix`), on the tabulated minimax grid of the particle-hole
-# window (GW_DENSITY_GRID). Set by an outer-grid study against the Casida
-# route (H2O, NH3, NH3/aug-cc-pVTZ, H2S, C6H6, C10H8, HBr; HF and PBE0;
-# recorded in tests/test_gw_density_imagfrequency.py): what sets the grid is
-# the ratio span/gap of the window, not the system size. Gauss-Legendre 48
-# (the earlier default) holds to 8e-8 up to a ratio of ~60, then degrades in
-# the oo block (deep cores): 1.1e-5 on PBE0 H2S (296), 1.9e-5 on PBE0 HBr
-# (1529). Minimax 24 reaches the fit's floor up to H2S but leaves 8.8e-5 on
-# HBr; minimax 34 reaches it everywhere (<= 1.3e-7), at no measurable extra
-# cost (the W build dominates). 34 is the largest tabulated size: a wider
-# window would need 'gauss_legendre' with many points (HBr: 160 for 1e-7).
+# Defaults of `numerics.gwdensity` (`nfreq`, `grid`), which a run overrides
+# there: the outer imaginary-frequency points of the GW density's dynamic
+# integral (`GW.density_matrix`), on the minimax grid of the particle-hole
+# window. The integrand has structure on every scale from the
+# smallest particle-hole gap to the largest transition energy, so what the
+# grid must resolve is the ratio span/gap of that window, not the size of the
+# system. It grows with deep core levels (heavier atoms), large basis sets
+# and small gaps. A minimax grid is fitted to the window itself and follows
+# it; a mapped Gauss-Legendre grid has a single scale (w0, near the gap) and
+# loses the far end of a wide window, where the deep cores sit. The points
+# are cheap next to the W build, so the default is the largest tabulated
+# minimax size; a window wider than the tables cover needs 'gauss_legendre'
+# with many points.
 GW_DENSITY_NFREQ = 34
 GW_DENSITY_GRID = 'minimax'
 
@@ -47,8 +48,10 @@ GW_DENSITY_GRID = 'minimax'
 # one pole 2 Omega/(w'^2 + Omega^2) per W-grid point, the Omega log-spaced over
 # [LOW * gap, HIGH * span] of the particle-hole window, and a Tikhonov
 # regularization relative to the largest singular value squared of the
-# (column-normalized) design matrix. Fixed, not user settings: lambda = 0 is
-# rank-deficient and fragile; 1e-10 vs 1e-8 moves the density < 1e-6.
+# (column-normalized) design matrix. Fixed, not user settings. The poles
+# overlap, so without regularization the fit is rank-deficient and its
+# amplitudes are fragile; the regularization only has to be large enough to
+# fix them, and the density hardly depends on its value beyond that.
 GW_DENSITY_W_FIT_LOW = 0.5
 GW_DENSITY_W_FIT_HIGH = 2.0
 GW_DENSITY_W_FIT_TIKHONOV = 1e-10

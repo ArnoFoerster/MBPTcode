@@ -1,5 +1,4 @@
 import numpy as np
-from pyscf import scf
 
 from src.SingleReference.common.mean_field_operators import mean_field_static_operator
 from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
@@ -12,6 +11,7 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_density_fitting_coefficients,
     get_two_electron_integrals_chemist,
+    require_restricted,
 )
 from src.Base.numerics.constants import (
     DEFAULT_BROADENING_ETA,
@@ -25,9 +25,7 @@ from src.SingleReference.DensityMatrix.density_matrix import (
 from src.SingleReference.GW.imaginary_axis import (
     correlation_self_energy_matrix_imaginary_axis)
 from src.SingleReference.GW.space_time import correlation_self_energy_matrix_space_time
-from src.Base.environment_seam import NoEnvironment, environment_of
 from src.Base.numerics.numerics import required_numerics
-from src.Base.utils.grids.matsubara import beta_from_mf
 
 #: The restricted spin sum: the spatial density is twice each channel's.
 SPIN_SUM = 2.0
@@ -180,36 +178,25 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     for name, value in (('auxbasis', auxbasis), ('screen_r_cut', screen_r_cut)):
         if value is not None and mode != 'space-time':
             raise ValueError(f"{name} is a 'space-time' mode setting; got mode={mode!r}.")
-    if isinstance(mf, scf.uhf.UHF):
-        raise NotImplementedError("compute_gw_density_matrix is currently restricted-spin only.")
-    if mode == 'casida':
-        numerics = relaxation_numerics(relaxation != 'none', numerics,
-                                       'compute_gw_density_matrix')
-    else:
-        numerics = required_numerics(numerics, f"compute_gw_density_matrix mode={mode!r}")
-        _refuse_numerical_mode(mf, mode, polarizability, df)
+    require_restricted(mf, 'compute_gw_density_matrix')
 
     mol = mol if mol is not None else mf.mol
     nocc = nocc if nocc is not None else mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
     nmo = len(eps)
 
-    if mode == 'imagfrequency':
-        blocks = imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics)
-    elif mode == 'space-time':
-        blocks = space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics,
-                                             auxbasis=auxbasis,
-                                             screen_r_cut=screen_r_cut)
+    where = f"compute_gw_density_matrix mode={mode!r}"
+    if mode == 'casida':
+        numerics = relaxation_numerics(relaxation != 'none', numerics, where)
+        blocks = casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability, df, eta)
     else:
-        if df:
-            df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
-            eri_chemist = None
+        numerics = required_numerics(numerics, where)
+        _refuse_casida_only_options(mode, polarizability, df)
+        if mode == 'imagfrequency':
+            blocks = imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics)
         else:
-            df_coeff = None
-            eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-        blocks = GWDensityMatrixSolver(
-            eps, df_coeff=df_coeff, eri_chemist=eri_chemist, eta=eta
-        ).compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability)
+            blocks = space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics,
+                                                 auxbasis=auxbasis, screen_r_cut=screen_r_cut)
     dgamma_oo, dgamma_ov, dgamma_vv = (SPIN_SUM * block for block in blocks)
 
     mo = mf.mo_coeff
@@ -228,8 +215,10 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     return dm_ao
 
 
-def _refuse_numerical_mode(mf, mode, polarizability, df):
-    """The numerical modes' restrictions, each refused by name."""
+def _refuse_casida_only_options(mode, polarizability, df):
+    """Options only the Casida route takes, refused by name on the numerical
+    modes. Their restricted-spin, gas-phase and T = 0 limits are refused by
+    the Sigma builders they call."""
     where = f"compute_gw_density_matrix mode={mode!r}"
     if str(polarizability).upper() != 'RPA':
         raise NotImplementedError(f"{where} screens with RPA only; got "
@@ -237,11 +226,22 @@ def _refuse_numerical_mode(mf, mode, polarizability, df):
     if not df:
         raise NotImplementedError(f"{where} needs a three-index object; df=False "
                                   "(four-centre integrals) is not supported.")
-    if not isinstance(environment_of(mf), NoEnvironment):
-        raise NotImplementedError(f"{where} is gas phase only; mf carries an "
-                                  f"environment ({type(environment_of(mf)).__name__}).")
-    if beta_from_mf(mf) is not None:
-        raise NotImplementedError(f"{where} is T = 0 only; mf is thermally smeared.")
+
+
+def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True,
+                            eta=DEFAULT_BROADENING_ETA):
+    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW from the
+    Casida poles of `polarizability` screening (`GWDensityMatrixSolver`), on
+    the mean field's density fit (df) or on four-centre integrals."""
+    if df:
+        df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+        eri_chemist = None
+    else:
+        df_coeff = None
+        eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+    return GWDensityMatrixSolver(
+        eps, df_coeff=df_coeff, eri_chemist=eri_chemist, eta=eta
+    ).compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability)
 
 
 def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):

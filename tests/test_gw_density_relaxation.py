@@ -1,5 +1,6 @@
-"""The GW density's keywords (`mode`, `relaxation`), its spin factors, its
-static gKS term and the J/K backend of its HF-kernel ('dyson') relaxation.
+"""The GW density's spin factors, its static gKS term and the J/K backend
+of its HF-kernel ('dyson') relaxation. Its keywords are in
+test_gw_density_keywords.
 
 - The static ov term is the HF Fock gradient at the gKS density over the gap:
   <i|Sigma_x - v_xc|a> = F_HF[gamma_KS]_ia, since F_KS_ia = 0.
@@ -22,7 +23,8 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
-from pyscf import dft, gto, scf
+import pytest
+from pyscf import dft, scf
 
 from src.Base import numerical_flags
 from src.Base.numerics.constants import DEFAULT_BROADENING_ETA
@@ -36,38 +38,22 @@ from src.SingleReference.DensityMatrix.density_matrix import hf_kernel_mean_fiel
 from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
                                                     compute_gw_density_matrix,
                                                     static_ov_term)
-from tests.molecules import WATER
-
-AUXBASIS = 'cc-pvdz-ri'
+from tests.gw_density_routes import AUXBASIS, converged, fitted, mo_dgamma, water
 
 
-def water(basis):
-    return gto.M(atom=WATER, basis=basis, verbose=0)
+@pytest.fixture(scope='module')
+def hf_df():
+    return fitted(scf.RHF(water()))
 
 
-def tight(mf):
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
-    return mf.run()
+@pytest.fixture(scope='module')
+def pbe0():
+    return fitted(dft.RKS(water(), xc='pbe0'))
 
 
-def fitted(mf):
-    mf = mf.density_fit(auxbasis=AUXBASIS)
-    return tight(mf)
-
-
-def mo_dgamma(mf, dm):
-    """C^T S (dm - gamma_mf) S C: the MO-basis density correction."""
-    S = mf.mol.intor('int1e_ovlp')
-    C = mf.mo_coeff
-    return C.T @ S @ (dm - mf.make_rdm1()) @ S @ C
-
-
-def report(name, ok, detail=''):
-    print(f"{name}: {'OK' if ok else 'FAIL'} {detail}")
-    return ok
-
-
-def check_static_term_is_hf_fock_gradient(ks):
+def test_static_term_is_hf_fock_gradient(pbe0):
+    """<i|Sigma_x - v_xc|a> / (e_i - e_a) == F_HF[gamma_KS]_ia / (e_i - e_a)."""
+    ks = pbe0
     mol = ks.mol
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(ks, representation='spatial')
@@ -75,13 +61,17 @@ def check_static_term_is_hf_fock_gradient(ks):
     F_hf = C.T @ hf_kernel_mean_field(ks).get_fock(dm=ks.make_rdm1()) @ C
     ref = F_hf[:nocc, nocc:] / (eps[:nocc, None] - eps[None, nocc:])
     got = static_ov_term(ks, mol, eps, nocc)
-    err = np.abs(got - ref).max()
-    return report('static ov term == F_HF[gamma_KS]_ia / (e_i - e_a)',
-                  err < 1e-10 and np.abs(ref).max() > 1e-4,
-                  f'(max |diff| {err:.2e}, max |term| {np.abs(ref).max():.2e})')
+    err, size = np.abs(got - ref).max(), np.abs(ref).max()
+    print(f'static ov term: max |diff| {err:.2e}, max |term| {size:.2e}')
+    assert size > 1e-4, 'the static term vanishes: nothing tested'
+    assert err < 1e-10
 
 
-def check_spin_factor(ks):
+def test_spin_factor(pbe0):
+    """The spatial density is 2x the per-channel blocks; per channel the
+    dynamic ov carries the w-normalization 2, and the static term enters the
+    spatial ov at 2x (not 4x, as before the fix)."""
+    ks = pbe0
     mol = ks.mol
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(ks, representation='spatial')
@@ -103,36 +93,34 @@ def check_spin_factor(ks):
                + np.einsum('sic,sbc->ib', t_ic, w[:, v, v])) / (ei[:, None] - ea[None, :])
 
     total = mo_dgamma(ks, compute_gw_density_matrix(ks, mol, relaxation='none'))
-    ok = True
-    ok &= report('spatial ov == 2 * per-channel ov',
-                 np.allclose(total[o, v], 2 * ov, atol=1e-10, rtol=0))
-    ok &= report('spatial oo == 2 * per-channel oo',
-                 np.allclose(total[o, o], 2 * oo, atol=1e-10, rtol=0))
-    ok &= report('spatial vv == 2 * per-channel vv',
-                 np.allclose(total[v, v], 2 * vv, atol=1e-10, rtol=0))
-    ok &= report('per-channel dynamic ov == 2 * raw-w dynamic ov',
-                 np.allclose(ov - static, 2 * dyn_raw, atol=1e-10, rtol=0))
+    for block, sl, per_channel in (('ov', (o, v), ov), ('oo', (o, o), oo),
+                                   ('vv', (v, v), vv)):
+        assert np.allclose(total[sl], 2 * per_channel, atol=1e-10, rtol=0), \
+            f'spatial {block} != 2 * per-channel {block}'
+    assert np.allclose(ov - static, 2 * dyn_raw, atol=1e-10, rtol=0), \
+        'per-channel dynamic ov != 2 * raw-w dynamic ov'
     static_in_total = total[o, v] - 2 * (2 * dyn_raw)
     err2 = np.abs(static_in_total - 2 * static).max()
     err4 = np.abs(static_in_total - 4 * static).max()
-    ok &= report('static term enters the spatial ov at 2x (not 4x)',
-                 err2 < 1e-10 and err4 > 1e-4,
-                 f'(|vs 2x| {err2:.2e}, |vs 4x| {err4:.2e})')
-    return ok
+    print(f'static term in the spatial ov: |vs 2x| {err2:.2e}, |vs 4x| {err4:.2e}')
+    assert err2 < 1e-10 and err4 > 1e-4
 
 
-def check_dyson_equals_zvector_on_hf(hf):
+def test_dyson_equals_zvector_on_hf_exact_integrals():
+    hf = converged(scf.RHF(water()))
     numerics = Numerics()
     dyson = compute_gw_density_matrix(hf, df=False, relaxation='dyson', numerics=numerics)
     zvec = compute_gw_density_matrix(hf, df=False, relaxation='zvector', numerics=numerics)
     err = np.abs(dyson - zvec).max()
-    return report("HF, exact integrals: 'dyson' == 'zvector'", err < 1e-8,
-                  f'(max |diff| {err:.2e})')
+    print(f"HF, exact integrals: max |'dyson' - 'zvector'| {err:.2e}")
+    assert err < 1e-8
 
 
-def check_dense_eq23(ks):
+def test_dense_eq23():
     """Eq. 23 of the iterated-Dyson paper, real restricted orbitals,
-    spin-summed Delta gamma, solved densely."""
+    spin-summed Delta gamma, solved densely: 'dyson' on PBE0 (water/6-31G,
+    exact integrals) reproduces it and differs from 'zvector'."""
+    ks = converged(dft.RKS(water('6-31g'), xc='pbe0'))
     mol = ks.mol
     nocc = mol.nelectron // 2
     numerics = Numerics()
@@ -162,116 +150,57 @@ def check_dense_eq23(ks):
 
     err = np.abs(x - dyson[o, v]).max()
     gap = np.abs(x - zvec[o, v]).max()
-    ok = report("PBE0: dense Eq. 23 == 'dyson' ov block", err < 1e-7,
-                f'(max |diff| {err:.2e})')
-    ok &= report("PBE0: dense Eq. 23 differs from 'zvector'", gap > 1e-5,
-                 f'(max |diff| {gap:.2e})')
-    return ok
+    print(f"PBE0: max |Eq. 23 - 'dyson'| {err:.2e}, max |Eq. 23 - 'zvector'| {gap:.2e}")
+    assert err < 1e-7, "dense Eq. 23 != 'dyson' ov block"
+    assert gap > 1e-5, "dense Eq. 23 does not differ from 'zvector'"
 
 
-def check_dyson_backend(hf_df):
-    numerics = Numerics()
+def test_dyson_backend(hf_df):
+    """The HF-kernel object keeps the mean field's J/K backend: exact _eri,
+    the DF object, the ISDF J/K; 'dyson' == 'zvector' on density-fitted HF."""
     exact = scf.RHF(hf_df.mol).run()
-    ok = report("HF-kernel object keeps the exact mean field's _eri",
-                hf_kernel_mean_field(exact)._eri is exact._eri)
-    ok &= report('HF-kernel object shares the DF object',
-                hf_kernel_mean_field(hf_df).with_df is hf_df.with_df)
+    assert hf_kernel_mean_field(exact)._eri is exact._eri
+    assert hf_kernel_mean_field(hf_df).with_df is hf_df.with_df
+    numerics = Numerics()
     dyson = compute_gw_density_matrix(hf_df, relaxation='dyson', numerics=numerics)
     zvec = compute_gw_density_matrix(hf_df, relaxation='zvector', numerics=numerics)
     err = np.abs(dyson - zvec).max()
-    ok &= report("HF, density fitted: 'dyson' == 'zvector'", err < 1e-8,
-                 f'(max |diff| {err:.2e})')
+    print(f"HF, density fitted: max |'dyson' - 'zvector'| {err:.2e}")
+    assert err < 1e-8
 
     # An ISDF mean field: the HF kernel is its own interpolated J - K/2.
     mol = hf_df.mol
     counts, n_start = resolve_isdf_grid('G1', 'cc-pvdz', ['O', 'H'], auxbasis=AUXBASIS)
     isdf = isdf_jk(scf.RHF(mol), auxbasis=AUXBASIS, counts=counts, n_start=n_start)
-    tight(isdf)
+    converged(isdf)
     hf = hf_kernel_mean_field(isdf)
-    ok &= report('HF-kernel object shares the ISDF J/K object', hf.with_df is isdf.with_df)
+    assert hf.with_df is isdf.with_df
     rng = np.random.default_rng(7)
     dm = rng.standard_normal((mol.nao, mol.nao))
     dm = dm + dm.T
     vj, vk = isdf.get_jk(mol, dm, hermi=1)
     err = np.abs(hf.gen_response(hermi=1)(dm) - (vj - 0.5 * vk)).max()
-    ok &= report('ISDF HF-kernel response == J - K/2 of the ISDF mean field', err < 1e-10,
-                 f'(max |diff| {err:.2e})')
-    return ok
+    print(f'ISDF: max |HF-kernel response - (J - K/2)| {err:.2e}')
+    assert err < 1e-10
 
 
-def check_dyson_on_pbe_flags_or_converges(pbe):
+def test_dyson_on_pbe_flags_or_converges():
+    """On PBE (no exact exchange) the 'dyson' solve either flags itself not
+    converged or converges to a finite density with Tr(gamma S) = N."""
+    pbe = fitted(dft.RKS(water(), xc='pbe'))
     flags = []
     with numerical_flags.collecting(flags):
         dm = compute_gw_density_matrix(pbe, relaxation='dyson', numerics=Numerics())
     names = [f['flag'] for f in flags]
     if 'orbital_response_not_converged' in names:
-        return report("PBE 'dyson': solve flagged not converged", True)
+        print("PBE 'dyson': solve flagged not converged")
+        return
     n = np.trace(dm @ pbe.mol.intor('int1e_ovlp'))
-    return report("PBE 'dyson': converged, finite, Tr(gamma S) = N",
-                  not names and np.all(np.isfinite(dm))
-                  and abs(n - pbe.mol.nelectron) < 1e-6,
-                  f'(flags {names}, N {n:.10f})')
-
-
-def raises(exc, words, call):
-    try:
-        call()
-    except exc as err:
-        return all(w in str(err) for w in words)
-    return False
-
-
-def check_keyword_values(hf):
-    numerics = Numerics()
-    ok = report("relaxation='Dyson' == 'dyson'", np.array_equal(
-        compute_gw_density_matrix(hf, relaxation='Dyson', numerics=numerics),
-        compute_gw_density_matrix(hf, relaxation='dyson', numerics=numerics)))
-    ok &= report("relaxation='relaxed' refused with the choices", raises(
-        ValueError, ['none', 'dyson', 'zvector'],
-        lambda: compute_gw_density_matrix(hf, relaxation='relaxed', numerics=numerics)))
-    ok &= report("mode='casida2' refused with the choices", raises(
-        ValueError, ['casida', 'imagfrequency', 'space-time'],
-        lambda: compute_gw_density_matrix(hf, mode='casida2', numerics=numerics)))
-    dm = compute_gw_density_matrix(hf, mode='casida', relaxation='none', numerics=None)
-    ok &= report("mode='casida', relaxation='none' runs without numerics",
-                 dm.shape == (hf.mol.nao, hf.mol.nao))
-    ok &= report("auxbasis with mode='casida' refused", raises(
-        ValueError, ['auxbasis'],
-        lambda: compute_gw_density_matrix(hf, mode='casida', auxbasis=AUXBASIS,
-                                          numerics=numerics)))
-    ok &= report("screen_r_cut with mode='casida' refused", raises(
-        ValueError, ['screen_r_cut'],
-        lambda: compute_gw_density_matrix(hf, mode='casida', screen_r_cut=5.0,
-                                          numerics=numerics)))
-    ok &= report('relax= is gone', raises(
-        TypeError, [], lambda: compute_gw_density_matrix(hf, relax=True, numerics=numerics)))
-    return ok
-
-
-def run():
-    hf_df = fitted(scf.RHF(water('cc-pvdz')))
-    pbe0 = fitted(dft.RKS(water('cc-pvdz'), xc='pbe0'))
-    pbe = fitted(dft.RKS(water('cc-pvdz'), xc='pbe'))
-    hf_exact = tight(scf.RHF(water('cc-pvdz')))
-    pbe0_small = tight(dft.RKS(water('6-31g'), xc='pbe0'))
-
-    results = [
-        check_static_term_is_hf_fock_gradient(pbe0),
-        check_spin_factor(pbe0),
-        check_dyson_equals_zvector_on_hf(hf_exact),
-        check_dense_eq23(pbe0_small),
-        check_dyson_backend(hf_df),
-        check_dyson_on_pbe_flags_or_converges(pbe),
-        check_keyword_values(hf_df),
-    ]
-    return all(results)
-
-
-def test_gw_density_relaxation():
-    assert run()
+    print(f"PBE 'dyson': flags {names}, N {n:.10f}")
+    assert not names
+    assert np.all(np.isfinite(dm))
+    assert abs(n - pbe.mol.nelectron) < 1e-6
 
 
 if __name__ == '__main__':
-    ok = run()
-    print("\nALL PASSED" if ok else "\nFAILURES DETECTED")
-    sys.exit(0 if ok else 1)
+    sys.exit(pytest.main([__file__, '-s', '-v']))

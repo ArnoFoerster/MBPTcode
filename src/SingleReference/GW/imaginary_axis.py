@@ -14,7 +14,6 @@ import numpy as np
 
 from pyscf import scf
 
-from src.Base.environment_seam import NoEnvironment, environment_of
 from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, GW_DENSITY_W_FIT_HIGH,
                                          GW_DENSITY_W_FIT_LOW, GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import numerics_or_default
@@ -25,7 +24,8 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      get_density_fitting_coefficients,
                                      get_df_coefficients_ov,
                                      require_closed_shell_or_unrestricted,
-                                     spin_index)
+                                     require_gas_phase, require_restricted,
+                                     require_zero_temperature, spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.Base.orbital_spaces import (get_occ_virt_indices,
                                      particle_hole_window, transition_range)
@@ -141,12 +141,9 @@ def correlation_self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, nu
     one per W-grid point, regularized by GW_DENSITY_W_FIT_TIKHONOV."""
     where = 'correlation_self_energy_matrix_imaginary_axis'
     require_closed_shell_or_unrestricted(mf, where, mol=mol)
-    if isinstance(mf, scf.uhf.UHF):
-        raise NotImplementedError(f'{where} is restricted-spin only.')
-    if not isinstance(environment_of(mf), NoEnvironment):
-        raise NotImplementedError(f'{where} is gas phase only; mf carries an environment.')
-    if beta_from_mf(mf) is not None:
-        raise NotImplementedError(f'{where} is T = 0 only; mf is thermally smeared.')
+    require_restricted(mf, where)
+    require_gas_phase(mf, where)
+    require_zero_temperature(mf, where)
     nfreq = numerics.imagfreq.nfreq
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')

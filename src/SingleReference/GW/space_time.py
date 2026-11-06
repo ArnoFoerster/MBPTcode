@@ -46,7 +46,9 @@ from src.Base.environment_seam import environment_of
 from pyscf import scf as pyscf_scf
 
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
-                                            require_closed_shell_or_unrestricted, spin_index)
+                                            require_closed_shell_or_unrestricted,
+                                            require_gas_phase, require_restricted,
+                                            require_zero_temperature, spin_index)
 from src.Base.orbital_spaces import occupied_count
 from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
                                                  molecular_points_covariant,
@@ -55,7 +57,6 @@ from src.Base.factorization.separable_ri import (atomic_frames, aux_metric_sqrt,
 from src.Base.factorization.ao_product_fit import pivoted_points, placed
 from src.Base.factorization.sliced_factors import SlicedFactors, unpack_factors
 from src.Base.utils.grids.analytic_continuation import pade_nodes
-from src.Base.utils.grids.matsubara import beta_from_mf
 from src.Base.utils.grids.grids import (gauss_legendre_grid, minimax_time_grid,
                                         minimax_supported_sizes)
 from src.Base.utils.parallel.mpi_grid import (agreement,
@@ -918,17 +919,11 @@ def correlation_self_energy_matrix_space_time(mf, mol, nocc, query_freqs, numeri
     `self_energy_matrix_imaginary_time` with `query_freqs` as its output axis
     and C^T Sigma C. At the Pade nodes its diagonal is the QP route's.
     """
-    require_closed_shell_or_unrestricted(
-        mf, 'correlation_self_energy_matrix_space_time', mol=mol)
-    if isinstance(mf, pyscf_scf.uhf.UHF):
-        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
-                                  'restricted-spin only.')
-    if separable_gauge_transform(mol, environment_of(mf), auxbasis) is not None:
-        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
-                                  'gas phase only; mf carries an environment.')
-    if beta_from_mf(mf) is not None:
-        raise NotImplementedError('correlation_self_energy_matrix_space_time is '
-                                  'T = 0 only; mf is thermally smeared.')
+    where = 'correlation_self_energy_matrix_space_time'
+    require_closed_shell_or_unrestricted(mf, where, mol=mol)
+    require_restricted(mf, where)
+    require_gas_phase(mf, where)
+    require_zero_temperature(mf, where)
     q = numerics.quadrature
     tile_gb = (ISDF_TILE_GB if numerics.layout.tile_gb is None
                else numerics.layout.tile_gb)

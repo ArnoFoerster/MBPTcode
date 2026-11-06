@@ -66,6 +66,7 @@ pytest test_davidson_triplet.py
 pytest test_declaration.py
 pytest test_gw_density_dyson.py
 pytest test_gw_density_imagfrequency.py
+pytest test_gw_density_keywords.py
 pytest test_gw_density_none.py
 pytest test_gw_density_quadrature.py
 pytest test_gw_density_relaxation.py

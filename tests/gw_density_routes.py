@@ -40,6 +40,7 @@ from pyscf import dft, gto, scf
 from src.Base.numerics.numerics import Numerics
 from src.SingleReference.GW.density_matrix import compute_gw_density_matrix
 from tests.isdf_test_grid import g1_numerics
+from tests.molecules import WATER
 
 NH3 = """
 N -0.000000  0.068952 -0.000000
@@ -116,6 +117,30 @@ MOLGW_BAR = {('HF', 'none'): 6e-7, ('HF', 'dyson'): 6e-7, ('HF', 'zvector'): 6e-
              ('PBE0', 'none'): 1e-5, ('PBE0', 'dyson'): 2e-5}
 
 
+def water(basis='cc-pvdz'):
+    """Water, the molecule of the component tests."""
+    return gto.M(atom=WATER, basis=basis, verbose=0)
+
+
+def converged(mf):
+    """`mf` run to the tight convergence every GW density test uses."""
+    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
+    mf.kernel()
+    assert mf.converged
+    return mf
+
+
+def fitted(mf):
+    """`mf` density-fitted on AUXBASIS, converged."""
+    return converged(mf.density_fit(auxbasis=AUXBASIS))
+
+
+def mo_dgamma(mf, dm):
+    """C^T S (dm - gamma_mf) S C: the MO-basis density correction."""
+    sc = mf.mol.intor('int1e_ovlp') @ mf.mo_coeff
+    return sc.T @ (dm - mf.make_rdm1()) @ sc
+
+
 def molecule(name='NH3'):
     return gto.M(atom=MOLECULES[name], basis='cc-pvdz', verbose=0)
 
@@ -124,11 +149,7 @@ def mean_field(reference, name='NH3'):
     """The converged density-fitted HF or PBE0 mean field of molecule `name`,
     tagged with `reference_name` and the `label` the checks print."""
     mol = molecule(name)
-    mf = scf.RHF(mol) if reference == 'HF' else dft.RKS(mol, xc='pbe0')
-    mf = mf.density_fit(auxbasis=AUXBASIS)
-    mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
-    mf.kernel()
-    assert mf.converged
+    mf = fitted(scf.RHF(mol) if reference == 'HF' else dft.RKS(mol, xc='pbe0'))
     mf.reference_name = reference
     mf.label = f'{name}/cc-pVDZ {reference}'
     return mf
