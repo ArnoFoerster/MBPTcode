@@ -16,8 +16,11 @@
 - Refusals are in test_gw_density_keywords.
 
 - The default outer grid (minimax 34) reproduces 'casida' to 1e-6 on HBr,
-  the widest particle-hole window of the outer-grid study, where
-  Gauss-Legendre 48 and minimax 24 do not.
+  a wide particle-hole window, where Gauss-Legendre 48 does not.
+- The minimax outer grid is fitted to [gap/2, span], the window its
+  integrand has: minimax 24 on HBr, which reads its table row by the window
+  rather than the stretched first row the default 34 reads there, reaches
+  the same 1e-7 (it was 8.8e-5 on [gap, span]).
 
 Water/cc-pVDZ, DF on the explicit auxiliary basis cc-pvdz-ri; HBr/cc-pVDZ
 for the wide window.
@@ -47,27 +50,39 @@ grids and never reached 1e-5 below inner Gauss-Legendre 256.
 
 OUTER-GRID STUDY (sets GW_DENSITY_NFREQ and GW_DENSITY_GRID): max
 |imagfrequency - casida| over the whole Delta gamma_MO, 'none', W grid
-minimax 20, against the ratio span/gap of the particle-hole window
-(scripts and full output: design notes, runs/2026-11-06-gw-density-outer-grid):
+minimax 20, against the ratio span/gap of the particle-hole window; minimax
+on [gap/2, span] (scripts and full output: design notes,
+runs/2026-11-06-gw-density-outer-grid and -outer-window):
 
-    system (cc-pVDZ)     ratio   GL48     GL96     MM24     MM34
-    H2O        HF          36    2.0e-9   3.6e-10  3.6e-10  3.6e-10
-    H2O        PBE0        62    7.5e-7   3.9e-10  3.8e-10  3.9e-10
-    C6H6       PBE0        53    1.8e-8   5.6e-10  5.6e-10  5.4e-10
-    C10H8      PBE0        78    2.0e-6   1.8e-9   1.8e-9   1.8e-9
-    NH3 (aug-cc-pVTZ) PBE0 111   1.3e-6   2.9e-9   2.0e-9   2.0e-9
-    H2S        HF         174    5.4e-6   6.5e-9   6.5e-9   6.5e-9
-    H2S        PBE0       296    1.1e-5   2.9e-8   1.1e-8   8.5e-9
-    HBr        HF         881    3.3e-6   7.3e-7   2.1e-5   1.6e-8
-    HBr        PBE0      1529    1.9e-5   5.8e-7   8.8e-5   1.3e-7
+    system (cc-pVDZ)     ratio   GL48     GL96     MM16     MM24     MM34
+    H2O        HF          36    2.0e-9   3.6e-10  1.2e-9   3.6e-10  3.6e-10
+    H2O        PBE0        62    7.5e-7   3.9e-10  1.2e-9   3.8e-10  3.9e-10
+    C6H6       PBE0        53    1.8e-8   5.6e-10  9.0e-10  5.6e-10  5.4e-10
+    C10H8      PBE0        78    2.0e-6   1.8e-9   1.5e-8   1.8e-9   1.8e-9
+    NH3 (aug-cc-pVTZ) PBE0 111   1.3e-6   2.9e-9   1.9e-9   2.0e-9   2.0e-9
+    H2S        HF         174    5.4e-6   6.5e-9   1.4e-8   6.5e-9   6.5e-9
+    H2S        PBE0       296    1.1e-5   2.9e-8   1.0e-7   8.5e-9   8.5e-9
+    HBr        HF         881    3.3e-6   7.3e-7   1.6e-8   1.6e-8   1.6e-8
+    HBr        PBE0      1529    1.9e-5   5.8e-7   1.2e-7   1.3e-7   1.3e-7
+    Br2        HF        1195    6.1e-6   5.4e-7   1.7e-7   1.7e-7   1.7e-7
+    Br2        PBE0      2937    2.0e-5   3.7e-6   7.0e-7   7.1e-7   7.1e-7
 
 The ratio sets the grid, not the system size; the Gauss-Legendre error sits
-in the oo block (the deep cores, far above its scale w0 = gap/2).
-Gauss-Legendre needs 160 points for 1.3e-7 on PBE0 HBr. Minimax 34, the
-largest tabulated size, reaches the floor everywhere at the cost of minimax
-24 and Gauss-Legendre 48 (naphthalene PBE0: 5.4 s, 5.4 s, 5.5 s; the space-time
-route alike), so it is the default. Raising the W grid to minimax 34 moves
-the floor by < 1e-8 (H2S PBE0 8.5e-9 -> 2.0e-9).
+in the oo block (the deep cores, far above its scale w0 = gap/2). Minimax
+24 reaches the floor everywhere (16 within 1e-7). On HBr and Br2 that floor
+is the W grid's: minimax 32 there takes HBr to 4e-10 and Br2 HF to 3e-10,
+and Br2 PBE0 reaches 3.9e-10 at W and outer minimax 34. Run on [gap, span]
+instead, minimax 24 left 2.1e-5 (HBr HF) and 8.8e-5 (HBr PBE0): the
+integrand's frontier Lorentzians have width |eps - mu| = gap/2. At 34
+points every system here is below the table's narrowest ratio, where the
+stretched first row ignores e_min, so the window does not change the
+default's numbers. The default is 34, the largest tabulated size, at the
+cost of minimax 24 and Gauss-Legendre 48 (naphthalene PBE0: 5.4 s, 5.4 s,
+5.5 s; the space-time route alike). Not 32: most rows of GreenX's 32-point
+frequency table miss their own target by 2-11 % (rows serving
+e_max/e_min = 5846-6665 and >= 10044); on Br2 PBE0, where [gap/2, span]
+reaches 5875, outer minimax 32 gives 3.7e-7 where 24 and 34 give ~1e-9 (W
+grid minimax 34).
 """
 import os
 import sys
@@ -222,20 +237,31 @@ def test_tikhonov_robustness(reference, relaxation):
     assert err < 1e-6
 
 
-#: HBr/cc-pVDZ, span/gap 881 (HF) and 1529 (PBE0): the widest window of the
-#: outer-grid study. Reached at the default 1.6e-8 (HF), 1.3e-7 (PBE0).
+#: HBr/cc-pVDZ, span/gap 881 (HF) and 1529 (PBE0): a wide window. Reached at
+#: the default 1.6e-8 (HF), 1.3e-7 (PBE0); minimax 24 on [gap/2, span] the
+#: same, where on [gap, span] it left 2.1e-5 and 8.8e-5.
 WIDE_WINDOW_BAR = 1e-6
 
 
-@pytest.mark.parametrize('reference', ['HF', 'PBE0'])
-def test_default_outer_grid_on_a_wide_window(reference):
+@pytest.fixture(scope='module', params=['HF', 'PBE0'])
+def hbr(request):
     mol = gto.M(atom='Br 0 0 0; H 0 0 1.414', basis='cc-pvdz', verbose=0)
-    mf = fitted(scf.RHF(mol) if reference == 'HF' else dft.RKS(mol, xc='pbe0'))
+    mf = fitted(scf.RHF(mol) if request.param == 'HF' else dft.RKS(mol, xc='pbe0'))
     casida = mo_dgamma(mf, compute_gw_density_matrix(mf, mode='casida', relaxation='none'))
+    return request.param, mf, casida
+
+
+@pytest.mark.parametrize('nfreq', [None, 24])
+def test_minimax_outer_grid_on_a_wide_window(hbr, nfreq):
+    """The default outer grid, and minimax 24, whose table row (unlike the
+    default's stretched first row) depends on the window's lower end."""
+    reference, mf, casida = hbr
+    numerics = Numerics() if nfreq is None else Numerics(gwdensity={'nfreq': nfreq})
     imag = mo_dgamma(mf, compute_gw_density_matrix(
-        mf, mode='imagfrequency', relaxation='none', numerics=Numerics()))
+        mf, mode='imagfrequency', relaxation='none', numerics=numerics))
     err = np.abs(imag - casida).max()
-    print(f"HBr {reference}: max |imagfrequency - casida| {err:.2e} (bar {WIDE_WINDOW_BAR:.0e})")
+    print(f"HBr {reference}, outer minimax {numerics.gwdensity.nfreq}: "
+          f"max |imagfrequency - casida| {err:.2e} (bar {WIDE_WINDOW_BAR:.0e})")
     assert err < WIDE_WINDOW_BAR
 
 

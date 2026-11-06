@@ -273,15 +273,21 @@ def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
 def outer_frequency_grid(eps, nocc, numerics):
     """(points, weights) on omega >= 0 of the outer integral of the GW
     density, by `numerics.gwdensity`: 'gauss_legendre' (w0 the gap-scaled
-    one when None) or 'minimax' (a tabulated size, over the particle-hole
-    window of `eps`)."""
+    one when None) or 'minimax' (a tabulated size, fitted to [gap/2, span]
+    of the particle-hole window of `eps`).
+
+    The minimax window starts at gap/2, not at the gap: each G_pp(i w) of
+    the integrand is a Lorentzian of width |eps_p - mu|, which for the
+    frontier orbitals around the mid-gap mu is gap/2. The upper end stays
+    at span (not max |eps_p - mu|), since Sigma adds poles beyond the
+    orbital energies."""
     cfg = numerics.gwdensity
     if cfg.grid == 'gauss_legendre':
         w0 = gap_scaled_w0(eps, nocc) if cfg.w0 is None else cfg.w0
         return gauss_legendre_grid(cfg.nfreq, w0)
     if cfg.grid == 'minimax':
         gap, span, _ = particle_hole_window(eps, nocc)
-        return minimax_frequency_grid(cfg.nfreq, gap, span)
+        return minimax_frequency_grid(cfg.nfreq, gap / 2, span)
     raise ValueError(f"Unknown grid={cfg.grid!r}; choose one of "
                      "'gauss_legendre', 'minimax'.")
 

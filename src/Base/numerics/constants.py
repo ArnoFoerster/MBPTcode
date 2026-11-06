@@ -29,17 +29,22 @@ IMAGFREQ_NFREQ = 20
 
 # Defaults of `numerics.gwdensity` (`nfreq`, `grid`), which a run overrides
 # there: the outer imaginary-frequency points of the GW density's dynamic
-# integral (`GW.density_matrix`), on the minimax grid of the particle-hole
-# window. The integrand has structure on every scale from the
-# smallest particle-hole gap to the largest transition energy, so what the
-# grid must resolve is the ratio span/gap of that window, not the size of the
-# system. It grows with deep core levels (heavier atoms), large basis sets
-# and small gaps. A minimax grid is fitted to the window itself and follows
-# it; a mapped Gauss-Legendre grid has a single scale (w0, near the gap) and
-# loses the far end of a wide window, where the deep cores sit. The points
-# are cheap next to the W build, so the default is the largest tabulated
-# minimax size; a window wider than the tables cover needs 'gauss_legendre'
-# with many points.
+# integral (`GW.density_matrix`), on the minimax grid of [gap/2, span] of
+# the particle-hole window. The integrand has structure on every scale from
+# half the smallest particle-hole gap (the frontier |eps - mu|) to the
+# largest transition energy, so what the grid must resolve is the ratio of
+# that window, not the size of the system. It grows with deep core levels
+# (heavier atoms), large basis sets and small gaps. A minimax grid is fitted
+# to the window itself and follows it; a mapped Gauss-Legendre grid has a
+# single scale (w0, near the gap) and loses the far end of a wide window,
+# where the deep cores sit. On that window minimax 24 already reaches the
+# route's floor (set elsewhere: the W grid and its fit) on every system
+# studied, up to HBr and Br2 (span/gap up to 2900), and minimax 16 is within
+# 1e-7 of it; the points are cheap next to the W build, so the default keeps
+# a wide margin. 34, not 32: most rows of GreenX's 32-point
+# frequency table miss their own target by 2-11 % (rows serving
+# e_max/e_min = 5846-6665 and >= 10044), which a window of [gap/2, span]
+# reaches on Br2/cc-pVDZ PBE0; every row of the 34-point table is sound.
 GW_DENSITY_NFREQ = 34
 GW_DENSITY_GRID = 'minimax'
 
