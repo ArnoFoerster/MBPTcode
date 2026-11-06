@@ -6,7 +6,9 @@
 - The `gwdensity` section is a later section: its defaults leave the identity
   what it was without it; a changed setting changes it.
 - The outer grid: tabulated minimax (the default, 34 points) or
-  Gauss-Legendre at any size; refusals name the choice.
+  Gauss-Legendre at any size, with its own w0. A bad setting (unknown grid,
+  non-positive nfreq, untabulated minimax size, non-positive w0, a w0 with
+  minimax) is refused when the Numerics is built, naming the setting.
 """
 import os
 import sys
@@ -75,8 +77,8 @@ def test_gwdensity_section_defaults_and_identity():
     now = Numerics().to_record()
     old = {k: v for k, v in now.items() if k != 'gwdensity'}
     assert Numerics.from_record(old).identity() == Numerics().identity()
-    assert (Numerics(gwdensity={'nfreq': GWDensityNumerics().nfreq + 16}).identity()
-            != Numerics().identity())
+    other = next(n for n in minimax_supported_sizes() if n != GWDensityNumerics().nfreq)
+    assert Numerics(gwdensity={'nfreq': other}).identity() != Numerics().identity()
 
 
 def test_outer_grid_choices():
@@ -91,9 +93,20 @@ def test_outer_grid_choices():
     points, _ = outer_frequency_grid(
         EPS, NOCC, Numerics(gwdensity={'nfreq': size, 'grid': 'minimax'}))
     assert len(points) == size
-    unsupported = max(minimax_supported_sizes()) + 1
-    with pytest.raises(ValueError, match='supported sizes'):
-        outer_frequency_grid(
-            EPS, NOCC, Numerics(gwdensity={'nfreq': unsupported, 'grid': 'minimax'}))
-    with pytest.raises(ValueError, match='simpson'):
-        outer_frequency_grid(EPS, NOCC, Numerics(gwdensity={'grid': 'simpson'}))
+    points, _ = outer_frequency_grid(
+        EPS, NOCC, Numerics(gwdensity={'nfreq': 48, 'grid': 'gauss_legendre', 'w0': 0.3}))
+    assert len(points) == 48
+
+
+@pytest.mark.parametrize('settings, words', [
+    ({'grid': 'no-such-grid'}, 'no-such-grid'),
+    ({'nfreq': 0}, 'positive number'),
+    ({'nfreq': max(minimax_supported_sizes()) + 1, 'grid': 'minimax'}, 'supported sizes'),
+    ({'grid': 'gauss_legendre', 'w0': -0.1}, 'positive energy'),
+    ({'grid': 'minimax', 'w0': 0.3}, 'Gauss-Legendre'),
+])
+def test_gwdensity_settings_refused_when_built(settings, words):
+    """A bad outer-grid setting fails when the Numerics is built, before any
+    mean field or screening is computed, whichever mode later reads it."""
+    with pytest.raises(ValueError, match=words):
+        Numerics(gwdensity=settings)

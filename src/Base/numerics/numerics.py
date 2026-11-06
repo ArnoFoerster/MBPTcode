@@ -38,6 +38,7 @@ its fields, `Numerics(bse={'solver': 'dense'})`, which the constructor turns
 into the section's record.
 """
 from dataclasses import asdict, dataclass, field, fields, replace
+from numbers import Integral
 from typing import Optional
 
 from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
@@ -48,7 +49,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
                                          EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ, GW_DENSITY_NFREQ,
-                                         GW_DENSITY_GRID,
+                                         GW_DENSITY_GRID, IMAGINARY_FREQUENCY_GRIDS,
                                          QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE, QSGW_DM_TOL,
                                          QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
                                          GL_FREQUENCY_SCALE,
@@ -76,6 +77,7 @@ from src.Base.numerics.constants import (ORBITAL_MULTIPLIER_MAX_ITER,
                                          ORBITAL_MULTIPLIER_RESIDUAL_TOL,
                                          ORBITAL_MULTIPLIER_TOL)
 from src.Base.utils.record_io import record_hash
+from src.Base.utils.grids.grids import minimax_supported_sizes
 from src.Base.utils.record_compat import (IDENTITY_AT_DEFAULT_OMITTED,
                                          IDENTITY_OMITTED_AT, NUMERICS_LATER_SECTIONS,
                                          NUMERICS_RETIRED, numerics_sections_as_read)
@@ -473,12 +475,34 @@ class ImagFreqNumerics:
 class GWDensityNumerics:
     """The outer imaginary-frequency integral of the GW density matrix
     (`GW.density_matrix`): nfreq points of its quadrature on omega >= 0; grid,
-    'minimax' (the default; a tabulated size, scaled to the particle-hole
-    window) or 'gauss_legendre' (scaled to the gap, any size); w0, the
-    Gauss-Legendre energy scale, Hartree, None for half the gap."""
+    'minimax' (the default; a tabulated size, fitted to [gap/2, span] of the
+    particle-hole window) or 'gauss_legendre' (scaled to the gap, any size);
+    w0, the Gauss-Legendre energy scale, Hartree, None for half the gap
+    (Gauss-Legendre only: a minimax grid has no free scale).
+
+    Refused when built, whichever mode later reads it: a grid outside
+    IMAGINARY_FREQUENCY_GRIDS, a non-positive nfreq, a minimax size with no table, a
+    non-positive w0, and a w0 with grid='minimax'."""
     nfreq: int = GW_DENSITY_NFREQ
     grid: str = GW_DENSITY_GRID
     w0: Optional[float] = None
+
+    def __post_init__(self):
+        if self.grid not in IMAGINARY_FREQUENCY_GRIDS:
+            raise ValueError(f'grid={self.grid!r} not in {IMAGINARY_FREQUENCY_GRIDS}')
+        if isinstance(self.nfreq, bool) or not isinstance(self.nfreq, Integral) \
+                or self.nfreq <= 0:
+            raise ValueError(f'nfreq={self.nfreq!r}: a positive number of points')
+        if self.grid == 'minimax' and self.nfreq not in minimax_supported_sizes():
+            raise ValueError(f'nfreq={self.nfreq} has no tabulated minimax grid; '
+                             f'supported sizes: {minimax_supported_sizes()}')
+        if self.w0 is not None:
+            if self.grid == 'minimax':
+                raise ValueError(f"w0={self.w0!r} is the Gauss-Legendre scale; a "
+                                 "minimax grid is fitted to the particle-hole "
+                                 "window and has none (grid='minimax')")
+            if not self.w0 > 0:
+                raise ValueError(f'w0={self.w0!r}: a positive energy, Hartree')
 
 
 @dataclass(frozen=True)

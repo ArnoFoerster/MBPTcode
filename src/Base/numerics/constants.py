@@ -27,6 +27,12 @@ DF_MO_BLOCK = 200
 # (`GW.imaginary_axis`): its W(i omega) quadrature, minimax by default.
 IMAGFREQ_NFREQ = 20
 
+#: The imaginary-frequency grid types a quadrature may name: the tabulated
+#: GreenX minimax grid or a mapped Gauss-Legendre grid. One list for every
+#: choice of grid type, checked when the setting is made; for now the GW
+#: density's outer grid (`numerics.gwdensity.grid`).
+IMAGINARY_FREQUENCY_GRIDS = ('minimax', 'gauss_legendre')
+
 # Defaults of `numerics.gwdensity` (`nfreq`, `grid`), which a run overrides
 # there: the outer imaginary-frequency points of the GW density's dynamic
 # integral (`GW.density_matrix`), on the minimax grid of [gap/2, span] of

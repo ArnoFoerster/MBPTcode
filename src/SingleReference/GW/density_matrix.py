@@ -16,7 +16,7 @@ from src.Base.pyscf.pyscf_interface import (
     require_restricted,
     require_zero_temperature,
 )
-from src.Base.numerics.constants import DEFAULT_BLOCK_SIZE
+from src.Base.numerics.constants import DEFAULT_BLOCK_SIZE, IMAGINARY_FREQUENCY_GRIDS
 from src.SingleReference.DensityMatrix.density_matrix import (
     hf_kernel_mean_field,
     solve_cphf_relaxation,
@@ -289,8 +289,7 @@ def outer_frequency_grid(eps, nocc, numerics):
     if cfg.grid == 'minimax':
         gap, span, _ = particle_hole_window(eps, nocc)
         return minimax_frequency_grid(cfg.nfreq, gap / 2, span)
-    raise ValueError(f"Unknown grid={cfg.grid!r}; choose one of "
-                     "'gauss_legendre', 'minimax'.")
+    raise ValueError(f"Unknown grid={cfg.grid!r}; choose one of {IMAGINARY_FREQUENCY_GRIDS}.")
 
 
 def dynamic_density_blocks(eps_mu, sigma, points, weights, nocc):
