@@ -6,11 +6,12 @@
   is a Tikhonov-regularized Lorentzian fit of W_c on the W grid convolved
   exactly with G (the one-pole kernel against scipy quad), and it matches the
   Sigma summed over the Casida RPA poles.
-- 'imagfrequency' reproduces 'casida' to 1e-5 per element in every block
-  (oo, ov, vv) of Delta gamma_MO, on HF and PBE0, unrelaxed and 'dyson'
-  relaxed, at the default grids; both routes screen with the same full RPA on
-  the same three-index object (the mean field's density fit, or the exact
-  integrals' decomposition on a mean field without one).
+- On a mean field without density fitting (the exact integrals'
+  decomposition), 'imagfrequency' reproduces 'casida' to 1e-5 per element in
+  every block (oo, ov, vv) of Delta gamma_MO: both routes screen with the
+  same full RPA on the same three-index object. The density-fitted
+  comparison, per relaxation on all three routes, is in test_gw_density_none,
+  test_gw_density_dyson and test_gw_density_zvector.
 - The fit's regularization: lambda 1e-10 -> 1e-8 moves Delta gamma < 1e-6.
 - Refusals: a polarizability other than RPA, df=False, an environment, no
   numerics, a thermally smeared mean field, an unrestricted reference.
@@ -18,7 +19,8 @@
 Water/cc-pVDZ, DF on the explicit auxiliary basis cc-pvdz-ri.
 
 Results at the defaults (W grid minimax 20, outer Gauss-Legendre 48), max
-|imagfrequency - casida| per block:
+|imagfrequency - casida| per block (recorded when the grids were chosen; the
+comparison itself now runs in the per-relaxation files):
 
     HF   'none'   oo 1.97e-9  ov 2.64e-10  vv 1.59e-10
     HF   'dyson'  oo 1.97e-9  ov 7.76e-10  vv 1.59e-10
@@ -178,14 +180,6 @@ def check_fitted_sigma_matches_casida_poles(mf, name):
                   err < 1e-4, f'(max |diff| {err:.2e}, max |Sigma| {np.abs(exact).max():.2e})')
 
 
-def check_matches_casida(mf, relaxation, name):
-    errs, scale = block_errors(mf, relaxation)
-    ok = all(e <= TOL for e in errs.values())
-    return report(f"{name} {relaxation!r}: imagfrequency == casida per block",
-                  ok, '(' + ', '.join(f'{k} {e:.2e}' for k, e in errs.items())
-                  + f'; max |dgamma| {scale:.2e})')
-
-
 def check_non_df_mean_field(hf_exact):
     errs, scale = block_errors(hf_exact, 'none')
     ok = all(e <= TOL for e in errs.values())
@@ -260,8 +254,6 @@ def run():
     results = [check_pair_weights_diagonal_matches_qp_sigma(hf), check_one_pole_kernel()]
     for mf, name in ((hf, 'HF'), (pbe0, 'PBE0')):
         results.append(check_fitted_sigma_matches_casida_poles(mf, name))
-        for relaxation in ('none', 'dyson'):
-            results.append(check_matches_casida(mf, relaxation, name))
         results.append(check_tikhonov_robustness(mf, name))
     results.append(check_non_df_mean_field(hf_exact))
     results.append(check_refusals(hf))
