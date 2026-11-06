@@ -16,20 +16,25 @@
 - Refusals: a polarizability other than RPA, df=False, an environment, no
   numerics, a thermally smeared mean field, an unrestricted reference.
 
-Water/cc-pVDZ, DF on the explicit auxiliary basis cc-pvdz-ri.
+- The default outer grid (minimax 34) reproduces 'casida' to 1e-6 on HBr,
+  the widest particle-hole window of the outer-grid study, where
+  Gauss-Legendre 48 and minimax 24 do not.
 
-Results at the defaults (W grid minimax 20, outer Gauss-Legendre 48), max
-|imagfrequency - casida| per block (recorded when the grids were chosen; the
-comparison itself now runs in the per-relaxation files):
+Water/cc-pVDZ, DF on the explicit auxiliary basis cc-pvdz-ri; HBr/cc-pVDZ
+for the wide window.
 
-    HF   'none'   oo 1.97e-9  ov 2.64e-10  vv 1.59e-10
-    HF   'dyson'  oo 1.97e-9  ov 7.76e-10  vv 1.59e-10
-    PBE0 'none'   oo 7.49e-7  ov 1.26e-9   vv 4.20e-10
-    PBE0 'dyson'  oo 7.49e-7  ov 4.02e-7   vv 4.20e-10
+Results at the defaults (W grid minimax 20, outer minimax 34), max
+|imagfrequency - casida| per block (the comparison itself runs in the
+per-relaxation files):
+
+    HF   'none'   oo 3.62e-10  ov 2.54e-10  vv 1.65e-10
+    HF   'dyson'  oo 3.62e-10  ov 3.20e-10  vv 1.65e-10
+    PBE0 'none'   oo 3.87e-10  ov 2.97e-10  vv 3.59e-10
+    PBE0 'dyson'  oo 3.87e-10  ov 4.83e-10  vv 3.59e-10
     lambda 1e-10 -> 1e-8: max |d dgamma| HF 5.9e-9, PBE0 1.3e-8
 
-GRID STUDY (sets GW_DENSITY_NFREQ), worst block over 'none' and 'dyson', W
-grid minimax 20 (minimax 34 gives the same to ~1e-9):
+FIRST GRID STUDY (water), worst block over 'none' and 'dyson', W grid
+minimax 20 (minimax 34 gives the same to ~1e-9):
 
     outer             16      24      32      48      64
     GL   HF        1.7e-4  1.5e-5  2.9e-7  2.0e-9  3.6e-10
@@ -37,11 +42,33 @@ grid minimax 20 (minimax 34 gives the same to ~1e-9):
     minimax HF     1.4e-4  3.6e-10 3.6e-10   -       -
     minimax PBE0   3.0e-4  4.9e-10 4.7e-10   -       -
 
-48 is the smallest Gauss-Legendre size within 3e-6 on both. The tabulated
-outer minimax grid reaches the floor already at 24 points; the default stays
-Gauss-Legendre (reported, not switched). Before the fit, the plain W-grid
-quadrature of the QP route left 3e-4 (HF) and 1e-3 (PBE0) at these grids and
-never reached 1e-5 below inner Gauss-Legendre 256.
+It set Gauss-Legendre 48 as the first default. Before the fit, the plain
+W-grid quadrature of the QP route left 3e-4 (HF) and 1e-3 (PBE0) at these
+grids and never reached 1e-5 below inner Gauss-Legendre 256.
+
+OUTER-GRID STUDY (sets GW_DENSITY_NFREQ and GW_DENSITY_GRID): max
+|imagfrequency - casida| over the whole Delta gamma_MO, 'none', W grid
+minimax 20, against the ratio span/gap of the particle-hole window
+(scripts and full output: design notes, runs/2026-11-06-gw-density-outer-grid):
+
+    system (cc-pVDZ)     ratio   GL48     GL96     MM24     MM34
+    H2O        HF          36    2.0e-9   3.6e-10  3.6e-10  3.6e-10
+    H2O        PBE0        62    7.5e-7   3.9e-10  3.8e-10  3.9e-10
+    C6H6       PBE0        53    1.8e-8   5.6e-10  5.6e-10  5.4e-10
+    C10H8      PBE0        78    2.0e-6   1.8e-9   1.8e-9   1.8e-9
+    NH3 (aug-cc-pVTZ) PBE0 111   1.3e-6   2.9e-9   2.0e-9   2.0e-9
+    H2S        HF         174    5.4e-6   6.5e-9   6.5e-9   6.5e-9
+    H2S        PBE0       296    1.1e-5   2.9e-8   1.1e-8   8.5e-9
+    HBr        HF         881    3.3e-6   7.3e-7   2.1e-5   1.6e-8
+    HBr        PBE0      1529    1.9e-5   5.8e-7   8.8e-5   1.3e-7
+
+The ratio sets the grid, not the system size; the Gauss-Legendre error sits
+in the oo block (the deep cores, far above its scale w0 = gap/2).
+Gauss-Legendre needs 160 points for 1.3e-7 on PBE0 HBr. Minimax 34, the
+largest tabulated size, reaches the floor everywhere at the cost of minimax
+24 and Gauss-Legendre 48 (naphthalene PBE0: 5.4 s, 5.4 s, 5.5 s; the space-time
+route alike), so it is the default. Raising the W grid to minimax 34 moves
+the floor by < 1e-8 (H2S PBE0 8.5e-9 -> 2.0e-9).
 """
 import copy
 import os
@@ -50,6 +77,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import numpy as np
+import pytest
 from pyscf import dft, gto, scf
 from scipy.integrate import quad
 
@@ -262,6 +290,23 @@ def run():
 
 def test_gw_density_imagfrequency():
     assert run()
+
+
+#: HBr/cc-pVDZ, span/gap 881 (HF) and 1529 (PBE0): the widest window of the
+#: outer-grid study. Reached at the default 1.6e-8 (HF), 1.3e-7 (PBE0).
+WIDE_WINDOW_BAR = 1e-6
+
+
+@pytest.mark.parametrize('reference', ['HF', 'PBE0'])
+def test_default_outer_grid_on_a_wide_window(reference):
+    mol = gto.M(atom='Br 0 0 0; H 0 0 1.414', basis='cc-pvdz', verbose=0)
+    mf = fitted(scf.RHF(mol) if reference == 'HF' else dft.RKS(mol, xc='pbe0'))
+    casida = mo_dgamma(mf, compute_gw_density_matrix(mf, mode='casida', relaxation='none'))
+    imag = mo_dgamma(mf, compute_gw_density_matrix(
+        mf, mode='imagfrequency', relaxation='none', numerics=Numerics()))
+    err = np.abs(imag - casida).max()
+    print(f"HBr {reference}: max |imagfrequency - casida| {err:.2e} (bar {WIDE_WINDOW_BAR:.0e})")
+    assert err < WIDE_WINDOW_BAR
 
 
 if __name__ == '__main__':

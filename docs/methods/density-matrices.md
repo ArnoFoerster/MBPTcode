@@ -70,17 +70,24 @@ one. The inner
 integrals use the existing sections: `imagfreq` for W, and `isdf`,
 `quadrature` and `layout` for the space-time route (the ISDF grid is named
 there, as for `solve_qp_energy_space_time`). The outer frequency integral of
-G Sigma G reads the `gwdensity` section: `nfreq` (default 48), `grid`
-(`'gauss_legendre'`, the default, or `'minimax'`, available only at
-tabulated sizes) and `w0` (the Gauss-Legendre scale, by default scaled to
-the gap). In `'imagfrequency'` the screened interaction on its minimax grid is
+G Sigma G reads the `gwdensity` section: `nfreq` (default 34), `grid`
+(`'minimax'`, the default, available only at tabulated sizes up to 34, or
+`'gauss_legendre'`, at any size) and `w0` (the Gauss-Legendre scale, by
+default scaled to the gap). The minimax grid is fitted to the particle-hole
+window, so it holds where the window is wide (deep cores, large basis sets,
+small gaps); the mapped Gauss-Legendre grid has one scale and degrades there
+(about 1e-5 at 48 points on H2S and HBr, against 1e-8 to 1e-7 for minimax
+34). For a window beyond the widest tested (span/gap about 1500), switch to
+`'gauss_legendre'` with many points. In `'imagfrequency'` the screened interaction on its minimax grid is
 fitted by a sum of Lorentzians and the integral over G is done exactly; the
 fit settings are fixed.
 
-Accuracy for water in cc-pVDZ: `'imagfrequency'` against `'casida'` agrees to
-about 2e-9 on HF and 7.5e-7 on PBE0 (largest element of the density
-correction) at the default outer grid; `'space-time'` against
-`'imagfrequency'` agrees to 1.4e-5 on the finest ISDF grid tested.
+Accuracy at the default grids: `'imagfrequency'` against `'casida'` agrees
+to about 4e-10 on water and NH3 in cc-pVDZ, HF and PBE0 (largest element of
+the density correction), and to 1.3e-7 or better on every system of the
+outer-grid study (up to HBr). `'space-time'` against `'casida'` agrees to
+about 5e-6 on NH3 in cc-pVDZ (5e-5 with `'dyson'` on PBE0, whose solve
+magnifies the error), set by the ISDF grid.
 
 **Scope.** The numerical modes take RPA screening (`polarizability='RPA'`),
 density fitting (`df=True`, the default), a closed-shell restricted reference,
@@ -117,6 +124,6 @@ A missing `numerics` where it is required (see above) raises `TypeError`. UHF/UK
   literature; `'zvector'` behaves as before.
 - The conditioning of the Lorentzian fit for small-gap systems has not been
   tested.
-- With the outer minimax grid, 24 points reached about 5e-10 against 48
-  Gauss-Legendre points on the test molecule. This is an observation only; the
-  default stays Gauss-Legendre with 48 points.
+- With `'dyson'` on a PBE0 reference and TDHF or BSE screening, NH3 has one
+  negative natural occupation: the HF kernel on PBE0 orbitals has a soft mode
+  (0.034 Ha) that this right-hand side projects onto strongly.

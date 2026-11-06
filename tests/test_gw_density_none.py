@@ -10,8 +10,9 @@
   N and lie in [0, 2], on CH4/cc-pVDZ (why CH4: gw_density_routes).
 
 Setup and the checks: gw_density_routes. NH3/cc-pVDZ (CH4/cc-pVDZ for TDHF
-and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures, space-time on
-the G1 ISDF grid. Run with `-s` for the printed occupations and differences.
+and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures (outer minimax
+34), space-time on the G1 ISDF grid. Run with `-s` for the printed
+occupations and differences.
 
 Casida occupations (largest five ... smallest; sum 10 to machine precision):
 
@@ -22,10 +23,10 @@ max |route - casida| per block of the MO density (max |Delta gamma| 2.8e-2
 HF, 4.6e-2 PBE0), on the occupations, and |sum - N|:
 
                          oo       ov       vv       occ      sum
-    HF   imagfrequency   3.3e-9   4.2e-10  2.3e-10  3.3e-9   3.0e-9
-    HF   space-time      1.9e-7   2.4e-6   5.5e-7   2.4e-7   4.8e-9
-    PBE0 imagfrequency   8.0e-8   6.0e-9   6.4e-10  8.1e-8   8.6e-8
-    PBE0 space-time      3.3e-7   5.5e-6   1.1e-6   6.1e-7   7.7e-8
+    HF   imagfrequency   4.0e-10  2.6e-10  2.3e-10  3.9e-10  1.8e-10
+    HF   space-time      1.9e-7   2.4e-6   5.5e-7   2.4e-7   1.0e-9
+    PBE0 imagfrequency   3.6e-10  5.5e-10  3.3e-10  3.6e-10  2.2e-10
+    PBE0 space-time      3.3e-7   5.5e-6   1.1e-6   6.1e-7   2.0e-9
 
 The ISDF grid GH (the finest for cc-pVDZ) gives space-time ov 1.8e-6 HF and
 3.7e-6 PBE0: little closer than G1.
@@ -53,9 +54,9 @@ from tests.gw_density_routes import (MODES, NUMERICAL_MODES, REFERENCES,
 
 RELAXATION = 'none'
 #: Per block of the MO density: the worst reached (PBE0) with a factor ~10.
-BLOCK_BAR = {'imagfrequency': 1e-6, 'space-time': 5e-5}
+BLOCK_BAR = {'imagfrequency': 2e-8, 'space-time': 5e-5}
 #: On the occupations: the worst reached (PBE0) with a factor ~10.
-OCCUPATION_BAR = {'imagfrequency': 1e-6, 'space-time': 5e-6}
+OCCUPATION_BAR = {'imagfrequency': 1e-8, 'space-time': 5e-6}
 
 
 @pytest.fixture(scope='module', params=REFERENCES)

@@ -48,6 +48,7 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
                                          EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ, GW_DENSITY_NFREQ,
+                                         GW_DENSITY_GRID,
                                          QSGW_BLOCK_ELEMS, QSGW_DIIS_SIZE, QSGW_DM_TOL,
                                          QSGW_MIXING_LAMBDA, QSGW_SRG_FLOW,
                                          GL_FREQUENCY_SCALE,
@@ -472,11 +473,11 @@ class ImagFreqNumerics:
 class GWDensityNumerics:
     """The outer imaginary-frequency integral of the GW density matrix
     (`GW.density_matrix`): nfreq points of its quadrature on omega >= 0; grid,
-    'gauss_legendre' (scaled to the gap) or 'minimax' (a tabulated size,
-    scaled to the particle-hole window); w0, the Gauss-Legendre energy scale,
-    Hartree, None for half the gap."""
+    'minimax' (the default; a tabulated size, scaled to the particle-hole
+    window) or 'gauss_legendre' (scaled to the gap, any size); w0, the
+    Gauss-Legendre energy scale, Hartree, None for half the gap."""
     nfreq: int = GW_DENSITY_NFREQ
-    grid: str = 'gauss_legendre'
+    grid: str = GW_DENSITY_GRID
     w0: Optional[float] = None
 
 

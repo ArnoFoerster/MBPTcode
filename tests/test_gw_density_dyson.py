@@ -10,8 +10,9 @@
   N and lie in [0, 2], on CH4/cc-pVDZ (why CH4: gw_density_routes).
 
 Setup and the checks: gw_density_routes. NH3/cc-pVDZ (CH4/cc-pVDZ for TDHF
-and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures, space-time on
-the G1 ISDF grid. Run with `-s` for the printed occupations and differences.
+and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures (outer minimax
+34), space-time on the G1 ISDF grid. Run with `-s` for the printed
+occupations and differences.
 
 Casida occupations (largest five ... smallest; sum 10 to machine precision):
 
@@ -25,18 +26,19 @@ max |route - casida| per block of the MO density (max |Delta gamma| 2.8e-2
 HF, 4.6e-2 PBE0), on the occupations, and |sum - N|:
 
                          oo       ov       vv       occ      sum
-    HF   imagfrequency   3.3e-9   1.0e-9   2.3e-10  3.3e-9   3.0e-9
-    HF   space-time      1.9e-7   4.5e-6   5.5e-7   2.4e-7   4.8e-9
-    PBE0 imagfrequency   8.0e-8   7.6e-8   6.4e-10  8.1e-8   8.6e-8
-    PBE0 space-time      3.3e-7   5.1e-5   1.1e-6   1.9e-6   7.7e-8
+    HF   imagfrequency   4.0e-10  3.9e-10  2.3e-10  3.9e-10  1.8e-10
+    HF   space-time      1.9e-7   4.5e-6   5.5e-7   2.4e-7   1.0e-9
+    PBE0 imagfrequency   3.6e-10  1.9e-9   3.3e-10  3.5e-10  2.2e-10
+    PBE0 space-time      3.3e-7   5.1e-5   1.1e-6   1.9e-6   2.0e-9
 
 PBE0 ov is the one entry well above the other relaxations' (space-time 5.1e-5
 against 6.5e-6 'zvector' and 5.5e-6 'none'). The cause is the conditioning of
 Eq. 23a, not the route: the HF-kernel matrix on the PBE0 orbitals and
 energies has its lowest eigenvalue at 0.034 Ha (0.32 Ha on HF; lowest ov gap
 0.34 Ha), so the solve magnifies the error in its right-hand side by ~29
-against ~3 on HF. The exact-integral route shows the same factor on its own
-smaller error (imagfrequency ov 6.0e-9 'none' -> 7.6e-8 'dyson'). The ISDF
+against ~3 on HF. The imagfrequency route shows the same amplification on its
+much smaller error (ov 5.5e-10 'none' -> 1.9e-9 'dyson'; 6.0e-9 -> 7.6e-8
+on the earlier Gauss-Legendre 48 outer grid). The ISDF
 grid GH (the finest for cc-pVDZ) gives space-time ov 4.0e-5 PBE0.
 
 CH4, TDHF and BSE screening: smallest natural occupation (sum N to 2e-14,
@@ -73,9 +75,9 @@ from tests.gw_density_routes import (MODES, NUMERICAL_MODES, REFERENCES,
 RELAXATION = 'dyson'
 #: Per block of the MO density: the worst reached (PBE0) with a factor ~4-10;
 #: space-time is looser than for the other relaxations (see above).
-BLOCK_BAR = {'imagfrequency': 1e-6, 'space-time': 2e-4}
+BLOCK_BAR = {'imagfrequency': 2e-8, 'space-time': 2e-4}
 #: On the occupations: the worst reached (PBE0) with a factor ~10.
-OCCUPATION_BAR = {'imagfrequency': 1e-6, 'space-time': 2e-5}
+OCCUPATION_BAR = {'imagfrequency': 1e-8, 'space-time': 2e-5}
 
 
 @pytest.fixture(scope='module', params=REFERENCES)

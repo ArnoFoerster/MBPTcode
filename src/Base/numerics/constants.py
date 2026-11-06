@@ -28,11 +28,19 @@ DF_MO_BLOCK = 200
 IMAGFREQ_NFREQ = 20
 
 # Outer imaginary-frequency points of the GW density's dynamic integral
-# (`GW.density_matrix`), Gauss-Legendre by default. Set by the grid study of
-# tests/test_gw_density_imagfrequency.py: the full pipeline (fitted Sigma on
-# the default minimax-20 W grid) against the Casida route on PBE0 water/cc-pVDZ
-# leaves 1.8e-5 with 32 points, 7.5e-7 with 48.
-GW_DENSITY_NFREQ = 48
+# (`GW.density_matrix`), on the tabulated minimax grid of the particle-hole
+# window (GW_DENSITY_GRID). Set by an outer-grid study against the Casida
+# route (H2O, NH3, NH3/aug-cc-pVTZ, H2S, C6H6, C10H8, HBr; HF and PBE0;
+# recorded in tests/test_gw_density_imagfrequency.py): what sets the grid is
+# the ratio span/gap of the window, not the system size. Gauss-Legendre 48
+# (the earlier default) holds to 8e-8 up to a ratio of ~60, then degrades in
+# the oo block (deep cores): 1.1e-5 on PBE0 H2S (296), 1.9e-5 on PBE0 HBr
+# (1529). Minimax 24 reaches the fit's floor up to H2S but leaves 8.8e-5 on
+# HBr; minimax 34 reaches it everywhere (<= 1.3e-7), at no measurable extra
+# cost (the W build dominates). 34 is the largest tabulated size: a wider
+# window would need 'gauss_legendre' with many points (HBr: 160 for 1e-7).
+GW_DENSITY_NFREQ = 34
+GW_DENSITY_GRID = 'minimax'
 
 # The Lorentzian fit of W_c(i w') on the W grid of the GW density's
 # imaginary-frequency Sigma (`GW.imaginary_axis.self_energy_matrix_imaginary_axis`):

@@ -30,8 +30,8 @@ moves the occupations only at second order through its off-diagonal elements
 (PBE0 'none', space-time: 5.5e-6 in the ov block, 6.1e-7 in the occupations),
 and the occupations do not see the natural orbitals at all.
 
-DF on cc-pvdz-ri; default quadratures (W grid minimax 20, outer
-Gauss-Legendre 48); space-time on the G1 ISDF grid.
+DF on cc-pvdz-ri; default quadratures (W grid minimax 20, outer minimax
+34); space-time on the G1 ISDF grid.
 """
 import numpy as np
 import pytest
@@ -65,9 +65,9 @@ SCREENINGS = ('TDHF', 'BSE')
 #: Restricted spin: each spatial natural orbital holds at most two electrons.
 MAX_OCCUPATION = 2.0
 TOL = 1e-10
-#: |sum - N|: the analytic route is exact; the numerical routes reach ~1e-7
-#: from their quadratures.
-SUM_TOL = {'casida': 1e-8, 'imagfrequency': 1e-6, 'space-time': 1e-6}
+#: |sum - N|: the analytic route is exact; the numerical routes reach 2e-9
+#: from their quadratures (outer minimax 34).
+SUM_TOL = {'casida': 1e-8, 'imagfrequency': 2e-8, 'space-time': 2e-8}
 
 
 def _occupations(text):

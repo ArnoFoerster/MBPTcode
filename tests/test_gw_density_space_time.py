@@ -6,8 +6,8 @@
 - No ISDF grid (a bare Numerics()): the exception `separable_factors` raises.
 
 Water/cc-pVDZ, HF, DF on cc-pvdz-ri (the factors' auxiliary basis too);
-default quadratures (W grid minimax 20, outer Gauss-Legendre 48, the
-space-time route's 'auto' time grid).
+default quadratures (W grid minimax 20, outer minimax 34, the space-time
+route's 'auto' time grid).
 
 The density itself, space-time against casida per block of Delta gamma_MO
 and on the natural occupations, per relaxation, is in test_gw_density_none,
