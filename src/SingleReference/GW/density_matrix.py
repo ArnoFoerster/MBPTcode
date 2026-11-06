@@ -11,7 +11,10 @@ from src.Base.pyscf.pyscf_interface import (
     get_orbital_energies,
     get_density_fitting_coefficients,
     get_two_electron_integrals_chemist,
+    require_closed_shell_or_unrestricted,
+    require_gas_phase,
     require_restricted,
+    require_zero_temperature,
 )
 from src.Base.numerics.constants import (
     DEFAULT_BROADENING_ETA,
@@ -157,9 +160,9 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     `imagfrequency_unrelaxed_blocks`) or 'space-time' (N^3: the same on the
     space-time QP route's Sigma, `space_time_unrelaxed_blocks`, on the ISDF
     grid numerics.isdf names).
-    The numerical modes take RPA screening on a density-fitted three-index
-    object (df=True) of a gas-phase, T = 0 mean field only, and always need
-    numerics.
+    Every mode takes a closed-shell, restricted, gas-phase, T = 0 mean field
+    only. The numerical modes take RPA screening on a density-fitted
+    three-index object (df=True) only, and always need numerics.
     relaxation: what is done with its ov block, always including the static
     gKS term (`static_ov_term`), which is relaxed with the rest:
       'none'    -- unrelaxed Delta_gamma^GW;
@@ -178,20 +181,25 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     for name, value in (('auxbasis', auxbasis), ('screen_r_cut', screen_r_cut)):
         if value is not None and mode != 'space-time':
             raise ValueError(f"{name} is a 'space-time' mode setting; got mode={mode!r}.")
-    require_restricted(mf, 'compute_gw_density_matrix')
+    where = f"compute_gw_density_matrix mode={mode!r}"
+    # The reference's scope, one set for every mode (the numerical modes'
+    # Sigma builders carry the same guards for their own callers).
+    require_closed_shell_or_unrestricted(mf, where, mol=mol)
+    require_restricted(mf, where)
+    require_gas_phase(mf, where)
+    require_zero_temperature(mf, where)
 
     mol = mol if mol is not None else mf.mol
     nocc = nocc if nocc is not None else mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
     nmo = len(eps)
 
-    where = f"compute_gw_density_matrix mode={mode!r}"
     if mode == 'casida':
         numerics = relaxation_numerics(relaxation != 'none', numerics, where)
         blocks = casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability, df, eta)
     else:
         numerics = required_numerics(numerics, where)
-        _refuse_casida_only_options(mode, polarizability, df)
+        _refuse_casida_only_options(where, polarizability, df)
         if mode == 'imagfrequency':
             blocks = imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics)
         else:
@@ -215,11 +223,9 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     return dm_ao
 
 
-def _refuse_casida_only_options(mode, polarizability, df):
+def _refuse_casida_only_options(where, polarizability, df):
     """Options only the Casida route takes, refused by name on the numerical
-    modes. Their restricted-spin, gas-phase and T = 0 limits are refused by
-    the Sigma builders they call."""
-    where = f"compute_gw_density_matrix mode={mode!r}"
+    modes; `where` names the call in the message."""
     if str(polarizability).upper() != 'RPA':
         raise NotImplementedError(f"{where} screens with RPA only; got "
                                   f"polarizability={polarizability!r}.")

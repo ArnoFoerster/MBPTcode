@@ -12,9 +12,8 @@ of the message that names the reason:
   the numerical modes, which screen with RPA on a three-index object;
 - a missing Numerics where one is required: the numerical modes always, the
   Casida route whenever it relaxes;
-- references outside the scope: UHF in every mode; an environment and a
-  thermally smeared mean field on the numerical modes (refused by their
-  Sigma builders);
+- references outside the scope, in every mode: UHF, an open-shell (ROHF)
+  reference, an environment and a thermally smeared mean field;
 - the removed keywords `relax` and `relax_kernel`.
 
 NH3/cc-pVDZ HF, density-fitted (`gw_density_routes.mean_field`).
@@ -118,16 +117,25 @@ def test_unrestricted_reference(hf, mode):
             relaxation='none')
 
 
-@pytest.mark.parametrize('mode', NUMERICAL)
-def test_environment_on_numerical_modes(hf, mode):
+@pytest.mark.parametrize('mode', MODES)
+def test_open_shell_reference(hf, mode):
+    cation = hf.mol.copy()
+    cation.charge, cation.spin = 1, 1
+    cation.build()
+    refused(NotImplementedError, ['closed-shell'], scf.ROHF(cation), mode=mode,
+            relaxation='none')
+
+
+@pytest.mark.parametrize('mode', MODES)
+def test_environment(hf, mode):
     solvated = attach_environment(copy.copy(hf),
                                   SolventScreening(hf.mol, eps=2.0, eps_static=2.0))
     refused(NotImplementedError, ['gas phase', 'SolventScreening'], solvated,
             mode=mode, relaxation='none')
 
 
-@pytest.mark.parametrize('mode', NUMERICAL)
-def test_smeared_mean_field_on_numerical_modes(hf, mode):
+@pytest.mark.parametrize('mode', MODES)
+def test_smeared_mean_field(hf, mode):
     smeared = copy.copy(hf)
     smeared.sigma, smeared.smearing_method = 0.01, 'fermi'
     refused(NotImplementedError, ['T = 0'], smeared, mode=mode, relaxation='none')
