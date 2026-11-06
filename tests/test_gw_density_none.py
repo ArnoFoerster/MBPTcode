@@ -6,10 +6,12 @@
 - The numerical routes reproduce the Casida occupations.
 - The Casida occupations reproduce MOLGW's: HF to every printed digit,
   PBE0 to 3.0e-6 (gw_density_routes.MOLGW_OCCUPATIONS).
+- With TDHF and BSE screening (Casida only), the natural occupations sum to
+  N and lie in [0, 2], on CH4/cc-pVDZ (why CH4: gw_density_routes).
 
-Setup and the checks: gw_density_routes. NH3/cc-pVDZ, DF on cc-pvdz-ri, HF
-and PBE0; default quadratures, space-time on the G1 ISDF grid. Run with `-s`
-for the printed occupations and differences.
+Setup and the checks: gw_density_routes. NH3/cc-pVDZ (CH4/cc-pVDZ for TDHF
+and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures, space-time on
+the G1 ISDF grid. Run with `-s` for the printed occupations and differences.
 
 Casida occupations (largest five ... smallest; sum 10 to machine precision):
 
@@ -27,6 +29,12 @@ HF, 4.6e-2 PBE0), on the occupations, and |sum - N|:
 
 The ISDF grid GH (the finest for cc-pVDZ) gives space-time ov 1.8e-6 HF and
 3.7e-6 PBE0: little closer than G1.
+
+CH4, TDHF and BSE screening: smallest natural occupation (sum N to 2e-14,
+largest at least 2.5e-4 below 2):
+
+    HF    TDHF  1.41e-4        BSE  1.34e-4
+    PBE0  TDHF  2.71e-4        BSE  2.48e-4
 """
 import os
 import sys
@@ -39,7 +47,9 @@ from tests.gw_density_routes import (MODES, NUMERICAL_MODES, REFERENCES,
                                      check_blocks_match_casida,
                                      check_occupations_match_casida,
                                      check_casida_matches_molgw,
-                                     check_occupations_physical, route_densities)
+                                     check_occupations_physical,
+                                     check_screened_occupations_physical, mean_field,
+                                     route_densities, SCREENINGS)
 
 RELAXATION = 'none'
 #: Per block of the MO density: the worst reached (PBE0) with a factor ~10.
@@ -74,6 +84,17 @@ def test_natural_occupations_match_casida(routes, mode):
 def test_casida_matches_molgw(routes):
     mf, densities = routes
     check_casida_matches_molgw(mf, densities, RELAXATION)
+
+
+
+@pytest.fixture(scope='module', params=REFERENCES)
+def ch4(request):
+    return mean_field(request.param, 'CH4')
+
+
+@pytest.mark.parametrize('polarizability', SCREENINGS)
+def test_screened_occupations_physical(ch4, polarizability):
+    check_screened_occupations_physical(ch4, polarizability, RELAXATION)
 
 
 if __name__ == '__main__':

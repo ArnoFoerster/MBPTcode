@@ -64,7 +64,6 @@ pytest test_davidson_one_source.py
 script test_davidson_symmetric.py
 pytest test_davidson_triplet.py
 pytest test_declaration.py
-script test_density_matrix_small.py
 pytest test_gw_density_dyson.py
 pytest test_gw_density_imagfrequency.py
 pytest test_gw_density_none.py

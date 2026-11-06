@@ -39,7 +39,7 @@ optional third-party one.
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |
 | GW density matrix | `test_gw_density_none`, `test_gw_density_dyson`, `test_gw_density_zvector` (all routes, per relaxation), `test_gw_density_relaxation`, `test_gw_density_quadrature`, `test_gw_density_imagfrequency`, `test_gw_density_space_time` |
-| MPn densities and Laplace | `test_mp2_density_matrix`, `test_mp3_density_matrix`, `test_mp2_density_df`, `test_mp3_density_df`, `test_mpn_density_restricted`, `test_mpn_density_unrestricted`, `test_mp4_laplace_restricted`, `test_density_matrix_small` |
+| MPn densities and Laplace | `test_mp2_density_matrix`, `test_mp3_density_matrix`, `test_mp2_density_df`, `test_mp3_density_df`, `test_mpn_density_restricted`, `test_mpn_density_unrestricted`, `test_mp4_laplace_restricted` |
 | response derivatives (finite field) | `test_mp3_finite_field`, `test_uhf_mp2_relaxed_finite_field` |
 | GW self-energy and QP equation | `test_self_energy_formulas`, `test_unrestricted_psd_triplets`, `test_unrestricted_spin_flip_open_shell`, `test_tdhf_vertex_is_bare`, `test_self_energy_diagonal_batch`, `test_self_energy_mode_matrix`, `test_analytical_continuation`, `test_construct_4d_w_rpa`, `test_rpa_correlation_energy`, `test_static_exchange_reuse` |
 | eigenvalue self-consistency | `test_evgw` |

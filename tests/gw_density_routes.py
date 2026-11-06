@@ -12,7 +12,18 @@ checks:
   restricted (spin-summed) bound; the GW density is restricted-spin only, so
   the unrestricted bound [0, 1] has no case;
 - the numerical routes reproduce the Casida occupations;
-- the Casida occupations reproduce MOLGW's (MOLGW_OCCUPATIONS).
+- the Casida occupations reproduce MOLGW's (MOLGW_OCCUPATIONS);
+- with TDHF and BSE screening (Casida only: the numerical routes take RPA
+  only), the natural occupations sum to N and lie in [0, 2], on CH4/cc-pVDZ.
+
+Why CH4 for TDHF/BSE: NH3 with a PBE0 reference, 'dyson' relaxation and
+TDHF or BSE screening gives one negative natural occupation (see
+test_gw_density_dyson). Of H2O, HF, N2, CO, CH4, LiH and Ne (cc-pVDZ), CH4,
+HF and Ne stay in [0, 2] for all 18 combinations (HF/PBE0 x RPA/TDHF/BSE x
+none/dyson/zvector); CH4 has the largest margin among the polyatomics
+(smallest occupation 9.7e-5) and symmetry-degenerate orbitals. H2O, N2 and
+CO have an unstable TDHF (CO also BSE) screening on PBE0 (omega^2 < 0, a
+CasidaInstability); LiH leaves [0, 2] even unrelaxed.
 
 The block comparison is the sharper test of the two: an error in the density
 moves the occupations only at second order through its off-diagonal elements
@@ -36,10 +47,21 @@ H  0.939731 -0.319345 -0.000000
 H -0.469865 -0.319346  0.813831
 H -0.469865 -0.319346 -0.813831
 """
+#: Td, C-H 1.089 A.
+CH4 = """
+C  0.000  0.000  0.000
+H  0.629  0.629  0.629
+H -0.629 -0.629  0.629
+H -0.629  0.629 -0.629
+H  0.629 -0.629 -0.629
+"""
+MOLECULES = {'NH3': NH3, 'CH4': CH4}
 AUXBASIS = 'cc-pvdz-ri'
 REFERENCES = ('HF', 'PBE0')
 MODES = ('casida', 'imagfrequency', 'space-time')
 NUMERICAL_MODES = ('imagfrequency', 'space-time')
+#: The screenings beyond RPA, Casida route only.
+SCREENINGS = ('TDHF', 'BSE')
 #: Restricted spin: each spatial natural orbital holds at most two electrons.
 MAX_OCCUPATION = 2.0
 TOL = 1e-10
@@ -94,20 +116,21 @@ MOLGW_BAR = {('HF', 'none'): 6e-7, ('HF', 'dyson'): 6e-7, ('HF', 'zvector'): 6e-
              ('PBE0', 'none'): 1e-5, ('PBE0', 'dyson'): 2e-5}
 
 
-def nh3():
-    return gto.M(atom=NH3, basis='cc-pvdz', verbose=0)
+def molecule(name='NH3'):
+    return gto.M(atom=MOLECULES[name], basis='cc-pvdz', verbose=0)
 
 
-def mean_field(reference):
-    """The converged density-fitted HF or PBE0 mean field of NH3, tagged
-    with `reference_name`."""
-    mol = nh3()
+def mean_field(reference, name='NH3'):
+    """The converged density-fitted HF or PBE0 mean field of molecule `name`,
+    tagged with `reference_name` and the `label` the checks print."""
+    mol = molecule(name)
     mf = scf.RHF(mol) if reference == 'HF' else dft.RKS(mol, xc='pbe0')
     mf = mf.density_fit(auxbasis=AUXBASIS)
     mf.conv_tol, mf.conv_tol_grad, mf.max_cycle = 1e-13, 1e-10, 200
     mf.kernel()
     assert mf.converged
     mf.reference_name = reference
+    mf.label = f'{name}/cc-pVDZ {reference}'
     return mf
 
 
@@ -149,25 +172,23 @@ def check_blocks_match_casida(mf, densities, mode, relaxation, bar):
     diff = np.abs(densities[mode] - densities['casida'])
     errs = {'oo': diff[o, o].max(), 'ov': diff[o, v].max(), 'vv': diff[v, v].max()}
     scale = np.abs(densities['casida'] - np.diag(mf.mo_occ)).max()
-    print(f"\nNH3/cc-pVDZ {mf.reference_name} {relaxation!r}: {mode} - casida per block: "
+    print(f"\n{mf.label} {relaxation!r}: {mode} - casida per block: "
           + ', '.join(f'{k} {e:.2e}' for k, e in errs.items())
           + f'  (max |dgamma| {scale:.2e}, bar {bar:.0e})')
     for block, err in errs.items():
         assert err < bar, f'{block} block: {err:.2e} >= {bar:.0e}'
 
 
-def check_occupations_physical(mf, densities, mode, relaxation):
+def assert_occupations_physical(mf, occ, sum_tol, title):
     """Sum N, every occupation in [0, 2]; correlation moves density out of
     the reference, so none is exactly 0 or 2, and the nocc largest are the
     valence pairs."""
-    occ = natural_occupations(densities[mode])
     nelec = mf.mol.nelectron
-    print(f"\nNH3/cc-pVDZ {mf.reference_name}: GW natural occupations "
-          f"({mode}, relaxation={relaxation!r})")
+    print(f"\n{mf.label}: GW natural occupations ({title})")
     print(np.array2string(occ, precision=8, max_line_width=100))
     print(f"sum {occ.sum():.12f}  (N = {nelec})  "
           f"min {occ.min():.3e}  max {occ.max():.10f}")
-    assert abs(occ.sum() - nelec) < SUM_TOL[mode]
+    assert abs(occ.sum() - nelec) < sum_tol
     assert occ.min() >= -TOL
     assert occ.max() <= MAX_OCCUPATION + TOL
     assert occ.max() < MAX_OCCUPATION and occ.min() > 0.0
@@ -175,14 +196,31 @@ def check_occupations_physical(mf, densities, mode, relaxation):
     assert np.all(occ[nelec // 2:] < 0.1)
 
 
+def check_occupations_physical(mf, densities, mode, relaxation):
+    """The occupations of route `mode` (RPA screening) are physical."""
+    assert_occupations_physical(mf, natural_occupations(densities[mode]), SUM_TOL[mode],
+                                f'{mode}, relaxation={relaxation!r}')
+
+
+def check_screened_occupations_physical(mf, polarizability, relaxation):
+    """The Casida occupations with `polarizability` screening are physical."""
+    numerics = None if relaxation == 'none' else Numerics()
+    dm = compute_gw_density_matrix(mf, polarizability=polarizability, mode='casida',
+                                   relaxation=relaxation, numerics=numerics)
+    assert np.allclose(dm, dm.T, atol=TOL)
+    sc = mf.mol.intor('int1e_ovlp') @ mf.mo_coeff
+    assert_occupations_physical(mf, natural_occupations(sc.T @ dm @ sc), SUM_TOL['casida'],
+                                f'casida, {polarizability} screening, '
+                                f'relaxation={relaxation!r}')
+
+
 def check_occupations_match_casida(mf, densities, mode, relaxation, bar):
     """max |n_mode - n_casida| below `bar`."""
     diff = np.abs(natural_occupations(densities[mode])
                   - natural_occupations(densities['casida'])).max()
-    print(f"\nNH3/cc-pVDZ {mf.reference_name} {relaxation!r}: "
+    print(f"\n{mf.label} {relaxation!r}: "
           f"max |n_{mode} - n_casida| {diff:.2e}  (bar {bar:.0e})")
     assert diff < bar
-
 
 
 def check_casida_matches_molgw(mf, densities, relaxation):
@@ -193,6 +231,6 @@ def check_casida_matches_molgw(mf, densities, relaxation):
         pytest.skip(f'no MOLGW occupations for {key}')
     ours = natural_occupations(densities['casida'])
     diff = np.abs(ours - MOLGW_OCCUPATIONS[key]).max()
-    print(f"\nNH3/cc-pVDZ {mf.reference_name} {relaxation!r}: "
+    print(f"\n{mf.label} {relaxation!r}: "
           f"max |n_casida - n_MOLGW| {diff:.2e}  (bar {MOLGW_BAR[key]:.0e})")
     assert diff < MOLGW_BAR[key]

@@ -6,10 +6,12 @@
 - The numerical routes reproduce the Casida occupations.
 - The Casida occupations reproduce MOLGW's relaxed (iterated-Dyson) ones:
   HF to every printed digit, PBE0 to 6.6e-6 (gw_density_routes.MOLGW_OCCUPATIONS).
+- With TDHF and BSE screening (Casida only), the natural occupations sum to
+  N and lie in [0, 2], on CH4/cc-pVDZ (why CH4: gw_density_routes).
 
-Setup and the checks: gw_density_routes. NH3/cc-pVDZ, DF on cc-pvdz-ri, HF
-and PBE0; default quadratures, space-time on the G1 ISDF grid. Run with `-s`
-for the printed occupations and differences.
+Setup and the checks: gw_density_routes. NH3/cc-pVDZ (CH4/cc-pVDZ for TDHF
+and BSE), DF on cc-pvdz-ri, HF and PBE0; default quadratures, space-time on
+the G1 ISDF grid. Run with `-s` for the printed occupations and differences.
 
 Casida occupations (largest five ... smallest; sum 10 to machine precision):
 
@@ -36,6 +38,22 @@ energies has its lowest eigenvalue at 0.034 Ha (0.32 Ha on HF; lowest ov gap
 against ~3 on HF. The exact-integral route shows the same factor on its own
 smaller error (imagfrequency ov 6.0e-9 'none' -> 7.6e-8 'dyson'). The ISDF
 grid GH (the finest for cc-pVDZ) gives space-time ov 4.0e-5 PBE0.
+
+CH4, TDHF and BSE screening: smallest natural occupation (sum N to 2e-14,
+largest at least 2.5e-4 below 2):
+
+    HF    TDHF  1.41e-4        BSE  1.34e-4
+    PBE0  TDHF  2.60e-4        BSE  2.40e-4
+
+NH3 is not used for TDHF/BSE because there, on PBE0, 'dyson' leaves [0, 2]:
+one natural occupation is -1.13e-3 (TDHF) and -2.56e-4 (BSE), with N kept
+to 1e-14 and no convergence flag ('none' and 'zvector' stay in [0, 2]). The
+solve is right: a dense solve of Eq. 23 reproduces the ov block to 1e-12. It
+is the same soft mode as above: TDHF and BSE project the right-hand side
+onto the 0.034 Ha eigenvector of the HF kernel 6x and 4x more than RPA
+does (-4.5e-3 and -3.2e-3 against -7.4e-4), so that mode carries 84% and
+77% of |ov|^2, and the ov block reaches 0.136 (TDHF) against 0.015 for
+'zvector'.
 """
 import os
 import sys
@@ -48,7 +66,9 @@ from tests.gw_density_routes import (MODES, NUMERICAL_MODES, REFERENCES,
                                      check_blocks_match_casida,
                                      check_occupations_match_casida,
                                      check_casida_matches_molgw,
-                                     check_occupations_physical, route_densities)
+                                     check_occupations_physical,
+                                     check_screened_occupations_physical, mean_field,
+                                     route_densities, SCREENINGS)
 
 RELAXATION = 'dyson'
 #: Per block of the MO density: the worst reached (PBE0) with a factor ~4-10;
@@ -84,6 +104,17 @@ def test_natural_occupations_match_casida(routes, mode):
 def test_casida_matches_molgw(routes):
     mf, densities = routes
     check_casida_matches_molgw(mf, densities, RELAXATION)
+
+
+
+@pytest.fixture(scope='module', params=REFERENCES)
+def ch4(request):
+    return mean_field(request.param, 'CH4')
+
+
+@pytest.mark.parametrize('polarizability', SCREENINGS)
+def test_screened_occupations_physical(ch4, polarizability):
+    check_screened_occupations_physical(ch4, polarizability, RELAXATION)
 
 
 if __name__ == '__main__':
