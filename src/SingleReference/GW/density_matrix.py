@@ -143,7 +143,7 @@ class GWDensityMatrixSolver(AmplitudeGenerator):
         return dgamma_oo, dgamma_ov, dgamma_vv
 
 
-def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=True,
+def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
                                mode='casida', relaxation='zvector',
                                numerics=None, auxbasis=None, screen_r_cut=None):
     """Build the total AO 1-particle density matrix gamma = gamma_mf + Delta_gamma^GW, restricted spin only.
@@ -186,7 +186,7 @@ def compute_gw_density_matrix(mf, mol=None, nocc=None, polarizability='RPA', df=
     require_zero_temperature(mf, where)
 
     mol = mol if mol is not None else mf.mol
-    nocc = nocc if nocc is not None else mol.nelectron // 2
+    nocc = mol.nelectron // 2
     eps = get_orbital_energies(mf, representation='spatial')
     nmo = len(eps)
 
