@@ -11,7 +11,8 @@ from pyscf.scf import stability as scf_stability
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
-from src.Base.environment_seam import environment_of
+from src.Base.environment_seam import NoEnvironment, environment_of
+from src.Base.utils.grids.matsubara import beta_from_mf
 from src.Base.pyscf.cphf import ResponseKernel
 
 #: C^T F C per mean field, keyed weakly so an entry dies with its mean field.
@@ -228,6 +229,38 @@ def spin_index(spin_channel):
     return 0 if spin_channel == 'alpha' else 1
 
 
+def get_spin_factor(spin_mode):
+    """The number of spin channels one computed channel stands for: 2 for
+    'restricted' (one spatial channel carries both spins: the spatial density
+    sums two identical channels, and the restricted screening amplitudes
+    restore their sqrt(2) in every term quadratic in them), 1 for
+    'unrestricted' (each channel is its own)."""
+    if spin_mode not in ('restricted', 'unrestricted'):
+        raise ValueError(f"spin_mode must be 'restricted' or 'unrestricted', "
+                         f"got {spin_mode!r}")
+    return 2.0 if spin_mode == 'restricted' else 1.0
+
+
+def require_restricted(mf, who):
+    """Refuse an unrestricted (UHF/UKS) reference on a restricted-only route."""
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError(f'{who} is restricted-spin only.')
+
+
+def require_gas_phase(mf, who):
+    """Refuse a mean field that carries an environment."""
+    environment = environment_of(mf)
+    if not isinstance(environment, NoEnvironment):
+        raise NotImplementedError(f'{who} is gas phase only; mf carries an '
+                                  f'environment ({type(environment).__name__}).')
+
+
+def require_zero_temperature(mf, who):
+    """Refuse a thermally smeared mean field."""
+    if beta_from_mf(mf) is not None:
+        raise NotImplementedError(f'{who} is T = 0 only; mf is thermally smeared.')
+
+
 def require_closed_shell_or_unrestricted(mf, who, mol=None):
     """Refuse a reference that a restricted code path would misread.
 
@@ -256,6 +289,20 @@ def require_closed_shell_or_unrestricted(mf, who, mol=None):
             f'one; this one has spin {mol.spin} and {off} occupations off that '
             f'pattern. Run an open shell as UHF/UKS.')
 
+
+
+def require_gas_phase_ground_state(mf, who, mol=None, unrestricted=False):
+    """Refuse every reference a gas-phase, T = 0 ground-state route would
+    misread: an open shell run restricted or non-aufbau occupations
+    (`require_closed_shell_or_unrestricted`), an unrestricted one unless the
+    route takes it (`unrestricted`), an attached environment
+    (`require_gas_phase`) and a thermal smearing (`require_zero_temperature`).
+    A route that gains unrestricted spin passes unrestricted=True."""
+    require_closed_shell_or_unrestricted(mf, who, mol=mol)
+    if not unrestricted:
+        require_restricted(mf, who)
+    require_gas_phase(mf, who)
+    require_zero_temperature(mf, who)
 
 def get_orbital_energies(mf, representation='spatial'):
     mo_energy = mf.mo_energy

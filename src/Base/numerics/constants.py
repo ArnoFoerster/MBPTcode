@@ -27,6 +27,46 @@ DF_MO_BLOCK = 200
 # (`GW.imaginary_axis`): its W(i omega) quadrature, minimax by default.
 IMAGFREQ_NFREQ = 20
 
+#: The imaginary-frequency grid types a quadrature may name: the tabulated
+#: GreenX minimax grid or a mapped Gauss-Legendre grid. One list for every
+#: choice of grid type, checked when the setting is made; for now the GW
+#: density's outer grid (`numerics.gwdensity.grid`).
+IMAGINARY_FREQUENCY_GRIDS = ('minimax', 'gauss_legendre')
+
+# Defaults of `numerics.gwdensity` (`nfreq`, `grid`), which a run overrides
+# there: the outer imaginary-frequency points of the GW density's dynamic
+# integral (`GW.density_matrix`), on the minimax grid of [gap/2, span] of
+# the particle-hole window. The integrand has structure on every scale from
+# half the smallest particle-hole gap (the frontier |eps - mu|) to the
+# largest transition energy, so what the grid must resolve is the ratio of
+# that window, not the size of the system. It grows with deep core levels
+# (heavier atoms), large basis sets and small gaps. A minimax grid is fitted
+# to the window itself and follows it; a mapped Gauss-Legendre grid has a
+# single scale (w0, near the gap) and loses the far end of a wide window,
+# where the deep cores sit. On that window minimax 24 already reaches the
+# route's floor (set elsewhere: the W grid and its fit) on every system
+# studied, up to HBr and Br2 (span/gap up to 2900), and minimax 16 is within
+# 1e-7 of it; the points are cheap next to the W build, so the default keeps
+# a wide margin. 34, not 32: most rows of GreenX's 32-point
+# frequency table miss their own target by 2-11 % (rows serving
+# e_max/e_min = 5846-6665 and >= 10044), which a window of [gap/2, span]
+# reaches on Br2/cc-pVDZ PBE0; every row of the 34-point table is sound.
+GW_DENSITY_NFREQ = 34
+GW_DENSITY_GRID = 'minimax'
+
+# The Lorentzian fit of W_c(i w') on the W grid of the GW density's
+# imaginary-frequency Sigma (`GW.imaginary_axis.fitted_self_energy_matrix_imaginary_axis`):
+# one pole 2 Omega/(w'^2 + Omega^2) per W-grid point, the Omega log-spaced over
+# [LOW * gap, HIGH * span] of the particle-hole window, and a Tikhonov
+# regularization relative to the largest singular value squared of the
+# (column-normalized) design matrix. Fixed, not user settings. The poles
+# overlap, so without regularization the fit is rank-deficient and its
+# amplitudes are fragile; the regularization only has to be large enough to
+# fix them, and the density hardly depends on its value beyond that.
+GW_DENSITY_W_FIT_LOW = 0.5
+GW_DENSITY_W_FIT_HIGH = 2.0
+GW_DENSITY_W_FIT_TIKHONOV = 1e-10
+
 # Lorentzian broadening for self-energy denominators / spectral functions.
 DEFAULT_BROADENING_ETA = 1e-3
 
@@ -280,9 +320,6 @@ QP_Z_DERIV_STEP = 1e-3
 # the quasiparticle energies of a spin-contaminated determinant describe a
 # mixture of spin states, which no correction downstream undoes.
 UHF_SPIN_CONTAMINATION_WARN = 0.1
-
-# spin factor
-GW_DENSITY_SPIN_SUM = 4.0
 
 # Singlet/triplet factor on the bare exchange kernel of a Casida/BSE problem:
 # kappa (ia|jb) with kappa = 2 for a singlet and 0 for a triplet.

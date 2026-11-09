@@ -22,7 +22,7 @@ class MP2DensityMatrixSolver:
     integrals, matching AmplitudeGenerator/get_antisymmetrized_spin_eri's
     convention. The ov block comes from the second-order singles amplitude
     t_i^{a(2)} (no CPHF/Z-vector solve), analogous to
-    GWDensityMatrixSolver.compute_unrelaxed_blocks.
+    the GW density's casida_unrelaxed_blocks.
     """
 
     def __init__(self, eps_spin, g_anti_spin, nocc_spin, ncore_spin=0):

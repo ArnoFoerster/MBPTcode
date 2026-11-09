@@ -4,7 +4,7 @@ point is imported from the module that defines it; this package re-exports
 nothing, so importing one of its modules loads only what that module needs.
 
 Density matrices from here
-(`SingleReference.DensityMatrix.density_matrix.compute_gw_density_matrix`) and
+(`SingleReference.GW.density_matrix.compute_gw_density_matrix`) and
 from src/SingleReference/CC (compute_ccsd/ccsdt_density_matrix) are both
 AO-basis 1-RDMs, usable interchangeably as calc_qp_energy(...,
 dm_correction=...).
