@@ -40,9 +40,11 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.factorization.isdf_jk import isdf_jk
 from src.Base.factorization.separable_ri import resolve_isdf_grid
 from src.SingleReference.DensityMatrix.density_matrix import hf_kernel_mean_field
-from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
+from src.SingleReference.GW.density_matrix import (casida_screening,
+                                                    casida_unrelaxed_blocks,
                                                     compute_gw_density_matrix,
-                                                    static_ov_term)
+                                                    screened_coulomb_residues,
+                                                    static_ov_term_unrelaxed)
 from src.environments.solvent_screening import SolventScreening
 from tests.gw_density_routes import AUXBASIS, converged, fitted, mo_dgamma, water
 
@@ -66,7 +68,7 @@ def test_static_term_is_hf_fock_gradient(pbe0):
     C = ks.mo_coeff
     F_hf = C.T @ hf_kernel_mean_field(ks).get_fock(dm=ks.make_rdm1()) @ C
     ref = F_hf[:nocc, nocc:] / (eps[:nocc, None] - eps[None, nocc:])
-    got = static_ov_term(ks, mol, eps, nocc)
+    got = static_ov_term_unrelaxed(ks, mol, eps, nocc)
     err, size = np.abs(got - ref).max(), np.abs(ref).max()
     print(f'static ov term: max |diff| {err:.2e}, max |term| {size:.2e}')
     assert size > 1e-4, 'the static term vanishes: nothing tested'
@@ -81,15 +83,14 @@ def test_spin_factor(pbe0):
     mol = ks.mol
     nocc = mol.nelectron // 2
     eps = get_orbital_energies(ks, representation='spatial')
-    solver = GWDensityMatrixSolver(
-        eps, df_coeff=get_density_fitting_coefficients(mol, ks, representation='spatial'))
-    omega, X, Y = solver.build_screening(nocc)
-    oo, ov, vv = solver.compute_unrelaxed_blocks(nocc, ks, mol, omega=omega, X=X, Y=Y)
-    static = static_ov_term(ks, mol, eps, nocc)
+    df_coeff = get_density_fitting_coefficients(mol, ks, representation='spatial')
+    omega, X, Y = casida_screening(eps, nocc, df_coeff=df_coeff)
+    oo, ov, vv = casida_unrelaxed_blocks(ks, mol, eps, nocc, screening=(omega, X, Y))
+    static = static_ov_term_unrelaxed(ks, mol, eps, nocc)
 
     # The dynamic ov term written out with the raw (un-normalized) w of
     # get_chi_a; the restricted w-normalization 2 is explicit here.
-    w = solver.get_chi_a(nocc, X, Y, p_state=None)
+    w = screened_coulomb_residues(eps, nocc, X, Y, df_coeff=df_coeff)
     o, v = slice(0, nocc), slice(nocc, None)
     ei, ea = eps[o], eps[v]
     t_ic = w[:, o, v] / (ei[None, :, None] - ea[None, None, :] - omega[:, None, None])

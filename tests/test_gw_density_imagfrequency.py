@@ -102,9 +102,10 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.utils.grids.grids import minimax_frequency_grid
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.GW import imaginary_axis
-from src.SingleReference.GW.density_matrix import (GWDensityMatrixSolver,
+from src.SingleReference.GW.density_matrix import (casida_screening,
                                                    compute_gw_density_matrix,
-                                                   outer_frequency_grid)
+                                                   outer_frequency_grid,
+                                                   screened_coulomb_residues)
 from src.SingleReference.GW.imaginary_axis import (
     self_energy_matrix_imaginary_axis, one_pole_convolution,
     screened_pair_weights, self_energy_diagonal_imaginary_axis)
@@ -193,10 +194,9 @@ def test_fitted_sigma_matches_casida_poles(reference):
     eps = get_orbital_energies(mf, representation='spatial')
     points, _ = outer_frequency_grid(eps, nocc, Numerics())
     sigma, mu = self_energy_matrix_imaginary_axis(mf, mol, nocc, points, Numerics())
-    solver = GWDensityMatrixSolver(
-        eps, df_coeff=get_density_fitting_coefficients(mol, mf, representation='spatial'))
-    omega, X, Y = solver.build_screening(nocc)
-    w = solver.get_chi_a(nocc, X, Y, p_state=None)
+    df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+    omega, X, Y = casida_screening(eps, nocc, df_coeff=df_coeff)
+    w = screened_coulomb_residues(eps, nocc, X, Y, df_coeff=df_coeff)
     shift = np.where(np.arange(len(eps)) < nocc, 1.0, -1.0)
     exact = np.array([2.0 * np.einsum(
         'spm,sqm,sm->pq', w, w,

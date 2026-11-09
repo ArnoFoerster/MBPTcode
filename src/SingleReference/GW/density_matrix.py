@@ -1,7 +1,6 @@
 import numpy as np
 
 from src.SingleReference.common.mean_field_operators import mean_field_static_operator
-from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
@@ -14,7 +13,6 @@ from src.Base.pyscf.pyscf_interface import (
     get_two_electron_integrals_chemist,
     require_gas_phase_ground_state,
 )
-from src.Base.numerics.constants import DEFAULT_BLOCK_SIZE
 from src.SingleReference.DensityMatrix.density_matrix import (
     hf_kernel_mean_field,
     solve_cphf_relaxation,
@@ -23,119 +21,11 @@ from src.SingleReference.DensityMatrix.density_matrix import (
 from src.SingleReference.GW.imaginary_axis import (
     self_energy_matrix_imaginary_axis)
 from src.SingleReference.GW.space_time import self_energy_matrix_space_time
+from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.Base.numerics.numerics import required_numerics
 
 MODES = ('casida', 'imagfrequency', 'space-time')
 RELAXATIONS = ('none', 'dyson', 'zvector')
-
-
-def _choice(value, choices, keyword):
-    """`value` normalized as calc_qp_energy's mode (lower case, '_' -> '-',
-    'imag-frequency' -> 'imagfrequency'), refused unless one of `choices`."""
-    name = str(value).lower().replace('_', '-')
-    name = {'imag-frequency': 'imagfrequency'}.get(name, name)
-    if name not in choices:
-        raise ValueError(f"Unknown {keyword}={value!r}; choose one of "
-                         + ', '.join(repr(c) for c in choices) + '.')
-    return name
-
-
-def static_ov_term(mf, mol, eps, nocc):
-    """Per-channel static gKS ov term <i|Sigma_x - v_xc|a> / (e_i - e_a),
-    (nocc, nvir), in closed form from `mean_field_static_operator` (the
-    per-spin -K/2 - v_xc at mf's density); no spin factor. Zero on HF."""
-    occ, virt = get_occ_virt_indices(eps, nocc)
-    mo = mf.mo_coeff
-    sx_ia = (mo.T @ mean_field_static_operator(mf, mol) @ mo)[np.ix_(occ, virt)]
-    return sx_ia / (eps[occ][:, None] - eps[virt][None, :])
-
-
-class GWDensityMatrixSolver(AmplitudeGenerator):
-    """
-    Builds the GW 1-particle density-matrix correction Delta_gamma^GW (unrelaxed and orbital-relaxed),
-    restricted spin only.
-
-    Screening reuses LinearResponseSolver/CasidaSolver and
-    AmplitudeGenerator.get_chi_a, so the polarizability channel matches the
-    one used for qp_energy.py's self-energy -- see build_screening.
-    """
-
-    def __init__(self, eps, df_coeff=None, eri_chemist=None, block_size=DEFAULT_BLOCK_SIZE):
-        self.spin_mode = 'restricted'
-        self.spin_factor = get_spin_factor(self.spin_mode)
-        self.block_size = block_size
-        self.eps = eps
-        self.df_coeff = df_coeff
-        self.eri_chemist = eri_chemist
-        self.norb = len(eps)
-        if self.df_coeff is not None:
-            self.naux = self.df_coeff.shape[0]
-
-    def _get_occ_virt_indices(self, eps, nocc):
-        return get_occ_virt_indices(eps, nocc)
-
-    def build_screening(self, nocc, polarizability='RPA'):
-        """Solve the Casida/BSE equation for the requested screening channel.
-
-        polarizability: 'RPA' (Coulomb-only), 'TDHF' (bare exchange), or
-        'BSE' (statically screened exchange, W_aux=W_RPA(0)). Returns (omega, X, Y).
-        """
-        lr_solver = LinearResponseSolver(
-            self.eps, coeff_df=self.df_coeff, eri_chemist=self.eri_chemist,
-            spin_mode='restricted'
-        )
-        mode = polarizability.upper()
-        if mode == 'RPA':
-            build_kw = dict(lBSE=False)
-        elif mode == 'TDHF':
-            build_kw = dict(lBSE=True, W_aux=None)
-        elif mode == 'BSE':
-            w_aux = lr_solver.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
-            build_kw = dict(lBSE=True, W_aux=w_aux)
-        else:
-            raise ValueError(f"Unknown screening mode '{polarizability}'; choose 'RPA', 'TDHF', or 'BSE'.")
-
-        omega, X, Y = CasidaSolver(
-            *lr_solver.build_casida_matrices(nocc, **build_kw)).solve()
-        return omega, X, Y
-
-    def compute_unrelaxed_blocks(self, nocc, mf, mol, polarizability='RPA', omega=None, X=None, Y=None):
-        """
-        Per-channel MO blocks (dgamma_oo, dgamma_ov, dgamma_vv) of the unrelaxed GW density
-        correction; the spatial density is `get_spin_factor` times these.
-
-        The ov block includes the static term (`static_ov_term`), so on HF it is purely dynamic.
-        """
-        if omega is None or X is None or Y is None:
-            omega, X, Y = self.build_screening(nocc, polarizability=polarizability)
-
-        eps = self.eps
-        occ, virt = self._get_occ_virt_indices(eps, nocc)
-        ei, ea = eps[occ], eps[virt]
-
-        w = self.get_chi_a(nocc, X, Y, p_state=None)          # (nstate, norb, norb)
-        w_ic = w[:, occ, :][:, :, virt]
-        w_ak = w[:, virt, :][:, :, occ]
-        w_ik = w[:, occ, :][:, :, occ]
-        w_bc = w[:, virt, :][:, :, virt]
-
-        den_ic = ei[None, :, None] - ea[None, None, :] - omega[:, None, None]
-        den_ak = ea[None, :, None] - ei[None, None, :] + omega[:, None, None]
-        t_ic = w_ic / den_ic
-        t_ak = w_ak / den_ak
-
-        # get_chi_a builds the restricted w without its sqrt(2); the
-        # w-quadratic terms restore it with the spin factor, as the restricted
-        # self-energy does (SelfEnergySolver._spin, GW/self_energy.py). The
-        # static term below is already per channel and takes no such factor.
-        dgamma_oo = -self.spin_factor * np.einsum('sic,sjc->ij', t_ic, t_ic)
-        dgamma_vv = self.spin_factor * np.einsum('sak,sbk->ab', t_ak, t_ak)
-
-        term1 = np.einsum('sik,sbk->ib', w_ik, t_ak)
-        term2 = np.einsum('sic,sbc->ib', t_ic, w_bc)
-        dgamma_ov = (self.spin_factor * (term1 + term2) / (ei[:, None] - ea[None, :])
-                     + static_ov_term(mf, mol, eps, nocc))
-        return dgamma_oo, dgamma_ov, dgamma_vv
 
 
 def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
@@ -154,15 +44,16 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
     Every mode takes a closed-shell, restricted, gas-phase, T = 0 mean field
     only. The numerical modes take RPA screening on a density-fitted
     three-index object (df=True) only, and always need numerics.
-    relaxation: what is done with its ov block, always including the static
-    gKS term (`static_ov_term`), which is relaxed with the rest:
+    Every mode's unrelaxed ov block includes the static gKS term
+    (`static_ov_term_unrelaxed`).
+    relaxation: what is done with that ov block (`relax_gw_density`):
       'none'    -- unrelaxed Delta_gamma^GW;
       'dyson'   -- iterated-Dyson density: one linear solve with the HF kernel
                    (bare Hartree + full exact exchange) on the gKS orbitals and
                    energies and mf's own J/K backend (`hf_kernel_mean_field`);
       'zvector' -- (default) the Z-vector solve with mf's own gKS kernel.
     Both coincide on an HF reference.
-    numerics: the run's `Numerics`, the relaxation's (solve_cphf_relaxation)
+    numerics: the run's `Numerics`, the relaxation's (`relax_gw_density`)
     and the numerical modes' grids; required unless mode='casida' and
     relaxation='none'.
     auxbasis, screen_r_cut: the space-time mode's; refused with any other mode.
@@ -205,12 +96,134 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
         dgamma[:nocc, nocc:] = dgamma_ov
         dgamma[nocc:, :nocc] = dgamma_ov.T
     else:
-        mf_hess = hf_kernel_mean_field(mf) if relaxation == 'dyson' else mf
-        dgamma = solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
-                                       numerics)
+        dgamma = relax_gw_density(mf, relaxation, nocc, dgamma_oo, dgamma_ov, dgamma_vv,
+                                  numerics)
 
     dm_ao = mf.make_rdm1() + mo @ dgamma @ mo.T
     return dm_ao
+
+
+# Shared by every mode.
+
+
+def _choice(value, choices, keyword):
+    """`value` normalized as calc_qp_energy's mode (lower case, '_' -> '-',
+    'imag-frequency' -> 'imagfrequency'), refused unless one of `choices`."""
+    name = str(value).lower().replace('_', '-')
+    name = {'imag-frequency': 'imagfrequency'}.get(name, name)
+    if name not in choices:
+        raise ValueError(f"Unknown {keyword}={value!r}; choose one of "
+                         + ', '.join(repr(c) for c in choices) + '.')
+    return name
+
+
+def static_ov_term_unrelaxed(mf, mol, eps, nocc):
+    """Per-channel static gKS ov term <i|Sigma_x - v_xc|a> / (e_i - e_a),
+    (nocc, nvir), in closed form from `mean_field_static_operator` (the
+    per-spin -K/2 - v_xc at mf's density); no spin factor. Zero on HF.
+
+    The same for every mode: each mode's unrelaxed ov block is its own
+    dynamic (Sigma_c) part plus this term, and a relaxation relaxes both."""
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    mo = mf.mo_coeff
+    sx_ia = (mo.T @ mean_field_static_operator(mf, mol) @ mo)[np.ix_(occ, virt)]
+    return sx_ia / (eps[occ][:, None] - eps[virt][None, :])
+
+
+def relax_gw_density(mf, relaxation, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics):
+    """The relaxed MO-basis Delta_gamma^GW (nmo, nmo) from the spatial
+    unrelaxed blocks: `solve_cphf_relaxation` on the Hessian object the
+    relaxation names. relaxation='none' does not come here.
+      'zvector' -- `mf` itself: its own gKS kernel;
+      'dyson'   -- `hf_kernel_mean_field(mf)`: the HF kernel J - K/2 on mf's
+                   orbitals, energies and J/K backend.
+    numerics: the run's `Numerics` (the Z-vector solve's tolerances)."""
+    if relaxation == 'zvector':
+        mf_hess = mf
+    elif relaxation == 'dyson':
+        mf_hess = hf_kernel_mean_field(mf)
+    else:
+        raise ValueError(f"relax_gw_density relaxes with 'zvector' or 'dyson'; "
+                         f"got relaxation={relaxation!r}.")
+    return solve_cphf_relaxation(mf_hess, nocc, dgamma_oo, dgamma_ov, dgamma_vv, numerics)
+
+
+# mode='casida': the analytic sum over the Casida poles of the screening.
+
+
+def casida_screening(eps, nocc, df_coeff=None, eri_chemist=None, polarizability='RPA'):
+    """(omega, X, Y) of the restricted Casida problem of the screening:
+    'RPA' (Coulomb only), 'TDHF' (bare exchange) or 'BSE' (statically
+    screened exchange, W_aux = W_RPA(0)), on `df_coeff` or `eri_chemist`."""
+    lr_solver = LinearResponseSolver(eps, coeff_df=df_coeff, eri_chemist=eri_chemist,
+                                     spin_mode='restricted')
+    channel = str(polarizability).upper()
+    if channel == 'RPA':
+        build_kw = dict(lBSE=False)
+    elif channel == 'TDHF':
+        build_kw = dict(lBSE=True, W_aux=None)
+    elif channel == 'BSE':
+        w_aux = lr_solver.solve_rpa_screening(np.array([0.0]), nocc, is_imaginary=True)[0]
+        build_kw = dict(lBSE=True, W_aux=w_aux)
+    else:
+        raise ValueError(f"Unknown screening mode '{polarizability}'; choose 'RPA', 'TDHF', or 'BSE'.")
+    return CasidaSolver(*lr_solver.build_casida_matrices(nocc, **build_kw)).solve()
+
+
+def screened_coulomb_residues(eps, nocc, X, Y, df_coeff=None, eri_chemist=None):
+    """w^s_pq (nstate, nmo, nmo): the residues of W at the Casida poles, from
+    the self-energy's own `get_chi_a` (`SelfEnergySolver`), so the density
+    and the QP Sigma share one convention: restricted w without its sqrt(2),
+    restored by `get_spin_factor` where w enters squared."""
+    return SelfEnergySolver(eps, df_coeff=df_coeff, eri_chemist=eri_chemist,
+                            spin_mode='restricted').get_chi_a(nocc, X, Y, p_state=None)
+
+
+def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True,
+                            screening=None):
+    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW from the
+    Casida poles of `polarizability` screening, on the mean field's density
+    fit (df) or on four-centre integrals; the spatial density is
+    `get_spin_factor` times these. `screening`: a precomputed
+    (omega, X, Y) of `casida_screening` on the same integrals, else solved here.
+
+    The ov block includes the static term (`static_ov_term_unrelaxed`), so on HF it is
+    purely dynamic."""
+    if df:
+        df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
+        eri_chemist = None
+    else:
+        df_coeff = None
+        eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
+    if screening is None:
+        screening = casida_screening(eps, nocc, df_coeff, eri_chemist, polarizability)
+    omega, X, Y = screening
+
+    occ, virt = get_occ_virt_indices(eps, nocc)
+    ei, ea = eps[occ], eps[virt]
+    w = screened_coulomb_residues(eps, nocc, X, Y, df_coeff, eri_chemist)
+    w_ic = w[:, occ, :][:, :, virt]
+    w_ak = w[:, virt, :][:, :, occ]
+    w_ik = w[:, occ, :][:, :, occ]
+    w_bc = w[:, virt, :][:, :, virt]
+
+    t_ic = w_ic / (ei[None, :, None] - ea[None, None, :] - omega[:, None, None])
+    t_ak = w_ak / (ea[None, :, None] - ei[None, None, :] + omega[:, None, None])
+
+    # w enters squared, so the restricted sqrt(2) is restored by the spin
+    # factor, as in the restricted self-energy (SelfEnergySolver._spin). The
+    # static term is already per channel and takes no such factor.
+    spin_factor = get_spin_factor('restricted')
+    dgamma_oo = -spin_factor * np.einsum('sic,sjc->ij', t_ic, t_ic)
+    dgamma_vv = spin_factor * np.einsum('sak,sbk->ab', t_ak, t_ak)
+    dynamic_ov = (np.einsum('sik,sbk->ib', w_ik, t_ak)
+                  + np.einsum('sic,sbc->ib', t_ic, w_bc))
+    dgamma_ov = (spin_factor * dynamic_ov / (ei[:, None] - ea[None, :])
+                 + static_ov_term_unrelaxed(mf, mol, eps, nocc))
+    return dgamma_oo, dgamma_ov, dgamma_vv
+
+
+# Shared by the numerical modes: the outer integral over the full Sigma_c,pq.
 
 
 def _refuse_casida_only_options(where, polarizability, df):
@@ -222,46 +235,6 @@ def _refuse_casida_only_options(where, polarizability, df):
     if not df:
         raise NotImplementedError(f"{where} needs a three-index object; df=False "
                                   "(four-centre integrals) is not supported.")
-
-
-def casida_unrelaxed_blocks(mf, mol, eps, nocc, polarizability='RPA', df=True):
-    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW from the
-    Casida poles of `polarizability` screening (`GWDensityMatrixSolver`), on
-    the mean field's density fit (df) or on four-centre integrals."""
-    if df:
-        df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
-        eri_chemist = None
-    else:
-        df_coeff = None
-        eri_chemist = get_two_electron_integrals_chemist(mol, mf, representation='spatial')
-    return GWDensityMatrixSolver(
-        eps, df_coeff=df_coeff, eri_chemist=eri_chemist
-    ).compute_unrelaxed_blocks(nocc, mf, mol, polarizability=polarizability)
-
-
-def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
-    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW on the
-    imaginary axis: the dynamic blocks of the full Sigma_c,pq(mu + i w)
-    (`self_energy_matrix_imaginary_axis`, already per spin, so no
-    w-normalization) on the outer grid, plus the closed-form static ov term."""
-    points, weights = outer_frequency_grid(eps, nocc, numerics)
-    sigma, mu = self_energy_matrix_imaginary_axis(mf, mol, nocc, points, numerics)
-    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
-    return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
-
-
-def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
-                                screen_r_cut=None):
-    """`imagfrequency_unrelaxed_blocks` on the space-time route's full
-    Sigma_c,pq(mu + i w) (`self_energy_matrix_space_time`, per
-    spin): separable factors on numerics.isdf's grid and the QP route's
-    tau <-> omega transforms."""
-    points, weights = outer_frequency_grid(eps, nocc, numerics)
-    sigma, mu = self_energy_matrix_space_time(
-        mf, mol, nocc, points, numerics, auxbasis=auxbasis,
-        screen_r_cut=screen_r_cut)
-    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
-    return oo, ov + static_ov_term(mf, mol, eps, nocc), vv
 
 
 def outer_frequency_grid(eps, nocc, numerics):
@@ -299,3 +272,34 @@ def dynamic_density_blocks(eps_mu, sigma, points, weights, nocc):
     gamma = np.einsum('w,wpq->pq', np.asarray(weights),
                       integrand.real) / np.pi
     return gamma[:nocc, :nocc], gamma[:nocc, nocc:], gamma[nocc:, nocc:]
+
+
+# mode='imagfrequency'.
+
+
+def imagfrequency_unrelaxed_blocks(mf, mol, eps, nocc, numerics):
+    """Per-channel (oo, ov, vv) of the unrelaxed Delta gamma^GW on the
+    imaginary axis: the dynamic blocks of the full Sigma_c,pq(mu + i w)
+    (`self_energy_matrix_imaginary_axis`, already per spin, so no
+    w-normalization) on the outer grid, plus the closed-form static ov term."""
+    points, weights = outer_frequency_grid(eps, nocc, numerics)
+    sigma, mu = self_energy_matrix_imaginary_axis(mf, mol, nocc, points, numerics)
+    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
+    return oo, ov + static_ov_term_unrelaxed(mf, mol, eps, nocc), vv
+
+
+# mode='space-time'.
+
+
+def space_time_unrelaxed_blocks(mf, mol, eps, nocc, numerics, auxbasis=None,
+                                screen_r_cut=None):
+    """`imagfrequency_unrelaxed_blocks` on the space-time route's full
+    Sigma_c,pq(mu + i w) (`self_energy_matrix_space_time`, per
+    spin): separable factors on numerics.isdf's grid and the QP route's
+    tau <-> omega transforms."""
+    points, weights = outer_frequency_grid(eps, nocc, numerics)
+    sigma, mu = self_energy_matrix_space_time(
+        mf, mol, nocc, points, numerics, auxbasis=auxbasis,
+        screen_r_cut=screen_r_cut)
+    oo, ov, vv = dynamic_density_blocks(eps - mu, sigma, points, weights, nocc)
+    return oo, ov + static_ov_term_unrelaxed(mf, mol, eps, nocc), vv

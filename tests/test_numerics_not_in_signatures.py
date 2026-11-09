@@ -118,6 +118,7 @@ Z_VECTOR_FUNCTIONS = {
     'src/gradients/scf_loop_response.py': ('loop_density_response',),
     'src/SingleReference/DensityMatrix/density_matrix.py': ('solve_cphf_relaxation',
                                                             'solve_cphf_relaxation_uhf'),
+    'src/SingleReference/GW/density_matrix.py': ('relax_gw_density',),
 }
 
 
