@@ -34,7 +34,6 @@ DF on cc-pvdz-ri; default quadratures (W grid minimax 20, outer minimax
 34); space-time on the G1 ISDF grid.
 """
 import numpy as np
-import pytest
 from pyscf import dft, gto, scf
 
 from src.Base.numerics.numerics import Numerics
@@ -245,11 +244,9 @@ def check_occupations_match_casida(mf, densities, mode, relaxation, bar):
 
 
 def check_casida_matches_molgw(mf, densities, relaxation):
-    """max |n_casida - n_MOLGW| below MOLGW_BAR; skipped where MOLGW gives
-    no reference (PBE0 'zvector': MOLGW's relaxation is 'dyson')."""
+    """max |n_casida - n_MOLGW| below MOLGW_BAR. MOLGW has no 'zvector'
+    relaxation, so there is no (PBE0, 'zvector') key; callers leave it out."""
     key = (mf.reference_name, relaxation)
-    if key not in MOLGW_OCCUPATIONS:
-        pytest.skip(f'no MOLGW occupations for {key}')
     ours = natural_occupations(densities['casida'])
     diff = np.abs(ours - MOLGW_OCCUPATIONS[key]).max()
     print(f"\n{mf.label} {relaxation!r}: "

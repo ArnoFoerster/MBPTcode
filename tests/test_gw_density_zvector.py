@@ -5,8 +5,8 @@
 - Every route's natural occupations sum to N and lie in [0, 2].
 - The numerical routes reproduce the Casida occupations.
 - On HF the Casida occupations reproduce MOLGW's relaxed ones to every
-  printed digit ('zvector' is 'dyson' there); MOLGW's relaxation is the
-  iterated-Dyson one, so PBE0 has no MOLGW reference and is skipped.
+  printed digit ('zvector' is 'dyson' there). HF only: MOLGW's relaxation is
+  the iterated-Dyson one, so it has no 'zvector' reference on PBE0.
 - With TDHF and BSE screening (Casida only), the natural occupations sum to
   N and lie in [0, 2], on CH4/cc-pVDZ (why CH4: gw_density_routes).
 
@@ -86,6 +86,7 @@ def test_natural_occupations_match_casida(routes, mode):
     check_occupations_match_casida(mf, densities, mode, RELAXATION, OCCUPATION_BAR[mode])
 
 
+@pytest.mark.parametrize('routes', ['HF'], indirect=True)
 def test_casida_matches_molgw(routes):
     mf, densities = routes
     check_casida_matches_molgw(mf, densities, RELAXATION)
