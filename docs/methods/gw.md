@@ -81,3 +81,8 @@ static W of the result. Restricted or unrestricted
 the SCF's PCM potential stays in the Fock matrix every cycle and the solute's
 response to its own added charge enters as a static operator from the
 screened reaction field ΔW, whose diagonal is Duchemin et al.'s Eq. (18).
+
+**GW density matrix** — `compute_gw_density_matrix` takes the same three routes
+(`mode='casida'`, `'imagfrequency'`, `'space-time'`) and relaxes the orbitals
+by the Z-vector or the linearized Dyson equation; see
+[Density matrices](density-matrices.md#gw-density-matrix).

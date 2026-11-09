@@ -39,7 +39,7 @@ from src.Base.numerics.constants import ISDF_DUCHEMIN_BLASE, XC_GRID_LEVEL_UNREC
 #: Sections added after records and identities were first written: a record
 #: without one reads its defaults, and one at its defaults leaves the identity
 #: what it was before the section existed.
-NUMERICS_LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'adc', 'properties')
+NUMERICS_LATER_SECTIONS = ('evgw', 'qsgw', 'imagfreq', 'gwdensity', 'adc', 'properties')
 
 #: Later sections whose default is not what a record written without them was
 #: computed with: such a record reads these values, the rest at the defaults.

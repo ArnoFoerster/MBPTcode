@@ -2,7 +2,7 @@
 (GWGammaInf, PSDn), chosen by method name (`METHOD_REGISTRY`)."""
 import numpy as np
 from src.Base.utils.parallel.threads import blas_single_threaded, row_map
-from src.Base.pyscf.pyscf_interface import spin_index
+from src.Base.pyscf.pyscf_interface import get_spin_factor, spin_index
 from src.SingleReference.LinearResponse.transition_amplitudes import AmplitudeGenerator
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.Base.numerics.constants import (DEFAULT_BROADENING_ETA, DEFAULT_BLOCK_SIZE,
@@ -332,12 +332,14 @@ class SelfEnergySolver(AmplitudeGenerator):
         return get_occ_virt_indices(eps, nocc)
 
     def _spin(self, nocc, spin_channel):
-        """(eps, nocc_spin, prefactor) of one spin channel: the unrestricted
-        channel's own orbitals at weight 1, the restricted ones at 2."""
+        """(eps, nocc_spin, prefactor) of one spin channel; the prefactor is
+        `get_spin_factor`: the unrestricted channel's own orbitals at weight 1,
+        the restricted ones at 2."""
+        prefactor = get_spin_factor(self.spin_mode)
         if self.spin_mode == 'unrestricted':
             eps = (self.eps_a, self.eps_b)[spin_index(spin_channel)]
-            return eps, nocc[spin_index(spin_channel)], 1.0
-        return self.eps, nocc, 2.0
+            return eps, nocc[spin_index(spin_channel)], prefactor
+        return self.eps, nocc, prefactor
 
     def calculate_self_energy(self, p_state, freq, nocc, eigenvalues_casida, chiXYa, chiXYb=None,
                               eigenvalues_casida_t=None, chiXYb_t=None, spin_channel='alpha', vertex_mode='GW',
