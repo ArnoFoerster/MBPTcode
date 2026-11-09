@@ -24,23 +24,24 @@ def relaxation_numerics(relax, numerics, where):
 
 
 def hf_kernel_mean_field(mf):
-    """A bare RHF carrying a restricted `mf`'s orbitals, energies and
-    occupations and its J/K backend, so that its `gen_response` is the HF
-    kernel J - K/2 on `mf`'s own integrals: the Hessian object of an
-    HF-kernel relaxation (`solve_cphf_relaxation`) on a gKS reference.
+    """The Hessian object of the Dyson route (relaxation='dyson') of a
+    correlated density's relaxation (`solve_cphf_relaxation`), for any
+    self-energy Sigma (GW, second order, ...): a bare RHF carrying a
+    restricted `mf`'s orbitals, energies, occupations and J/K backend, so
+    that its `gen_response` is the HF kernel J - K/2.
 
-    The backend is the one `mf` builds J and K with: exact four-centre
-    integrals where `mf` has no `with_df` (its `_eri` is carried over, so a
-    custom or incore Hamiltonian is kept and not rebuilt); the same `with_df` object
-    (density fit or ISDF-K, `isdf_jk`) where `mf` is a pyscf density-fitted
-    mean field. Any other backend is refused rather than replaced by exact
-    integrals. Only the kernel changes: no exchange-correlation kernel, full
-    exact exchange (no fraction, no range separation).
+    The iterated-Dyson density responds through H_KS - v_xc + Sigma: f_xc
+    drops out with v_xc and, Sigma_c held fixed, Hartree + Sigma_x leave
+    J - K/2 on the gKS orbitals. The Z-vector route passes `mf` itself (gKS
+    kernel); the two coincide on an HF reference. On gKS energies this
+    Hessian need not be positive definite (e.g. PBE), so the solve may flag
+    itself not converged.
 
-    A reference whose Hamiltonian the bare RHF cannot carry is refused, not
-    dropped: an open shell, an unrestricted one, an attached environment
-    (its screening would be lost) and a thermally smeared one (the Z-vector
-    solve splits the orbitals on integer occupations)."""
+    The backend is `mf`'s own, so the kernel uses the same interaction as
+    the reference: its `_eri` (exact integrals) or its `with_df` (pyscf DF
+    or ISDF-K). Any other backend is refused rather than replaced by exact
+    integrals. So is any reference a bare RHF cannot carry: open shell,
+    unrestricted, attached environment, thermal smearing."""
     where = 'hf_kernel_mean_field'
     require_gas_phase_ground_state(mf, where)
     if not isinstance(mf, scf.hf.RHF):

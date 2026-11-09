@@ -1,12 +1,14 @@
 """GW quasiparticle energies on the imaginary-frequency axis.
 
-The RPA screened interaction W(i omega) on a minimax or Gauss-Legendre grid,
-the correlation self-energy by numerical convolution over that grid
-(`self_energy_diagonal_imaginary_axis`), and its continuation to the real axis by Pade
-(`solve_qp_energy_imaginary_axis`), restricted and unrestricted, at T = 0 or
-at a finite temperature. And the full-matrix Sigma_c,pq(mu + i w) of the GW
-density (`self_energy_matrix_imaginary_axis`), whose inner
-integral goes through a Lorentzian fit of W_c rather than that quadrature.
+The module builds the RPA screened interaction W(i omega) on a minimax or
+Gauss-Legendre grid, computes the correlation self-energy by numerical
+convolution over that grid (`self_energy_diagonal_imaginary_axis`), and
+continues it to the real axis by Pade (`solve_qp_energy_imaginary_axis`).
+This works restricted and unrestricted, at T = 0 or at a finite temperature.
+
+For the GW density it also builds the full-matrix Sigma_c,pq(mu + i w)
+(`self_energy_matrix_imaginary_axis`). There the inner integral uses a
+Lorentzian fit of W_c instead of that quadrature.
 """
 import time as _time
 
