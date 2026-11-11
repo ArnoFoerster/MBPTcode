@@ -1,6 +1,8 @@
-"""Exciton descriptors of Casida/BSE excitations from their (X, Y) eigenvectors:
-electron-hole distance, electron and hole sizes, their covariance, and the size
-of the excitation, as expectation values over the exciton wavefunction."""
+"""Exciton descriptors of Casida/BSE excitations from their (X, Y) eigenvectors,
+and of any excitation from its full one-particle transition density matrix
+(`exciton_descriptors_tdm`): electron-hole distance, electron and hole sizes,
+their covariance, and the size of the excitation, as expectation values over
+the exciton wavefunction."""
 import numpy as np
 from pyscf import scf
 
