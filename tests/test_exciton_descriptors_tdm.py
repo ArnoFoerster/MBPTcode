@@ -27,6 +27,10 @@ Water, 6-31G. Checks:
      <r_h> unchanged to 1e-7 (the SCF orbitals set the bar), those two moved
      by the translation to 1e-6 bohr and so differing from the untranslated
      ones.
+  7. a random 1TDM with all four blocks against the same moments contracted in
+     the AO basis: Omega, <r_h>, <r_e>, sigma per direction and COV_eh^xy to
+     1e-10; the oo and vv blocks move sigma_h and COV_eh^xy is not symmetric,
+     so the check sees a dropped block and a swapped (x, y).
 
 Run: python tests/test_exciton_descriptors_tdm.py
 """
@@ -301,6 +305,58 @@ def check_translation():
     return ok
 
 
+def ao_moments(mol, C, g):
+    """Omega, shape (nroots,), sigma_h and sigma_e per direction, shape
+    (nroots, 3), and COV_eh^xy, shape (nroots, 3, 3), of the 1TDMs g, shape
+    (nroots, norb, norb), contracted in the AO basis: X = C g C^T, index (m, l)
+    the hole and electron AO, Omega = tr(X^T S X S), <r_h> = tr(mu X S X^T),
+    <r_e> = tr(X^T S X mu), <r_e^x r_h^y> = tr(X^T mu^y X mu^x), each / Omega,
+    the second moments with the diagonal of r r in place of mu."""
+    S = mol.intor_symmetric('int1e_ovlp')
+    with mol.with_common_orig((0.0, 0.0, 0.0)):
+        mu = mol.intor_symmetric('int1e_r', comp=3)
+        rr = mol.intor_symmetric('int1e_rr', comp=9)[[0, 4, 8]]
+    out = []
+    for x in np.einsum('mp,npq,lq->nml', C, g, C):
+        om = np.trace(x.T @ S @ x @ S)
+        hole, elec = x @ S @ x.T, x.T @ S @ x
+        r_h, r_e, r_h2, r_e2 = (np.array([np.trace(b @ d) for b in ops]) / om
+                                for ops, d in ((mu, hole), (mu, elec), (rr, hole),
+                                               (rr, elec)))
+        r_eh = np.array([[np.trace(x.T @ mu[y] @ x @ mu[k]) for y in range(3)]
+                         for k in range(3)]) / om
+        out.append((om, np.sqrt(r_h2 - r_h**2), np.sqrt(r_e2 - r_e**2),
+                    r_eh - np.outer(r_e, r_h)))
+    return [np.array(v) for v in zip(*out)]
+
+
+def check_ao_route():
+    """Check 7."""
+    print('\n=== 7. a full 1TDM against the AO-basis route ===')
+    mf = rhf(WATER_ORIGIN, '6-31g')
+    mol, C = mf.mol, mf.mo_coeff
+    nocc, nmo = mol.nelectron // 2, C.shape[1]
+    g = np.random.default_rng(11).standard_normal((2, nmo, nmo))
+    d = exciton_descriptors_tdm(mol, C, g)
+    om, s_h, s_e, cov = ao_moments(mol, C, g)
+    err = max(float(np.abs(d['c_n'] - om).max() / om.max()),
+              float(np.abs(d['sigma_h_dir'] - s_h).max()),
+              float(np.abs(d['sigma_e_dir'] - s_e).max()),
+              float(np.abs(d['cov_eh_mat'] - cov).max()))
+    ok = check(err < 1e-10, 'Omega, sigma_h, sigma_e per direction and COV_eh^xy equal',
+               f'max |d| {err:.1e}')
+    ph = g.copy()
+    ph[:, :nocc, :nocc] = 0.0
+    ph[:, nocc:, nocc:] = 0.0
+    off = float(np.abs(ao_moments(mol, C, ph)[1] - s_h).max())
+    ok &= check(off > 1e-3, 'without the oo and vv blocks sigma_h differs',
+                f'max |d| {off:.1e} bohr')
+    asym = float(np.abs(cov - cov.transpose(0, 2, 1)).max())
+    ok &= check(asym > 1e-3, 'COV_eh^xy is not symmetric in (x, y)',
+                f'max |d| {asym:.1e} bohr^2')
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     ok = check_xy_reduction()
@@ -309,6 +365,7 @@ def run():
     ok &= check_fold()
     ok &= check_active_and_guard()
     ok &= check_translation()
+    ok &= check_ao_route()
     return ok
 
 
