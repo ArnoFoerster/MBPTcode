@@ -45,7 +45,8 @@ from src.SingleReference.ADC.eeADC import ee_transition_density as etd
 from src.SingleReference.ADC.eeADC.solve import solve_ee_adc
 from src.SingleReference.LinearResponse.exciton_descriptors import (
     exciton_descriptors, exciton_descriptors_tdm)
-from tests.adc_common import AUX, NF, WATER_C2V, WATER_ORIGIN, check, rhf_df
+from tests.adc_common import (AUX, NF, WATER_C2V, WATER_ORIGIN, check, ee_numerics,
+                              rhf_df)
 
 PARITY = {'singlet': +1, 'triplet': -1}
 NTO_KEYS = ('nto_weights', 'pr_nto', 's_he', 's_he_raw', 'z_he')
@@ -159,12 +160,14 @@ def check_pyscf():
     eu, _, _, _ = ua.kernel(nroots=6)
     ty_a, ty_b = (np.asarray(t).reshape(-1, nmo, nmo)
                   for t in ua._adc_es.get_trans_moments())
+    ref0 = etd.reference_from_integrals(eps, V, no, 'adc2', ground=True)
     for spin in PARITY:
-        e, Z = solve_ee_adc(mf, level='adc2', spin=spin, nroots=2, conv_tol=1e-10)
+        e, Z = solve_ee_adc(mf, level='adc2', spin=spin, nroots=2,
+                            numerics=ee_numerics(conv_tol=1e-10))
         err, unscaled = 0.0, np.inf
         for k in range(2):
-            c, s = etd.spin_free_ground_transition_density(eps, V, no, Z[:, k], 'adc2',
-                                                           PARITY[spin])
+            state = etd.flat_state(Z[:, k], no, nmo - no, 'adc2', PARITY[spin])
+            c, s = etd.ground_transition_density(ref0, state)
             dens = c if spin == 'singlet' else s
             g = dens / np.sqrt(2.0)                  # sqrt(2) gamma^alpha
             if spin == 'singlet':
