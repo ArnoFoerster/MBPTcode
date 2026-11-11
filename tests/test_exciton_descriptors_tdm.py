@@ -48,6 +48,7 @@ NTO_KEYS = ('nto_weights', 'pr_nto', 's_he', 's_he_raw', 'z_he')
 
 
 def rhf(atom, basis):
+    """Converged RHF of `atom` in `basis`, to 1e-13 Ha and a gradient of 1e-9."""
     mol = gto.M(atom=atom, basis=basis, verbose=0)
     mf = scf.RHF(mol)
     mf.conv_tol = 1e-13
@@ -66,6 +67,7 @@ def xy_as_tdm(X, Y, nocc, nmo):
 
 
 def max_diff(a, b, keys):
+    """Largest |a[k] - b[k]| over the entries named in `keys` of two result dicts."""
     return max(float(np.abs(np.asarray(a[k]) - np.asarray(b[k])).max()) for k in keys)
 
 
@@ -265,6 +267,7 @@ def run():
 
 
 def test_exciton_descriptors_tdm():
+    """Every check of run(), under pytest."""
     assert run()
 
 
