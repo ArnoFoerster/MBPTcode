@@ -120,30 +120,31 @@ def _greedy_thiele(z, f):
     return order, a
 
 
-def pade_continue_elementwise(z, F, z_query, greedy=True, symmetric=False, rel_tol=1e-10,
-                              max_order=None):
-    """Thiele-Pade continuation of every element of a matrix-valued function independently.
+def pade_fit_elementwise(z, F, greedy=True, symmetric=False, rel_tol=1e-10, max_order=None):
+    """Thiele-Pade fit of every element of a matrix-valued function independently.
 
     z         : (n,) sample points
     F         : (n,d,d) samples
-    z_query   : (nq,) points to evaluate at
     symmetric : F[k] = F[k].T for every k, so only the upper triangle is fitted.
-    rel_tol   : elements whose samples all stay below rel_tol*max|F| are returned as
-                exactly zero. Thiele divides by the samples, so a symmetry-forbidden
-                element would otherwise be a fit to round-off.
+    rel_tol   : elements whose samples all stay below rel_tol*max|F| get all-zero
+                coefficients, so they evaluate to exactly zero. Thiele divides by
+                the samples, so a symmetry-forbidden element would otherwise be a
+                fit to round-off.
     max_order : cap on the number of Pade nodes, applied after the ordering (None
                 keeps all of them). Same meaning as in PadeFit.
 
-    Returns (nq,d,d). Each element gets its own greedy ordering, as a PadeFit per
-    element would, but through the single-pass _greedy_thiele.
+    Returns (Z, A), both (n_nodes,d,d): each element's nodes, in its own greedy
+    ordering (as a PadeFit per element would, but through the single-pass
+    _greedy_thiele), and their Thiele coefficients. pade_eval_elementwise
+    evaluates them, so the fit is done once however many points follow.
     """
     z = np.asarray(z, dtype=complex)
     F = np.asarray(F, dtype=complex)
-    z_query = np.atleast_1d(np.asarray(z_query, dtype=complex))
     d = F.shape[-1]
-    out = np.zeros((len(z_query), d, d), dtype=complex)
     floor = rel_tol * np.abs(F).max()
     n_nodes = len(z) if max_order is None else min(max_order, len(z))
+    Z = np.zeros((n_nodes, d, d), dtype=complex)
+    A = np.zeros((n_nodes, d, d), dtype=complex)
 
     for p in range(d):
         for q in range(p if symmetric else 0, d):
@@ -153,10 +154,42 @@ def pade_continue_elementwise(z, F, z_query, greedy=True, symmetric=False, rel_t
             if greedy:
                 order, a = _greedy_thiele(z, f)
                 # Thiele coefficients are nested, so truncating them is the lower-order fit.
-                out[:, p, q] = pade_eval(z_query, z[order[:n_nodes]], a[:n_nodes])
+                Z[:, p, q], A[:, p, q] = z[order[:n_nodes]], a[:n_nodes]
             else:
-                out[:, p, q] = pade_eval(z_query, z[:n_nodes], thiele_coefficients(z[:n_nodes], f[:n_nodes]))
+                Z[:, p, q] = z[:n_nodes]
+                A[:, p, q] = thiele_coefficients(z[:n_nodes], f[:n_nodes])
             if symmetric:
-                out[:, q, p] = out[:, p, q]
+                Z[:, q, p], A[:, q, p] = Z[:, p, q], A[:, p, q]
 
-    return out
+    return Z, A
+
+
+def pade_eval_elementwise(z_query, Z, A):
+    """pade_eval of every element of a pade_fit_elementwise fit at once.
+
+    z_query : a scalar, giving (d,d), or an (nq,) array, giving (nq,d,d).
+
+    A scalar z_query only allocates (d,d), so a real axis can be walked point
+    by point (or in chunks) without storing the (nq,d,d) result.
+    """
+    zq = np.asarray(z_query, dtype=complex)[..., None, None]
+    result = A[-1] * np.ones_like(zq)
+    for i in range(len(A) - 2, -1, -1):
+        result = A[i] / (1.0 + (zq - Z[i]) * result)
+    return result
+
+
+def pade_continue_elementwise(z, F, z_query, greedy=True, symmetric=False, rel_tol=1e-10,
+                              max_order=None):
+    """Thiele-Pade continuation of every element of a matrix-valued function independently.
+
+    z_query : (nq,) points to evaluate at. The other arguments are those of
+              pade_fit_elementwise.
+
+    Returns (nq,d,d): pade_fit_elementwise, then pade_eval_elementwise at every
+    point. When the points can be used one at a time, call those two directly
+    so the (nq,d,d) array is never stored.
+    """
+    Z, A = pade_fit_elementwise(z, F, greedy=greedy, symmetric=symmetric,
+                                rel_tol=rel_tol, max_order=max_order)
+    return pade_eval_elementwise(np.atleast_1d(z_query), Z, A)

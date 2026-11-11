@@ -151,6 +151,7 @@ pytest test_one_rate_table.py
 pytest test_optimize_refreeze.py
 pytest test_orbital_response_distributed.py
 pytest test_ordered_reductions.py
+pytest test_pade_elementwise_streaming.py
 pytest test_pbc_2d_head.py
 script test_pbc_amplitudes.py
 script test_pbc_bse.py

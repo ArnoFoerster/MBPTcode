@@ -23,6 +23,7 @@ import numpy as np
 import scipy.signal
 import resource
 
+from pyscf import df, lib
 from pyscf.data.elements import chemcore
 from src.Solvers.diis import DIIS
 from src.Base.numerics.constants import SURFACE_GRID_ACCURACY
@@ -30,7 +31,8 @@ from src.Base.pyscf.pyscf_interface import get_orbital_energies
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid)
 from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
-from src.Base.utils.grids.analytic_continuation import pade_continue_elementwise
+from src.Base.utils.grids.analytic_continuation import (pade_fit_elementwise,
+                                                        pade_eval_elementwise)
 
 # --- Convergence parameters ---
 # Outer scGW cycle
@@ -48,6 +50,39 @@ MU_TOL = 1e-10              # smallest bisection bracket width
 STALL_TRACE_TOL = 1e-4      # |Tr[gamma] - nocc| still accepted at that width
 MAX_BRACKET_ITER = 50
 MAX_BISECT_ITER = 100
+
+# Real axis
+PADE_EVAL_CHUNK = 16        # real frequencies per Sigma(w) / G(w) evaluation in trace_Greal_from_pade
+
+# RI (build_B_ri, calc_new_sigma_ri)
+RI_BLOCK_MB = 256           # size of one (block, nmo, nmo) slab of B; a few slabs are alive at once
+
+def ri_blocks(naux, nmo, block_size=None):
+    """Slices that split the auxiliary index 0..naux into consecutive blocks
+    of block_size, by default as many P as fit one (block, nmo, nmo) slab of
+    RI_BLOCK_MB."""
+    if block_size is None:
+        block_size = max(1, int(RI_BLOCK_MB * 2**20 // (8 * nmo * nmo)))
+    return [slice(p0, min(p0 + block_size, naux)) for p0 in range(0, naux, block_size)]
+
+
+def build_B_ri(mol, mo_coeff, auxbasis, block_size=None):
+    """RI three-index tensor in the MO basis,
+        B[P,p,q] = sum_mn L[P,mn] C[m,p] C[n,q],  (pq|rs) = sum_P B[P,p,q] B[P,r,s],
+    with L the Cholesky factors of the AO integrals in `auxbasis`.
+
+    L comes packed (lower triangle of mn). It is unpacked and transformed one
+    block of P at a time into a preallocated B, so the unpacked AO tensor
+    (naux, nao, nao) is never stored whole. Peak: B, plus L (about half of B)
+    until return, plus a few blocks.
+    """
+    Lpq = df.incore.cholesky_eri(mol, auxbasis=auxbasis)
+    naux, nmo = Lpq.shape[0], mo_coeff.shape[1]
+    B = np.empty((naux, nmo, nmo))
+    for blk in ri_blocks(naux, nmo, block_size):
+        L = lib.unpack_tril(Lpq[blk])
+        B[blk] = np.matmul(mo_coeff.T @ L, mo_coeff)
+    return B
 
 def density_matrix_ir(G, grid_f):
     """Density matrix from G: gamma = -G(tau = beta).
@@ -187,6 +222,23 @@ def build_Greal_from_F(freq_points, sigma_real, F, eta, trace_only=False):
 
     return G_w
 
+def trace_Greal_from_pade(freq_points, Z, A, F, eta, chunk=PADE_EVAL_CHUNK):
+    """Tr[G(z)] at z = omega + i.eta, with Sigma(z) evaluated from its Pade fit.
+
+    Same G as build_Greal_from_F with trace_only=True, but Sigma(z) comes from
+    the fit (Z, A) of pade_fit_elementwise, chunk frequencies at a time, so
+    neither the (nfreq, nmo, nmo) Sigma nor G is ever stored: memory is the
+    fit plus a few (chunk, nmo, nmo) arrays, whatever the number of frequencies.
+    """
+    eye = np.eye(F.shape[0])
+    tr_G = np.empty(len(freq_points), dtype=complex)
+    for start in range(0, len(freq_points), chunk):
+        z = np.asarray(freq_points[start:start + chunk]) + 1j*eta
+        sigma = pade_eval_elementwise(z, Z, A)
+        tr_G[start:start + chunk] = np.trace(
+            np.linalg.inv(z[:, None, None]*eye - F - sigma), axis1=1, axis2=2)
+    return tr_G
+
 def _mu_cycle_find_trace(mu, F, sigma_mo, grid_f, grid_kind='IR'):
     """Build G and gamma for one trial mu, with F and Sigma fixed.
 
@@ -309,13 +361,54 @@ def project_tau_cross(src_grid, dst_grid, f_src, dim, parity):
     f_dst = src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T
     return np.ascontiguousarray(f_dst).reshape(-1, dim, dim)
 
-def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
+def tau_projection_matrix(src_grid, dst_grid, parity):
+    """The matrix P of `project_tau_cross`, f_dst[t'] = sum_t P[t, t'] f_src[t],
+    shape (ntau_src, ntau_dst). The projection is linear in f, so P is its
+    image of the identity."""
+    return src_grid.project_tau(np.eye(len(src_grid.tau_points)),
+                                dst_grid.tau_points, parity=parity)
+
+def G_tau_slice(row_even, row_odd, G_flat, nmo):
+    """Even and odd part of G at one tau point, sum_k row_even[k] Re G(i.omega_k)
+    and sum_k row_odd[k] Im G(i.omega_k), as contiguous (nmo, nmo) arrays.
+    G_flat: G as (nfreq, nmo*nmo) complex."""
+    G_even = np.ascontiguousarray((row_even @ G_flat).real).reshape(nmo, nmo)
+    G_odd = np.ascontiguousarray((row_odd @ G_flat).imag).reshape(nmo, nmo)
+    return G_even, G_odd
+
+def streaming_transforms(grid_f, grid_b):
+    """The tau <-> i.omega transforms of the Sigma build, with the projection
+    between the fermion and boson tau points multiplied in, so that each tau
+    slice comes straight from the frequency axis (`G_tau_slice`):
+        G(i.omega) -> G(tau_b), even / odd:   (ntau_b, nfreq_f) each
+        (W - I)(i.omega_b) -> (W - I)(tau_f): (ntau_f, nfreq_b)
+    G(i.omega) -> G(tau_f) is grid_f.cosft_tw / sinft_tw itself.
+    Returns (G_to_b_even, G_to_b_odd, W_to_f)."""
+    G_to_b_even = tau_projection_matrix(grid_f, grid_b, 'even').T @ grid_f.cosft_tw
+    G_to_b_odd = tau_projection_matrix(grid_f, grid_b, 'odd').T @ grid_f.sinft_tw
+    W_to_f = tau_projection_matrix(grid_b, grid_f, 'even').T @ grid_b.cosft_tw
+    return G_to_b_even, G_to_b_odd, W_to_f
+
+def W_minus_I_inplace(chi_omega):
+    """W - I = [I - chi]^-1 - I at each frequency, written over chi_omega
+    (nfreq, naux, naux), which is returned. Only the correlation part W - I
+    is transformed to tau (the constant does not decay), and it is even, so
+    cosine only."""
+    eye_aux = np.eye(chi_omega.shape[-1])
+    for k in range(len(chi_omega)):
+        Wc = np.linalg.inv(eye_aux - chi_omega[k])
+        Wc -= eye_aux
+        chi_omega[k] = Wc
+    return chi_omega
+
+def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
 
     Steps: G -> chi = G*G -> W = [I - chi]^-1 -> Sigma = G*W. The products
     are taken pointwise in imaginary time on the ISDF/THC grid; the Dyson
     inversion for W is done in frequency. G and Sigma live on the fermion
-    grid, chi and W on the boson grid, and `project_tau_cross` moves
+    grid, chi and W on the boson grid, and the projection of
+    `project_tau_cross` (as a matrix, `tau_projection_matrix`) moves
     quantities between the two.
 
     Both products are local in tau, so each is done in a loop over tau that
@@ -324,7 +417,10 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     frequency. Only a few (ngrid, ngrid) slices are alive at once, never an
     (ntau, ngrid, ngrid) array: ngrid is several times nmo and grows with
     the number of atoms, so those arrays set the peak memory (2.2 GiB for
-    CH4/cc-pVTZ, against ~0.7 GiB with the loops).
+    CH4/cc-pVTZ, against ~0.7 GiB with the loops). The tau <-> i.omega
+    transforms are streamed in the same loops (`streaming_transforms`), so
+    the only arrays over a grid axis are G and Sigma(i.omega) (nfreq_f, nmo,
+    nmo) and chi, then W - I in its place, (nfreq_b, naux, naux).
 
     G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
     X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
@@ -338,14 +434,15 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
       sigma_new  on grid_f.omega_points, MO basis
     """
     nmo = G.shape[-1]
+    nfreq_f = grid_f.cosft_wt.shape[0]
+    nfreq_b = grid_b.cosft_wt.shape[0]
+    G_flat = np.ascontiguousarray(G).reshape(len(G), nmo * nmo)
 
-    # G(i.omega) -> G(tau) on the fermion grid, even and odd parts separately.
-    G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
-    G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
-
-    # chi lives on the boson grid, so move G onto the boson tau points.
-    G_even_b = project_tau_cross(grid_f, grid_b, G_even_f, nmo, 'even')
-    G_odd_b = project_tau_cross(grid_f, grid_b, G_odd_f, nmo, 'odd')
+    # The tau <-> i.omega transforms and the fermion <-> boson projections are
+    # streamed as in `calc_new_sigma_ri`: each tau slice of G and W is built
+    # from the frequency axis when it is used (`streaming_transforms`), and
+    # summed straight into chi(i.omega) and Sigma(i.omega).
+    G_to_b_even, G_to_b_odd, W_to_f = streaming_transforms(grid_f, grid_b)
 
     # chi(i.omega) = -2 sum_tau cosft_wt[w, tau] D^T [Go(tau) * Gv(tau)] D,
     # the same as chi0_imaginary_frequency, with Go = Ghat_greater and
@@ -364,33 +461,21 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     buf_a = np.empty((ngrid, ngrid))
     buf_b = np.empty((ngrid, ngrid))
 
-    pi_aux = np.empty((len(grid_b.tau_points), naux, naux))
+    chi_omega = np.zeros((nfreq_b, naux, naux))
     for t in range(len(grid_b.tau_points)):
-        np.matmul(X_mo @ (G_even_b[t] - G_odd_b[t]), XT, out=buf_a)
-        np.matmul(X_mo @ (G_even_b[t] + G_odd_b[t]), XT, out=buf_b)
+        G_even, G_odd = G_tau_slice(G_to_b_even[t], G_to_b_odd[t], G_flat, nmo)
+        np.matmul(X_mo @ (G_even - G_odd), XT, out=buf_a)
+        np.matmul(X_mo @ (G_even + G_odd), XT, out=buf_b)
         buf_a *= buf_b
-        pi_aux[t] = (DT @ buf_a) @ D
-    del G_even_b, G_odd_b
-    chi_omega = 2.0 * np.tensordot(grid_b.cosft_wt, pi_aux, axes=(1, 0))
-    del pi_aux
+        pi_t = (DT @ buf_a) @ D
+        for k in range(nfreq_b):
+            chi_omega[k] += (2.0 * grid_b.cosft_wt[k, t]) * pi_t
+    del pi_t
 
-    # W = [I - chi]^-1 at each frequency.
-    eye_aux = np.eye(naux)
-    W_omega = np.empty_like(chi_omega)
-    for k in range(chi_omega.shape[0]):
-        W_omega[k] = np.linalg.inv(eye_aux - chi_omega[k])
-    if not return_all:
-        del chi_omega
-
-    # W(i.omega) -> W(tau). Only the correlation part W - I is transformed
-    # (the constant does not decay), and it is even, so cosine only.
-    Wt_tau_b = np.einsum('tk,kab->tab', grid_b.cosft_tw, W_omega - eye_aux, optimize=True)
-    if not return_all:
-        del W_omega
-
-    # Sigma lives on the fermion grid, so move W onto the fermion tau points.
-    Wt_tau_f = project_tau_cross(grid_b, grid_f, Wt_tau_b, naux, 'even')
-    del Wt_tau_b
+    if return_all:
+        chi_out = chi_omega.copy()
+    Wc_omega = W_minus_I_inplace(chi_omega)
+    del chi_omega
 
     # Sigma(tau) = G(tau) * Z(tau) elementwise on the ISDF/THC grid, with
     # Z = D (W - I) D^T; unlike chi, no extra sign is needed. G is taken at
@@ -402,35 +487,162 @@ def calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D, return_all=False):
     # normalization as self_energy_matrix_imaginary_time (imaginary_time.py);
     # it cancels the 2 above, so even/odd below are the halves.
     # Checked against that routine for the bare G0: agreement to 8e-9.
-    even = np.empty((len(grid_f.tau_points), nmo, nmo))
-    odd = np.empty_like(even)
+    # Sigma(i.omega) = -sum_tau [cosft_wt even + 1j sinft_wt odd] is
+    # accumulated one tau at a time.
+    sigma_new = np.zeros((nfreq_f, nmo, nmo), dtype=complex)
+    sigma_re, sigma_im = sigma_new.real, sigma_new.imag
     Z_t = np.empty((ngrid, ngrid))
     for t in range(len(grid_f.tau_points)):
-        np.matmul(D @ Wt_tau_f[t], DT, out=Z_t)
-        np.matmul(X_mo @ G_even_f[t], XT, out=buf_a)
+        G_even, G_odd = G_tau_slice(grid_f.cosft_tw[t], grid_f.sinft_tw[t], G_flat, nmo)
+        Wt = np.tensordot(W_to_f[t], Wc_omega, axes=(0, 0))
+        np.matmul(D @ Wt, DT, out=Z_t)
+        np.matmul(X_mo @ G_even, XT, out=buf_a)
         buf_a *= Z_t
-        even[t] = (XT @ buf_a) @ X_mo
-        np.matmul(X_mo @ G_odd_f[t], XT, out=buf_a)
+        even = (XT @ buf_a) @ X_mo
+        np.matmul(X_mo @ G_odd, XT, out=buf_a)
         buf_a *= Z_t
-        odd[t] = (XT @ buf_a) @ X_mo
-    del Z_t, buf_a, buf_b, Wt_tau_f
-
-    sigma_new = -(np.tensordot(grid_f.cosft_wt, even, axes=(1, 0))
-                  + 1j * np.tensordot(grid_f.sinft_wt, odd, axes=(1, 0)))
-    del even, odd
+        odd = (XT @ buf_a) @ X_mo
+        for k in range(nfreq_f):
+            sigma_re[k] -= grid_f.cosft_wt[k, t] * even
+            sigma_im[k] -= grid_f.sinft_wt[k, t] * odd
+    del Z_t, buf_a, buf_b, Wt
 
     if not return_all:
         return sigma_new
 
+    G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
+    G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
     G_lesser_f = G_even_f - G_odd_f
     G_greater_f = G_even_f + G_odd_f
-    return (G_lesser_f + 1j * G_greater_f), chi_omega, W_omega, sigma_new
+    return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
+
+def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
+    """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega), with
+    the Coulomb interaction in plain RI instead of the ISDF/THC factors.
+
+    The same workflow as `calc_new_sigma_isdf`, G -> chi = G*G -> W = [I - chi]^-1
+    -> Sigma = G*W, with the same grids, transforms and normalization. Only
+    the two products in tau change: with B[P,p,q] ~ sum_g X_mo[g,p] X_mo[g,q] D[g,P]
+    the elementwise products on the ISDF grid become contractions over MO
+    indices,
+        chi_PQ(tau)  = sum B[P,p,r] G_lesser[p,q] G_greater[r,s] B[Q,q,s]
+        Sigma_pq(tau) = sum B[P,p,r] G[r,s] (W - I)[P,Q] B[Q,s,q],
+    so chi and W are in the same auxiliary basis as with ISDF. Cost per tau
+    point is O(naux nmo^3 + naux^2 nmo^2).
+
+    Both products are summed over blocks of P (`ri_blocks`), so besides B
+    only a few (block, nmo, nmo) slabs are alive, never a second B-sized
+    array. The blocking does not change the flop count. The tau <-> i.omega
+    transforms are streamed one tau point at a time, so the only arrays over
+    a grid axis are G and Sigma(i.omega) (nfreq_f, nmo, nmo) and chi, then
+    W - I in its place, (nfreq_b, naux, naux).
+
+    G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
+    B: (naux, nmo, nmo) RI three-index tensor in the MO basis, already
+        contracted with the Coulomb metric, (pq|rs) = sum_P B[P,p,q] B[P,r,s].
+    return_all: also return the intermediates; otherwise only sigma_new is
+        returned.
+    block_size: P per block; default from RI_BLOCK_MB.
+
+    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new),
+    as `calc_new_sigma_isdf`.
+    """
+    nmo = G.shape[-1]
+    naux = B.shape[0]
+    nfreq_f = grid_f.cosft_wt.shape[0]
+    nfreq_b = grid_b.cosft_wt.shape[0]
+    G_flat = np.ascontiguousarray(G).reshape(len(G), nmo * nmo)
+
+    # Every transform between tau and i.omega, and the projection between
+    # the fermion and boson tau points, is a small matrix along that axis
+    # (`streaming_transforms`). Each tau slice of G and W is built when it is
+    # used and summed straight into chi(i.omega) and Sigma(i.omega), so no
+    # (ntau, nmo, nmo) or (ntau, naux, naux) array is stored.
+    G_to_b_even, G_to_b_odd, W_to_f = streaming_transforms(grid_f, grid_b)
+
+    # chi(tau): M_P = G_lesser^T B_P G_greater, then pi_PQ = sum_qs M_P[q,s] B_Q[q,s]
+    # (lesser = even - odd, greater = even + odd, as in calc_new_sigma_isdf).
+    # Each block of P fills its own rows pi[blk, :], so M is only ever one
+    # block. chi(i.omega) = 2 sum_tau cosft_wt[omega, tau] pi(tau) is
+    # accumulated one tau at a time.
+    B_flat = B.reshape(naux, nmo * nmo)
+    blocks = ri_blocks(naux, nmo, block_size)
+    chi_omega = np.zeros((nfreq_b, naux, naux))
+    pi_t = np.empty((naux, naux))
+    for t in range(len(grid_b.tau_points)):
+        G_even, G_odd = G_tau_slice(G_to_b_even[t], G_to_b_odd[t], G_flat, nmo)
+        G_lesser = G_even - G_odd
+        G_greater = G_even + G_odd
+        for blk in blocks:
+            M = np.matmul(G_lesser.T @ B[blk], G_greater)
+            pi_t[blk] = M.reshape(-1, nmo * nmo) @ B_flat.T
+        for k in range(nfreq_b):
+            chi_omega[k] += (2.0 * grid_b.cosft_wt[k, t]) * pi_t
+    del M, pi_t
+
+    if return_all:
+        chi_out = chi_omega.copy()
+
+    Wc_omega = W_minus_I_inplace(chi_omega)
+    del chi_omega
+
+    # Sigma(tau): V_P = sum_Q (W - I)[P,Q] B_Q, then
+    #     even = sum_P B_P G_even V_P,  odd = sum_P B_P G_odd V_P,
+    # the RI form of 2 X^T [(X G X^T) * Z] X; the prefactor -0.5 is the same
+    # as in calc_new_sigma_isdf. The sum over P is split into blocks: each
+    # block needs only its own V_P (rows blk of W - I against all of B) and
+    # adds sum_{P in blk, r} B[P,p,r] (G V_P)[r,q] to even / odd.
+    # Sigma(i.omega) = -sum_tau [cosft_wt even + 1j sinft_wt odd] is
+    # accumulated one tau at a time.
+    sigma_new = np.zeros((nfreq_f, nmo, nmo), dtype=complex)
+    sigma_re, sigma_im = sigma_new.real, sigma_new.imag
+    for t in range(len(grid_f.tau_points)):
+        G_even, G_odd = G_tau_slice(grid_f.cosft_tw[t], grid_f.sinft_tw[t], G_flat, nmo)
+        Wt = np.tensordot(W_to_f[t], Wc_omega, axes=(0, 0))
+        even = np.zeros((nmo, nmo))
+        odd = np.zeros((nmo, nmo))
+        for blk in blocks:
+            V = (Wt[blk] @ B_flat).reshape(-1, nmo, nmo)
+            even += np.tensordot(B[blk], np.matmul(G_even, V), axes=([0, 2], [0, 1]))
+            odd += np.tensordot(B[blk], np.matmul(G_odd, V), axes=([0, 2], [0, 1]))
+        for k in range(nfreq_f):
+            sigma_re[k] -= grid_f.cosft_wt[k, t] * even
+            sigma_im[k] -= grid_f.sinft_wt[k, t] * odd
+    del V, Wt
+
+    if not return_all:
+        return sigma_new
+
+    G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
+    G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
+    G_lesser_f = G_even_f - G_odd_f
+    G_greater_f = G_even_f + G_odd_f
+    return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
+
+def calc_new_sigma(G, grid_f, grid_b, X_mo=None, D=None, B=None, method='ISDF',
+                   return_all=False):
+    """Correlation self-energy Sigma(i.omega), by `calc_new_sigma_isdf`
+    (method='ISDF', needs X_mo and D) or `calc_new_sigma_ri` (method='RI',
+    needs B). Returns what the chosen routine returns.
+    """
+    method = method.upper()
+    if method == 'ISDF':
+        if X_mo is None or D is None:
+            raise ValueError("method='ISDF' needs X_mo and D")
+        return calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=return_all)
+    if method == 'RI':
+        if B is None:
+            raise ValueError("method='RI' needs B")
+        return calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=return_all)
+    raise ValueError(f"Unknown method {method!r}, expected 'ISDF' or 'RI'")
 
 def pack_sigma_F(sigma, F, sigma_weight=1.0):
     """(Sigma, F) as one real vector, for DIIS.
 
-    Real and imaginary parts of Sigma are stored separately, so the plain
-    dot product of two such vectors is Re<e1|e2>, the DIIS inner product.
+    Sigma is stored as its complex memory read as float64 (real and
+    imaginary parts interleaved), so the plain dot product of two such
+    vectors is Re<e1|e2>, the DIIS inner product, and `unpack_sigma_F` can
+    return views instead of copies.
     sigma_weight scales the Sigma block: it has nfreq times more entries
     than F and would otherwise dominate the DIIS B-matrix. It is applied to
     the error vectors only; the iterates are packed unweighted, so DIIS
@@ -438,28 +650,33 @@ def pack_sigma_F(sigma, F, sigma_weight=1.0):
 
     sigma: (nfreq, nmo, nmo) complex. F: (nmo, nmo) real.
     """
-    return np.concatenate([sigma_weight * sigma.real.ravel(),
-                           sigma_weight * sigma.imag.ravel(),
-                           F.ravel()])
+    n2 = 2 * sigma.size
+    x = np.empty(n2 + F.size)
+    x[:n2] = np.ascontiguousarray(sigma).view(np.float64).ravel()
+    x[n2:] = F.ravel()
+    if sigma_weight != 1.0:
+        x[:n2] *= sigma_weight
+    return x
 
 def unpack_sigma_F(x, sigma_shape):
-    """Inverse of `pack_sigma_F` (for sigma_weight = 1)."""
-    n = int(np.prod(sigma_shape))
-    sigma = (x[:n] + 1j * x[n:2 * n]).reshape(sigma_shape)
-    # Copy, so F does not keep the whole packed vector x alive as a view.
-    F = x[2 * n:].reshape(sigma_shape[1:]).copy()
+    """Inverse of `pack_sigma_F` (for sigma_weight = 1). Sigma and F are
+    views into x, not copies: the packed DIIS vector and the Dyson input
+    share memory, and x stays alive as long as either is used."""
+    n2 = 2 * int(np.prod(sigma_shape))
+    sigma = x[:n2].view(np.complex128).reshape(sigma_shape)
+    F = x[n2:].reshape(sigma_shape[1:])
     return sigma, F
 
 def pack_G(G):
-    """G as one real vector for DIIS (real and imaginary parts, as in `pack_sigma_F`)."""
-    return np.concatenate([G.real.ravel(), G.imag.ravel()])
+    """G as one real vector for DIIS, laid out as in `pack_sigma_F`; a view
+    of G's memory (no copy) when G is contiguous."""
+    return np.ascontiguousarray(G).view(np.float64).ravel()
 
 def unpack_G(x, G_shape):
-    """Inverse of `pack_G`."""
-    n = int(np.prod(G_shape))
-    return (x[:n] + 1j * x[n:]).reshape(G_shape)
+    """Inverse of `pack_G`; a view of x."""
+    return x.view(np.complex128).reshape(G_shape)
 
-def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_file=None, **kwargs):
+def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None, **kwargs):
     """Self-consistent GW quasiparticle energies on IR grids.
 
     Starts from the mean-field G0, iterates Sigma and F to self-consistency
@@ -473,10 +690,16 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     nocc: number of doubly occupied orbitals.
     skip_scf: stop after the first Dyson step (see Returns).
     grid_kind: only 'IR' is implemented.
-    save_file: if given, (w_real, A) is written there as CSV.
+    save_file: if given, (w_real, A, mu) is written there as CSV, and the
+        converged density (dm_ao, gamma_mo), mo_coeff, F_mo, mu, E_gm, E_c,
+        e_hf and method to save_file + '.h5' (pyscf chkfile, key 'scgw',
+        with mol).
+    method: 'ISDF' (separable factors) or 'RI' (plain RI three-index
+        tensor, needs `auxbasis`); see `calc_new_sigma`.
     kwargs: `factors` (precomputed output of `separable_factors`) or
         `auxbasis` and `grid_accuracy` (ISDF grid level, default
-        SURFACE_GRID_ACCURACY; used to build them); `beta` and `omega_max` override
+        SURFACE_GRID_ACCURACY; used to build them); `auxbasis` is also the
+        RI auxiliary basis; `eta` the real-axis broadening; `beta` and `omega_max` override
         the IR grid parameters that are otherwise derived from mf's
         orbital energies (e.g. to run different starts on the same grid);
         `diis_size`, `diis_start` and `mixing` override DIIS_SIZE,
@@ -549,10 +772,22 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     print(f'boson   duality_error (even/odd) = '
             f'{grid_b.duality_error("even"):.2e} / {grid_b.duality_error("odd"):.2e}\n')
 
-    X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
-                                else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis'),
-                                                       grid_accuracy=kwargs.get('grid_accuracy',
-                                                                                SURFACE_GRID_ACCURACY)))
+    method = method.upper()
+    if method == 'ISDF':
+        X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
+                                    else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis'),
+                                                        grid_accuracy=kwargs.get('grid_accuracy',
+                                                                                    SURFACE_GRID_ACCURACY)))
+        B = None
+    elif method == 'RI':
+        if kwargs.get('auxbasis') is None:
+            raise ValueError("If method == 'RI' auxbasis must be specified")
+        B = build_B_ri(mol, mf.mo_coeff, kwargs.get('auxbasis'))
+
+        X_mo = None
+        D = None
+    else:
+        raise ValueError(f"Unknown method {method!r}, expected 'ISDF' or 'RI'")
 
     # --- First iteration: G0 -> gamma, Sigma -> F -> G ---
     freq_points = grid_f.omega_points
@@ -566,7 +801,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     gamma = density_matrix_ir(G0, grid_f)
     print(f'Trace gamma_G0: {np.trace(gamma)}, expected nocc: {nocc}\n')
 
-    sigma_new = calc_new_sigma_ir(G0, grid_f, grid_b, X_mo, D)
+    sigma_new = calc_new_sigma(G0, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method)
 
     h_mo = mf.mo_coeff.T @ mf.get_hcore(mol) @ mf.mo_coeff
     e_nuc = mol.energy_nuc()
@@ -609,8 +844,17 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     # Weight of the Sigma block in the DIIS error, see pack_sigma_F.
     sigma_weight = 1.0 / np.sqrt(len(freq_points))
     sigma_shape = sigma_new.shape
+    n_sigma = 2 * sigma_new.size    # length of the Sigma block of a packed vector
 
-    sigma_in, F_in = sigma_new, F
+    # With mix='sigma_F', x_in is the only copy of the iterate: sigma_in and
+    # F_in are views into it (`unpack_sigma_F`), so the Dyson input and the
+    # DIIS vector are not stored twice.
+    if mix == 'sigma_F':
+        x_in = pack_sigma_F(sigma_new, F)
+        sigma_in, F_in = unpack_sigma_F(x_in, sigma_shape)
+    else:
+        x_in = None
+        sigma_in, F_in = sigma_new, F
     del sigma_new, F, G, gamma
     # print(f'Sigma_in: {sigma_in.nbytes / 2**30:.3f} GiB')
     mu, G, gamma = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
@@ -623,44 +867,43 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
         mu_old = mu
         if mix == 'sigma_F':
             # 1. Outputs from the current G
-            sigma_out = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            sigma_out = calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method)
             F_out = build_new_F(gamma, mf, h_mo)
+            x_out = pack_sigma_F(sigma_out, F_out)
+            del sigma_out, F_out
 
-            # 2. Residual
-            r_sigma = sigma_out - sigma_in
-            r_F = F_out - F_in
-            res_sigma = np.max(np.abs(r_sigma))
-            res_F = np.max(np.abs(r_F))
+            # 2. Residual, x_out - x_in, read off the packed vectors and
+            # then weighted in place into the DIIS error.
+            error = x_out - x_in
+            res_sigma = np.max(np.abs(error[:n_sigma].view(np.complex128)))
+            res_F = np.max(np.abs(error[n_sigma:]))
             residual = max(res_sigma, res_F)
             print(f'Iteration {it}: residual Sigma: {res_sigma:.3e}, F: {res_F:.3e}')
             if residual <= RESIDUAL_CONVERGENCE:
-                del sigma_out, F_out, r_sigma, r_F
+                del x_out, error
                 break
-
-            x_in = pack_sigma_F(sigma_in, F_in)
-            x_out = pack_sigma_F(sigma_out, F_out)
-            error = pack_sigma_F(r_sigma, r_F, sigma_weight)
-            del sigma_out, F_out, r_sigma, r_F
+            error[:n_sigma] *= sigma_weight
         else:
             # 1. G_out from the current G_in
-            sigma_in = calc_new_sigma_ir(G, grid_f, grid_b, X_mo, D)
+            sigma_in = calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method)
             F_in = build_new_F(gamma, mf, h_mo)
             mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                                             grid_f=grid_f, grid_kind='IR')
 
-            # 2. Residual
-            res_G = np.max(np.abs(G_out - G))
+            # 2. Residual. x_in and x_out are views of G and G_out, so only
+            # the error is a new array.
+            x_in = pack_G(G)
+            x_out = pack_G(G_out)
+            error = x_out - x_in
+            res_G = np.max(np.abs(error.view(np.complex128)))
             res_gamma = np.max(np.abs(gamma_out - gamma))
             residual = res_G
             print(f'Iteration {it}: residual G: {res_G:.3e}, gamma: {res_gamma:.3e}')
             if residual <= RESIDUAL_CONVERGENCE:
                 G, gamma = G_out, gamma_out
-                del G_out, gamma_out
+                x_in = None
+                del G_out, gamma_out, x_out, error
                 break
-
-            x_in = pack_G(G)
-            x_out = pack_G(G_out)
-            error = x_out - x_in
 
         # 3. Mix
         x_new = None
@@ -673,12 +916,16 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
                 # dependent; take a linear step instead.
                 pass
         if x_new is None:
-            x_new = x_in + alpha * (x_out - x_in)
+            # x_in + alpha * (x_out - x_in), with one new array instead of three
+            x_new = x_out - x_in
+            x_new *= alpha
+            x_new += x_in
             step = f'linear (alpha = {alpha})'
-        del x_in, x_out, error
+        del x_out, error
 
         if mix == 'sigma_F':
-            sigma_in, F_in = unpack_sigma_F(x_new, sigma_shape)
+            x_in = x_new
+            sigma_in, F_in = unpack_sigma_F(x_in, sigma_shape)
             del x_new, G, gamma
 
             # 4. Dyson + particle number
@@ -686,6 +933,8 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
                                     grid_f=grid_f, grid_kind='IR')
             G_dyson = G
         else:
+            # x_in is a view of the old G; drop it so that G can be freed.
+            x_in = None
             G = unpack_G(x_new, sigma_shape)
             gamma = density_matrix_ir(G, grid_f)
             G_dyson = G_out
@@ -711,43 +960,55 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, grid_kind='IR', save_fil
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
 
     # Nothing from the cycle is needed on the real axis; free it before the
-    # (large) real-frequency arrays are allocated.
-    del h_mo, X_mo, D, diis, G, gamma, grid_b, sigma_in, F_in
+    # (large) real-frequency arrays are allocated. gamma is kept (nmo^2) for
+    # the save below.
+    del h_mo, X_mo, D, B, diis, G, grid_b, sigma_in, F_in, x_in
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
     # level of F, with 0.5 Ha margin. eta is the broadening; the frequency
     # step is finer, so each peak (half-width ~eta) is well sampled.
-    eta = 1e-2
+    eta = kwargs.get('eta', 1e-2)
     w_step = eta / 10
 
     eps_F = np.linalg.eigvalsh(F)
 
     # the spectral function's window and range (kwargs A_window, A_range)
     A_window = kwargs.get('A_window') or 0.5
-    A_range = kwargs.get('A_range') or [eps_F[chemcore(mol)] - A_window , 2 * mu - eps_F[chemcore(mol)] + A_window]
+    A_range = kwargs.get('A_range') or [eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] - A_window , 2 * mu - eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] + A_window]
 
     w_real = np.arange(A_range[0], A_range[1], w_step)
     pade_max_order = 24
 
     z_fit = mu + 1j * grid_f.omega_points
-    z_real = w_real + 1j * eta
 
-    sigma_real = pade_continue_elementwise(z_fit, sigma_new, z_real, greedy=True,
-                                        symmetric=True, max_order=pade_max_order) 
-    # print(f'SigmaReal: {sigma_real.nbytes / 2**30:.3f} GiB')
+    # Fit once; Sigma(w) is then evaluated a chunk of frequencies at a time
+    # inside trace_Greal_from_pade, so (len(w_real), nmo, nmo) is never stored.
+    pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma_new, greedy=True,
+                                          symmetric=True, max_order=pade_max_order)
 
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
-        f'eta = {eta}: shape {sigma_real.shape}')
+        f'eta = {eta}: Pade fit {pade_Z.shape}')
     print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
-        f'{np.max(np.abs(pade_continue_elementwise(z_fit, sigma_new, z_fit, symmetric=True, max_order=pade_max_order) - sigma_new))}\n')
+        f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma_new))}\n')
 
-    tr_G_w = build_Greal_from_F(w_real, sigma_real, F, eta, trace_only=True)
-    del sigma_real
+    tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
+    del pade_Z, pade_A
     A = -1/np.pi * tr_G_w.imag
 
     if save_file is not None:
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
+
+        # The converged density next to the CSV, read back with
+        # lib.chkfile.load(save_file + '.h5', 'scgw') and load_mol. gamma is
+        # per spin in the MO basis of mf, so the total AO density is
+        # 2 C gamma C^T.
+        lib.chkfile.save(save_file + '.h5', 'scgw', {
+            'dm_ao': 2.0 * mf.mo_coeff @ gamma @ mf.mo_coeff.T,
+            'gamma_mo': gamma, 'mo_coeff': mf.mo_coeff, 'F_mo': F,
+            'mu': mu, 'E_gm': E_gm, 'E_c': E_c, 'e_hf': mf.e_tot,
+            'method': method})
+        lib.chkfile.save_mol(mol, save_file + '.h5')
 
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # height threshold is set as a minimum weight rather than a fixed number.

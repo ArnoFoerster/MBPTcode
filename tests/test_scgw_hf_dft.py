@@ -8,7 +8,7 @@ Test 2 (start independence): the full scGW cycle is self-consistent, so
 starting it from HF or from DFT orbitals must give the same Galitskii-Migdal
 energy (on a shared IR grid).
 
-Sigma is switched off by monkeypatching: scgw.calc_new_sigma_ir is replaced
+Sigma is switched off by monkeypatching: scgw.calc_new_sigma is replaced
 by a wrapper that returns a zero Sigma, and put back afterwards. Nothing in
 scgw.py itself changes.
 
@@ -36,23 +36,23 @@ E_GM_TOL = 1e-6
 
 @contextmanager
 def sigma_switched_off():
-    """Inside this block, scgw.calc_new_sigma_ir returns Sigma = 0.
+    """Inside this block, scgw.calc_new_sigma returns Sigma = 0.
 
-    solve_qp_energy_scgw looks calc_new_sigma_ir up in the scgw module at
+    solve_qp_energy_scgw looks calc_new_sigma up in the scgw module at
     every call, so replacing the module attribute is enough for the whole
     cycle to see the new function. The original is restored on exit, also
     when the run raises.
     """
-    original = scgw.calc_new_sigma_ir
+    original = scgw.calc_new_sigma
 
-    def zero_sigma(G, grid_f, grid_b, X_mo, D):
-        return np.zeros_like(original(G, grid_f, grid_b, X_mo, D))
+    def zero_sigma(G, grid_f, grid_b, **kwargs):
+        return np.zeros_like(original(G, grid_f, grid_b, **kwargs))
 
-    scgw.calc_new_sigma_ir = zero_sigma
+    scgw.calc_new_sigma = zero_sigma
     try:
         yield
     finally:
-        scgw.calc_new_sigma_ir = original
+        scgw.calc_new_sigma = original
 
 
 def check_sigma_zero_gives_hf(mol, mf_start, e_hf, name):

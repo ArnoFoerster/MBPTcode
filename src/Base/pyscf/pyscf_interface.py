@@ -959,3 +959,65 @@ def exchange_channels(mf):
     if omega == 0.0 or beta == 0.0:
         return [(0.0, alpha)]
     return [(0.0, alpha + beta), (float(omega), -beta)]
+
+
+def freeze_core(mf, ncore=None):
+    """Frozen-core view of a converged closed-shell mean field.
+
+    The lowest `ncore` orbitals (default pyscf's `chemcore`) are frozen with
+    occupation 2 and removed from the orbital space. The core is kept in a
+    fixed one-body term and a constant energy:
+
+        h_eff  = h + 2J[core] - K[core]                (AO basis)
+        E_core = Tr[D_core (h + (1/2)(2J - K)[core])]
+
+    so that, over the active orbitals, h_eff + 2J[gamma] - K[gamma] is the
+    full Fock matrix whenever gamma is the active density. As the core is
+    frozen at the full-HF core orbitals, the full-HF active orbitals are the
+    frozen-core HF solution; no new SCF is needed.
+
+    Returns (mf_fc, mol_fc). mf_fc is a shallow copy of mf with mo_coeff,
+    mo_energy and mo_occ cut to the active orbitals, get_hcore returning
+    h_eff and `frozen_core = ncore`. mol_fc is a copy of mf.mol whose
+    energy_nuc() returns E_nuc + E_core, so a total energy built from
+    (mf_fc, mol_fc) is the all-electron one. mf_fc.e_tot is the full HF
+    energy. The number of active doubly occupied orbitals is
+    mf.mol.nelectron // 2 - ncore.
+    """
+    import copy
+    from pyscf.data.elements import chemcore
+
+    if isinstance(mf, scf.uhf.UHF):
+        raise NotImplementedError('freeze_core is closed-shell only')
+    mol = mf.mol
+    if ncore is None:
+        ncore = chemcore(mol)
+    if not 0 <= ncore <= mol.nelectron // 2:
+        raise ValueError(f'ncore={ncore} outside [0, nocc={mol.nelectron // 2}]')
+
+    C_core = mf.mo_coeff[:, :ncore]
+    dm_core = 2.0 * C_core @ C_core.T
+    hcore = mf.get_hcore(mol)
+    vj, vk = mf.get_jk(mol, dm_core)
+    v_core = vj - 0.5 * vk
+    h_eff = hcore + v_core
+    e_core = float(np.einsum('ij,ji->', dm_core, hcore + 0.5 * v_core).real)
+    e_nuc_fc = mol.energy_nuc() + e_core
+
+    mol_fc = mol.copy()
+    mol_fc.energy_nuc = lambda *args, **kwargs: e_nuc_fc
+
+    # copy.copy goes through pyscf's __getstate__/__setstate__, which set
+    # _opt and _eri to None; reset() restores _opt for the direct-SCF get_jk
+    # (taken once nao**4 integrals exceed max_memory), and the in-core _eri,
+    # if any, is the same AO tensor and is shared.
+    mf_fc = copy.copy(mf)
+    mf_fc.reset(mol_fc)
+    mf_fc._eri = getattr(mf, '_eri', None)
+    mf_fc.mo_coeff = mf.mo_coeff[:, ncore:]
+    mf_fc.mo_energy = mf.mo_energy[ncore:]
+    mf_fc.mo_occ = mf.mo_occ[ncore:]
+    mf_fc.get_hcore = lambda *args, **kwargs: h_eff
+    mf_fc.frozen_core = ncore
+    mf_fc.e_core = e_core
+    return mf_fc, mol_fc
