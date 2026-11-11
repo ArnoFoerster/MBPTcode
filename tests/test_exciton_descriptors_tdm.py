@@ -22,7 +22,11 @@ Water, 6-31G. Checks:
      without the sqrt(2) / 2 scaling breaks the upper bound.
   5. a 1TDM on the active columns of mo_coeff gives the descriptors of the
      same 1TDM padded with zeros on all columns; the wrong columns do not; a
-     zero 1TDM raises ValueError.
+     zero 1TDM raises ValueError and a complex one NotImplementedError.
+  6. the molecule translated by (3, -2, 5) A: every descriptor but <r_e> and
+     <r_h> unchanged to 1e-7 (the SCF orbitals set the bar), those two moved
+     by the translation to 1e-6 bohr and so differing from the untranslated
+     ones.
 
 Run: python tests/test_exciton_descriptors_tdm.py
 """
@@ -253,6 +257,44 @@ def check_active_and_guard():
         ok &= check(False, 'a zero 1TDM raises ValueError')
     except ValueError as e:
         ok &= check('zero 1TDM' in str(e), 'a zero 1TDM raises ValueError', str(e))
+    try:
+        exciton_descriptors_tdm(mol, C, pad.astype(complex))
+        ok &= check(False, 'a complex 1TDM raises NotImplementedError')
+    except NotImplementedError as e:
+        ok &= check('real 1TDM' in str(e), 'a complex 1TDM raises NotImplementedError',
+                    str(e))
+    return ok
+
+
+def check_translation():
+    """Check 6."""
+    print('\n=== 6. a translated molecule ===')
+    shift = np.array([3.0, -2.0, 5.0])                # Angstrom
+    got = []
+    for t in (np.zeros(3), shift):
+        atoms = [(f.split()[0], [float(v) + s for v, s in zip(f.split()[1:4], t)])
+                 for f in WATER_ORIGIN.split(';')]
+        mf = rhf(atoms, '6-31g')
+        mol = mf.mol
+        nocc, nmo = mol.nelectron // 2, mf.mo_coeff.shape[1]
+        td = mf.TDHF()
+        td.conv_tol = 1e-12                            # the vectors set the bar
+        td.kernel(nstates=3)
+        X = np.stack([np.sqrt(2.0) * x.ravel() for x, _ in td.xy], axis=1)
+        Y = np.stack([np.sqrt(2.0) * y.ravel() for _, y in td.xy], axis=1)
+        g = xy_as_tdm(X, Y, nocc, nmo)
+        got.append(exciton_descriptors_tdm(mol, mf.mo_coeff, g))
+    a, b = got
+    keys = [k for k in a if k not in ('r_e', 'r_h')]
+    err = max_diff(a, b, keys)
+    ok = check(err < 1e-7, f'{len(keys)} descriptors unchanged', f'max |d| {err:.1e}')
+    t = shift / 0.529177210903                         # bohr
+    moved = max(float(np.abs(b[k] - a[k] - t).max()) for k in ('r_e', 'r_h'))
+    ok &= check(moved < 1e-6, '<r_e> and <r_h> move with the molecule',
+                f'max |d| {moved:.1e} bohr')
+    stay = min(float(np.abs(b[k] - a[k]).max()) for k in ('r_e', 'r_h'))
+    ok &= check(stay > 1.0, 'and so differ from the untranslated ones',
+                f'min max |d| {stay:.1f} bohr')
     return ok
 
 
@@ -263,6 +305,7 @@ def run():
     ok &= check_pyscf()
     ok &= check_fold()
     ok &= check_active_and_guard()
+    ok &= check_translation()
     return ok
 
 

@@ -240,7 +240,10 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     cases of Plasser's definition assume, so one NTO pair gives S_H|E = 0 and
     Z_HE = PR_NTO = 1 at any Ω. The raw form on λ_i,
     S_raw = Ω S_H|E - Ω log2 Ω, is returned beside it. Every descriptor but Ω
-    and S_raw is unchanged under γ → cγ.
+    and S_raw is unchanged under γ → cγ, and every one but ⟨r_h⟩ and ⟨r_e⟩
+    under a translation of the molecule. A root of a degenerate pair is one
+    arbitrary rotation within the pair, and S_H|E and Z_HE of a single member
+    depend on it; report them for the pair, or with the members' spread.
 
     References
     ----------
@@ -250,6 +253,9 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     Plasser, Krylov and Dreuw, J. Chem. Theory Comput. 14, 710 (2018),
     Eqs. (13)-(22).
     """
+    if np.iscomplexobj(gamma) or np.iscomplexobj(mo_coeff):
+        raise NotImplementedError('exciton_descriptors_tdm takes real orbitals and '
+                                  'a real 1TDM; a complex one would need conjugates')
     gamma = np.asarray(gamma, dtype=float)
     ao_r, ao_r2 = _ao_moments(mol)
     # Orbital-basis blocks: mu_xpq = sum_mn C_mp ao_xmn C_nq, index (x, p, q).
