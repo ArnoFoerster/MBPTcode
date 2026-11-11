@@ -95,6 +95,7 @@ pytest test_exchange_skeleton_split.py
 pytest test_fitted_exchange_columns.py
 pytest test_fitted_exchange_conditioning.py
 script test_exciton_descriptors.py
+pytest test_exciton_descriptors_tdm.py
 pytest test_faddeev_adc3.py
 pytest test_fit_adjoint_stability.py
 pytest test_followed_root_after_rejection.py
