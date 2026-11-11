@@ -197,8 +197,12 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
         orthonormal orbitals ψ_p the 1TDM is written in; with a frozen core, the
         active columns of the mean field's `mo_coeff`
     gamma : ndarray, shape (nroots, norb, norb), index (n, p, q)
-        γ^0n_pq = ⟨Ψ_0|a†_p a_q|Ψ_n⟩ of one spin block, p the hole and q the
-        electron index; all four blocks (oo, ov, vo, vv) enter
+        the spatial 1TDM γ^0n_pq, p the hole and q the electron index, all four
+        blocks (oo, ov, vo, vv) entering: for a closed-shell singlet or an
+        Ms = 0 triplet √2 times its alpha block ⟨Ψ_0|a†_pα a_qα|Ψ_n⟩, so that a
+        normalized CIS vector has Ω = 1. PySCF's transition RDMs hold
+        ⟨bra|a†_q a_p|ket⟩ at [p, q], the transpose of this γ. An open-shell or
+        unrestricted state, whose two spin blocks differ, is not covered
 
     Returns
     -------
@@ -228,7 +232,9 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     and ⟨r_h²⟩, ⟨r_e²⟩ with M in place of µ; d_eh, σ_e, σ_h, COV_eh, R_eh and
     d_exc follow from these moments as in `exciton_descriptors`. With
     γ_ia = X_ia, γ_ai = Y_ia and the oo and vv blocks zero they are its terms,
-    so the (X, Y) form is the special case of this one.
+    so the (X, Y) form is the special case of this one; that is the sign in
+    which the transition density is X + Y (Kimber and Plasser, Eq. (50)). There
+    Ω = |X|² + |Y|² exceeds 1, and S_raw below is no entropy.
 
     The natural transition orbital (NTO) weights λ_i are the squared singular
     values of γ, Σ_i λ_i = Ω. Then
@@ -239,11 +245,12 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     with zero weights dropped from the sum. λ̂ has unit sum, as the worked
     cases of Plasser's definition assume, so one NTO pair gives S_H|E = 0 and
     Z_HE = PR_NTO = 1 at any Ω. The raw form on λ_i,
-    S_raw = Ω S_H|E - Ω log2 Ω, is returned beside it. Every descriptor but Ω
-    and S_raw is unchanged under γ → cγ, and every one but ⟨r_h⟩ and ⟨r_e⟩
-    under a translation of the molecule. A root of a degenerate pair is one
-    arbitrary rotation within the pair, and S_H|E and Z_HE of a single member
-    depend on it; report them for the pair, or with the members' spread.
+    S_raw = Ω S_H|E - Ω log2 Ω, is returned beside it. Every descriptor but Ω,
+    the NTO weights and S_raw is unchanged under γ → cγ, and every one but
+    ⟨r_h⟩ and ⟨r_e⟩ under a translation of the molecule. A root of a
+    degenerate pair is one arbitrary rotation within the pair: S_H|E, Z_HE,
+    the centroids and the per-direction and matrix keys of a single member
+    depend on it, so report them for the pair, or with the members' spread.
 
     References
     ----------
@@ -251,7 +258,9 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     S. A. Bäppler, F. Plasser, M. Wormit and A. Dreuw, Phys. Rev. A 90, 052521
     (2014), the exciton wavefunction as the full 1TDM; definitions after Mewes,
     Plasser, Krylov and Dreuw, J. Chem. Theory Comput. 14, 710 (2018),
-    Eqs. (13)-(22).
+    Eqs. (13)-(22), the per-direction and matrix keys their componentwise
+    form; P. Kimber and F. Plasser, Phys. Chem. Chem. Phys. 22, 6058 (2020),
+    Eq. (50), the 1TDM of an (X, Y) response vector.
     """
     if np.iscomplexobj(gamma) or np.iscomplexobj(mo_coeff):
         raise NotImplementedError('exciton_descriptors_tdm takes real orbitals and '
@@ -265,8 +274,9 @@ def exciton_descriptors_tdm(mol, mo_coeff, gamma):
     # c_n = sum_pq gamma_npq gamma_npq
     c_n = np.einsum('npq,npq->n', gamma, gamma)
     if np.any(c_n == 0.0):
-        raise ValueError('a root with a zero 1TDM: the charge part of an Ms = 0 '
-                         'triplet and the spin part of a singlet vanish')
+        raise ValueError('a root with a zero 1TDM: pass sqrt(2) times the alpha '
+                         'block; the charge density of an Ms = 0 triplet and the '
+                         'spin density of a singlet are zero')
 
     def one_particle(b):
         # hole:     sum_pqr gamma_npq b_xpr gamma_nrq
