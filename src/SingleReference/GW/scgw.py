@@ -676,6 +676,48 @@ def unpack_G(x, G_shape):
     """Inverse of `pack_G`; a view of x."""
     return x.view(np.complex128).reshape(G_shape)
 
+def pack_pade(Z, A, omega_points):
+    """A symmetric `pade_fit_elementwise` fit (Z, A) in compact form for saving.
+
+    Every node in Z is one of the fit points mu + i*omega_points, so it is
+    stored as an index into omega_points (smallest integer type that fits)
+    instead of a complex number, and only the upper triangle is kept.
+    Elements below the fit's floor have all-zero coefficients, so their
+    nodes do not matter; they get index 0.
+
+    Returns {'node_index': (n_nodes, npair), 'coeff': (n_nodes, npair)}, with
+    npair = nmo (nmo + 1) / 2 in np.triu_indices order; `unpack_pade` inverts it.
+    """
+    iu = np.triu_indices(Z.shape[-1])
+    Z_u, A_u = Z[:, iu[0], iu[1]], A[:, iu[0], iu[1]]
+
+    sorter = np.argsort(omega_points)
+    pos = np.searchsorted(omega_points[sorter], Z_u.imag)
+    index = sorter[np.clip(pos, 0, len(omega_points) - 1)]
+    fitted = (A_u != 0).any(axis=0)
+    index[:, ~fitted] = 0
+    if not np.array_equal(omega_points[index][:, fitted], Z_u.imag[:, fitted]):
+        raise ValueError('Pade nodes are not on omega_points')
+
+    return {'node_index': index.astype(np.min_scalar_type(len(omega_points) - 1)),
+            'coeff': A_u}
+
+def unpack_pade(pade, omega_points, mu):
+    """Inverse of `pack_pade`: the full (Z, A), each (n_nodes, nmo, nmo),
+    ready for `pade_eval_elementwise` or `trace_Greal_from_pade`."""
+    index, A_u = pade['node_index'], pade['coeff']
+    npair = A_u.shape[1]
+    nmo = int(round((np.sqrt(8 * npair + 1) - 1) / 2))
+    iu = np.triu_indices(nmo)
+
+    Z = np.zeros((len(A_u), nmo, nmo), dtype=complex)
+    A = np.zeros((len(A_u), nmo, nmo), dtype=complex)
+    Z[:, iu[0], iu[1]] = mu + 1j * np.asarray(omega_points)[index]
+    A[:, iu[0], iu[1]] = A_u
+    Z[:, iu[1], iu[0]] = Z[:, iu[0], iu[1]]
+    A[:, iu[1], iu[0]] = A[:, iu[0], iu[1]]
+    return Z, A
+
 def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
                           save_sigma=False, **kwargs):
     """Self-consistent GW on IR grids, up to (not including) the real axis.
@@ -984,7 +1026,8 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
     return sigma_new, F, mu, grid_f.omega_points, E_gm
 
 
-def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None, **kwargs):
+def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
+                         save_pade=False, **kwargs):
     """Self-consistent GW quasiparticle energies on IR grids.
 
     Runs the scGW cycle (`_solve_qp_energy_scgw`), then continues the
@@ -995,6 +1038,10 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     Arguments are those of `_solve_qp_energy_scgw`, plus:
     save_file: if given, (w_real, A, mu) is also written there as CSV.
     save_sigma: passed on to `_solve_qp_energy_scgw` through kwargs.
+    save_pade: also write the Pade fit of Sigma to save_file + '.h5' under
+        'scgw/pade' (see `pack_pade`), enough to redo A(omega), e.g. at a
+        smaller eta, without Sigma. Smaller than sigma_mo, but fixes the
+        fit (max_order, node choice). Ignored without save_file.
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
         margin around and the range of the real frequency axis.
 
@@ -1038,6 +1085,13 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
         f'eta = {eta}: Pade fit {pade_Z.shape}')
     print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
         f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma))}\n')
+
+    if save_file is not None and save_pade:
+        # Next to the cycle's results; unpack_pade(d['pade'], d['omega_points'],
+        # d['mu']) with d = lib.chkfile.load(save_file + '.h5', 'scgw') gives
+        # back (Z, A) for trace_Greal_from_pade, e.g. to redo A at another eta.
+        lib.chkfile.save(save_file + '.h5', 'scgw/pade',
+                         pack_pade(pade_Z, pade_A, omega_points))
 
     tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
     del pade_Z, pade_A
