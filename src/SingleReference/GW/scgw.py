@@ -23,6 +23,7 @@ import numpy as np
 import scipy.signal
 import resource
 
+import h5py
 from pyscf import df, lib
 from pyscf.data.elements import chemcore
 from src.Solvers.diis import DIIS
@@ -1025,40 +1026,20 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
     # on return, before the real-axis arrays are allocated.
     return sigma_new, F, mu, grid_f.omega_points, E_gm
 
+def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, **kwargs):
+    """Real-axis part of `solve_qp_energy_scgw`, from a Pade fit of Sigma.
 
-def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
-                         save_pade=False, **kwargs):
-    """Self-consistent GW quasiparticle energies on IR grids.
+    Builds A(omega) = -Tr[Im G(omega + i.eta)] / pi with Sigma from the fit
+    (pade_Z, pade_A) of `pade_fit_elementwise` (or `unpack_pade`) and takes
+    the quasiparticle energies from its peaks. Shared by the run that has
+    just fitted Sigma and the reconstruction from a saved fit.
 
-    Runs the scGW cycle (`_solve_qp_energy_scgw`), then continues the
-    converged Sigma to the real axis with Pade and takes the quasiparticle
-    energies from the peaks of the spectral function
-    A(omega) = -Tr[Im G(omega)] / pi.
-
-    Arguments are those of `_solve_qp_energy_scgw`, plus:
-    save_file: if given, (w_real, A, mu) is also written there as CSV.
-    save_sigma: passed on to `_solve_qp_energy_scgw` through kwargs.
-    save_pade: also write the Pade fit of Sigma to save_file + '.h5' under
-        'scgw/pade' (see `pack_pade`), enough to redo A(omega), e.g. at a
-        smaller eta, without Sigma. Smaller than sigma_mo, but fixes the
-        fit (max_order, node choice). Ignored without save_file.
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
         margin around and the range of the real frequency axis.
+    save_file: if given, (w_real, A, mu) is written there as CSV.
 
-    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
-    function, the real frequency axis it is on, the Galitskii-Migdal
-    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
-    and the converged chemical potential.
-    With skip_scf=True, returns
-    (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
+    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`.
     """
-    out = _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=skip_scf, method=method,
-                                grid_kind=grid_kind, save_file=save_file, **kwargs)
-    if skip_scf:
-        return out
-    sigma, F, mu, omega_points, E_gm = out
-
-    # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
     # level of F, with 0.5 Ha margin. eta is the broadening; the frequency
     # step is finer, so each peak (half-width ~eta) is well sampled.
@@ -1069,32 +1050,16 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
 
     # the spectral function's window and range (kwargs A_window, A_range)
     A_window = kwargs.get('A_window') or 0.5
-    A_range = kwargs.get('A_range') or [eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] - A_window , 2 * mu - eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)] + A_window]
+    eps_low = eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)]
+    A_range = kwargs.get('A_range') or [eps_low - A_window, 2 * mu - eps_low + A_window]
 
     w_real = np.arange(A_range[0], A_range[1], w_step)
-    pade_max_order = 24
-
-    z_fit = mu + 1j * omega_points
-
-    # Fit once; Sigma(w) is then evaluated a chunk of frequencies at a time
-    # inside trace_Greal_from_pade, so (len(w_real), nmo, nmo) is never stored.
-    pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma, greedy=True,
-                                          symmetric=True, max_order=pade_max_order)
-
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
-        f'eta = {eta}: Pade fit {pade_Z.shape}')
-    print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
-        f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma))}\n')
+          f'eta = {eta}: Pade fit {pade_Z.shape}')
 
-    if save_file is not None and save_pade:
-        # Next to the cycle's results; unpack_pade(d['pade'], d['omega_points'],
-        # d['mu']) with d = lib.chkfile.load(save_file + '.h5', 'scgw') gives
-        # back (Z, A) for trace_Greal_from_pade, e.g. to redo A at another eta.
-        lib.chkfile.save(save_file + '.h5', 'scgw/pade',
-                         pack_pade(pade_Z, pade_A, omega_points))
-
+    # Sigma(w) is evaluated a chunk of frequencies at a time inside
+    # trace_Greal_from_pade, so (len(w_real), nmo, nmo) is never stored.
     tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
-    del pade_Z, pade_A
     A = -1/np.pi * tr_G_w.imag
 
     if save_file is not None:
@@ -1117,3 +1082,90 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     print(f'\nPeak memory usage: {peak_gib} GiB\n')
 
     return qpes, A, w_real, E_gm, mu
+
+def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind='IR', skip_scf=False, save_file=None,
+                         save_pade=False, **kwargs):
+    """Self-consistent GW quasiparticle energies on IR grids.
+
+    Runs the scGW cycle (`_solve_qp_energy_scgw`), then continues the
+    converged Sigma to the real axis with Pade and takes the quasiparticle
+    energies from the peaks of the spectral function
+    A(omega) = -Tr[Im G(omega)] / pi (`_finish_qp_from_pade`).
+
+    Arguments are those of `_solve_qp_energy_scgw`, plus:
+    ref_file: an .h5 file written by an earlier run (its save_file + '.h5').
+        If given, the cycle is skipped and the real-axis part is redone from
+        the saved 'scgw/sigma_mo' (refitted), or else from 'scgw/pade'
+        (the saved fit, used as is). mf and mol must be those of that run.
+    save_file: if given, (w_real, A, mu) is also written there as CSV.
+    save_sigma: passed on to `_solve_qp_energy_scgw` through kwargs.
+    save_pade: also write the Pade fit of Sigma to save_file + '.h5' under
+        'scgw/pade' (see `pack_pade`), enough to redo A(omega), e.g. at a
+        smaller eta, without Sigma. Smaller than sigma_mo, but fixes the
+        fit (max_order, node choice). Ignored without save_file.
+    kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
+        margin around and the range of the real frequency axis.
+
+    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
+    function, the real frequency axis it is on, the Galitskii-Migdal
+    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
+    and the converged chemical potential.
+    With skip_scf=True (and no ref_file), returns
+    (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
+    """
+    if ref_file is None:
+        out = _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=skip_scf, method=method,
+                                    grid_kind=grid_kind, save_file=save_file, **kwargs)
+        if skip_scf:
+            return out
+        sigma, F, mu, omega_points, E_gm = out
+
+    else:
+        if not ref_file.endswith('.h5'):
+            raise ValueError(f"ref_file must be an .h5 file, got '{ref_file}'")
+
+        with h5py.File(ref_file, 'r') as f:
+            if 'scgw' not in f:
+                raise ValueError(f"No 'scgw' group in {ref_file}")
+            keys = f['scgw'].keys()
+            has_sigma, has_pade = 'sigma_mo' in keys, 'pade' in keys
+
+        if not (has_sigma or has_pade):
+            raise ValueError('Ref. file was given to skip calculation, but no '
+                             f'sigma or pade weights found in {ref_file}')
+
+        F            = lib.chkfile.load(ref_file, 'scgw/F_mo')
+        mu           = lib.chkfile.load(ref_file, 'scgw/mu')
+        omega_points = lib.chkfile.load(ref_file, 'scgw/omega_points')
+        E_gm         = lib.chkfile.load(ref_file, 'scgw/E_gm')
+
+        if not has_sigma:
+            # Saved fit, used as is: no Sigma(i*w_n) to refit or check against.
+            pade_Z, pade_A = unpack_pade(lib.chkfile.load(ref_file, 'scgw/pade'),
+                                         omega_points, mu)
+            return _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
+                                        save_file=save_file, **kwargs)
+
+        sigma = lib.chkfile.load(ref_file, 'scgw/sigma_mo')
+
+    # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
+    pade_max_order = 24
+    z_fit = mu + 1j * omega_points
+
+    # Fit once; _finish_qp_from_pade then evaluates Sigma(w) from the fit.
+    pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma, greedy=True,
+                                          symmetric=True, max_order=pade_max_order)
+
+    print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
+        f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma))}\n')
+    del sigma
+
+    if save_file is not None and save_pade:
+        # Next to the cycle's results; unpack_pade(d['pade'], d['omega_points'],
+        # d['mu']) with d = lib.chkfile.load(save_file + '.h5', 'scgw') gives
+        # back (Z, A) for trace_Greal_from_pade, e.g. to redo A at another eta.
+        lib.chkfile.save(save_file + '.h5', 'scgw/pade',
+                         pack_pade(pade_Z, pade_A, omega_points))
+
+    return _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
+                                save_file=save_file, **kwargs)
