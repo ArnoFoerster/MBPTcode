@@ -676,13 +676,12 @@ def unpack_G(x, G_shape):
     """Inverse of `pack_G`; a view of x."""
     return x.view(np.complex128).reshape(G_shape)
 
-def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None, **kwargs):
-    """Self-consistent GW quasiparticle energies on IR grids.
+def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
+                          save_sigma=False, **kwargs):
+    """Self-consistent GW on IR grids, up to (not including) the real axis.
 
-    Starts from the mean-field G0, iterates Sigma and F to self-consistency
-    (DIIS on (Sigma, F), convergence on their residual), then continues
-    Sigma to the real axis with Pade and takes the quasiparticle energies
-    from the peaks of the spectral function A(omega) = -Tr[Im G(omega)] / pi.
+    Starts from the mean-field G0 and iterates Sigma and F to
+    self-consistency (DIIS on (Sigma, F), convergence on their residual).
     The total energy is the Galitskii-Migdal energy of the converged G and
     Sigma.
 
@@ -690,26 +689,29 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     nocc: number of doubly occupied orbitals.
     skip_scf: stop after the first Dyson step (see Returns).
     grid_kind: only 'IR' is implemented.
-    save_file: if given, (w_real, A, mu) is written there as CSV, and the
-        converged density (dm_ao, gamma_mo), mo_coeff, F_mo, mu, E_gm, E_c,
-        e_hf and method to save_file + '.h5' (pyscf chkfile, key 'scgw',
-        with mol).
+    save_file: if given, the converged F_mo, mu, density (dm_ao, gamma_mo),
+        mo_coeff, the Matsubara frequencies omega_points, E_gm, E_c, e_hf
+        and method are written to save_file + '.h5' (pyscf chkfile, key
+        'scgw', with mol).
+    save_sigma: also write the converged Sigma (sigma_mo, on omega_points)
+        to the h5. Off by default: it is (n_omega, nmo, nmo) complex and
+        can be very large for large systems. Ignored without save_file.
     method: 'ISDF' (separable factors) or 'RI' (plain RI three-index
         tensor, needs `auxbasis`); see `calc_new_sigma`.
     kwargs: `factors` (precomputed output of `separable_factors`) or
         `auxbasis` and `grid_accuracy` (ISDF grid level, default
         SURFACE_GRID_ACCURACY; used to build them); `auxbasis` is also the
-        RI auxiliary basis; `eta` the real-axis broadening; `beta` and `omega_max` override
+        RI auxiliary basis; `beta` and `omega_max` override
         the IR grid parameters that are otherwise derived from mf's
         orbital energies (e.g. to run different starts on the same grid);
         `diis_size`, `diis_start` and `mixing` override DIIS_SIZE,
         DIIS_START and LINEAR_MIXING; `mix` picks what is mixed, 'sigma_F'
         (default) or 'G' (see the comment at the cycle).
 
-    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
-    function, the real frequency axis it is on, the Galitskii-Migdal
-    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
-    and the converged chemical potential.
+    Returns (sigma, F, mu, omega_points, E_gm): the converged Sigma(i w_n)
+    and F, of which the converged G is the Dyson solution, the chemical
+    potential, the fermion Matsubara frequencies Sigma is on, and the
+    Galitskii-Migdal total energy (`galitskii_migdal_energy`).
     With skip_scf=True, returns
     (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
@@ -952,17 +954,62 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
 
     print('\n----END SCF----\n')
 
-    # G is the Dyson solution of (sigma_in, F_in); continue those to the real
-    # axis so G, F and Sigma below stay consistent.
+    # G is the Dyson solution of (sigma_in, F_in); these are what is returned
+    # and continued to the real axis, so G, F and Sigma stay consistent.
     sigma_new, F = sigma_in, F_in
 
     E_gm, E_c = galitskii_migdal_energy(G, sigma_new, mf, h_mo, grid_f, e_nuc)
     print(f'Galitskii-Migdal energy: E = {E_gm} Ha, E_c = {E_c} Ha\n')
 
-    # Nothing from the cycle is needed on the real axis; free it before the
-    # (large) real-frequency arrays are allocated. gamma is kept (nmo^2) for
-    # the save below.
-    del h_mo, X_mo, D, B, diis, G, grid_b, sigma_in, F_in, x_in
+    if save_file is not None:
+        # Read back with lib.chkfile.load(save_file + '.h5', 'scgw') and
+        # load_mol. gamma is per spin in the MO basis of mf, so the total AO
+        # density is 2 C gamma C^T. With save_sigma, sigma_mo, F_mo, mu and
+        # omega_points are enough to redo the real-axis continuation without
+        # the cycle; sigma_mo is (n_omega, nmo, nmo) complex, so it is off by
+        # default.
+        data = {
+            'dm_ao': 2.0 * mf.mo_coeff @ gamma @ mf.mo_coeff.T,
+            'gamma_mo': gamma, 'mo_coeff': mf.mo_coeff, 'F_mo': F,
+            'omega_points': grid_f.omega_points,
+            'mu': mu, 'E_gm': E_gm, 'E_c': E_c, 'e_hf': mf.e_tot,
+            'method': method}
+        if save_sigma:
+            data['sigma_mo'] = sigma_new
+        lib.chkfile.save(save_file + '.h5', 'scgw', data)
+        lib.chkfile.save_mol(mol, save_file + '.h5')
+
+    # Everything else from the cycle (G, the factors, DIIS, grid_b) is freed
+    # on return, before the real-axis arrays are allocated.
+    return sigma_new, F, mu, grid_f.omega_points, E_gm
+
+
+def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None, **kwargs):
+    """Self-consistent GW quasiparticle energies on IR grids.
+
+    Runs the scGW cycle (`_solve_qp_energy_scgw`), then continues the
+    converged Sigma to the real axis with Pade and takes the quasiparticle
+    energies from the peaks of the spectral function
+    A(omega) = -Tr[Im G(omega)] / pi.
+
+    Arguments are those of `_solve_qp_energy_scgw`, plus:
+    save_file: if given, (w_real, A, mu) is also written there as CSV.
+    save_sigma: passed on to `_solve_qp_energy_scgw` through kwargs.
+    kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
+        margin around and the range of the real frequency axis.
+
+    Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
+    function, the real frequency axis it is on, the Galitskii-Migdal
+    total energy of the converged G and Sigma (`galitskii_migdal_energy`)
+    and the converged chemical potential.
+    With skip_scf=True, returns
+    (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
+    """
+    out = _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=skip_scf, method=method,
+                                grid_kind=grid_kind, save_file=save_file, **kwargs)
+    if skip_scf:
+        return out
+    sigma, F, mu, omega_points, E_gm = out
 
     # --- Real axis: Pade-continue Sigma, build G(omega), find peaks of A ---
     # The frequency window runs from the lowest valence level to the highest
@@ -980,17 +1027,17 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
     w_real = np.arange(A_range[0], A_range[1], w_step)
     pade_max_order = 24
 
-    z_fit = mu + 1j * grid_f.omega_points
+    z_fit = mu + 1j * omega_points
 
     # Fit once; Sigma(w) is then evaluated a chunk of frequencies at a time
     # inside trace_Greal_from_pade, so (len(w_real), nmo, nmo) is never stored.
-    pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma_new, greedy=True,
+    pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma, greedy=True,
                                           symmetric=True, max_order=pade_max_order)
 
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
         f'eta = {eta}: Pade fit {pade_Z.shape}')
     print(f'Pade check, max |Sigma_pade(i*w_n) - Sigma(i*w_n)|: '
-        f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma_new))}\n')
+        f'{np.max(np.abs(pade_eval_elementwise(z_fit, pade_Z, pade_A) - sigma))}\n')
 
     tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
     del pade_Z, pade_A
@@ -998,17 +1045,6 @@ def solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind
 
     if save_file is not None:
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
-
-        # The converged density next to the CSV, read back with
-        # lib.chkfile.load(save_file + '.h5', 'scgw') and load_mol. gamma is
-        # per spin in the MO basis of mf, so the total AO density is
-        # 2 C gamma C^T.
-        lib.chkfile.save(save_file + '.h5', 'scgw', {
-            'dm_ao': 2.0 * mf.mo_coeff @ gamma @ mf.mo_coeff.T,
-            'gamma_mo': gamma, 'mo_coeff': mf.mo_coeff, 'F_mo': F,
-            'mu': mu, 'E_gm': E_gm, 'E_c': E_c, 'e_hf': mf.e_tot,
-            'method': method})
-        lib.chkfile.save_mol(mol, save_file + '.h5')
 
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # height threshold is set as a minimum weight rather than a fixed number.
