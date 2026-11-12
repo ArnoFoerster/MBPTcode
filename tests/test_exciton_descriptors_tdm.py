@@ -31,6 +31,13 @@ Water, 6-31G. Checks:
      the AO basis: Omega, <r_h>, <r_e>, sigma per direction and COV_eh^xy to
      1e-10; the oo and vv blocks move sigma_h and COV_eh^xy is not symmetric,
      so the check sees a dropped block and a swapped (x, y).
+  8. solve_ee_adc(fold=True, return_fold=True, exciton_descriptors=True), two
+     singlets and two triplets on tiles of one occupied orbital: the
+     FoldResult's .exciton_descriptors hold the NTO keys and equal those of the
+     whole-doubles builder (fold_state, ground_transition_density) at sqrt(2)
+     times the alpha block to 1e-10, while the unscaled density and the roots
+     swapped do not; without the keyword none are built; without return_fold,
+     at adc1 and off the fold the keyword raises ValueError.
 
 Run: python tests/test_exciton_descriptors_tdm.py
 """
@@ -357,6 +364,57 @@ def check_ao_route():
     return ok
 
 
+def check_ee_adc():
+    """Check 8."""
+    print('\n=== 8. solve_ee_adc(exciton_descriptors=True) on the RI fold ===')
+    ok = True
+    mf = rhf_df(WATER_C2V, '6-31g')
+    mol = mf.mol
+    C = np.asarray(mf.mo_coeff)[:, NF:]
+    kw = dict(level='adc2', nroots=2, fold=True, frozen=NF, auxbasis=AUX,
+              numerics=ee_numerics(conv_tol=1e-11, residual_tol=1e-9, tile_gb=1e-9),
+              return_fold=True)
+    for spin in ee_ri_fold.SPINS:
+        try:
+            res = solve_ee_adc(mf, spin=spin, exciton_descriptors=True, **kw)[2]
+        except TypeError as exc:
+            return check(False, 'solve_ee_adc takes exciton_descriptors', str(exc))
+        got = res.exciton_descriptors
+        op, f = res.operator, res.operator.f
+        ref = etd.reference_from_factors(np.concatenate([f.eo, f.ev]),
+                                         etd.factors_of(op), f.no, ground=True)
+        which = 0 if spin == 'singlet' else 1
+        g = np.stack([etd.ground_transition_density(
+            ref, etd.fold_state(op, res.y[:, k], res.omega[k], res.t1[k]))[which]
+            for k in range(2)]) / np.sqrt(2.0)
+        want = exciton_descriptors_tdm(mol, C, g)
+        keys = sorted(want)
+        err = max_diff(got, want, keys) if set(got) == set(keys) else np.inf
+        ok &= check(err < 1e-10 and set(NTO_KEYS) <= set(got),
+                    f'{spin}s: equal to the whole-doubles builder, NTO keys included',
+                    f'max |d| {err:.1e}')
+        off = min(max_diff(got, exciton_descriptors_tdm(mol, C, h), keys)
+                  for h in (np.sqrt(2.0) * g, g[::-1]))
+        ok &= check(off > 1e-3, f'{spin}s: the unscaled density and the roots swapped '
+                    'differ', f'min max |d| {off:.1e}')
+    res = solve_ee_adc(mf, spin='singlet', **kw)[2]
+    ok &= check(not hasattr(res, 'exciton_descriptors'),
+                'without the keyword no descriptors are built')
+    refused = []
+    for case in (dict(return_fold=False), dict(level='adc1'), dict(fold=False)):
+        args = dict(kw, numerics=None, **case)
+        if not args['fold']:
+            args.pop('return_fold')
+        try:
+            solve_ee_adc(mf, spin='singlet', exciton_descriptors=True, **args)
+            refused.append(False)
+        except (TypeError, ValueError) as exc:
+            refused.append('exciton_descriptors needs fold=True' in str(exc))
+    ok &= check(all(refused), 'without return_fold, at adc1 and off the fold it raises '
+                'ValueError', str(refused))
+    return ok
+
+
 def run():
     """Every check; True when all passed."""
     ok = check_xy_reduction()
@@ -366,6 +424,7 @@ def run():
     ok &= check_active_and_guard()
     ok &= check_translation()
     ok &= check_ao_route()
+    ok &= check_ee_adc()
     return ok
 
 
