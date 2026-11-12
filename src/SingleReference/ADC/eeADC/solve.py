@@ -149,6 +149,8 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     LinearResponse.exciton_descriptors.exciton_descriptors_tdm over the roots,
     from each root's ISR-ADC(2) ground-to-state transition density
     (ee_ri_transition) at sqrt(2) times its alpha block. Off, none is built.
+    With state_specific they belong to the roots as solved, at the
+    FoldResult's .omega, while e holds the shifted .omega_ss.
 
     start (fold=True, level 'adc2'): the singles vectors (no * nv, m) of a
     neighbouring problem's roots in this mean field's orbitals, the block
