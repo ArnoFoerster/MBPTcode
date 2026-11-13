@@ -22,6 +22,9 @@ from src.SingleReference.ADC.eeADC import (ee_u_dense_full, ee_u_sigma_full,
                                      ee_ri_density, ee_state_specific,
                                      ee_fold, ee_ri_fold, ee_u_r_sigma_df)
 from src.SingleReference.ADC.eeADC import ee_relaxed_density as erd
+from src.SingleReference.ADC.eeADC import ee_ri_transition as ert
+from src.SingleReference.LinearResponse.exciton_descriptors import (
+    exciton_descriptors_tdm)
 from src.SingleReference.ADC.eeADC.ee_spin_adapt import channel_basis, csf_isometry
 from src.Base.numerics.constants import EE_ADC_DENSE_LIMIT, EE_FOLD_RESIDUAL_GAP
 from src.environments.solvent_vocabulary import SS_DENSITY_DEFAULT
@@ -109,7 +112,7 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
                     numerics=None, state_specific='off',
                     ss_density=SS_DENSITY_DEFAULT, scaling=None,
                     relaxed_density=False, start=None, residual_tol=None,
-                    full_check=False):
+                    full_check=False, exciton_descriptors=False):
     """fold=True: the density-fitted tiled fold of ee_ri_fold; start and
     full_check the block solver's (ee_fold.solve_folded), level 'adc2'."""
     if route != 'spinfree' or isinstance(mf, _scf.uhf.UHF):
@@ -170,6 +173,9 @@ def solve_folded_ri(mf, mol, level, nroots, spin, conv_tol, en_dress, frozen,
         res.delta_density_relaxed = relaxed_densities(res, mol, mf, frozen,
                                                       tile_gb, auxbasis,
                                                       numerics=numerics)
+    if exciton_descriptors:
+        res.exciton_descriptors = fold_exciton_descriptors(res, mol, mf, frozen,
+                                                           tile_gb)
     return EEResult((e, Z, res) if return_fold else (e, Z), res.converged)
 
 
@@ -189,6 +195,22 @@ def relaxed_densities(res, mol, mf, frozen, tile_gb, auxbasis, roots=None,
                     op, mf, mol, frozen, res.t1[k], Bc=Bc, env=env,
                     pcm_response=pcm_response, numerics=numerics)
                 for k in roots]
+
+
+def fold_exciton_descriptors(res, mol, mf, frozen, tile_gb):
+    """exciton_descriptors_tdm of every root of an ADC(2) fold result solved on
+    mf, from each root's ISR ground-to-state transition density
+    (ee_ri_transition) at sqrt(2) times its alpha block: charge / sqrt(2) for
+    a singlet, spin / sqrt(2) for an Ms = 0 triplet. A collective over the
+    operator's ranks."""
+    op = res.operator
+    keys = [(op.spin, k) for k in range(res.omega.size)]
+    roots = {key: (op, res.y[:, k], res.omega[k], res.t1[k])
+             for k, key in enumerate(keys)}
+    got = ert.transition_densities(roots, grounds=keys, tile_gb=tile_gb)
+    which = 0 if op.spin == 'singlet' else 1                # (charge, spin)
+    gamma = np.stack([got[ert.GROUND, key][which] for key in keys]) / np.sqrt(2.0)
+    return exciton_descriptors_tdm(mol, _active_orbitals(mol, mf, frozen, op), gamma)
 
 
 def _active_orbitals(mol, mf, frozen, op):

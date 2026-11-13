@@ -1,6 +1,8 @@
-"""Exciton descriptors of Casida/BSE excitations from their (X, Y) eigenvectors:
-electron-hole distance, electron and hole sizes, their covariance, and the size
-of the excitation, as expectation values over the exciton wavefunction."""
+"""Exciton descriptors of Casida/BSE excitations from their (X, Y) eigenvectors,
+and of any excitation from its full one-particle transition density matrix
+(`exciton_descriptors_tdm`): electron-hole distance, electron and hole sizes,
+their covariance, and the size of the excitation, as expectation values over
+the exciton wavefunction."""
 import numpy as np
 from pyscf import scf
 
@@ -97,10 +99,7 @@ def exciton_descriptors(mf, mol, nocc, X, Y):
     nvirt = len(virt)
     nroots = X.shape[1]
     mo = mf.mo_coeff
-    with mol.with_common_orig((0.0, 0.0, 0.0)):
-        ao_r = mol.intor_symmetric('int1e_r', comp=3)      # (3, nao, nao)
-        ao_rr = mol.intor_symmetric('int1e_rr', comp=9)    # (9, nao, nao)
-    ao_r2 = ao_rr[[0, 4, 8]]      # xx, yy, zz of the (xx xy xz yx yy yz zx zy zz) order
+    ao_r, ao_r2 = _ao_moments(mol)
 
     # Orbital-basis blocks: block_pq = sum_mn C_mp ao_mn C_nq, index (x, p, q).
     def mo_block(ao, p, q):
@@ -148,7 +147,23 @@ def exciton_descriptors(mf, mol, nocc, X, Y):
     v = np.einsum('nxij,njb->nxib', w, U)                # sum_j w_ij Y_jb
     xy = np.einsum('nxib,yib->nxy', v, d_ov)             # sum_ib v_ib mu_ib
     r_eh = (xx + yy + 2.0 * xy) / c_n[:, None, None]
+    return _descriptors_from_moments(c_n, r_h, r_e, r_h2, r_e2, r_eh)
 
+
+def _ao_moments(mol):
+    """(r, r_µ²) AO integrals about the origin, each shape (3, nao, nao),
+    index (x, m, n)."""
+    with mol.with_common_orig((0.0, 0.0, 0.0)):
+        ao_r = mol.intor_symmetric('int1e_r', comp=3)      # (3, nao, nao)
+        ao_rr = mol.intor_symmetric('int1e_rr', comp=9)    # (9, nao, nao)
+    # xx, yy, zz of the (xx xy xz yx yy yz zx zy zz) order
+    return ao_r, ao_rr[[0, 4, 8]]
+
+
+def _descriptors_from_moments(c_n, r_h, r_e, r_h2, r_e2, r_eh):
+    """The descriptor dict of `exciton_descriptors` from the normalized moments
+    ⟨r_h⟩, ⟨r_e⟩, ⟨r_h²⟩, ⟨r_e²⟩, each shape (nroots, 3), index (n, x), and
+    ⟨r_e^x r_h^y⟩, shape (nroots, 3, 3), index (n, x, y)."""
     # COV_eh^xy = <r_e^x r_h^y> - <r_e^x><r_h^y>; the scalar COV_eh is its trace
     cov_mat = r_eh - np.einsum('nx,ny->nxy', r_e, r_h)
     cov_eh = np.einsum('nxx->n', cov_mat)
@@ -171,3 +186,125 @@ def exciton_descriptors(mf, mol, nocc, X, Y):
             'R_eh_dir': cov_diag / (sigma_e_dir * sigma_h_dir),
             'cov_eh_mat': cov_mat,
             'R_eh_mat': cov_mat / np.einsum('nx,ny->nxy', sigma_e_dir, sigma_h_dir)}
+
+
+def exciton_descriptors_tdm(mol, mo_coeff, gamma):
+    """Spatial and natural-transition-orbital descriptors of every root from its
+    full one-particle transition density matrix (1TDM), in bohr.
+
+    Parameters
+    ----------
+    mol : PySCF Mole the orbitals are expanded on
+    mo_coeff : ndarray, shape (nao, norb), index (m, p)
+        orthonormal orbitals ψ_p the 1TDM is written in; with a frozen core, the
+        active columns of the mean field's `mo_coeff`
+    gamma : ndarray, shape (nroots, norb, norb), index (n, p, q)
+        the spatial 1TDM γ^0n_pq, p the hole and q the electron index, all four
+        blocks (oo, ov, vo, vv) entering: for a closed-shell singlet or an
+        Ms = 0 triplet √2 times its alpha block ⟨Ψ_0|a†_pα a_qα|Ψ_n⟩, so that a
+        normalized CIS vector has Ω = 1. PySCF's transition RDMs hold
+        ⟨bra|a†_q a_p|ket⟩ at [p, q], the transpose of this γ. An open-shell or
+        unrestricted state, whose two spin blocks differ, is not covered
+
+    Returns
+    -------
+    dict of ndarray, the keys of `exciton_descriptors` with 'c_n' the squared
+    norm Ω_n = Σ_pq γ_pq², and, index n the root and i the NTO pair,
+        'nto_weights' shape (nroots, norb)  λ_ni, descending
+        'pr_nto'      shape (nroots,)       Ω² / Σ_i λ_i²
+        's_he'        shape (nroots,)       -Σ_i λ̂_i log2 λ̂_i, λ̂_i = λ_i / Ω
+        's_he_raw'    shape (nroots,)       -Σ_i λ_i log2 λ_i
+        'z_he'        shape (nroots,)       2^s_he
+
+    Notes
+    -----
+    The exciton wavefunction of root n, ψ_p(r_h) a hole and ψ_q(r_e) an
+    electron orbital,
+
+        χ_n(r_h, r_e) = Σ_pq γ_pq ψ_p(r_h) ψ_q(r_e),
+
+    has the squared norm Ω = Σ_pq γ_pq², and ⟨O⟩ = ⟨χ_n|O|χ_n⟩ / Ω. With µ_pq
+    and M_pq the dipole and diagonal second-moment matrices of
+    `exciton_descriptors`, x the electron and y the hole component,
+
+        ⟨r_h⟩         = Σ_pqr γ_pq µ_pr γ_rq / Ω
+        ⟨r_e⟩         = Σ_pqs γ_pq µ_qs γ_ps / Ω
+        ⟨r_e^x r_h^y⟩ = Σ_pqrs γ_pq µ^y_pr γ_rs µ^x_qs / Ω
+
+    and ⟨r_h²⟩, ⟨r_e²⟩ with M in place of µ; d_eh, σ_e, σ_h, COV_eh, R_eh and
+    d_exc follow from these moments as in `exciton_descriptors`. With
+    γ_ia = X_ia, γ_ai = Y_ia and the oo and vv blocks zero they are its terms,
+    so the (X, Y) form is the special case of this one; that is the sign in
+    which the transition density is X + Y (Kimber and Plasser, Eq. (50)). There
+    Ω = |X|² + |Y|² exceeds 1, and S_raw below is no entropy.
+
+    The natural transition orbital (NTO) weights λ_i are the squared singular
+    values of γ, Σ_i λ_i = Ω. Then
+
+        PR_NTO = (Σ_i λ_i)² / Σ_i λ_i²
+        S_H|E  = -Σ_i λ̂_i log2 λ̂_i,   λ̂_i = λ_i / Ω,   Z_HE = 2^S_H|E
+
+    with zero weights dropped from the sum. λ̂ has unit sum, as the worked
+    cases of Plasser's definition assume, so one NTO pair gives S_H|E = 0 and
+    Z_HE = PR_NTO = 1 at any Ω. The raw form on λ_i,
+    S_raw = Ω S_H|E - Ω log2 Ω, is returned beside it. Every descriptor but Ω,
+    the NTO weights and S_raw is unchanged under γ → cγ, and every one but
+    ⟨r_h⟩ and ⟨r_e⟩ under a translation of the molecule. A root of a
+    degenerate pair is one arbitrary rotation within the pair: S_H|E, Z_HE,
+    the centroids and the per-direction and matrix keys of a single member
+    depend on it, so report them for the pair, or with the members' spread.
+
+    References
+    ----------
+    F. Plasser, J. Chem. Phys. 144, 194107 (2016), Eqs. (11), (12), (15);
+    S. A. Bäppler, F. Plasser, M. Wormit and A. Dreuw, Phys. Rev. A 90, 052521
+    (2014), the exciton wavefunction as the full 1TDM; definitions after Mewes,
+    Plasser, Krylov and Dreuw, J. Chem. Theory Comput. 14, 710 (2018),
+    Eqs. (13)-(22), the per-direction and matrix keys their componentwise
+    form; P. Kimber and F. Plasser, Phys. Chem. Chem. Phys. 22, 6058 (2020),
+    Eq. (50), the 1TDM of an (X, Y) response vector.
+    """
+    if np.iscomplexobj(gamma) or np.iscomplexobj(mo_coeff):
+        raise NotImplementedError('exciton_descriptors_tdm takes real orbitals and '
+                                  'a real 1TDM; a complex one would need conjugates')
+    gamma = np.asarray(gamma, dtype=float)
+    ao_r, ao_r2 = _ao_moments(mol)
+    # Orbital-basis blocks: mu_xpq = sum_mn C_mp ao_xmn C_nq, index (x, p, q).
+    mu = np.einsum('xmn,mp,nq->xpq', ao_r, mo_coeff, mo_coeff, optimize=True)
+    m2 = np.einsum('xmn,mp,nq->xpq', ao_r2, mo_coeff, mo_coeff, optimize=True)
+
+    # c_n = sum_pq gamma_npq gamma_npq
+    c_n = np.einsum('npq,npq->n', gamma, gamma)
+    if np.any(c_n == 0.0):
+        raise ValueError('a root with a zero 1TDM: pass sqrt(2) times the alpha '
+                         'block; the charge density of an Ms = 0 triplet and the '
+                         'spin density of a singlet are zero')
+
+    def one_particle(b):
+        # hole:     sum_pqr gamma_npq b_xpr gamma_nrq
+        # electron: sum_pqs gamma_npq b_xqs gamma_nps
+        h = np.einsum('npq,xpr,nrq->nx', gamma, b, gamma, optimize=True)
+        e = np.einsum('npq,xqs,nps->nx', gamma, b, gamma, optimize=True)
+        return h / c_n[:, None], e / c_n[:, None]
+
+    r_h, r_e = one_particle(mu)                  # <r_h>, <r_e>       (n, x)
+    r_h2, r_e2 = one_particle(m2)                # <r_h^2>, <r_e^2>   (n, x)
+
+    # <r_e^x r_h^y> = sum_pqrs gamma_npq mu_ypr gamma_nrs mu_xqs, index (n, x, y)
+    w = np.einsum('ypr,nrs->nyps', mu, gamma)            # sum_r mu_ypr gamma_nrs
+    v = np.einsum('npq,nyps->nyqs', gamma, w)            # sum_p gamma_npq w_nyps
+    # r_eh_nxy = sum_qs v_nyqs mu_xqs / c_n
+    r_eh = np.einsum('nyqs,xqs->nxy', v, mu) / c_n[:, None, None]
+
+    # lambda_ni = s_ni^2, s_ni the singular values of gamma_n, descending
+    lam = np.linalg.svd(gamma, compute_uv=False) ** 2
+    lam_hat = lam / c_n[:, None]
+    # S = -sum_i lam_ni log2 lam_ni over the nonzero weights, normalized and raw
+    s_he = -np.einsum('ni,ni->n', lam_hat,
+                      np.log2(np.where(lam_hat > 0.0, lam_hat, 1.0)))
+    s_raw = -np.einsum('ni,ni->n', lam, np.log2(np.where(lam > 0.0, lam, 1.0)))
+    out = _descriptors_from_moments(c_n, r_h, r_e, r_h2, r_e2, r_eh)
+    out.update(nto_weights=lam,
+               pr_nto=c_n**2 / np.einsum('ni,ni->n', lam, lam),
+               s_he=s_he, s_he_raw=s_raw, z_he=2.0**s_he)
+    return out
