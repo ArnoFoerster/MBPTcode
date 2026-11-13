@@ -20,6 +20,7 @@ Galitskii-Migdal energy of the converged G and Sigma
 `solve_qp_energy_scgw` is the entry point.
 """
 import numpy as np
+import scipy.integrate
 import scipy.signal
 import resource
 
@@ -1035,7 +1036,9 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     just fitted Sigma and the reconstruction from a saved fit.
 
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
-        margin around and the range of the real frequency axis.
+        margin around and the range of the real frequency axis;
+        `min_qp_weight` the smallest |weight| of a kept peak (default 0.7,
+        see `analyze_peaks`).
     save_file: if given, (w_real, A, mu) is written there as CSV.
 
     Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`.
@@ -1065,23 +1068,68 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     if save_file is not None:
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
 
-    # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
-    # height threshold is set as a minimum weight rather than a fixed number.
-    min_peak_weight = 0.05
-    peaks, _ = scipy.signal.find_peaks(A, height=min_peak_weight / (np.pi * eta))
-    qpes = np.empty(len(peaks))
-
-    # Refine each peak position with a parabola through the maximum and its
-    # two neighbours, instead of taking the grid point itself.
-    for i, peak in enumerate(peaks):
-        a_left, a_mid, a_right = A[peak - 1], A[peak], A[peak + 1]
-        shift = 0.5 * (a_left - a_right) / (a_left - 2 * a_mid + a_right)
-        qpes[i] = w_real[peak] + shift * w_step
+    # Peaks and dips of A, filtered on their integrated weight (analyze_peaks).
+    qpes, _, _ = analyze_peaks(w_real, A, eta, w_step,
+                               min_qp_weight=kwargs.get('min_qp_weight', 0.7))
 
     peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
     print(f'\nPeak memory usage: {peak_gib} GiB\n')
 
     return qpes, A, w_real, E_gm, mu
+
+def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
+    """Quasiparticle peaks of the spectral function A(omega).
+
+    Peaks are searched for in A and in -A: a quasiparticle pole can come out
+    of the Pade continuation as a dip (e.g. the Ne HOMO at eta = 1e-3), which
+    a search for maxima alone misses. Between neighbouring peaks the boundary
+    is the point where |A| is smallest (the zero crossing between a peak and
+    a dip), and the weight of a peak is the integral of A between its two
+    boundaries. Peaks with |weight| < min_qp_weight (satellites, or spurious
+    peaks from a wrong eta) are dropped.
+
+    A is a trace over orbitals, so a degenerate level has weight ~ Z times
+    its degeneracy.
+
+    Returns (qpes, weights, negative) for the kept peaks: the positions,
+    refined with a parabola through the extremum and its two neighbours,
+    their weights, and whether each is a dip (negative peak) in A.
+    """
+    # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
+    # height threshold is set as a minimum weight rather than a fixed number.
+    min_peak_weight = 0.05
+    height = min_peak_weight / (np.pi * eta)
+    peaks_pos, _ = scipy.signal.find_peaks(A, height=height)
+    peaks_neg, _ = scipy.signal.find_peaks(-A, height=height)
+    peaks = np.sort(np.concatenate([peaks_pos, peaks_neg]))
+    negative = np.isin(peaks, peaks_neg)
+
+    # Boundaries at the smallest |A| between neighbouring peaks, and the data
+    # edges outside the first and last peak; the weights then add up to the
+    # integral of A over the whole axis.
+    bounds = ([0] + [p0 + np.argmin(np.abs(A[p0:p1])) for p0, p1 in zip(peaks[:-1], peaks[1:])]
+              + [len(A) - 1])
+    weights = np.array([scipy.integrate.trapezoid(A[l:r + 1], w_real[l:r + 1])
+                        for l, r in zip(bounds[:-1], bounds[1:])])
+
+    # Refine each peak position with a parabola through the extremum and its
+    # two neighbours, instead of taking the grid point itself (the same
+    # formula holds for a minimum).
+    qpes = np.empty(len(peaks))
+    for i, peak in enumerate(peaks):
+        a_left, a_mid, a_right = A[peak - 1], A[peak], A[peak + 1]
+        shift = 0.5 * (a_left - a_right) / (a_left - 2 * a_mid + a_right)
+        qpes[i] = w_real[peak] + shift * w_step
+
+    keep = np.abs(weights) >= min_qp_weight
+
+    print(f'\nPeaks of A (|weight| >= {min_qp_weight} kept):')
+    for qpe, weight, neg, kept in zip(qpes, weights, negative, keep):
+        print(f'  w = {qpe:.6f} Ha  weight = {weight:7.3f}'
+              f'{"  (negative peak)" if neg else ""}{"" if kept else "  dropped"}')
+
+    return qpes[keep], weights[keep], negative[keep]
+
 
 def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind='IR', skip_scf=False, save_file=None,
                          save_pade=False, **kwargs):
