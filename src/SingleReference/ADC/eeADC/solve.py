@@ -61,7 +61,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                  environment=None, return_fold=False,
                  numerics=None, state_specific='off', ss_density=SS_DENSITY_DEFAULT,
                  spin_scaling=None, relaxed_density=False, start=None,
-                 full_check=False):
+                 full_check=False, exciton_descriptors=False):
     """(e, Z): the lowest `nroots` excitation energies and their vectors, as
     an EEResult (`ee_driver.EEResult`): the tuple, plus .converged, one flag
     per root (a Davidson or fold root that did not converge also warns).
@@ -144,6 +144,14 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     with the mean field's own (gas-like) kernel. What a solvation loop
     (src.environments.solvation_loop) reads.
 
+    exciton_descriptors (fold=True, return_fold=True, level 'adc2'): the
+    FoldResult's .exciton_descriptors, the dict of
+    LinearResponse.exciton_descriptors.exciton_descriptors_tdm over the roots,
+    from each root's ISR-ADC(2) ground-to-state transition density
+    (ee_ri_transition) at sqrt(2) times its alpha block. Off, none is built.
+    With state_specific they belong to the roots as solved, at the
+    FoldResult's .omega, while e holds the shifted .omega_ss.
+
     start (fold=True, level 'adc2'): the singles vectors (no * nv, m) of a
     neighbouring problem's roots in this mean field's orbitals, the block
     solver's start in place of the seeds of M (ee_fold.solve_folded);
@@ -183,6 +191,9 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
     if relaxed_density and not (fold and return_fold and level in ('adc1', 'adc2')):
         raise ValueError('relaxed_density needs fold=True, return_fold=True and '
                          "level 'adc1' or 'adc2'")
+    if exciton_descriptors and not (fold and return_fold and level == 'adc2'):
+        raise ValueError('exciton_descriptors needs fold=True, return_fold=True '
+                         "and level 'adc2'")
     if ee_state_specific.check_mode(state_specific) != 'off':
         if not fold:
             raise NotImplementedError('state_specific is wired on fold=True')
@@ -198,7 +209,7 @@ def solve_ee_adc(mf, mol=None, level='adc3', nroots=5, route='spinfree',
                                     return_fold, env, tile_gb, route, numerics,
                                     state_specific, ss_density, scaling,
                                     relaxed_density, start, residual_tol,
-                                    full_check)
+                                    full_check, exciton_descriptors)
     if return_parity and route != 'spinfree':
         raise ValueError("return_parity is defined on route='spinfree' only, "
                          "where the alpha<->beta flip acts on the vector layout")
