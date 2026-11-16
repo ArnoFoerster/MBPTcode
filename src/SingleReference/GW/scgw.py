@@ -1038,10 +1038,12 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
         margin around and the range of the real frequency axis;
         `min_qp_weight` the smallest |weight| of a kept peak (default 0.7,
-        see `analyze_peaks`).
+        see `analyze_peaks`); `return_peak_info` (default False) to also
+        return the peaks' weights and dip flags.
     save_file: if given, (w_real, A, mu) is written there as CSV.
 
-    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`.
+    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`, plus
+    {'weights', 'negative'} (aligned with qpes) with return_peak_info.
     """
     # The frequency window runs from the lowest valence level to the highest
     # level of F, with 0.5 Ha margin. eta is the broadening; the frequency
@@ -1069,12 +1071,24 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
 
     # Peaks and dips of A, filtered on their integrated weight (analyze_peaks).
-    qpes, _, _ = analyze_peaks(w_real, A, eta, w_step,
-                               min_qp_weight=kwargs.get('min_qp_weight', 0.7))
+    qpes, weights, negative = analyze_peaks(w_real, A, eta, w_step,
+                                            min_qp_weight=kwargs.get('min_qp_weight', 0.7))
+
+    # A dip means Im G has the wrong sign there (the continuation breaks
+    # causality), so a HOMO or LUMO read off a dip is flagged.
+    for label, side in (('HOMO', qpes < mu), ('LUMO', qpes > mu)):
+        if side.any():
+            i = np.flatnonzero(side)[-1 if label == 'HOMO' else 0]
+            if negative[i]:
+                print(f'WARNING: the {label} peak (w = {qpes[i]:.6f} Ha, weight = '
+                      f'{weights[i]:.3f}) is a dip in A: the Pade continuation is '
+                      f'not causal there; try another eta.')
 
     peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
     print(f'\nPeak memory usage: {peak_gib} GiB\n')
 
+    if kwargs.get('return_peak_info', False):
+        return qpes, A, w_real, E_gm, mu, {'weights': weights, 'negative': negative}
     return qpes, A, w_real, E_gm, mu
 
 def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
@@ -1096,13 +1110,21 @@ def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
     their weights, and whether each is a dip (negative peak) in A.
     """
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
-    # height threshold is set as a minimum weight rather than a fixed number.
+    # threshold is set as a minimum weight rather than a fixed number. It is
+    # applied to the height and to the prominence: a ripple on the flank of
+    # a large peak clears the height on that peak's tail alone, and would
+    # otherwise get a boundary of its own and cut the large peak's weight
+    # (possibly below min_qp_weight, dropping a real quasiparticle).
     min_peak_weight = 0.05
-    height = min_peak_weight / (np.pi * eta)
-    peaks_pos, _ = scipy.signal.find_peaks(A, height=height)
-    peaks_neg, _ = scipy.signal.find_peaks(-A, height=height)
+    threshold = min_peak_weight / (np.pi * eta)
+    peaks_pos, _ = scipy.signal.find_peaks(A, height=threshold, prominence=threshold)
+    peaks_neg, _ = scipy.signal.find_peaks(-A, height=threshold, prominence=threshold)
     peaks = np.sort(np.concatenate([peaks_pos, peaks_neg]))
     negative = np.isin(peaks, peaks_neg)
+
+    if len(peaks) == 0:
+        print(f'\nNo peaks of A found above {min_peak_weight} weight (eta = {eta}).')
+        return np.empty(0), np.empty(0), np.empty(0, dtype=bool)
 
     # Boundaries at the smallest |A| between neighbouring peaks, and the data
     # edges outside the first and last peak; the weights then add up to the
@@ -1152,12 +1174,15 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
         smaller eta, without Sigma. Smaller than sigma_mo, but fixes the
         fit (max_order, node choice). Ignored without save_file.
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
-        margin around and the range of the real frequency axis.
+        margin around and the range of the real frequency axis;
+        `min_qp_weight` and `return_peak_info` (see `_finish_qp_from_pade`).
 
     Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
     function, the real frequency axis it is on, the Galitskii-Migdal
     total energy of the converged G and Sigma (`galitskii_migdal_energy`)
-    and the converged chemical potential.
+    and the converged chemical potential. With return_peak_info=True, a
+    sixth element {'weights', 'negative'} gives each peak's integrated
+    weight and whether it is a dip in A.
     With skip_scf=True (and no ref_file), returns
     (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
