@@ -1136,12 +1136,15 @@ def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
 
     # Refine each peak position with a parabola through the extremum and its
     # two neighbours, instead of taking the grid point itself (the same
-    # formula holds for a minimum).
+    # formula holds for a minimum). A flat top (zero curvature, which
+    # find_peaks can report) keeps the grid point, and the shift is clipped
+    # to half a step: the extremum lies between the two midpoints.
     qpes = np.empty(len(peaks))
     for i, peak in enumerate(peaks):
         a_left, a_mid, a_right = A[peak - 1], A[peak], A[peak + 1]
-        shift = 0.5 * (a_left - a_right) / (a_left - 2 * a_mid + a_right)
-        qpes[i] = w_real[peak] + shift * w_step
+        curvature = a_left - 2 * a_mid + a_right
+        shift = 0.5 * (a_left - a_right) / curvature if curvature != 0 else 0.0
+        qpes[i] = w_real[peak] + np.clip(shift, -0.5, 0.5) * w_step
 
     keep = np.abs(weights) >= min_qp_weight
 
