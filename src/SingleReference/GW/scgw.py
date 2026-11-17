@@ -241,6 +241,27 @@ def trace_Greal_from_pade(freq_points, Z, A, F, eta, chunk=PADE_EVAL_CHUNK):
             np.linalg.inv(z[:, None, None]*eye - F - sigma), axis1=1, axis2=2)
     return tr_G
 
+def diag_Greal_from_pade(freq_points, Z, A, F, eta, U=None, chunk=PADE_EVAL_CHUNK):
+    """Diagonal of G(z) at z = omega + i.eta, (nfreq, nmo), in the basis of
+    the (real, orthonormal) columns of U; U=None is the MO basis F is in.
+
+    As trace_Greal_from_pade, Sigma(z) comes from the Pade fit, chunk
+    frequencies at a time; the sum over the last axis is Tr[G]. With U,
+    G U = M^-1 U is one solve, the cost of the inverse itself, and
+    (U^T G U)_ii = sum_j U_ji (G U)_ji, so U^T G U is never formed.
+    """
+    eye = np.eye(F.shape[0])
+    diag_G = np.empty((len(freq_points), F.shape[0]), dtype=complex)
+    for start in range(0, len(freq_points), chunk):
+        z = np.asarray(freq_points[start:start + chunk]) + 1j*eta
+        M = z[:, None, None]*eye - F - pade_eval_elementwise(z, Z, A)
+        if U is None:
+            diag_G[start:start + chunk] = np.diagonal(np.linalg.inv(M), axis1=1, axis2=2)
+        else:
+            GU = np.linalg.solve(M, np.broadcast_to(U, M.shape))
+            diag_G[start:start + chunk] = (U * GU).sum(axis=-2)
+    return diag_G
+
 def _mu_cycle_find_trace(mu, F, sigma_mo, grid_f, grid_kind='IR'):
     """Build G and gamma for one trial mu, with F and Sigma fixed.
 
@@ -1039,11 +1060,24 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
         margin around and the range of the real frequency axis;
         `min_qp_weight` the smallest |weight| of a kept peak (default 0.7,
         see `analyze_peaks`); `return_peak_info` (default False) to also
-        return the peaks' weights and dip flags.
-    save_file: if given, (w_real, A, mu) is written there as CSV.
+        return the peaks' weights and dip flags;
+        `analysis`: 'sum' (default) searches the peaks of A itself;
+        'separate' builds A_i = -Im G_ii / pi in the eigenbasis of F and
+        searches each degenerate group of A_i on its own
+        (`analyze_orbital_peaks`), so every weight is a Z per orbital and
+        each quasiparticle energy belongs to an orbital (about 10% more on
+        the inversions, the Pade evaluation is unchanged);
+        `degen_tol` (default 1e-4 Ha) the eps_F spacing below which
+        orbitals are grouped, for 'separate'.
+    save_file: if given, (w_real, A, mu) is written there as CSV (A the
+        total, also for 'separate').
 
-    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`, plus
-    {'weights', 'negative'} (aligned with qpes) with return_peak_info.
+    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`, plus a
+    dict with return_peak_info. With 'sum', qpes are the kept peaks of A
+    and the dict is {'weights', 'negative'}, aligned with qpes. With
+    'separate', qpes has one entry per orbital of F (eps_F order; nan when
+    the orbital has no kept peak in the window, e.g. high virtuals) and the
+    dict is that of `analyze_orbital_peaks` plus 'A_diag'.
     """
     # The frequency window runs from the lowest valence level to the highest
     # level of F, with 0.5 Ha margin. eta is the broadening; the frequency
@@ -1051,7 +1085,11 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     eta = kwargs.get('eta', 1e-2)
     w_step = eta / 10
 
-    eps_F = np.linalg.eigvalsh(F)
+    analysis = kwargs.get('analysis', 'sum').lower()
+    if analysis not in ('sum', 'separate'):
+        raise ValueError(f"analysis must be 'sum' or 'separate', got {analysis!r}")
+
+    eps_F, U_F = np.linalg.eigh(F)
 
     # the spectral function's window and range (kwargs A_window, A_range)
     A_window = kwargs.get('A_window') or 0.5
@@ -1062,23 +1100,41 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
           f'eta = {eta}: Pade fit {pade_Z.shape}')
 
+    min_qp_weight = kwargs.get('min_qp_weight', 0.7)
+
     # Sigma(w) is evaluated a chunk of frequencies at a time inside
-    # trace_Greal_from_pade, so (len(w_real), nmo, nmo) is never stored.
-    tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
-    A = -1/np.pi * tr_G_w.imag
+    # trace_Greal_from_pade / diag_Greal_from_pade, so
+    # (len(w_real), nmo, nmo) is never stored.
+    if analysis == 'sum':
+        tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
+        A = -1/np.pi * tr_G_w.imag
+    else:
+        A_diag = -1/np.pi * diag_Greal_from_pade(w_real, pade_Z, pade_A, F, eta, U=U_F).imag
+        A = A_diag.sum(axis=1)
 
     if save_file is not None:
         np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
 
-    # Peaks and dips of A, filtered on their integrated weight (analyze_peaks).
-    qpes, weights, negative = analyze_peaks(w_real, A, eta, w_step,
-                                            min_qp_weight=kwargs.get('min_qp_weight', 0.7))
+    if analysis == 'sum':
+        # Peaks and dips of A, filtered on their integrated weight (analyze_peaks).
+        qpes, weights, negative = analyze_peaks(w_real, A, eta, w_step,
+                                                min_qp_weight=min_qp_weight)
+        peak_info = {'weights': weights, 'negative': negative}
+    else:
+        qpes, peak_info = analyze_orbital_peaks(w_real, A_diag, eps_F, mu, eta, w_step,
+                                                min_qp_weight=min_qp_weight,
+                                                degen_tol=kwargs.get('degen_tol', 1e-4))
+        weights, negative = peak_info['weights'], peak_info['negative']
+        peak_info['A_diag'] = A_diag
 
     # A dip means Im G has the wrong sign there (the continuation breaks
-    # causality), so a HOMO or LUMO read off a dip is flagged.
+    # causality), so a HOMO or LUMO read off a dip is flagged. HOMO / LUMO
+    # are the highest / lowest qpe below / above mu (qpes need not be sorted
+    # and can hold nan with 'separate').
     for label, side in (('HOMO', qpes < mu), ('LUMO', qpes > mu)):
         if side.any():
-            i = np.flatnonzero(side)[-1 if label == 'HOMO' else 0]
+            idx = np.flatnonzero(side)
+            i = idx[np.argmax(qpes[idx])] if label == 'HOMO' else idx[np.argmin(qpes[idx])]
             if negative[i]:
                 print(f'WARNING: the {label} peak (w = {qpes[i]:.6f} Ha, weight = '
                       f'{weights[i]:.3f}) is a dip in A: the Pade continuation is '
@@ -1088,10 +1144,10 @@ def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, *
     print(f'\nPeak memory usage: {peak_gib} GiB\n')
 
     if kwargs.get('return_peak_info', False):
-        return qpes, A, w_real, E_gm, mu, {'weights': weights, 'negative': negative}
+        return qpes, A, w_real, E_gm, mu, peak_info
     return qpes, A, w_real, E_gm, mu
 
-def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
+def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7, verbose=True):
     """Quasiparticle peaks of the spectral function A(omega).
 
     Peaks are searched for in A and in -A: a quasiparticle pole can come out
@@ -1108,6 +1164,7 @@ def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
     Returns (qpes, weights, negative) for the kept peaks: the positions,
     refined with a parabola through the extremum and its two neighbours,
     their weights, and whether each is a dip (negative peak) in A.
+    verbose=False skips the printout.
     """
     # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
     # threshold is set as a minimum weight rather than a fixed number. It is
@@ -1123,7 +1180,8 @@ def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
     negative = np.isin(peaks, peaks_neg)
 
     if len(peaks) == 0:
-        print(f'\nNo peaks of A found above {min_peak_weight} weight (eta = {eta}).')
+        if verbose:
+            print(f'\nNo peaks of A found above {min_peak_weight} weight (eta = {eta}).')
         return np.empty(0), np.empty(0), np.empty(0, dtype=bool)
 
     # Boundaries at the smallest |A| between neighbouring peaks, and the data
@@ -1148,12 +1206,91 @@ def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7):
 
     keep = np.abs(weights) >= min_qp_weight
 
-    print(f'\nPeaks of A (|weight| >= {min_qp_weight} kept):')
-    for qpe, weight, neg, kept in zip(qpes, weights, negative, keep):
-        print(f'  w = {qpe:.6f} Ha  weight = {weight:7.3f}'
-              f'{"  (negative peak)" if neg else ""}{"" if kept else "  dropped"}')
+    if verbose:
+        print(f'\nPeaks of A (|weight| >= {min_qp_weight} kept):')
+        for qpe, weight, neg, kept in zip(qpes, weights, negative, keep):
+            print(f'  w = {qpe:.6f} Ha  weight = {weight:7.3f}'
+                  f'{"  (negative peak)" if neg else ""}{"" if kept else "  dropped"}')
 
     return qpes[keep], weights[keep], negative[keep]
+
+
+def analyze_orbital_peaks(w_real, A_diag, eps_F, mu, eta, w_step, min_qp_weight=0.7,
+                          degen_tol=1e-4):
+    """Quasiparticle peak per orbital, from the diagonal terms A_i of A.
+
+    A_diag is (nfreq, nmo), A_i = -Im G_ii / pi in the eigenbasis of F, with
+    eps_F its (ascending) eigenvalues. Orbitals whose eps_F lie within
+    degen_tol of each other (chained) form one group, and the peaks of the
+    group's summed A_i are searched for with `analyze_peaks`: within a
+    degenerate subspace the eigenvectors are arbitrary, and Sigma can split
+    one pole over its A_i, but their sum does not depend on that choice.
+
+    The quasiparticle peak of a group is its peak of largest |weight|, kept
+    if |weight| / degeneracy >= min_qp_weight; the other peaks (weight >=
+    0.05, see `analyze_peaks`) are its satellites. Weights are integrals over
+    the window, so for an orbital near or past its edge they are cut.
+
+    Returns (qpes, info): qpes (nmo,) the quasiparticle energy of every
+    orbital (that of its group; nan if none is kept), and info a dict of
+    (nmo,) arrays 'weights' (the group's quasiparticle weight, as with
+    analysis='sum'), 'Z' (weights / degeneracy), 'negative' (a dip),
+    'degeneracy', 'group' (group index), plus 'satellites', one list of
+    (w, weight) per group.
+    """
+    nmo = len(eps_F)
+    # Groups: consecutive eps_F (sorted) closer than degen_tol.
+    group = np.concatenate([[0], np.cumsum(np.diff(eps_F) > degen_tol)])
+    n_groups = group[-1] + 1
+
+    qpes = np.full(nmo, np.nan)
+    weights = np.full(nmo, np.nan)
+    w_best = np.full(nmo, np.nan)       # also for dropped groups, for the printout
+    negative = np.zeros(nmo, dtype=bool)
+    degeneracy = np.bincount(group)[group]
+    satellites = []
+
+    for g in range(n_groups):
+        members = np.flatnonzero(group == g)
+        q, wt, neg = analyze_peaks(w_real, A_diag[:, members].sum(axis=1), eta, w_step,
+                                   min_qp_weight=0.0, verbose=False)
+        if len(q) == 0:
+            satellites.append([])
+            continue
+        best = np.argmax(np.abs(wt))
+        satellites.append([(q[k], wt[k]) for k in range(len(q)) if k != best])
+        w_best[members] = q[best]
+        weights[members] = wt[best]
+        negative[members] = neg[best]
+        if abs(wt[best]) / len(members) >= min_qp_weight:
+            qpes[members] = q[best]
+
+    Z = weights / degeneracy
+
+    print(f'\nQuasiparticle peak per orbital group (eigenbasis of F, |Z| >= {min_qp_weight} '
+          f'kept; Z = weight / degeneracy):')
+    print(f'  {"orbitals":>9} {"eps_F (Ha)":>11} {"w_qp (Ha)":>11} {"Z":>7}  satellites')
+    for g in range(n_groups):
+        members = np.flatnonzero(group == g)
+        i = members[0]
+        if np.isnan(weights[i]):
+            continue    # no peak in the window
+        orbs = f'{i}' if len(members) == 1 else f'{i}-{members[-1]}'
+        status = '' if not np.isnan(qpes[i]) else '  dropped'
+        sats = ', '.join(f'{w:.4f} [{wt:.2f}]' for w, wt in satellites[g])
+        print(f'  {orbs:>9} {eps_F[i]:11.5f} {w_best[i]:11.6f} {Z[i]:7.3f}'
+              f'{"  (negative peak)" if negative[i] else ""}{status}  {sats}')
+
+    # The orbital order of F (occupied below mu) should survive Sigma: a
+    # quasiparticle on the other side of mu than its orbital means levels
+    # have crossed, or a wrong peak was taken.
+    crossed = np.flatnonzero(~np.isnan(qpes) & ((eps_F < mu) != (qpes < mu)))
+    if len(crossed):
+        print(f'WARNING: orbitals {crossed.tolist()} have their quasiparticle peak on the '
+              f'other side of mu than eps_F.')
+
+    return qpes, {'weights': weights, 'Z': Z, 'negative': negative,
+                  'degeneracy': degeneracy, 'group': group, 'satellites': satellites}
 
 
 def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind='IR', skip_scf=False, save_file=None,
@@ -1178,14 +1315,16 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
         fit (max_order, node choice). Ignored without save_file.
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
         margin around and the range of the real frequency axis;
-        `min_qp_weight` and `return_peak_info` (see `_finish_qp_from_pade`).
+        `min_qp_weight`, `return_peak_info`, `analysis` ('sum' or
+        'separate') and `degen_tol` (see `_finish_qp_from_pade`).
 
     Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
     function, the real frequency axis it is on, the Galitskii-Migdal
     total energy of the converged G and Sigma (`galitskii_migdal_energy`)
-    and the converged chemical potential. With return_peak_info=True, a
-    sixth element {'weights', 'negative'} gives each peak's integrated
-    weight and whether it is a dip in A.
+    and the converged chemical potential. With analysis='separate', qpes
+    has one entry per orbital of F (nan where none). With
+    return_peak_info=True, a sixth element gives each peak's integrated
+    weight and whether it is a dip in A (see `_finish_qp_from_pade`).
     With skip_scf=True (and no ref_file), returns
     (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
