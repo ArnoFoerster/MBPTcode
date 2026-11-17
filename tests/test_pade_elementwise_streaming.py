@@ -11,7 +11,7 @@ import numpy as np
 from src.Base.utils.grids.analytic_continuation import (
     _greedy_thiele, pade_eval, pade_continue_elementwise, pade_fit_elementwise,
     pade_eval_elementwise)
-from src.SingleReference.GW.scgw import build_Greal_from_F, trace_Greal_from_pade
+from src.SingleReference.GW.scgw import trace_Greal_from_pade
 
 D = 6
 MAX_ORDER = 10
@@ -50,6 +50,14 @@ def reference_elementwise(z, F, z_query, symmetric):
     return out
 
 
+def reference_trace_G(w, sigma_real, F, eta):
+    """Tr[G(z)], G(z) = [z I - F - Sigma(z)]^-1 at z = w + i.eta, one frequency
+    at a time from the full (nfreq, D, D) sigma_real (Sigma at the same z)."""
+    eye = np.eye(F.shape[0])
+    return np.array([np.trace(np.linalg.inv((wi + 1j*eta)*eye - F - s))
+                     for wi, s in zip(w, sigma_real)])
+
+
 def test_wrapper_matches_per_element_continuation():
     z, F = fit_points()
     z_query = np.linspace(-2.0, 3.0, 37) + 1e-2j
@@ -82,7 +90,7 @@ def test_streamed_trace_matches_full_sigma():
     w = np.linspace(-3.0, 3.0, 101)
 
     sigma_real = pade_eval_elementwise(w + 1j*eta, Z, A)
-    ref = build_Greal_from_F(w, sigma_real, F, eta, trace_only=True)
+    ref = reference_trace_G(w, sigma_real, F, eta)
     # Chunk sizes that do and do not divide len(w), and one larger than it.
     for chunk in (1, 7, 16, 500):
         np.testing.assert_allclose(trace_Greal_from_pade(w, Z, A, F, eta, chunk=chunk),

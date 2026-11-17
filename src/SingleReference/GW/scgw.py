@@ -17,16 +17,18 @@ off the peaks of the spectral function. The total energy is the
 Galitskii-Migdal energy of the converged G and Sigma
 (`galitskii_migdal_energy`).
 
-`solve_qp_energy_scgw` is the entry point.
+`solve_qp_energy_scgw` is the entry point. This module holds the driver (IR
+grids, the self-consistency cycle with its DIIS packing, saving and loading
+the .h5); the pieces it calls live in
+    scgw_sigma.py      G -> Sigma (ISDF and RI)
+    scgw_dyson.py      F, Dyson equation, density matrix, mu search, GM energy
+    scgw_real_axis.py  G(omega) from the Pade fit of Sigma, A(omega)
+    spectral_peaks.py  quasiparticle peaks of A(omega)
 """
 import numpy as np
-import scipy.integrate
-import scipy.signal
-import resource
 
 import h5py
-from pyscf import df, lib
-from pyscf.data.elements import chemcore
+from pyscf import lib
 from src.Solvers.diis import DIIS
 from src.Base.numerics.constants import SURFACE_GRID_ACCURACY
 from src.Base.pyscf.pyscf_interface import get_orbital_energies
@@ -35,6 +37,16 @@ from src.Base.orbital_spaces import get_occ_virt_indices
 from src.SingleReference.GW.space_time import separable_factors
 from src.Base.utils.grids.analytic_continuation import (pade_fit_elementwise,
                                                         pade_eval_elementwise)
+from src.SingleReference.GW.scgw_dyson import (density_matrix_ir, galitskii_migdal_energy,
+                                               build_new_F, build_G_from_F, mu_cycle)
+# calc_new_sigma is imported by name and looked up in this module's namespace
+# by the cycle, so tests can replace it with scgw.calc_new_sigma = ...
+from src.SingleReference.GW.scgw_sigma import build_B_ri, calc_new_sigma
+# The real-axis part; trace/diag_Greal_from_pade and the peak analysis are
+# also imported here so that they can still be imported from scgw.
+from src.SingleReference.GW.scgw_real_axis import (finish_qp_from_pade, pack_pade, unpack_pade,
+                                                   trace_Greal_from_pade, diag_Greal_from_pade)
+from src.SingleReference.GW.spectral_peaks import analyze_peaks, analyze_orbital_peaks
 
 # --- Convergence parameters ---
 # Outer scGW cycle
@@ -43,621 +55,6 @@ LINEAR_MIXING = 1.0         # fraction of the new (Sigma, F) kept in linear-mixi
 DIIS_SIZE = 8               # DIIS subspace; 0 mixes linearly throughout
 DIIS_START = 3              # linear-mixing iterations before DIIS takes over
 MAX_SCF_ITER = 150          # cap on scGW iterations
-
-# mu search (mu_cycle)
-MU_STEP = 1e-6              # first step away from the starting mu
-TRACE_TOL = 1e-8            # |Tr[gamma] - nocc| at which mu is converged
-MU_KEEP_TOL = 1e-6          # |Tr[gamma] - nocc| at the incoming mu below which no search is done
-MU_TOL = 1e-10              # smallest bisection bracket width
-STALL_TRACE_TOL = 1e-4      # |Tr[gamma] - nocc| still accepted at that width
-MAX_BRACKET_ITER = 50
-MAX_BISECT_ITER = 100
-
-# Real axis
-PADE_EVAL_CHUNK = 16        # real frequencies per Sigma(w) / G(w) evaluation in trace_Greal_from_pade
-
-# RI (build_B_ri, calc_new_sigma_ri)
-RI_BLOCK_MB = 256           # size of one (block, nmo, nmo) slab of B; a few slabs are alive at once
-
-def ri_blocks(naux, nmo, block_size=None):
-    """Slices that split the auxiliary index 0..naux into consecutive blocks
-    of block_size, by default as many P as fit one (block, nmo, nmo) slab of
-    RI_BLOCK_MB."""
-    if block_size is None:
-        block_size = max(1, int(RI_BLOCK_MB * 2**20 // (8 * nmo * nmo)))
-    return [slice(p0, min(p0 + block_size, naux)) for p0 in range(0, naux, block_size)]
-
-
-def build_B_ri(mol, mo_coeff, auxbasis, block_size=None):
-    """RI three-index tensor in the MO basis,
-        B[P,p,q] = sum_mn L[P,mn] C[m,p] C[n,q],  (pq|rs) = sum_P B[P,p,q] B[P,r,s],
-    with L the Cholesky factors of the AO integrals in `auxbasis`.
-
-    L comes packed (lower triangle of mn). It is unpacked and transformed one
-    block of P at a time into a preallocated B, so the unpacked AO tensor
-    (naux, nao, nao) is never stored whole. Peak: B, plus L (about half of B)
-    until return, plus a few blocks.
-    """
-    Lpq = df.incore.cholesky_eri(mol, auxbasis=auxbasis)
-    naux, nmo = Lpq.shape[0], mo_coeff.shape[1]
-    B = np.empty((naux, nmo, nmo))
-    for blk in ri_blocks(naux, nmo, block_size):
-        L = lib.unpack_tril(Lpq[blk])
-        B[blk] = np.matmul(mo_coeff.T @ L, mo_coeff)
-    return B
-
-def density_matrix_ir(G, grid_f):
-    """Density matrix from G: gamma = -G(tau = beta).
-
-    Follows from G(0-) = gamma and fermion antiperiodicity,
-    G(tau - beta) = -G(tau). G is transformed to imaginary time and the IR
-    basis is evaluated at tau = beta, so no frequency quadrature is involved.
-
-    Checked for the bare G0 on H2/cc-pVDZ: matches the exact density to ~4e-6.
-
-    G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
-    Returns gamma, (nmo, nmo), in the MO basis.
-    """
-    G_even = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
-    G_odd = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
-
-    ntau, nmo = G_even.shape[0], G_even.shape[1]
-    G_even_flat = G_even.reshape(ntau, nmo * nmo).T
-    G_odd_flat = G_odd.reshape(ntau, nmo * nmo).T
-
-    beta = grid_f.meta['beta']
-    tau_beta = np.array([beta])
-    G_even_beta = grid_f.project_tau(G_even_flat, tau_beta, parity='even').reshape(nmo, nmo)
-    G_odd_beta = grid_f.project_tau(G_odd_flat, tau_beta, parity='odd').reshape(nmo, nmo)
-
-    G_greater_beta = G_even_beta + G_odd_beta
-    return -G_greater_beta
-
-def galitskii_migdal_energy(G, sigma_mo, mf, h_mo, grid_f, e_nuc):
-    """Closed-shell Galitskii-Migdal total energy from G and Sigma_c.
-
-        E = E_nuc + Tr[gamma (h + F)] + (1/beta) sum_n Tr[Sigma_c(i.omega_n) G(i.omega_n)]
-
-    with gamma per spin and F = h + 2J[gamma] - K[gamma]. The prefactor of
-    the correlation term is 2 (spin) x 1/2 (GM).
-
-    The Matsubara sum runs over all n, not over the IR sampling points. It is
-    done as in `density_matrix_ir`: (1/beta) sum_n X(i.omega_n) = -X(tau = beta)
-    for a fermionic X, evaluated through the IR basis. Tr[Sigma G] decays as
-    1/omega^2, so X(tau) has no jump at tau = 0 and no convergence factor is
-    needed. The trace is taken before the transform: the matrix Sigma G does
-    not satisfy X(-i.omega) = X(i.omega)^dagger, which the even/odd split
-    assumes, but its trace satisfies x(-i.omega) = x(i.omega)*.
-
-    G is expected to be the Dyson solution for sigma_mo; at convergence
-    sigma_mo = Sigma[G] as well. gamma and F are rebuilt from G, not taken
-    from the (mixed) quantities of the scGW cycle.
-
-    Checked on H2/cc-pVDZ: with Sigma = 0 and the HF G0 it reproduces the HF
-    energy to 3e-8; for G0 and Sigma[G0] with the interaction scaled by
-    lambda, E_c / lambda^2 tends to twice the direct MP2 energy.
-
-    G, sigma_mo: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
-    mf: the mean-field object, for J and K (see `build_new_F`).
-    Returns (E, E_c): the total energy and its correlation part, both real.
-    """
-    gamma = density_matrix_ir(G, grid_f)
-    F = build_new_F(gamma, mf, h_mo)
-    E_1b = np.einsum('pq,qp->', gamma, h_mo + F).real
-
-    tr_sigma_G = np.einsum('wij,wji->w', sigma_mo, G)
-    E_c = density_matrix_ir(tr_sigma_G[:, None, None], grid_f)[0, 0].real
-
-    return e_nuc + E_1b + E_c, E_c
-
-def build_new_F(gamma, mf, h_mo):
-    """Closed-shell Fock matrix F = h + 2J[gamma] - K[gamma], in the MO basis.
-
-    J and K are built in the AO basis by mf.get_jk, so the (nmo^4) MO
-    integrals are never stored; whether pyscf keeps AO integrals in core,
-    works integral-direct or uses density fitting is decided by mf. With
-    hermi=0 pyscf's J and K equal the MO-basis contractions
-    J_ij = (ij|kl) gamma_kl and K_ij = (ik|jl) gamma_kl for any gamma, also
-    one that is not exactly symmetric.
-
-    gamma: (nmo, nmo) density matrix per spin (occupations between 0 and 1).
-    mf: the mean-field object whose mo_coeff define the MO basis.
-    h_mo: core Hamiltonian.
-    """
-    C = mf.mo_coeff
-    J_ao, K_ao = mf.get_jk(mf.mol, C @ gamma @ C.T, hermi=0)
-
-    return h_mo + C.T @ (2* J_ao - K_ao) @ C
-
-def build_G_from_F(mu, freq_points, sigma_mo, F, return_G_hf=False):
-    """Dyson equation on the imaginary axis:
-    G(i.omega) = [(i.omega + mu) I - F - Sigma(i.omega)]^-1.
-
-    sigma_mo: (nfreq, nmo, nmo) complex, on freq_points.
-    return_G_hf: also return G_hf, the same expression without Sigma.
-    """
-
-    G = np.empty_like(sigma_mo)
-    nmo = G.shape[-1]
-    eye = np.eye(nmo)
-
-    if not return_G_hf:
-        for k, w in enumerate(freq_points):
-            G[k] = np.linalg.inv((1j* w + mu)*eye - F - sigma_mo[k])
-        return G
-    
-    else:
-        G_hf = np.empty_like(sigma_mo)
-        for k, w in enumerate(freq_points):
-            G_hf_inv = (1j* w + mu)*eye - F 
-            G[k] = np.linalg.inv(G_hf_inv - sigma_mo[k])
-            G_hf[k] = np.linalg.inv((G_hf_inv))
-        return G, G_hf
-
-def build_Greal_from_F(freq_points, sigma_real, F, eta, trace_only=False):
-    """Dyson equation just above the real axis, at z = omega + i.eta:
-    G(z) = [z I - F - Sigma(z)]^-1.
-
-    sigma_real must be Sigma evaluated at the same z = omega + i.eta, so eta
-    enters both terms. This is not double broadening: it is G at one complex
-    point, so every pole of G becomes a Lorentzian of half-width eta and height
-    Z / (pi * eta). Taking Sigma at omega + i0 instead would give widths Z * eta
-    and the same height 1 / (pi * eta) for every peak, whatever its weight.
-
-    No mu here: sigma_real is expected on absolute real frequencies.
-
-    trace_only: return Tr[G(z)] per frequency instead of the full G, so the
-    (nfreq, nmo, nmo) array is never stored.
-    """
-
-    eye = np.eye(F.shape[0])
-
-    if trace_only:
-        tr_G = np.empty(len(freq_points), dtype=complex)
-        for i, w in enumerate(freq_points):
-            tr_G[i] = np.trace(np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i]))
-        return tr_G
-
-    G_w = np.empty_like(sigma_real)
-    for i,w in enumerate(freq_points):
-        G_w[i] = np.linalg.inv((w + 1j*eta)*eye - F - sigma_real[i])
-
-    return G_w
-
-def trace_Greal_from_pade(freq_points, Z, A, F, eta, chunk=PADE_EVAL_CHUNK):
-    """Tr[G(z)] at z = omega + i.eta, with Sigma(z) evaluated from its Pade fit.
-
-    Same G as build_Greal_from_F with trace_only=True, but Sigma(z) comes from
-    the fit (Z, A) of pade_fit_elementwise, chunk frequencies at a time, so
-    neither the (nfreq, nmo, nmo) Sigma nor G is ever stored: memory is the
-    fit plus a few (chunk, nmo, nmo) arrays, whatever the number of frequencies.
-    """
-    eye = np.eye(F.shape[0])
-    tr_G = np.empty(len(freq_points), dtype=complex)
-    for start in range(0, len(freq_points), chunk):
-        z = np.asarray(freq_points[start:start + chunk]) + 1j*eta
-        sigma = pade_eval_elementwise(z, Z, A)
-        tr_G[start:start + chunk] = np.trace(
-            np.linalg.inv(z[:, None, None]*eye - F - sigma), axis1=1, axis2=2)
-    return tr_G
-
-def diag_Greal_from_pade(freq_points, Z, A, F, eta, U=None, chunk=PADE_EVAL_CHUNK):
-    """Diagonal of G(z) at z = omega + i.eta, (nfreq, nmo), in the basis of
-    the (real, orthonormal) columns of U; U=None is the MO basis F is in.
-
-    As trace_Greal_from_pade, Sigma(z) comes from the Pade fit, chunk
-    frequencies at a time; the sum over the last axis is Tr[G]. With U,
-    G U = M^-1 U is one solve, the cost of the inverse itself, and
-    (U^T G U)_ii = sum_j U_ji (G U)_ji, so U^T G U is never formed.
-    """
-    eye = np.eye(F.shape[0])
-    diag_G = np.empty((len(freq_points), F.shape[0]), dtype=complex)
-    for start in range(0, len(freq_points), chunk):
-        z = np.asarray(freq_points[start:start + chunk]) + 1j*eta
-        M = z[:, None, None]*eye - F - pade_eval_elementwise(z, Z, A)
-        if U is None:
-            diag_G[start:start + chunk] = np.diagonal(np.linalg.inv(M), axis1=1, axis2=2)
-        else:
-            GU = np.linalg.solve(M, np.broadcast_to(U, M.shape))
-            diag_G[start:start + chunk] = (U * GU).sum(axis=-2)
-    return diag_G
-
-def _mu_cycle_find_trace(mu, F, sigma_mo, grid_f, grid_kind='IR'):
-    """Build G and gamma for one trial mu, with F and Sigma fixed.
-
-    Returns (Tr[gamma], gamma, G).
-    """
-    if grid_kind.upper() == 'IR':
-        G = build_G_from_F(mu, grid_f.omega_points, sigma_mo, F)
-        gamma = density_matrix_ir(G, grid_f)
-
-    return np.trace(gamma), gamma, G
-
-def mu_cycle(mu, F, nocc, sigma_mo,
-            mu_step=MU_STEP, trace_tol=TRACE_TOL, keep_tol=MU_KEEP_TOL, mu_tol=MU_TOL,
-            max_bracket_iter=MAX_BRACKET_ITER, max_bisect_iter=MAX_BISECT_ITER,
-            grid_f=None, grid_kind='IR', stall_trace_tol=STALL_TRACE_TOL):
-    """Find the mu for which Tr[gamma(mu)] = nocc.
-
-    F and Sigma are given by the caller and kept fixed during the search.
-    Only then is Tr[gamma(mu)] monotonic in mu, which bisection needs;
-    rebuilding F at every trial mu made the trace jump. Taking F as input
-    lets the caller mix F before the search, so the returned G is the Dyson
-    solution of the mixed F with the right particle number.
-
-    Two phases:
-      1. Step away from the starting mu, growing the step by 1.5x each time,
-         until the trace crosses nocc.
-      2. Bisect inside that bracket.
-
-    If the trace at the incoming mu is already within keep_tol of nocc, mu
-    is kept and no search is done. In a gapped system at large beta the
-    trace is nearly flat in mu inside the gap, so a trace error at the
-    1e-8 level of the IR density moves mu by ~1e-6 each search; mu then
-    drifts every scGW iteration and G(i.omega), which depends on mu
-    explicitly, never converges (seen on Ne/cc-pVDZ).
-
-    Once searching, converged when |trace - nocc| < trace_tol. If the bracket shrinks below
-    mu_tol first, the result is still accepted when
-    |trace - nocc| < stall_trace_tol; otherwise a RuntimeError is raised.
-
-    Returns (mu, G, gamma).
-    """
-    trace_old, gamma, G = _mu_cycle_find_trace(
-        mu, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind,)
-
-    # print(f'Trace before mu-cycle: {trace_old}')
-
-    if abs(trace_old - nocc) < keep_tol:
-        print(f'mu_cycle: mu kept, |trace - nocc| = {abs(trace_old - nocc):.2e}')
-        return mu, G, gamma
-    del G, gamma
-
-    # --- Phase 1: bracket the root ---
-    step = mu_step
-    direction = -1.0 if trace_old > nocc else 1.0 #original
-    # direction = 1.0 if trace_old > nocc else -1.0
-    mu_a, trace_a = mu, trace_old
-
-    for _ in range(max_bracket_iter):
-        mu_b = mu_a + direction * step
-        trace_b, gamma_b, G_b = _mu_cycle_find_trace(
-            mu_b, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind)
-
-        if (trace_a - nocc) * (trace_b - nocc) <= 0:
-            break
-        mu_a, trace_a = mu_b, trace_b
-        step *= 1.5
-        del G_b, gamma_b
-    else:
-        raise RuntimeError(f'mu_cycle: failed to bracket nocc={nocc} '
-                           f'within {max_bracket_iter} probes')
-
-    # --- Phase 2: bisection ---
-    mu_lo, mu_hi, trace_lo = mu_a, mu_b, trace_a
-    del G_b, gamma_b
-    for _ in range(max_bisect_iter):
-        mu_mid = 0.5 * (mu_lo + mu_hi)
-        G_mid = gamma_mid = None  # free the previous trial before building the next
-        trace_mid, gamma_mid, G_mid = _mu_cycle_find_trace(
-            mu_mid, F, sigma_mo, grid_f=grid_f, grid_kind=grid_kind)
-
-        if abs(trace_mid - nocc) < trace_tol:
-            print(f'mu_cycle converged: mu={mu_mid}, trace={trace_mid}')
-            return mu_mid, G_mid, gamma_mid
-
-        if abs(mu_hi - mu_lo) < mu_tol:
-            if abs(trace_mid - nocc) < stall_trace_tol:
-                print(f'mu_cycle converged (bracket collapsed, trace within '
-                     f'stall_trace_tol): mu={mu_mid}, trace={trace_mid}')
-                return mu_mid, G_mid, gamma_mid
-            raise RuntimeError(
-                f'mu_cycle: bisection bracket collapsed to width '
-                f'{abs(mu_hi - mu_lo):.2e} (< mu_tol={mu_tol:.1e}) with '
-                f'|trace-nocc| = {abs(trace_mid - nocc):.2e} at mu={mu_mid} -- '
-                f'nowhere near trace_tol={trace_tol:.1e} or '
-                f'stall_trace_tol={stall_trace_tol:.1e}.')
-
-        if (trace_lo - nocc) * (trace_mid - nocc) <= 0:
-            mu_hi = mu_mid
-        else:
-            mu_lo, trace_lo = mu_mid, trace_mid
-
-    raise RuntimeError(f'mu_cycle: did not converge in {max_bisect_iter} '
-                       f'iterations (|trace-nocc| = {abs(trace_mid - nocc):.2e})')
-
-def project_tau_cross(src_grid, dst_grid, f_src, dim, parity):
-    """Interpolate f from src_grid's tau points onto dst_grid's tau points.
-
-    The fermion and boson grids share beta but sample different tau points,
-    and the products chi = G*G and Sigma = G*W need both factors at the same
-    tau.
-
-    f_src: (ntau_src, dim, dim), on src_grid.tau_points.
-    parity: 'even' or 'odd', the symmetry sector f_src belongs to.
-    Returns (ntau_dst, dim, dim), on dst_grid.tau_points, C-contiguous: the
-    transposed view would make every [t] slice strided, which matmul cannot
-    pass to BLAS (14 s instead of 0.5 s per Sigma build for CH4/cc-pVTZ).
-    """
-    ntau_src = len(src_grid.tau_points)
-    flat = f_src.reshape(ntau_src, dim * dim).T               # (dim*dim, ntau_src)
-    f_dst = src_grid.project_tau(flat, dst_grid.tau_points, parity=parity).T
-    return np.ascontiguousarray(f_dst).reshape(-1, dim, dim)
-
-def tau_projection_matrix(src_grid, dst_grid, parity):
-    """The matrix P of `project_tau_cross`, f_dst[t'] = sum_t P[t, t'] f_src[t],
-    shape (ntau_src, ntau_dst). The projection is linear in f, so P is its
-    image of the identity."""
-    return src_grid.project_tau(np.eye(len(src_grid.tau_points)),
-                                dst_grid.tau_points, parity=parity)
-
-def G_tau_slice(row_even, row_odd, G_flat, nmo):
-    """Even and odd part of G at one tau point, sum_k row_even[k] Re G(i.omega_k)
-    and sum_k row_odd[k] Im G(i.omega_k), as contiguous (nmo, nmo) arrays.
-    G_flat: G as (nfreq, nmo*nmo) complex."""
-    G_even = np.ascontiguousarray((row_even @ G_flat).real).reshape(nmo, nmo)
-    G_odd = np.ascontiguousarray((row_odd @ G_flat).imag).reshape(nmo, nmo)
-    return G_even, G_odd
-
-def streaming_transforms(grid_f, grid_b):
-    """The tau <-> i.omega transforms of the Sigma build, with the projection
-    between the fermion and boson tau points multiplied in, so that each tau
-    slice comes straight from the frequency axis (`G_tau_slice`):
-        G(i.omega) -> G(tau_b), even / odd:   (ntau_b, nfreq_f) each
-        (W - I)(i.omega_b) -> (W - I)(tau_f): (ntau_f, nfreq_b)
-    G(i.omega) -> G(tau_f) is grid_f.cosft_tw / sinft_tw itself.
-    Returns (G_to_b_even, G_to_b_odd, W_to_f)."""
-    G_to_b_even = tau_projection_matrix(grid_f, grid_b, 'even').T @ grid_f.cosft_tw
-    G_to_b_odd = tau_projection_matrix(grid_f, grid_b, 'odd').T @ grid_f.sinft_tw
-    W_to_f = tau_projection_matrix(grid_b, grid_f, 'even').T @ grid_b.cosft_tw
-    return G_to_b_even, G_to_b_odd, W_to_f
-
-def W_minus_I_inplace(chi_omega):
-    """W - I = [I - chi]^-1 - I at each frequency, written over chi_omega
-    (nfreq, naux, naux), which is returned. Only the correlation part W - I
-    is transformed to tau (the constant does not decay), and it is even, so
-    cosine only."""
-    eye_aux = np.eye(chi_omega.shape[-1])
-    for k in range(len(chi_omega)):
-        Wc = np.linalg.inv(eye_aux - chi_omega[k])
-        Wc -= eye_aux
-        chi_omega[k] = Wc
-    return chi_omega
-
-def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
-    """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
-
-    Steps: G -> chi = G*G -> W = [I - chi]^-1 -> Sigma = G*W. The products
-    are taken pointwise in imaginary time on the ISDF/THC grid; the Dyson
-    inversion for W is done in frequency. G and Sigma live on the fermion
-    grid, chi and W on the boson grid, and the projection of
-    `project_tau_cross` (as a matrix, `tau_projection_matrix`) moves
-    quantities between the two.
-
-    Both products are local in tau, so each is done in a loop over tau that
-    takes the result straight back to a small basis, chi(tau) to the
-    auxiliary basis and Sigma(tau) to the MO basis, before the transform to
-    frequency. Only a few (ngrid, ngrid) slices are alive at once, never an
-    (ntau, ngrid, ngrid) array: ngrid is several times nmo and grows with
-    the number of atoms, so those arrays set the peak memory (2.2 GiB for
-    CH4/cc-pVTZ, against ~0.7 GiB with the loops). The tau <-> i.omega
-    transforms are streamed in the same loops (`streaming_transforms`), so
-    the only arrays over a grid axis are G and Sigma(i.omega) (nfreq_f, nmo,
-    nmo) and chi, then W - I in its place, (nfreq_b, naux, naux).
-
-    G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
-    X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
-    return_all: also return the intermediates; otherwise only sigma_new is
-        returned and chi, W and G(tau) are freed as soon as they are used.
-
-    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new):
-      G_tau      G_lesser + 1j*G_greater, on grid_f.tau_points
-      chi_omega  on grid_b.omega_points, auxiliary basis
-      W_omega    on grid_b.omega_points, auxiliary basis
-      sigma_new  on grid_f.omega_points, MO basis
-    """
-    nmo = G.shape[-1]
-    nfreq_f = grid_f.cosft_wt.shape[0]
-    nfreq_b = grid_b.cosft_wt.shape[0]
-    G_flat = np.ascontiguousarray(G).reshape(len(G), nmo * nmo)
-
-    # The tau <-> i.omega transforms and the fermion <-> boson projections are
-    # streamed as in `calc_new_sigma_ri`: each tau slice of G and W is built
-    # from the frequency axis when it is used (`streaming_transforms`), and
-    # summed straight into chi(i.omega) and Sigma(i.omega).
-    G_to_b_even, G_to_b_odd, W_to_f = streaming_transforms(grid_f, grid_b)
-
-    # chi(i.omega) = -2 sum_tau cosft_wt[w, tau] D^T [Go(tau) * Gv(tau)] D,
-    # the same as chi0_imaginary_frequency, with Go = Ghat_greater and
-    # Gv = -Ghat_lesser for the dressed G. The two minus signs cancel.
-    # Ghat = X_mo G X_mo^T is G on the ISDF/THC grid (lesser = even - odd,
-    # greater = even + odd).
-    #
-    # The (ngrid, ngrid) products are written into buffers reused over tau,
-    # and X^T, D^T are made contiguous: in benchmarks at ngrid = 740
-    # (OpenBLAS), fresh arrays and transposed views as left operand made
-    # these products up to 2-3x slower than the batched einsums.
-    naux = D.shape[1]
-    ngrid = X_mo.shape[0]
-    XT = np.ascontiguousarray(X_mo.T)
-    DT = np.ascontiguousarray(D.T)
-    buf_a = np.empty((ngrid, ngrid))
-    buf_b = np.empty((ngrid, ngrid))
-
-    chi_omega = np.zeros((nfreq_b, naux, naux))
-    for t in range(len(grid_b.tau_points)):
-        G_even, G_odd = G_tau_slice(G_to_b_even[t], G_to_b_odd[t], G_flat, nmo)
-        np.matmul(X_mo @ (G_even - G_odd), XT, out=buf_a)
-        np.matmul(X_mo @ (G_even + G_odd), XT, out=buf_b)
-        buf_a *= buf_b
-        pi_t = (DT @ buf_a) @ D
-        for k in range(nfreq_b):
-            chi_omega[k] += (2.0 * grid_b.cosft_wt[k, t]) * pi_t
-    del pi_t
-
-    if return_all:
-        chi_out = chi_omega.copy()
-    Wc_omega = W_minus_I_inplace(chi_omega)
-    del chi_omega
-
-    # Sigma(tau) = G(tau) * Z(tau) elementwise on the ISDF/THC grid, with
-    # Z = D (W - I) D^T; unlike chi, no extra sign is needed. G is taken at
-    # the fermion tau points straight from the fermion-grid G rather than
-    # projecting the boson-grid copy back. Sigma_greater +- Sigma_lesser,
-    # the even and odd parts, need only the even and odd parts of G:
-    #     even = 2 X^T [(X G_even X^T) * Z] X,  odd = 2 X^T [(X G_odd X^T) * Z] X.
-    # Sigma(tau) -> Sigma(i.omega) with overall prefactor -0.5, the same
-    # normalization as self_energy_matrix_imaginary_time (imaginary_time.py);
-    # it cancels the 2 above, so even/odd below are the halves.
-    # Checked against that routine for the bare G0: agreement to 8e-9.
-    # Sigma(i.omega) = -sum_tau [cosft_wt even + 1j sinft_wt odd] is
-    # accumulated one tau at a time.
-    sigma_new = np.zeros((nfreq_f, nmo, nmo), dtype=complex)
-    sigma_re, sigma_im = sigma_new.real, sigma_new.imag
-    Z_t = np.empty((ngrid, ngrid))
-    for t in range(len(grid_f.tau_points)):
-        G_even, G_odd = G_tau_slice(grid_f.cosft_tw[t], grid_f.sinft_tw[t], G_flat, nmo)
-        Wt = np.tensordot(W_to_f[t], Wc_omega, axes=(0, 0))
-        np.matmul(D @ Wt, DT, out=Z_t)
-        np.matmul(X_mo @ G_even, XT, out=buf_a)
-        buf_a *= Z_t
-        even = (XT @ buf_a) @ X_mo
-        np.matmul(X_mo @ G_odd, XT, out=buf_a)
-        buf_a *= Z_t
-        odd = (XT @ buf_a) @ X_mo
-        for k in range(nfreq_f):
-            sigma_re[k] -= grid_f.cosft_wt[k, t] * even
-            sigma_im[k] -= grid_f.sinft_wt[k, t] * odd
-    del Z_t, buf_a, buf_b, Wt
-
-    if not return_all:
-        return sigma_new
-
-    G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
-    G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
-    G_lesser_f = G_even_f - G_odd_f
-    G_greater_f = G_even_f + G_odd_f
-    return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
-
-def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
-    """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega), with
-    the Coulomb interaction in plain RI instead of the ISDF/THC factors.
-
-    The same workflow as `calc_new_sigma_isdf`, G -> chi = G*G -> W = [I - chi]^-1
-    -> Sigma = G*W, with the same grids, transforms and normalization. Only
-    the two products in tau change: with B[P,p,q] ~ sum_g X_mo[g,p] X_mo[g,q] D[g,P]
-    the elementwise products on the ISDF grid become contractions over MO
-    indices,
-        chi_PQ(tau)  = sum B[P,p,r] G_lesser[p,q] G_greater[r,s] B[Q,q,s]
-        Sigma_pq(tau) = sum B[P,p,r] G[r,s] (W - I)[P,Q] B[Q,s,q],
-    so chi and W are in the same auxiliary basis as with ISDF. Cost per tau
-    point is O(naux nmo^3 + naux^2 nmo^2).
-
-    Both products are summed over blocks of P (`ri_blocks`), so besides B
-    only a few (block, nmo, nmo) slabs are alive, never a second B-sized
-    array. The blocking does not change the flop count. The tau <-> i.omega
-    transforms are streamed one tau point at a time, so the only arrays over
-    a grid axis are G and Sigma(i.omega) (nfreq_f, nmo, nmo) and chi, then
-    W - I in its place, (nfreq_b, naux, naux).
-
-    G: (nfreq, nmo, nmo) complex, on grid_f.omega_points.
-    B: (naux, nmo, nmo) RI three-index tensor in the MO basis, already
-        contracted with the Coulomb metric, (pq|rs) = sum_P B[P,p,q] B[P,r,s].
-    return_all: also return the intermediates; otherwise only sigma_new is
-        returned.
-    block_size: P per block; default from RI_BLOCK_MB.
-
-    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new),
-    as `calc_new_sigma_isdf`.
-    """
-    nmo = G.shape[-1]
-    naux = B.shape[0]
-    nfreq_f = grid_f.cosft_wt.shape[0]
-    nfreq_b = grid_b.cosft_wt.shape[0]
-    G_flat = np.ascontiguousarray(G).reshape(len(G), nmo * nmo)
-
-    # Every transform between tau and i.omega, and the projection between
-    # the fermion and boson tau points, is a small matrix along that axis
-    # (`streaming_transforms`). Each tau slice of G and W is built when it is
-    # used and summed straight into chi(i.omega) and Sigma(i.omega), so no
-    # (ntau, nmo, nmo) or (ntau, naux, naux) array is stored.
-    G_to_b_even, G_to_b_odd, W_to_f = streaming_transforms(grid_f, grid_b)
-
-    # chi(tau): M_P = G_lesser^T B_P G_greater, then pi_PQ = sum_qs M_P[q,s] B_Q[q,s]
-    # (lesser = even - odd, greater = even + odd, as in calc_new_sigma_isdf).
-    # Each block of P fills its own rows pi[blk, :], so M is only ever one
-    # block. chi(i.omega) = 2 sum_tau cosft_wt[omega, tau] pi(tau) is
-    # accumulated one tau at a time.
-    B_flat = B.reshape(naux, nmo * nmo)
-    blocks = ri_blocks(naux, nmo, block_size)
-    chi_omega = np.zeros((nfreq_b, naux, naux))
-    pi_t = np.empty((naux, naux))
-    for t in range(len(grid_b.tau_points)):
-        G_even, G_odd = G_tau_slice(G_to_b_even[t], G_to_b_odd[t], G_flat, nmo)
-        G_lesser = G_even - G_odd
-        G_greater = G_even + G_odd
-        for blk in blocks:
-            M = np.matmul(G_lesser.T @ B[blk], G_greater)
-            pi_t[blk] = M.reshape(-1, nmo * nmo) @ B_flat.T
-        for k in range(nfreq_b):
-            chi_omega[k] += (2.0 * grid_b.cosft_wt[k, t]) * pi_t
-    del M, pi_t
-
-    if return_all:
-        chi_out = chi_omega.copy()
-
-    Wc_omega = W_minus_I_inplace(chi_omega)
-    del chi_omega
-
-    # Sigma(tau): V_P = sum_Q (W - I)[P,Q] B_Q, then
-    #     even = sum_P B_P G_even V_P,  odd = sum_P B_P G_odd V_P,
-    # the RI form of 2 X^T [(X G X^T) * Z] X; the prefactor -0.5 is the same
-    # as in calc_new_sigma_isdf. The sum over P is split into blocks: each
-    # block needs only its own V_P (rows blk of W - I against all of B) and
-    # adds sum_{P in blk, r} B[P,p,r] (G V_P)[r,q] to even / odd.
-    # Sigma(i.omega) = -sum_tau [cosft_wt even + 1j sinft_wt odd] is
-    # accumulated one tau at a time.
-    sigma_new = np.zeros((nfreq_f, nmo, nmo), dtype=complex)
-    sigma_re, sigma_im = sigma_new.real, sigma_new.imag
-    for t in range(len(grid_f.tau_points)):
-        G_even, G_odd = G_tau_slice(grid_f.cosft_tw[t], grid_f.sinft_tw[t], G_flat, nmo)
-        Wt = np.tensordot(W_to_f[t], Wc_omega, axes=(0, 0))
-        even = np.zeros((nmo, nmo))
-        odd = np.zeros((nmo, nmo))
-        for blk in blocks:
-            V = (Wt[blk] @ B_flat).reshape(-1, nmo, nmo)
-            even += np.tensordot(B[blk], np.matmul(G_even, V), axes=([0, 2], [0, 1]))
-            odd += np.tensordot(B[blk], np.matmul(G_odd, V), axes=([0, 2], [0, 1]))
-        for k in range(nfreq_f):
-            sigma_re[k] -= grid_f.cosft_wt[k, t] * even
-            sigma_im[k] -= grid_f.sinft_wt[k, t] * odd
-    del V, Wt
-
-    if not return_all:
-        return sigma_new
-
-    G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
-    G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
-    G_lesser_f = G_even_f - G_odd_f
-    G_greater_f = G_even_f + G_odd_f
-    return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
-
-def calc_new_sigma(G, grid_f, grid_b, X_mo=None, D=None, B=None, method='ISDF',
-                   return_all=False):
-    """Correlation self-energy Sigma(i.omega), by `calc_new_sigma_isdf`
-    (method='ISDF', needs X_mo and D) or `calc_new_sigma_ri` (method='RI',
-    needs B). Returns what the chosen routine returns.
-    """
-    method = method.upper()
-    if method == 'ISDF':
-        if X_mo is None or D is None:
-            raise ValueError("method='ISDF' needs X_mo and D")
-        return calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=return_all)
-    if method == 'RI':
-        if B is None:
-            raise ValueError("method='RI' needs B")
-        return calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=return_all)
-    raise ValueError(f"Unknown method {method!r}, expected 'ISDF' or 'RI'")
 
 def pack_sigma_F(sigma, F, sigma_weight=1.0):
     """(Sigma, F) as one real vector, for DIIS.
@@ -698,48 +95,6 @@ def pack_G(G):
 def unpack_G(x, G_shape):
     """Inverse of `pack_G`; a view of x."""
     return x.view(np.complex128).reshape(G_shape)
-
-def pack_pade(Z, A, omega_points):
-    """A symmetric `pade_fit_elementwise` fit (Z, A) in compact form for saving.
-
-    Every node in Z is one of the fit points mu + i*omega_points, so it is
-    stored as an index into omega_points (smallest integer type that fits)
-    instead of a complex number, and only the upper triangle is kept.
-    Elements below the fit's floor have all-zero coefficients, so their
-    nodes do not matter; they get index 0.
-
-    Returns {'node_index': (n_nodes, npair), 'coeff': (n_nodes, npair)}, with
-    npair = nmo (nmo + 1) / 2 in np.triu_indices order; `unpack_pade` inverts it.
-    """
-    iu = np.triu_indices(Z.shape[-1])
-    Z_u, A_u = Z[:, iu[0], iu[1]], A[:, iu[0], iu[1]]
-
-    sorter = np.argsort(omega_points)
-    pos = np.searchsorted(omega_points[sorter], Z_u.imag)
-    index = sorter[np.clip(pos, 0, len(omega_points) - 1)]
-    fitted = (A_u != 0).any(axis=0)
-    index[:, ~fitted] = 0
-    if not np.array_equal(omega_points[index][:, fitted], Z_u.imag[:, fitted]):
-        raise ValueError('Pade nodes are not on omega_points')
-
-    return {'node_index': index.astype(np.min_scalar_type(len(omega_points) - 1)),
-            'coeff': A_u}
-
-def unpack_pade(pade, omega_points, mu):
-    """Inverse of `pack_pade`: the full (Z, A), each (n_nodes, nmo, nmo),
-    ready for `pade_eval_elementwise` or `trace_Greal_from_pade`."""
-    index, A_u = pade['node_index'], pade['coeff']
-    npair = A_u.shape[1]
-    nmo = int(round((np.sqrt(8 * npair + 1) - 1) / 2))
-    iu = np.triu_indices(nmo)
-
-    Z = np.zeros((len(A_u), nmo, nmo), dtype=complex)
-    A = np.zeros((len(A_u), nmo, nmo), dtype=complex)
-    Z[:, iu[0], iu[1]] = mu + 1j * np.asarray(omega_points)[index]
-    A[:, iu[0], iu[1]] = A_u
-    Z[:, iu[1], iu[0]] = Z[:, iu[0], iu[1]]
-    A[:, iu[1], iu[0]] = A[:, iu[0], iu[1]]
-    return Z, A
 
 def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
                           save_sigma=False, **kwargs):
@@ -1048,251 +403,6 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
     # on return, before the real-axis arrays are allocated.
     return sigma_new, F, mu, grid_f.omega_points, E_gm
 
-def _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm, save_file=None, **kwargs):
-    """Real-axis part of `solve_qp_energy_scgw`, from a Pade fit of Sigma.
-
-    Builds A(omega) = -Tr[Im G(omega + i.eta)] / pi with Sigma from the fit
-    (pade_Z, pade_A) of `pade_fit_elementwise` (or `unpack_pade`) and takes
-    the quasiparticle energies from its peaks. Shared by the run that has
-    just fitted Sigma and the reconstruction from a saved fit.
-
-    kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
-        margin around and the range of the real frequency axis;
-        `min_qp_weight` the smallest |weight| of a kept peak (default 0.7,
-        see `analyze_peaks`); `return_peak_info` (default False) to also
-        return the peaks' weights and dip flags;
-        `analysis`: 'sum' (default) searches the peaks of A itself;
-        'separate' builds A_i = -Im G_ii / pi in the eigenbasis of F and
-        searches each degenerate group of A_i on its own
-        (`analyze_orbital_peaks`), so every weight is a Z per orbital and
-        each quasiparticle energy belongs to an orbital (about 10% more on
-        the inversions, the Pade evaluation is unchanged);
-        `degen_tol` (default 1e-4 Ha) the eps_F spacing below which
-        orbitals are grouped, for 'separate'.
-    save_file: if given, (w_real, A, mu) is written there as CSV (A the
-        total, also for 'separate').
-
-    Returns (qpes, A, w_real, E_gm, mu), as `solve_qp_energy_scgw`, plus a
-    dict with return_peak_info. With 'sum', qpes are the kept peaks of A
-    and the dict is {'weights', 'negative'}, aligned with qpes. With
-    'separate', qpes has one entry per orbital of F (eps_F order; nan when
-    the orbital has no kept peak in the window, e.g. high virtuals) and the
-    dict is that of `analyze_orbital_peaks` plus 'A_diag'.
-    """
-    # The frequency window runs from the lowest valence level to the highest
-    # level of F, with 0.5 Ha margin. eta is the broadening; the frequency
-    # step is finer, so each peak (half-width ~eta) is well sampled.
-    eta = kwargs.get('eta', 1e-2)
-    w_step = eta / 10
-
-    analysis = kwargs.get('analysis', 'sum').lower()
-    if analysis not in ('sum', 'separate'):
-        raise ValueError(f"analysis must be 'sum' or 'separate', got {analysis!r}")
-
-    eps_F, U_F = np.linalg.eigh(F)
-
-    # the spectral function's window and range (kwargs A_window, A_range)
-    A_window = kwargs.get('A_window') or 0.5
-    eps_low = eps_F[max(chemcore(mol) - getattr(mf, "frozen_core", 0), 0)]
-    A_range = kwargs.get('A_range') or [eps_low - A_window, 2 * mu - eps_low + A_window]
-
-    w_real = np.arange(A_range[0], A_range[1], w_step)
-    print(f'\nSigma(w) on {len(w_real)} real frequencies in [{w_real[0]}, {w_real[-1]}] Ha, '
-          f'eta = {eta}: Pade fit {pade_Z.shape}')
-
-    min_qp_weight = kwargs.get('min_qp_weight', 0.7)
-
-    # Sigma(w) is evaluated a chunk of frequencies at a time inside
-    # trace_Greal_from_pade / diag_Greal_from_pade, so
-    # (len(w_real), nmo, nmo) is never stored.
-    if analysis == 'sum':
-        tr_G_w = trace_Greal_from_pade(w_real, pade_Z, pade_A, F, eta)
-        A = -1/np.pi * tr_G_w.imag
-    else:
-        A_diag = -1/np.pi * diag_Greal_from_pade(w_real, pade_Z, pade_A, F, eta, U=U_F).imag
-        A = A_diag.sum(axis=1)
-
-    if save_file is not None:
-        np.savetxt(save_file, (w_real, A, np.full_like(w_real, mu)), delimiter=',')
-
-    if analysis == 'sum':
-        # Peaks and dips of A, filtered on their integrated weight (analyze_peaks).
-        qpes, weights, negative = analyze_peaks(w_real, A, eta, w_step,
-                                                min_qp_weight=min_qp_weight)
-        peak_info = {'weights': weights, 'negative': negative}
-    else:
-        qpes, peak_info = analyze_orbital_peaks(w_real, A_diag, eps_F, mu, eta, w_step,
-                                                min_qp_weight=min_qp_weight,
-                                                degen_tol=kwargs.get('degen_tol', 1e-4))
-        weights, negative = peak_info['weights'], peak_info['negative']
-        peak_info['A_diag'] = A_diag
-
-    # A dip means Im G has the wrong sign there (the continuation breaks
-    # causality), so a HOMO or LUMO read off a dip is flagged. HOMO / LUMO
-    # are the highest / lowest qpe below / above mu (qpes need not be sorted
-    # and can hold nan with 'separate').
-    for label, side in (('HOMO', qpes < mu), ('LUMO', qpes > mu)):
-        if side.any():
-            idx = np.flatnonzero(side)
-            i = idx[np.argmax(qpes[idx])] if label == 'HOMO' else idx[np.argmin(qpes[idx])]
-            if negative[i]:
-                print(f'WARNING: the {label} peak (w = {qpes[i]:.6f} Ha, weight = '
-                      f'{weights[i]:.3f}) is a dip in A: the Pade continuation is '
-                      f'not causal there; try another eta.')
-
-    peak_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20  # ru_maxrss is in KiB on Linux
-    print(f'\nPeak memory usage: {peak_gib} GiB\n')
-
-    if kwargs.get('return_peak_info', False):
-        return qpes, A, w_real, E_gm, mu, peak_info
-    return qpes, A, w_real, E_gm, mu
-
-def analyze_peaks(w_real, A, eta, w_step, min_qp_weight=0.7, verbose=True):
-    """Quasiparticle peaks of the spectral function A(omega).
-
-    Peaks are searched for in A and in -A: a quasiparticle pole can come out
-    of the Pade continuation as a dip (e.g. the Ne HOMO at eta = 1e-3), which
-    a search for maxima alone misses. Between neighbouring peaks the boundary
-    is the point where |A| is smallest (the zero crossing between a peak and
-    a dip), and the weight of a peak is the integral of A between its two
-    boundaries. Peaks with |weight| < min_qp_weight (satellites, or spurious
-    peaks from a wrong eta) are dropped.
-
-    A is a trace over orbitals, so a degenerate level has weight ~ Z times
-    its degeneracy.
-
-    Returns (qpes, weights, negative) for the kept peaks: the positions,
-    refined with a parabola through the extremum and its two neighbours,
-    their weights, and whether each is a dip (negative peak) in A.
-    verbose=False skips the printout.
-    """
-    # A pole of weight Z, broadened by eta, peaks at Z / (pi * eta), so the
-    # threshold is set as a minimum weight rather than a fixed number. It is
-    # applied to the height and to the prominence: a ripple on the flank of
-    # a large peak clears the height on that peak's tail alone, and would
-    # otherwise get a boundary of its own and cut the large peak's weight
-    # (possibly below min_qp_weight, dropping a real quasiparticle).
-    min_peak_weight = 0.05
-    threshold = min_peak_weight / (np.pi * eta)
-    peaks_pos, _ = scipy.signal.find_peaks(A, height=threshold, prominence=threshold)
-    peaks_neg, _ = scipy.signal.find_peaks(-A, height=threshold, prominence=threshold)
-    peaks = np.sort(np.concatenate([peaks_pos, peaks_neg]))
-    negative = np.isin(peaks, peaks_neg)
-
-    if len(peaks) == 0:
-        if verbose:
-            print(f'\nNo peaks of A found above {min_peak_weight} weight (eta = {eta}).')
-        return np.empty(0), np.empty(0), np.empty(0, dtype=bool)
-
-    # Boundaries at the smallest |A| between neighbouring peaks, and the data
-    # edges outside the first and last peak; the weights then add up to the
-    # integral of A over the whole axis.
-    bounds = ([0] + [p0 + np.argmin(np.abs(A[p0:p1])) for p0, p1 in zip(peaks[:-1], peaks[1:])]
-              + [len(A) - 1])
-    weights = np.array([scipy.integrate.trapezoid(A[l:r + 1], w_real[l:r + 1])
-                        for l, r in zip(bounds[:-1], bounds[1:])])
-
-    # Refine each peak position with a parabola through the extremum and its
-    # two neighbours, instead of taking the grid point itself (the same
-    # formula holds for a minimum). A flat top (zero curvature, which
-    # find_peaks can report) keeps the grid point, and the shift is clipped
-    # to half a step: the extremum lies between the two midpoints.
-    qpes = np.empty(len(peaks))
-    for i, peak in enumerate(peaks):
-        a_left, a_mid, a_right = A[peak - 1], A[peak], A[peak + 1]
-        curvature = a_left - 2 * a_mid + a_right
-        shift = 0.5 * (a_left - a_right) / curvature if curvature != 0 else 0.0
-        qpes[i] = w_real[peak] + np.clip(shift, -0.5, 0.5) * w_step
-
-    keep = np.abs(weights) >= min_qp_weight
-
-    if verbose:
-        print(f'\nPeaks of A (|weight| >= {min_qp_weight} kept):')
-        for qpe, weight, neg, kept in zip(qpes, weights, negative, keep):
-            print(f'  w = {qpe:.6f} Ha  weight = {weight:7.3f}'
-                  f'{"  (negative peak)" if neg else ""}{"" if kept else "  dropped"}')
-
-    return qpes[keep], weights[keep], negative[keep]
-
-
-def analyze_orbital_peaks(w_real, A_diag, eps_F, mu, eta, w_step, min_qp_weight=0.7,
-                          degen_tol=1e-4):
-    """Quasiparticle peak per orbital, from the diagonal terms A_i of A.
-
-    A_diag is (nfreq, nmo), A_i = -Im G_ii / pi in the eigenbasis of F, with
-    eps_F its (ascending) eigenvalues. Orbitals whose eps_F lie within
-    degen_tol of each other (chained) form one group, and the peaks of the
-    group's summed A_i are searched for with `analyze_peaks`: within a
-    degenerate subspace the eigenvectors are arbitrary, and Sigma can split
-    one pole over its A_i, but their sum does not depend on that choice.
-
-    The quasiparticle peak of a group is its peak of largest |weight|, kept
-    if |weight| / degeneracy >= min_qp_weight; the other peaks (weight >=
-    0.05, see `analyze_peaks`) are its satellites. Weights are integrals over
-    the window, so for an orbital near or past its edge they are cut.
-
-    Returns (qpes, info): qpes (nmo,) the quasiparticle energy of every
-    orbital (that of its group; nan if none is kept), and info a dict of
-    (nmo,) arrays 'weights' (the group's quasiparticle weight, as with
-    analysis='sum'), 'Z' (weights / degeneracy), 'negative' (a dip),
-    'degeneracy', 'group' (group index), plus 'satellites', one list of
-    (w, weight) per group.
-    """
-    nmo = len(eps_F)
-    # Groups: consecutive eps_F (sorted) closer than degen_tol.
-    group = np.concatenate([[0], np.cumsum(np.diff(eps_F) > degen_tol)])
-    n_groups = group[-1] + 1
-
-    qpes = np.full(nmo, np.nan)
-    weights = np.full(nmo, np.nan)
-    w_best = np.full(nmo, np.nan)       # also for dropped groups, for the printout
-    negative = np.zeros(nmo, dtype=bool)
-    degeneracy = np.bincount(group)[group]
-    satellites = []
-
-    for g in range(n_groups):
-        members = np.flatnonzero(group == g)
-        q, wt, neg = analyze_peaks(w_real, A_diag[:, members].sum(axis=1), eta, w_step,
-                                   min_qp_weight=0.0, verbose=False)
-        if len(q) == 0:
-            satellites.append([])
-            continue
-        best = np.argmax(np.abs(wt))
-        satellites.append([(q[k], wt[k]) for k in range(len(q)) if k != best])
-        w_best[members] = q[best]
-        weights[members] = wt[best]
-        negative[members] = neg[best]
-        if abs(wt[best]) / len(members) >= min_qp_weight:
-            qpes[members] = q[best]
-
-    Z = weights / degeneracy
-
-    print(f'\nQuasiparticle peak per orbital group (eigenbasis of F, |Z| >= {min_qp_weight} '
-          f'kept; Z = weight / degeneracy):')
-    print(f'  {"orbitals":>9} {"eps_F (Ha)":>11} {"w_qp (Ha)":>11} {"Z":>7}  satellites')
-    for g in range(n_groups):
-        members = np.flatnonzero(group == g)
-        i = members[0]
-        if np.isnan(weights[i]):
-            continue    # no peak in the window
-        orbs = f'{i}' if len(members) == 1 else f'{i}-{members[-1]}'
-        status = '' if not np.isnan(qpes[i]) else '  dropped'
-        sats = ', '.join(f'{w:.4f} [{wt:.2f}]' for w, wt in satellites[g])
-        print(f'  {orbs:>9} {eps_F[i]:11.5f} {w_best[i]:11.6f} {Z[i]:7.3f}'
-              f'{"  (negative peak)" if negative[i] else ""}{status}  {sats}')
-
-    # The orbital order of F (occupied below mu) should survive Sigma: a
-    # quasiparticle on the other side of mu than its orbital means levels
-    # have crossed, or a wrong peak was taken.
-    crossed = np.flatnonzero(~np.isnan(qpes) & ((eps_F < mu) != (qpes < mu)))
-    if len(crossed):
-        print(f'WARNING: orbitals {crossed.tolist()} have their quasiparticle peak on the '
-              f'other side of mu than eps_F.')
-
-    return qpes, {'weights': weights, 'Z': Z, 'negative': negative,
-                  'degeneracy': degeneracy, 'group': group, 'satellites': satellites}
-
-
 def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind='IR', skip_scf=False, save_file=None,
                          save_pade=False, **kwargs):
     """Self-consistent GW quasiparticle energies on IR grids.
@@ -1300,7 +410,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
     Runs the scGW cycle (`_solve_qp_energy_scgw`), then continues the
     converged Sigma to the real axis with Pade and takes the quasiparticle
     energies from the peaks of the spectral function
-    A(omega) = -Tr[Im G(omega)] / pi (`_finish_qp_from_pade`).
+    A(omega) = -Tr[Im G(omega)] / pi (`finish_qp_from_pade`).
 
     Arguments are those of `_solve_qp_energy_scgw`, plus:
     ref_file: an .h5 file written by an earlier run (its save_file + '.h5').
@@ -1316,7 +426,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
     kwargs: `eta` the real-axis broadening; `A_window` and `A_range` the
         margin around and the range of the real frequency axis;
         `min_qp_weight`, `return_peak_info`, `analysis` ('sum' or
-        'separate') and `degen_tol` (see `_finish_qp_from_pade`).
+        'separate') and `degen_tol` (see `finish_qp_from_pade`).
 
     Returns (qpes, A, w_real, E_gm, mu): the peak positions, the spectral
     function, the real frequency axis it is on, the Galitskii-Migdal
@@ -1324,7 +434,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
     and the converged chemical potential. With analysis='separate', qpes
     has one entry per orbital of F (nan where none). With
     return_peak_info=True, a sixth element gives each peak's integrated
-    weight and whether it is a dip in A (see `_finish_qp_from_pade`).
+    weight and whether it is a dip in A (see `finish_qp_from_pade`).
     With skip_scf=True (and no ref_file), returns
     (G, F, G0, mu, h_mo, grid_f, grid_b, X_mo, D) instead.
     """
@@ -1358,7 +468,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
             # Saved fit, used as is: no Sigma(i*w_n) to refit or check against.
             pade_Z, pade_A = unpack_pade(lib.chkfile.load(ref_file, 'scgw/pade'),
                                          omega_points, mu)
-            return _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
+            return finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
                                         save_file=save_file, **kwargs)
 
         sigma = lib.chkfile.load(ref_file, 'scgw/sigma_mo')
@@ -1367,7 +477,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
     pade_max_order = 24
     z_fit = mu + 1j * omega_points
 
-    # Fit once; _finish_qp_from_pade then evaluates Sigma(w) from the fit.
+    # Fit once; finish_qp_from_pade then evaluates Sigma(w) from the fit.
     pade_Z, pade_A = pade_fit_elementwise(z_fit, sigma, greedy=True,
                                           symmetric=True, max_order=pade_max_order)
 
@@ -1382,5 +492,5 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
         lib.chkfile.save(save_file + '.h5', 'scgw/pade',
                          pack_pade(pade_Z, pade_A, omega_points))
 
-    return _finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
+    return finish_qp_from_pade(mf, mol, pade_Z, pade_A, F, mu, E_gm,
                                 save_file=save_file, **kwargs)
