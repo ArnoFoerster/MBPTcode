@@ -15,6 +15,16 @@ non-contiguous (0), on the orbitals of a density-fitted RHF against an
 exact-integral CASCI (0; a DF-CASCI differs by 4.1e-6), and packed in spin
 orbitals (4.3e-14). Its reference determinant is the RHF energy (5.7e-14), and
 with every H2/6-31G orbital active it is FCI (4.4e-16, tolerance 1e-9).
+
+The driver with method='rpa' (the default) on casida, for bare, crpa and
+crpa_ph: the reference determinant is E_HF + E_c[v] - E_c^A[v_eff]; with
+every orbital active the E_c pair cancels and H_eff gives FCI, the same on
+PBE and HF orbitals; with no orbital active E_0 = E_HF + E_c[v]; 'bare' is
+CASCI shifted by the E_c pair; crpa_ph leaves the active HF energy alone;
+the crpa static defect is zero (also on a density-fitted mean field). The
+diagnostics keyword, the option refusals and one low-level result reused
+for many active spaces and screenings are tested too. Measured values in
+each test's docstring.
 """
 from types import SimpleNamespace
 
@@ -377,3 +387,189 @@ def test_mpi_rank_guard(monkeypatch):
                         lambda comm=None: (object(), 0, 2))
     with pytest.raises(NotImplementedError, match='serial'):
         run_low_level(water(), method='hf')
+
+
+# --- the RPA low-level method on casida: the E_0 limits ---------------------
+
+SCREENINGS_1 = ('bare', 'crpa', 'crpa_ph')
+
+
+@pytest.fixture(scope='module')
+def wat_rpa():
+    """(mf, low, aspace): water/6-31G RHF, its casida RPA (default df=True)
+    and the contiguous (4,4) active space."""
+    mf = water()
+    low = run_low_level(mf)
+    return mf, low, ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+
+
+def test_default_method_is_rpa(wat_rpa):
+    mf, low, aspace = wat_rpa
+    assert low.method == 'rpa' and low.mode == 'casida' and low.df is True
+    g, space, en = build_effective_hamiltonian(low, aspace)
+    assert g[0] == en.e0 and en.e_c_full == low.e_c_full
+    assert set(en.diagnostics) == {'static_defect'}
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_reference_determinant_energy(wat_rpa, s):
+    """The reference determinant of H_eff is E_HF + E_c[v] - E_c^A[v_eff]
+    for every screening. Measured 5.7e-14 for each."""
+    mf, low, aspace = wat_rpa
+    g, space, en = build_effective_hamiltonian(low, aspace, screening=s)
+    assert abs(reference_energy(g, 2)
+               - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
+    assert en.e_c_active < 0.0 and en.e_c_full < en.e_c_active
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_all_active_is_fci_and_ec_cancels(s):
+    """H2/6-31G with every orbital active: vtilde = 0, the E_c pair cancels
+    (both by the plasmon formula on the same v) and H_eff is the full
+    Hamiltonian. Measured |E_c - E_c^A| = 0.0 (the same eigensolve of the
+    same matrices); |E - E_FCI| = 4.4e-16."""
+    mf = h2()
+    low = run_low_level(mf)
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
+    g, space, en = build_effective_hamiltonian(low, aspace, screening=s)
+    e = _solve(g, space)
+    assert abs(en.e_c_full - en.e_c_active) < 1e-10
+    assert abs(e - fci.FCI(mf).kernel()[0]) < 1e-9
+
+
+def test_ph_screenings_leave_the_active_mean_field(wat_rpa):
+    """crpa_ph changes only the particle-hole elements, which neither the
+    Hartree nor the exchange energy of the active reference reads:
+    E_HF,ee[vtilde] = 0, and the rows of h_eff of the occupied active
+    orbitals are the CASCI ones. (The virtual-virtual block does change:
+    the full double counting subtracts sum_k vt_ak,kb, a ph element.)"""
+    mf, low, aspace = wat_rpa
+    g, _, en = build_effective_hamiltonian(low, aspace, screening='crpa_ph')
+    g_hf, _, _ = _hf_heff(mf, aspace)
+    assert en.e_hf_ee_vtilde == 0.0
+    assert np.array_equal(g[1][:2], g_hf[1][:2])
+    assert np.abs(g[1][2:, 2:] - g_hf[1][2:, 2:]).max() > 1e-4
+    _, _, en_crpa = build_effective_hamiltonian(low, aspace, screening='crpa')
+    assert abs(en_crpa.e_hf_ee_vtilde) > 1e-3
+
+
+def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
+    """'bare' is the mechanical embedding: the CASCI Hamiltonian shifted by
+    E_c[v] - E_c^A[v]. Measured 0.0."""
+    mf, low, aspace = wat_rpa
+    g, space, en = build_effective_hamiltonian(low, aspace, screening='bare')
+    assert en.e_hf_ee_vtilde == 0.0
+    assert abs(_solve(g, space)
+               - (_casci(mf) + en.e_c_full - en.e_c_active)) < 1e-8
+
+
+@pytest.mark.parametrize('density_fit', [False, True], ids=['rhf', 'df_rhf'])
+def test_static_defect_is_zero_for_crpa(density_fit):
+    """W^A[v + vtilde](0) = W(0) for crpa when v_eff is built on the v of the
+    full RPA (ruling R3): also with a density-fitted mean field, whose fitted
+    v is not the exact one. 'bare' leaves the environment screening out.
+    Measured crpa (rhf / df_rhf): 3.8e-15 / 4.4e-15; bare: 0.143 / 0.143."""
+    mf = water()
+    if density_fit:
+        mf = scf.RHF(mf.mol).density_fit()
+        mf.conv_tol = 1e-11
+        mf.verbose = 0
+        mf.run()
+    low = run_low_level(mf)
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    _, _, en = build_effective_hamiltonian(low, aspace, screening='crpa')
+    _, _, en_bare = build_effective_hamiltonian(low, aspace, screening='bare')
+    assert en.diagnostics['static_defect'] < 1e-8
+    assert en_bare.diagnostics['static_defect'] > 1e-4
+
+
+def test_diagnostics_keyword(wat_rpa):
+    mf, low, aspace = wat_rpa
+    _, _, en = build_effective_hamiltonian(low, aspace, diagnostics=())
+    assert en.diagnostics == {}
+    with pytest.raises(ValueError, match="'static_defect', 'ec_active_casida'"):
+        build_effective_hamiltonian(low, aspace, diagnostics=('nope',))
+    # names that do not apply (casida, no sigma) are skipped, not zero
+    _, _, en = build_effective_hamiltonian(
+        low, aspace, diagnostics=('sigma_poles', 'ec_active_casida',
+                                  'sigma_continuation'))
+    assert en.diagnostics == {}
+    _, _, en = build_effective_hamiltonian(
+        low, aspace, diagnostics=['Static-Defect', 'sigma_poles'])
+    assert list(en.diagnostics) == ['static_defect']
+    _, _, en = build_effective_hamiltonian(low, aspace,
+                                           diagnostics='static_defect')
+    assert list(en.diagnostics) == ['static_defect']
+
+
+def test_rpa_option_refusals(wat_rpa):
+    mf, low, aspace = wat_rpa
+    with pytest.raises(ValueError, match="'crpa'"):
+        build_effective_hamiltonian(low, aspace, screening='rpa')
+    with pytest.raises(NotImplementedError, match="screening='mrpa'"):
+        build_effective_hamiltonian(low, aspace, screening='mrpa')
+    for sigma in ('srg', 'mode_a'):
+        with pytest.raises(NotImplementedError, match='sigma'):
+            build_effective_hamiltonian(low, aspace, sigma=sigma)
+    for sigma in ('None', 'none', 'SRG', 'gw'):
+        with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
+            build_effective_hamiltonian(low, aspace, sigma=sigma)
+    with pytest.raises(TypeError, match="method='rpa'.*nope"):
+        build_effective_hamiltonian(low, aspace, nope=1)
+
+
+def _same(a, b):
+    (g1, _, e1), (g2, _, e2) = a, b
+    assert abs(g1[0] - g2[0]) < 1e-12
+    assert np.abs(g1[1] - g2[1]).max() < 1e-12
+    assert np.abs(g1[2] - g2[2]).max() < 1e-12
+    for name in ('e_hf_ee_vtilde', 'e_c_full', 'e_c_active', 'e0'):
+        assert abs(getattr(e1, name) - getattr(e2, name)) < 1e-12
+    assert e1.diagnostics.keys() == e2.diagnostics.keys()
+
+
+def test_one_low_serves_many_calls(wat_rpa):
+    """One low-level result, used for crpa, crpa_ph, bare and a second active
+    space in turn, gives each the same H_eff as a fresh one: no call leaves
+    anything behind that a later call reads."""
+    mf, low, aspace = wat_rpa
+    other = ActiveSpace.from_indices(len(mf.mo_energy), 5, [2, 4], [5, 7])
+    calls = [(aspace, 'crpa'), (aspace, 'crpa_ph'), (aspace, 'bare'),
+             (other, 'crpa'), (aspace, 'crpa')]
+    shared = [build_effective_hamiltonian(low, a, screening=s)
+              for a, s in calls]
+    for (a, s), got in zip(calls, shared):
+        fresh = build_effective_hamiltonian(run_low_level(mf), a, screening=s)
+        _same(got, fresh)
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_pbe_all_active_fci_equals_hf(s):
+    """With every H2/6-31G orbital active H_eff is the full Hamiltonian on
+    the orbitals it is given, so PBE and HF orbitals give the same FCI
+    energy. Measured 0.0 for every screening."""
+    mf_hf = h2()
+    mf_pbe = dft.RKS(mf_hf.mol, xc='pbe')
+    mf_pbe.conv_tol = 1e-11
+    mf_pbe.verbose = 0
+    mf_pbe.run()
+    energies = []
+    for mf in (mf_hf, mf_pbe):
+        aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0],
+                                          [1, 2, 3])
+        g, space, _ = build_effective_hamiltonian(run_low_level(mf), aspace,
+                                                  screening=s)
+        energies.append(_solve(g, space))
+    assert abs(energies[0] - energies[1]) < 1e-7
+
+
+def test_empty_active_space_e0(wat_rpa):
+    """Spec §3.9: with no active orbital E_0 = E_HF + E_c[v]; ActiveSpace
+    takes the empty selection. No solver is called. Measured 1.4e-14."""
+    mf, low, _ = wat_rpa
+    empty = ActiveSpace.from_indices(len(mf.mo_energy), 5, [], [])
+    for s in SCREENINGS_1:
+        g, space, en = build_effective_hamiltonian(low, empty, screening=s)
+        assert space['n_orbs'] == 0 and en.e_c_active == 0.0
+        assert abs(en.e0 - (mf.e_tot + low.e_c_full)) < 1e-9
+        assert g[0] == en.e0 and g[2].shape == (0, 0, 0, 0)

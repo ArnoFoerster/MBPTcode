@@ -9,7 +9,9 @@ independent implementation (tests/test_downfolding_one_body.py,
 tests/test_downfolding_energy.py, tests/test_downfolding_two_body.py).
 The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
 (spec §3.3, row E_RPA,corr); the cRPA correction (`vtilde_crpa` and the two
-zeroing variants, spec §3.4) is the pole sum of its modes.
+zeroing variants, spec §3.4) is the pole sum of its modes, and
+`vtilde_crpa_so` the same correction built in spin orbitals without spin
+adaptation; `w_static_active` is the full W(0) on the active orbitals.
 
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
@@ -302,3 +304,51 @@ def vtilde_zero_apb_only(eri, eps, nocc, part):
     out = _pole_sum(eri, nocc, part.act, omega, xpy, _pair_labels(eps, nocc))
     assert np.abs(out.imag).max() < 1e-10
     return out.real
+
+
+def w_static_active(eri, eps, nocc, part):
+    """W(0) on part.act (chemist order) of the full restricted direct RPA of
+    chemist `eri`: the bare active integrals plus the pole sum over every
+    (i, a) pair, nothing deleted."""
+    act = part.act
+    return (eri[np.ix_(act, act, act, act)]
+            + w0_minus_v(eri, eps, nocc, act))
+
+
+def vtilde_crpa_so(eri, eps, nocc, part):
+    """The cRPA correction written in spin orbitals, its alpha-alpha block.
+
+    The spin-orbital direct RPA has A = delta + K and B = K with
+    K_(i s a s),(j t b t) = (i a|j b) for any two spins s, t (Coulomb only;
+    spin-flip pairs have no Coulomb coupling and are left out), so
+    (A+B)_so = delta + 2K over the 2 nocc nvirt same-spin pairs. The pairs
+    whose i and a are both active are deleted, for both spins, and
+        vt_so = -2 V [(A+B)_so,rr]^-1 V^T,
+    V_(t u),(i a) = (t s u s|i t a t) over every active spin orbital t, u,
+    the static (omega = 0) form of the pole sum -2/Omega_n of paper Eq. 2.12.
+    No restricted spin adaptation is used, so this checks the restricted
+    factor -4 on delta + 4K independently. Spin orbitals as at the top of
+    this module: p < nmo alpha, nmo + p beta."""
+    nmo = len(eps)
+    active = _active_pairs(eps, nocc, part)
+    labels = _pair_labels(eps, nocc)
+    pairs = [(s * nmo + i, s * nmo + a) for s in (0, 1)
+             for (i, a), act in zip(labels, active) if not act]
+    spin_orb = [(p % nmo, p // nmo) for p in range(2 * nmo)]
+
+    def coulomb(p, q, r, s):
+        (p, sp), (q, sq), (r, sr), (s, ss) = (spin_orb[x] for x in (p, q, r, s))
+        return eri[p, q, r, s] if sp == sq and sr == ss else 0.0
+
+    apb = np.zeros((len(pairs), len(pairs)))
+    for x, (i, a) in enumerate(pairs):
+        apb[x, x] = eps[a % nmo] - eps[i % nmo]
+        for y, (j, b) in enumerate(pairs):
+            apb[x, y] += 2.0 * coulomb(i, a, j, b)
+    act_so = [p for p in part.act] + [nmo + p for p in part.act]
+    m = len(act_so)
+    v = np.array([[coulomb(t, u, i, a) for (i, a) in pairs]
+                  for t in act_so for u in act_so])
+    vt = (-2.0 * v @ np.linalg.solve(apb, v.T)).reshape((m,) * 4)
+    n = len(part.act)
+    return vt[:n, :n, :n, :n]

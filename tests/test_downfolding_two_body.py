@@ -21,7 +21,13 @@ block (Eq. 2.14, the Omega = 0 modes dropped), and differs from zeroing A+B
 alone; it has the symmetry of a real chemist integral, only lowers the
 diagonal, vanishes when every orbital is active and is the fully screened
 W(0) - v when no pair is active. cRPA_ph is cRPA on the particle-hole
-elements, 'bare' is zero.
+elements, 'bare' is zero. It also equals the cRPA written in spin
+orbitals, both spins and no spin adaptation (ruling R12), which pins the
+restricted factor -4 on delta + 4K.
+
+E_c^A[v_eff], the dRPA of the active ph pairs with v_eff, and the static
+defect max |W(0) - W^A[v_eff](0)| equal the oracle's for bare, crpa and
+crpa_ph; the crpa defect is zero, and with no active ph pair E_c^A = 0.
 """
 import numpy as np
 import pytest
@@ -42,8 +48,10 @@ from src.SingleReference.LinearResponse.rpa_energy import \
     rpa_correlation_energy_casida
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import (drpa, h2, mo_integrals, rpa_energy,
-                                      vtilde_crpa, vtilde_crpa_zeroing,
-                                      vtilde_zero_apb_only, w0_minus_v, water)
+                                      vtilde_crpa, vtilde_crpa_so,
+                                      vtilde_crpa_zeroing,
+                                      vtilde_zero_apb_only, w0_minus_v,
+                                      w_static_active, water)
 
 
 def test_active_eri_is_exact():
@@ -229,17 +237,6 @@ def test_mode_refusals(wat):
     assert rpa.SIGMAS == (None, 'srg', 'mode_a')
 
 
-def test_rpa_terms_not_built_yet(wat):
-    """The full RPA runs; building an active space from it is not there yet,
-    and says so."""
-    mf, _, eps, nocc = wat
-    low = run_low_level(mf, method='rpa', mode='Casida')
-    assert low.mode == 'casida'
-    aspace = ActiveSpace.from_counts(eps, nocc, 2, 2)
-    with pytest.raises(NotImplementedError, match='not implemented yet'):
-        build_effective_hamiltonian(low, aspace)
-
-
 @pytest.fixture(scope='module')
 def low_exact(wat):
     """The casida RPALowLevel of water/6-31G on the exact integrals."""
@@ -360,3 +357,80 @@ def test_screening_refusals(wat, low_exact):
         rpa.screening_correction(low_exact, part, 'rpa')
     with pytest.raises(NotImplementedError, match="screening='mrpa'"):
         rpa.screening_correction(low_exact, part, 'mrpa')
+
+
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_crpa_is_the_spin_orbital_crpa(wat, low_exact, aspace):
+    """Ruling R12: the restricted -4 on delta + 4K against the cRPA written
+    in spin orbitals (both spins, the active pairs of both deleted,
+    -2 V (A+B)_so,rr^-1 V^T), its alpha-alpha block. Measured max deviation
+    (contiguous / non-contiguous): 2.6e-16 / 1.9e-16."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    assert np.abs(v - vtilde_crpa_so(eri, eps, nocc, part)).max() < 1e-8
+
+
+def _v_eff(eri, part, screening, low):
+    a = part.act
+    return (eri[np.ix_(a, a, a, a)]
+            + rpa.screening_correction(low, part, screening))
+
+
+def _active_w_static(v_eff, eps, part):
+    """W^A[v_eff](0) of the oracle: the restricted direct RPA of v_eff alone,
+    on the active orbitals (occupied first) and their orbital energies."""
+    n = part.n_act
+    return v_eff + w0_minus_v(v_eff, eps[part.act], part.n_act_occ,
+                              np.arange(n))
+
+
+@pytest.mark.parametrize('screening', ['bare', 'crpa', 'crpa_ph'])
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_active_correlation_energy(wat, low_exact, aspace, screening):
+    """E_c^A[v_eff], the dense dRPA of the active ph pairs with v_eff (exact
+    v + vtilde here, df=False), against the oracle's dRPA energy of v_eff on
+    the active orbitals. Measured deviation 0.0 for every case listed (both
+    run the same eigensolve of delta^1/2 (delta + 4K) delta^1/2)."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v_eff = _v_eff(eri, part, screening, low_exact)
+    e = rpa.active_correlation_energy(low_exact, part, v_eff)
+    ref = rpa_energy(v_eff, eps[part.act], part.n_act_occ)
+    assert e < 0.0 and abs(e - ref) < 1e-8
+
+
+@pytest.mark.parametrize('screening', ['bare', 'crpa', 'crpa_ph'])
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_static_defect(wat, low_exact, aspace, screening):
+    """max |W(0) - W^A[v_eff](0)| over the active (pq|rs), against the
+    oracle's full W(0) (`w_static_active`) and its dRPA of v_eff alone. For
+    crpa it is zero: W^A[W^r](0) = W(0) exactly. Measured defect
+    (contiguous / non-contiguous): crpa 2.9e-15 / 2.0e-15, bare 0.143 /
+    0.163, crpa_ph 0.142 / 0.163; deviation from the oracle at most 1.1e-15."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v_eff = _v_eff(eri, part, screening, low_exact)
+    d = rpa.static_defect(low_exact, part, v_eff)
+    ref = np.abs(w_static_active(eri, eps, nocc, part)
+                 - _active_w_static(v_eff, eps, part)).max()
+    assert abs(d - ref) < 1e-8
+    if screening == 'crpa':
+        assert d < 1e-8
+    else:
+        assert d > 1e-4
+
+
+@pytest.mark.parametrize('occ, virt', [([3, 4], []), ([], [5, 6])],
+                         ids=['no_active_virtual', 'no_active_occupied'])
+def test_no_active_pair_correlation_and_defect(wat, low_exact, occ, virt):
+    """No active ph pair: E_c^A = 0 and W^A = v_eff, so the crpa defect is
+    |W(0) - v - vtilde| with vtilde the fully screened W(0) - v: zero."""
+    mf, eri, eps, nocc = wat
+    part = partition(ActiveSpace(len(eps), nocc, occ, virt), eps)
+    v_eff = _v_eff(eri, part, 'crpa', low_exact)
+    assert rpa.active_correlation_energy(low_exact, part, v_eff) == 0.0
+    assert rpa.static_defect(low_exact, part, v_eff) < 1e-8

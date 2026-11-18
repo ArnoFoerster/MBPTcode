@@ -10,8 +10,10 @@ modes contribute nothing to the direct RPA.
 
 `screening_correction` gives the static (omega = 0) screening correction of an
 active space on the casida route: the active pairs deleted from A+B and one
-Cholesky solve. Its assembly into an active space's terms (`terms`) is not
-there yet.
+Cholesky solve. `terms` assembles an active space's DownfoldingTerms from it:
+vtilde, the correlation-energy pair E_c[v] - E_c^A[v_eff] (both by the
+plasmon formula, on the same v) and the static defect
+|W(0) - W^A[v_eff](0)|, zero for crpa. Sigma^E (`sigma`) is not built yet.
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,13 +30,15 @@ from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 
 from ..partition import active_pair_mask, ph_element_mask
-from ..terms import choice
+from ..terms import DownfoldingTerms, choice
 
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
 BUILT_MODES = ('casida',)
 SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
+DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
+               'sigma_continuation')
 
 
 @dataclass(eq=False)
@@ -90,8 +94,7 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     numerics: the run's Numerics (None: the defaults), kept on the result
         and read by the eigensolve.
 
-    E_RPA,corr comes from the same solve as Omega and X+Y; A and B are freed
-    by the solver, so Tr A is taken before it.
+    E_RPA,corr comes from the same solve as Omega and X+Y.
     """
     _refuse_options(opts, 'run')
     mode = choice(mode, MODES, 'mode')
@@ -109,6 +112,18 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     else:
         factors = None
         eri = get_two_electron_integrals_chemist(mol, mf, 'spatial')
+    e_c, omega, xpy = _plasmon(eps, nocc, factors, eri, numerics)
+    return RPALowLevel(
+        mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
+        e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
+
+
+def _plasmon(eps, nocc, factors, eri, numerics):
+    """(E_c, omega, X+Y) of the restricted singlet direct RPA on the
+    integrals `factors` (three-index) or `eri` (chemist), by the plasmon
+    formula E_c = 1/2 (sum omega - Tr A). A and B are freed by the solver,
+    so Tr A is taken before it. The full RPA and the active one go through
+    here, so the E_c pair is the same formula on the same solver."""
     lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
                               spin_mode='restricted')
     A, B = lr.build_casida_matrices(nocc, lBSE=False)
@@ -118,10 +133,7 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     omega, xpy, y = solver.solve(numerics=numerics)
     xpy += y
     del y
-    return RPALowLevel(
-        mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
-        e_c_full=float(0.5 * (np.sum(omega) - trace_a)), omega=omega,
-        xpy=xpy, factors=factors, eri=eri)
+    return float(0.5 * (np.sum(omega) - trace_a)), omega, xpy
 
 
 def screening_correction(low, part, screening):
@@ -175,9 +187,118 @@ def screening_correction(low, part, screening):
     return vt
 
 
-def terms(low, part, **opts):
-    """Not built yet: the RPA's DownfoldingTerms of an active space."""
-    raise NotImplementedError(
-        f"method={METHOD!r}: the screened interaction of an active space is "
-        f"not implemented yet (mode={low.mode!r}); run_low_level gives the "
-        f"full RPA only.")
+def _active_v(low, act):
+    """The v of the full RPA (low.factors or low.eri) on the orbitals `act`:
+    (v_act, v_ov), v_act the (n,)*4 chemist (pq|rs) and v_ov the
+    (n*n, n_pair) (pq|ia) over every (i, a) pair in C order."""
+    n, nocc = len(act), low.nocc
+    if low.factors is not None:
+        b = low.factors
+        b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
+        b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
+        return (b_act.T @ b_act).reshape((n,) * 4), b_act.T @ b_ov
+    eri = low.eri[np.ix_(act, act)]
+    return (eri[:, :, act][:, :, :, act],
+            eri[:, :, :nocc, nocc:].reshape(n * n, -1))
+
+
+def _active_ph(low, part, v_eff):
+    """(delta, K, v_ph) of the active ph pairs (k active occupied times the
+    active virtual, local indices, C order): delta the orbital energy
+    differences, K_ia,jb = v_eff[i,a,j,b] and v_ph (n*n, n_ph) the columns
+    v_eff[:, :, i, a]."""
+    n, k = part.n_act, part.n_act_occ
+    eps = low.eps[part.act]
+    delta = (eps[k:][None, :] - eps[:k][:, None]).ravel()
+    v_ph = v_eff[:, :, :k, k:].reshape(n * n, delta.size)
+    return delta, v_eff[:k, k:, :k, k:].reshape(delta.size, delta.size), v_ph
+
+
+def active_correlation_energy(low, part, v_eff):
+    """E_c^A[v_eff], the direct RPA correlation energy of the active space
+    alone: the restricted singlet dRPA on the n_A_o n_A_v active ph pairs
+    with K_ia,jb = v_eff[i,a,j,b] (local indices, occupied first) and the
+    orbital energies of the reference, by the plasmon formula of the full
+    RPA. v_eff is (n_act,)*4 chemist; for the E_c pair to cancel when every
+    orbital is active it has to be built on the same v as low.e_c_full
+    (spec §3.2). Zero when there is no active ph pair."""
+    k = part.n_act_occ
+    if k == 0 or k == part.n_act:
+        return 0.0
+    return _plasmon(low.eps[part.act], k, None, v_eff, low.numerics)[0]
+
+
+def static_defect(low, part, v_eff):
+    """max |W(0) - W^A[v_eff](0)| over the active (pq|rs): how far the
+    active-space RPA of v_eff falls short of the full static screening.
+
+    W(0) - v = -4 V xpy diag(1/omega) xpy^T V^T, V = (pq|ia) on the v of the
+    full RPA; W^A[v_eff](0) = v_eff - 4 v_eff[:, ph] (delta_A + 4 K^A)^-1
+    v_eff[ph, :] on the active ph pairs, K^A the ph block of v_eff. v_eff has
+    to be built on that same v (spec §3.2): for crpa, W^A[W^r](0) = W(0)
+    exactly and the defect is zero to rounding. delta_A + 4 K^A is positive
+    definite for every built screening (for crpa it is a Schur complement of
+    delta + 4K), so one Cholesky solve gives the active response.
+    Zero for an empty active space.
+    """
+    n = part.n_act
+    if n == 0:
+        return 0.0
+    v_act, v_ov = _active_v(low, part.act)
+    r = v_ov @ low.xpy
+    w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
+    w_act = v_eff.copy()
+    delta, k_ph, v_ph = _active_ph(low, part, v_eff)
+    if delta.size:
+        apb = 4.0 * k_ph
+        apb[np.diag_indices_from(apb)] += delta
+        w_act -= (4.0 * v_ph @ cho_solve(cho_factor(apb), v_ph.T)).reshape(
+            (n,) * 4)
+    return float(np.abs(w_full - w_act).max())
+
+
+def _diagnostic_names(diagnostics):
+    """The DIAGNOSTICS entries `diagnostics` names (a name or an iterable of
+    names), each refused unless it is one."""
+    if isinstance(diagnostics, str):
+        diagnostics = (diagnostics,)
+    return {choice(d, DIAGNOSTICS, 'diagnostics') for d in diagnostics}
+
+
+def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
+          **opts):
+    """The DownfoldingTerms of the RPA on the active space `part`.
+
+    screening: 'bare' | 'crpa' | 'crpa_ph' ('mrpa' not built yet); vtilde
+        is its static correction (`screening_correction`), the same in every
+        spin block (restricted).
+    sigma: None, the paper's scheme (full double counting, no Sigma_bar);
+        'srg' and 'mode_a' are not built yet.
+    diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
+        that does not apply here (casida, no sigma: everything but
+        'static_defect') is skipped and absent, an unknown name refused.
+
+    E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
+    pairs with v_eff = v + vtilde, v the same integrals as the full RPA
+    (low.factors or low.eri, spec §3.2), not the exact v of H_eff. 'bare'
+    keeps E_c[v] - E_c^A[v], the mechanical embedding.
+    """
+    _refuse_options(opts, 'terms')
+    names = _diagnostic_names(diagnostics)
+    screening = choice(screening, SCREENINGS, 'screening')
+    if sigma not in SIGMAS:
+        raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
+                         + ', '.join(repr(s) for s in SIGMAS) + '.')
+    if sigma is not None:
+        raise NotImplementedError(
+            f"method={METHOD!r} sigma={sigma!r} is not implemented yet; "
+            f"built: sigma=None.")
+    vt = screening_correction(low, part, screening)
+    v_eff = _active_v(low, part.act)[0] + vt
+    found = {}
+    if 'static_defect' in names:
+        found['static_defect'] = static_defect(low, part, v_eff)
+    return DownfoldingTerms(
+        vtilde=(vt, vt, vt), sigma_bar=None, e_c_full=low.e_c_full,
+        e_c_active=active_correlation_energy(low, part, v_eff), dc='full',
+        diagnostics=found)
