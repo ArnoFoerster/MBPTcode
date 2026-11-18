@@ -8,13 +8,16 @@ matrices were built from. The reference is restricted closed shell and the
 response the singlet one (A = delta + 2K, B = 2K, K_ia,jb = (ia|jb)); triplet
 modes contribute nothing to the direct RPA.
 
-Only the casida route is built; the screened interaction of an active space
-(`terms`) is not there yet.
+`screening_correction` gives the static (omega = 0) screening correction of an
+active space on the casida route: the active pairs deleted from A+B and one
+Cholesky solve. Its assembly into an active space's terms (`terms`) is not
+there yet.
 """
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
@@ -24,6 +27,7 @@ from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 
+from ..partition import active_pair_mask, ph_element_mask
 from ..terms import choice
 
 METHOD = 'rpa'
@@ -118,6 +122,57 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
         e_c_full=float(0.5 * (np.sum(omega) - trace_a)), omega=omega,
         xpy=xpy, factors=factors, eri=eri)
+
+
+def screening_correction(low, part, screening):
+    """The static screening correction vt = W^r(0) - v on the active orbitals.
+
+    Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
+    screening: 'bare' gives zeros; 'crpa' the restricted cRPA correction
+        vt_tu,vw = -4 sum_{ia,jb in r} (tu|ia) [(delta + 4K)_rr^-1]_ia,jb (jb|vw),
+    r the (i, a) pairs that are not both active (spec §3.3, §3.4): the
+    response of the active pairs is deleted from A+B = delta + 4K, which is
+    the paper's zeroing of A+B and A-B on the active block with its Omega = 0
+    modes dropped, and the static response chi^r(0) = -4 [(A+B)_rr]^-1 of
+    the spin-summed restricted singlet is one Cholesky solve on the deleted
+    matrix. 'crpa_ph' keeps that correction on the particle-hole elements
+    alone (`ph_element_mask`). 'mrpa' is not built yet.
+
+    (A+B)_rr and (tu|ia) are built here from the same integrals as the full
+    RPA, low.factors (K = B_ov^T B_ov) or low.eri. With every orbital active
+    no pair is left to screen and the correction is zero, without a solve;
+    with no active occupied or no active virtual orbital nothing is deleted
+    and it is the fully screened W(0) - v on those orbitals.
+    """
+    screening = choice(screening, SCREENINGS, 'screening')
+    if screening == 'mrpa':
+        raise NotImplementedError(
+            f"method={METHOD!r} screening='mrpa' is not implemented yet; "
+            f"built: 'bare', 'crpa', 'crpa_ph'.")
+    n = part.n_act
+    vt = np.zeros((n,) * 4)
+    res = ~active_pair_mask(part)
+    if screening == 'bare' or n == 0 or not res.any():
+        return vt
+    nocc, act = low.nocc, part.act
+    if low.factors is not None:
+        b = low.factors
+        b_res = b[:, :nocc, nocc:].reshape(b.shape[0], -1)[:, res]
+        k_rr = b_res.T @ b_res
+        v_rt = b_res.T @ b[:, act][:, :, act].reshape(b.shape[0], n * n)
+    else:
+        eri = low.eri
+        ov = eri[:nocc, nocc:].reshape(res.size, *eri.shape[2:])[res]
+        k_rr = ov[:, :nocc, nocc:].reshape(len(ov), -1)[:, res]
+        v_rt = ov[:, act][:, :, act].reshape(len(ov), n * n)
+    eps = low.eps
+    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[res]
+    apb = 4.0 * k_rr
+    apb[np.diag_indices_from(apb)] += delta
+    vt = (-4.0 * v_rt.T @ cho_solve(cho_factor(apb), v_rt)).reshape((n,) * 4)
+    if screening == 'crpa_ph':
+        vt *= ph_element_mask(part)
+    return vt
 
 
 def terms(low, part, **opts):

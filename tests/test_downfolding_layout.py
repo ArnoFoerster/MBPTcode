@@ -77,5 +77,9 @@ def test_driver_imports_only_the_registry():
 def test_choice_refuses_and_normalizes():
     assert choice('Imag_Frequency', ('casida', 'imagfrequency'),
                   'mode') == 'imagfrequency'
+    # a choice spelt with '_' is matched in either spelling and returned as listed
+    for value in ('crpa_ph', 'CRPA-PH'):
+        assert choice(value, ('crpa', 'crpa_ph'), 'screening') == 'crpa_ph'
+    assert choice('Space_Time', ('space-time',), 'mode') == 'space-time'
     with pytest.raises(ValueError, match="mode"):
         choice('x', ('casida',), 'mode')

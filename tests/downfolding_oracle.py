@@ -8,7 +8,8 @@ production code in `src/MultiReference/Downfolding/` is checked against an
 independent implementation (tests/test_downfolding_one_body.py,
 tests/test_downfolding_energy.py, tests/test_downfolding_two_body.py).
 The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
-(spec §3.3, row E_RPA,corr).
+(spec §3.3, row E_RPA,corr); the cRPA correction (`vtilde_crpa` and the two
+zeroing variants, spec §3.4) is the pole sum of its modes.
 
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
@@ -201,3 +202,103 @@ def rpa_energy(eri, eps, nocc):
     delta, K = _pair_space(eri, eps, nocc)
     omega, _ = drpa(eri, eps, nocc)
     return 0.5 * omega.sum() - 0.5 * np.sum(delta + 2.0 * np.diag(K))
+
+
+def _active_pairs(eps, nocc, part):
+    """Bool mask over the (i, a) pairs in C order, True where i is an active
+    occupied and a an active virtual orbital (written out here so the oracle
+    does not lean on the production mask)."""
+    occ = {int(i) for i in part.act_occ}
+    virt = {int(a) for a in part.act_virt}
+    return np.array([i in occ and a in virt for i in range(nocc)
+                     for a in range(nocc, len(eps))], dtype=bool)
+
+
+def _pole_sum(eri, nocc, act, omega, xpy, pairs):
+    """W(0) - v on the orbitals `act`, chemist order, from restricted singlet
+    RPA modes (omega, xpy) whose xpy rows are the (i, a) pairs `pairs`.
+
+    Spin orbitals (paper Eq. 2.12, spec §3.4): W(0) - v = sum_n w_n w_n^T (-2/Omega_n),
+    w_n,pq = sum_ia (pq|ia) (X+Y)_ia,n over the spin-orbital pairs. A
+    restricted singlet mode has (X+Y)_{ia sigma} = xpy_ia / sqrt(2) on both
+    spins (same norm X^TX - Y^TY = 1), so for either spin of p, q its
+    spin-summed residue is w_n,pq = sqrt(2) sum_ia (pq|ia) xpy_ia,n; triplet
+    modes have opposite signs on the two spins and give w = 0. Hence the
+    restricted residue factor is -4/Omega_n on r_n,pq = sum_ia (pq|ia) xpy_ia,n:
+        W(0) - v = -4 sum_n r_n r_n^T / Omega_n,
+    i.e. -4 v (A+B)^-1 v for xpy diag(1/Omega) xpy^T = (A+B)^-1.
+    """
+    n = len(act)
+    occ, virt = zip(*pairs) if len(pairs) else ((), ())
+    v = eri[np.ix_(act, act)][:, :, list(occ), list(virt)].reshape(n * n, -1)
+    r = v @ xpy
+    out = -4.0 * (r / omega[None, :]) @ r.T
+    return out.reshape((n,) * 4)
+
+
+def _pair_labels(eps, nocc):
+    return [(i, a) for i in range(nocc) for a in range(nocc, len(eps))]
+
+
+def w0_minus_v(eri, eps, nocc, act, keep=None):
+    """W(0) - v on the orbitals `act` (chemist order) of the restricted direct
+    RPA of chemist `eri`, solved on the (i, a) pairs `keep` (bool mask, None:
+    all), by the pole sum of `_pole_sum`."""
+    omega, xpy = drpa(eri, eps, nocc, keep=keep)
+    labels = _pair_labels(eps, nocc)
+    if keep is not None:
+        labels = [p for p, k in zip(labels, keep) if k]
+    return _pole_sum(eri, nocc, act, omega, xpy, labels)
+
+
+def vtilde_crpa(eri, eps, nocc, part):
+    """The cRPA correction on part.act: the active pairs (i and a both
+    active) deleted from the response, the rest solved and pole-summed."""
+    keep = ~_active_pairs(eps, nocc, part)
+    return w0_minus_v(eri, eps, nocc, part.act, keep=keep)
+
+
+def vtilde_crpa_zeroing(eri, eps, nocc, part):
+    """The cRPA correction by the paper's literal Eq. 2.14.
+
+    (A+B)^R = A+B and (A-B)^R = A-B = delta, both set to zero on the block
+    where both pairs are active (i, a, j, b all in the active space), then
+    the full-size M = (A-B)^1/2 (A+B) (A-B)^1/2 diagonalized. (A-B)^1/2 is
+    zero on the active rows, so M is block diagonal: the active block gives
+    Omega = 0 modes, which are dropped, and the residual block is the deleted
+    problem. X+Y = (A-B)^1/2 Z Omega^-1/2 as in `drpa`.
+    """
+    delta, K = _pair_space(eri, eps, nocc)
+    active = _active_pairs(eps, nocc, part)
+    apb = np.diag(delta) + 4.0 * K
+    apb[np.ix_(active, active)] = 0.0
+    amb = delta.copy()
+    amb[active] = 0.0
+    root = np.sqrt(amb)
+    omega2, Z = np.linalg.eigh(root[:, None] * apb * root[None, :])
+    modes = omega2 > 1e-10 * omega2.max()
+    assert np.count_nonzero(~modes) == np.count_nonzero(active)
+    omega = np.sqrt(omega2[modes])
+    xpy = root[:, None] * Z[:, modes] / np.sqrt(omega)[None, :]
+    return _pole_sum(eri, nocc, part.act, omega, xpy,
+                     _pair_labels(eps, nocc))
+
+
+def vtilde_zero_apb_only(eri, eps, nocc, part):
+    """The wrong variant: only A+B zeroed on the active block, A-B = delta
+    kept, then the full-size M = delta^1/2 (A+B) delta^1/2 solved and
+    pole-summed. With the cross blocks of A+B left in, M is indefinite, so
+    some Omega_n = sqrt(Omega_n^2) are imaginary; the pole sum is taken in
+    complex arithmetic, where the residue r_n r_n^T / Omega_n is
+    (delta^1/2 Z)_n (delta^1/2 Z)_n^T / Omega_n^2 and real."""
+    delta, K = _pair_space(eri, eps, nocc)
+    active = _active_pairs(eps, nocc, part)
+    apb = np.diag(delta) + 4.0 * K
+    apb[np.ix_(active, active)] = 0.0
+    root = np.sqrt(delta)
+    omega2, Z = np.linalg.eigh(root[:, None] * apb * root[None, :])
+    omega = np.sqrt(omega2.astype(complex))
+    xpy = root[:, None] * Z / np.sqrt(omega)[None, :]
+    out = _pole_sum(eri, nocc, part.act, omega, xpy, _pair_labels(eps, nocc))
+    assert np.abs(out.imag).max() < 1e-10
+    return out.real

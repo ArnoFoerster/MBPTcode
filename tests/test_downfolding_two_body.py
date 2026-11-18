@@ -13,6 +13,15 @@ active space) gives the oracle's direct RPA energy on exact and on fitted
 integrals, keeps X+Y in the pair order of the active-pair mask and with the
 normalization xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 4K)^-1, and
 refuses the modes and options it does not have.
+
+The cRPA correction of an active space, the active pairs deleted from
+delta + 4K and one Cholesky solve, equals the oracle's pole sum of the
+deleted problem and the paper's literal zeroing of A+B and A-B on the active
+block (Eq. 2.14, the Omega = 0 modes dropped), and differs from zeroing A+B
+alone; it has the symmetry of a real chemist integral, only lowers the
+diagonal, vanishes when every orbital is active and is the fully screened
+W(0) - v when no pair is active. cRPA_ph is cRPA on the particle-hole
+elements, 'bare' is zero.
 """
 import numpy as np
 import pytest
@@ -23,7 +32,8 @@ from src.MultiReference.Downfolding.effective_hamiltonian import (
     build_effective_hamiltonian, run_low_level)
 from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import (active_pair_mask,
-                                                      partition)
+                                                      partition,
+                                                      ph_element_mask)
 from src.MultiReference.Downfolding.two_body import active_eri, pack
 from src.SingleReference.common.active_space import ActiveSpace
 from src.SingleReference.LinearResponse.linear_response import \
@@ -32,7 +42,8 @@ from src.SingleReference.LinearResponse.rpa_energy import \
     rpa_correlation_energy_casida
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import (drpa, h2, mo_integrals, rpa_energy,
-                                      water)
+                                      vtilde_crpa, vtilde_crpa_zeroing,
+                                      vtilde_zero_apb_only, w0_minus_v, water)
 
 
 def test_active_eri_is_exact():
@@ -227,3 +238,125 @@ def test_rpa_terms_not_built_yet(wat):
     aspace = ActiveSpace.from_counts(eps, nocc, 2, 2)
     with pytest.raises(NotImplementedError, match='not implemented yet'):
         build_effective_hamiltonian(low, aspace)
+
+
+@pytest.fixture(scope='module')
+def low_exact(wat):
+    """The casida RPALowLevel of water/6-31G on the exact integrals."""
+    return run_low_level(wat[0], method='rpa', df=False)
+
+
+def _contiguous_44(eps, nocc):
+    return ActiveSpace.from_counts(eps, nocc, 2, 2)
+
+
+def _non_contiguous(eps, nocc):
+    return ActiveSpace(len(eps), nocc, [2, 4], [5, 7])
+
+
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_crpa_is_the_deleted_problem(wat, low_exact, aspace):
+    """cRPA by deletion and one Cholesky solve equals the oracle's pole sum
+    of the deleted problem and the paper's literal Eq. 2.14 (A+B and A-B
+    zeroed on the active block, the Omega = 0 modes dropped), and differs
+    from zeroing A+B alone (whose M is indefinite, one negative Omega^2 per
+    active pair). Measured max deviation (contiguous / non-contiguous): pole
+    sum 7.5e-16 / 1.6e-15, literal zeroing 3.6e-15 / 3.4e-15,
+    zero-A+B-only 0.27 / 0.82."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    assert v.shape == (part.n_act,) * 4
+    assert np.abs(v - vtilde_crpa(eri, eps, nocc, part)).max() < 1e-8
+    assert np.abs(v - vtilde_crpa_zeroing(eri, eps, nocc, part)).max() < 1e-8
+    assert np.abs(v - vtilde_zero_apb_only(eri, eps, nocc, part)).max() > 1e-4
+
+
+def test_crpa_from_factors(wat):
+    """df=True builds (A+B)_rr and (tu|ia) from the three-index factors; on
+    this non-DF RHF they are the exact eigendecomposition of the MO
+    integrals, so the oracle on the exact integrals holds to 1e-8. Measured
+    max deviation 1.5e-15."""
+    mf, eri, eps, nocc = wat
+    low = run_low_level(mf, method='rpa', df=True)
+    part = partition(_non_contiguous(eps, nocc), eps)
+    v = rpa.screening_correction(low, part, 'crpa')
+    assert np.abs(v - vtilde_crpa(eri, eps, nocc, part)).max() < 1e-8
+
+
+def test_crpa_reduces_the_diagonal(wat, low_exact):
+    """v_tu,tu = -4 x^T [(delta + 4K)_rr]^-1 x <= 0 with x_jb = (jb|tu): the
+    screening only weakens the bare interaction."""
+    _, _, eps, nocc = wat
+    part = partition(_contiguous_44(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    diag = np.einsum('tutu->tu', v)
+    assert diag.max() <= 0.0 and diag.min() < -1e-2
+
+
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_crpa_symmetry(wat, low_exact, aspace):
+    """(tu|vw) = (ut|vw) = (vw|tu) for real orbitals."""
+    _, _, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    assert np.abs(v - v.transpose(1, 0, 2, 3)).max() < 1e-10
+    assert np.abs(v - v.transpose(2, 3, 0, 1)).max() < 1e-10
+
+
+def test_crpa_ph_is_the_masked_crpa(wat, low_exact):
+    """crpa_ph keeps the cRPA correction on the particle-hole elements and
+    nothing elsewhere, where cRPA itself is not zero."""
+    _, _, eps, nocc = wat
+    part = partition(_non_contiguous(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    v_ph = rpa.screening_correction(low_exact, part, 'crpa_ph')
+    mask = ph_element_mask(part)
+    assert np.array_equal(v_ph, v * mask)
+    assert np.abs(v[~mask]).max() > 1e-3
+
+
+def test_bare_is_zero(wat, low_exact):
+    _, _, eps, nocc = wat
+    part = partition(_non_contiguous(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'Bare')
+    assert v.shape == (4,) * 4 and not np.any(v)
+
+
+def test_all_active_gives_zero(monkeypatch):
+    """H2/6-31G with every orbital active: no pair is left to screen, so the
+    correction is zero for every screening, without a solve."""
+    mf = h2()
+    low = run_low_level(mf, method='rpa', df=False)
+    part = partition(ActiveSpace(4, 1, [0], [1, 2, 3]), mf.mo_energy)
+
+    def no_solve(*args, **kwargs):
+        raise AssertionError('a solve on an empty residual space')
+    monkeypatch.setattr(rpa, 'cho_factor', no_solve)
+    for screening in ('bare', 'crpa', 'crpa_ph'):
+        v = rpa.screening_correction(low, part, screening)
+        assert v.shape == (4,) * 4 and not np.any(v)
+
+
+@pytest.mark.parametrize('occ, virt', [([3, 4], []), ([], [5, 6])],
+                         ids=['no_active_virtual', 'no_active_occupied'])
+def test_no_active_virtual(wat, low_exact, occ, virt):
+    """No active virtual (or no active occupied) orbital: no pair has both
+    ends active, nothing is deleted, and the correction is the fully
+    screened W(0) - v on those orbitals (oracle pole sum over every pair).
+    Measured max deviation 2.4e-15 / 3.6e-16."""
+    mf, eri, eps, nocc = wat
+    part = partition(ActiveSpace(len(eps), nocc, occ, virt), eps)
+    v = rpa.screening_correction(low_exact, part, 'crpa')
+    assert np.abs(v - w0_minus_v(eri, eps, nocc, part.act)).max() < 1e-8
+
+
+def test_screening_refusals(wat, low_exact):
+    _, _, eps, nocc = wat
+    part = partition(_contiguous_44(eps, nocc), eps)
+    with pytest.raises(ValueError, match="'crpa'"):
+        rpa.screening_correction(low_exact, part, 'rpa')
+    with pytest.raises(NotImplementedError, match="screening='mrpa'"):
+        rpa.screening_correction(low_exact, part, 'mrpa')
