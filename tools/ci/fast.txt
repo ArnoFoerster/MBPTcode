@@ -4,6 +4,7 @@ pytest test_active_space_cc.py
 pytest test_active_space_solver.py
 pytest test_adaptive_partition_carried.py
 pytest test_adaptive_posteriori.py
+pytest test_downfolding_two_body.py
 script test_adc2x_df.py
 script test_adc3_df_memory_fix.py
 pytest test_adc2_spectrum.py
