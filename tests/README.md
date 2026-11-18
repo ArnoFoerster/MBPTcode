@@ -35,6 +35,7 @@ optional third-party one.
 | a per-element or per-atom basis on the photophysics route: the map and its atom labels, each key's auxiliary sets and grid row, a grid level on a map, the stamps and resume refusals, a uniform map bitwise the plain name and a per-atom map bitwise its per-element map, the S1 force of a hybrid basis against its energy | `test_hybrid_basis` |
 | the shared symmetric Davidson | `test_davidson_symmetric` |
 | active-space solvers: FCI, the determinant basis and DMRG on one interface; CCSDT and CCSDTQ against FCI, on a downfolded Hamiltonian and on a vertex without real-orbital symmetry, and their refusals | `test_active_space_solver`, `test_active_space_cc`, `test_qdpt_perturbative` |
+| RPA/HF downfolding: the general layer imports no method code, the driver takes only the `LOW_LEVEL` registry, the keyword-choice helper | `test_downfolding_layout` |
 | ADC solvers | `test_adc3`, `test_adc3_restricted`, `test_adc2x_df`, `test_adc3_df_memory_fix`, `test_spin_adapt`, `test_screened_adc2x`, `test_downfolded_seeds`, `test_unrestricted_neon`, `test_bn_unrestricted_excitations` |
 | Epstein–Nesbet and static corrections | `test_uhf_static_correction_df`, `test_uhf_ccsd_static_correction`, `test_amplitudes_consistency` |
 | coupled cluster | `test_restricted_ccsdt`, `test_ccsdt_lambda`, `test_ccsdt_density_matrix`, `test_eom_ccsdt`, `test_cc_polarizability` |
