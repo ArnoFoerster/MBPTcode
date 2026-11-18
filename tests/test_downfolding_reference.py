@@ -434,3 +434,14 @@ def test_benzene_1010_omega_r():
     ref = np.array(DATA['benzene_1010_omega_r']['values'])
     assert omega.size == ref.size
     assert np.abs(np.sort(omega)[:20] - ref[:20]).max() < 4.5e-3
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _release_cached_mean_fields():
+    """Empty the caches when the module is done: a mean field still held at
+    interpreter shutdown leaves pyscf's temporary chkfile to be finalized
+    after the tempfile module, which warns (ResourceWarning) when this file
+    runs in one process with others (ruling R20)."""
+    yield
+    for cached in (_benzene_vtilde, _pinned_build, _pinned_low, _low):
+        cached.cache_clear()
