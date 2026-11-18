@@ -572,7 +572,9 @@ def pole_window(low, part):
     `lowest_excitation`. Every pole of S^E lies at eps_i - Omega_n <= lo
     (inactive i) or eps_a + Omega_n >= hi (environment virtual a), so between
     them every D_tr is non-zero. A side without orbitals (or no excitation at
-    all) is -inf or +inf."""
+    all) is -inf or +inf; with neither side Omega_min is not computed."""
+    if not len(part.inactive) and not len(part.env_virt):
+        return -np.inf, np.inf
     om = lowest_excitation(low)
     if om is None:
         return -np.inf, np.inf
@@ -583,14 +585,20 @@ def pole_window(low, part):
 
 
 def _refuse_near_poles(low, part, settings, sigma):
-    """Refuse (ValueError) an active orbital whose energy is within
-    pole_margin/sqrt(2 s) of an edge of `pole_window`, or outside it (spec
-    §3.6); s = DOWNFOLDING_SRG_S when srg_s is None. On casida this guards
-    sigma='mode_a' alone and points to 'srg'; on imagfrequency it guards
-    both forms, continued from the imaginary axis at s = inf, and points to
-    casida."""
+    """Refuse (ValueError) an active orbital whose energy is within the
+    margin of an edge of `pole_window`, or outside it (spec §3.6): on casida
+    pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when srg_s is None,
+    guarding sigma='mode_a' alone and pointing to 'srg'; on imagfrequency
+    the larger of that and continuation_margin (ruling R22: the Pade
+    continuation loses accuracy towards the poles), guarding both forms and
+    pointing to casida."""
     s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
     margin = settings.pole_margin / np.sqrt(2.0 * s)
+    why = (f"pole_margin {settings.pole_margin:g} / sqrt(2 s), s = {s:g}")
+    if low.mode != 'casida' and settings.continuation_margin > margin:
+        margin = settings.continuation_margin
+        why = (f"continuation_margin {margin:g} Ha, where the Pade "
+               f"continuation from the imaginary axis is accurate")
     lo, hi = pole_window(low, part)
     eps = low.eps[part.act]
     dist = np.minimum(eps - lo, hi - eps)
@@ -611,8 +619,7 @@ def _refuse_near_poles(low, part, settings, sigma):
         raise ValueError(
             f"sigma={sigma!r} diverges at the poles of the environment "
             f"self-energy: the active {named} are within the margin "
-            f"{margin:.6f} Ha (pole_margin {settings.pole_margin:g} / "
-            f"sqrt(2 s), s = {s:g}) of the pole-free window "
+            f"{margin:.6f} Ha ({why}) of the pole-free window "
             f"({lo:.6f}, {hi:.6f}) or outside it (a negative distance). "
             + advice)
 
@@ -632,7 +639,8 @@ def embedding_self_energy(low, part, sigma):
         'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
         (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
         + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
-        on casida, pointing to mode='casida'.
+        on casida, within the larger of pole_margin/sqrt(2 s) and
+        numerics.downfolding.continuation_margin, pointing to mode='casida'.
     Zero when the environment is empty.
     """
     return _embedding(low, part, sigma)[0]
@@ -681,7 +689,8 @@ def sigma_env_imag_axis(low, part, query_freqs):
     """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
     the correlation self-energy iG(W - v) of the full RPA's W on part.act
     (occupied first) with the internal orbital restricted to part.env, mu
-    the whole system's mid-gap. imagfrequency only.
+    the whole system's mid-gap. imagfrequency only (NotImplementedError
+    otherwise).
 
     This is the GW density's `fitted_self_energy_matrix_imaginary_axis` on
     the three-index factors sliced to B[Q, t, r] (t active, r environment)
@@ -690,6 +699,12 @@ def sigma_env_imag_axis(low, part, query_freqs):
     (GW_DENSITY_W_FIT_*), whose one-pole convolution with G_r is exact; the
     full system's mu and fit range, so only the internal sum changes.
     """
+    if low.mode != 'imagfrequency':
+        raise NotImplementedError(
+            f"sigma_env_imag_axis samples the density-fitted W of "
+            f"mode='imagfrequency'; this low-level result is mode="
+            f"{low.mode!r} (its self-energy is `embedding_self_energy`): "
+            f"use mode='imagfrequency'.")
     n, env = part.n_act, part.env
     query_freqs = np.atleast_1d(query_freqs)
     if n == 0 or len(env) == 0:

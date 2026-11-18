@@ -17,7 +17,8 @@ at finite s stays within its damping bound of s = inf. 'mode_a' refuses an
 active space whose orbital energy leaves the pole-free window (or comes
 within the margin of its edge), where 'srg' stays finite and equal to the
 oracle. On the prototype's own orbitals 'mode_a' is its Sigma_bar. The
-`downfolding` numerics section holds srg_s and pole_margin.
+`downfolding` numerics section holds srg_s, pole_margin and
+continuation_margin.
 
 A term of Eq. 44 exactly at a pole is 0, not NaN (ruling R17). The
 'sigma_poles' diagnostic of `terms` (window, pole distances, Z_t against
@@ -43,7 +44,8 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
-from src.Base.numerics.constants import (DOWNFOLDING_POLE_MARGIN,
+from src.Base.numerics.constants import (DOWNFOLDING_CONTINUATION_MARGIN,
+                                         DOWNFOLDING_POLE_MARGIN,
                                          DOWNFOLDING_SRG_S)
 from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
                                         numerics_or_default)
@@ -335,15 +337,19 @@ def test_prototype_sigma_bar(case):
 
 def test_numerics_section():
     """Numerics.downfolding: the defaults from constants, a dict built into
-    the section, srg_s = None allowed (s = inf), srg_s <= 0 and
-    pole_margin < 0 refused."""
+    the section, srg_s = None allowed (s = inf), srg_s <= 0, pole_margin < 0
+    and continuation_margin < 0 refused."""
     assert Numerics().downfolding == DownfoldingNumerics(
-        srg_s=DOWNFOLDING_SRG_S, pole_margin=DOWNFOLDING_POLE_MARGIN)
+        srg_s=DOWNFOLDING_SRG_S, pole_margin=DOWNFOLDING_POLE_MARGIN,
+        continuation_margin=DOWNFOLDING_CONTINUATION_MARGIN)
+    assert DownfoldingNumerics(
+        continuation_margin=0.0).continuation_margin == 0.0
     assert Numerics(downfolding={'srg_s': 250.0}).downfolding.srg_s == 250.0
     assert Numerics(downfolding={'srg_s': None}).downfolding.srg_s is None
     assert DownfoldingNumerics(pole_margin=0.0).pole_margin == 0.0
     for bad in ({'srg_s': -1.0}, {'srg_s': 0.0}, {'pole_margin': -1.0},
-                {'srg_s': float('inf')}, {'srg_s': float('nan')}):
+                {'srg_s': float('inf')}, {'srg_s': float('nan')},
+                {'continuation_margin': -0.1}):
         with pytest.raises(ValueError):
             Numerics(downfolding=bad)
 
@@ -575,7 +581,8 @@ def test_sigma_env_imag_axis_against_the_pole_sum(wat):
     the minimax W grid against the exact residues. Measured max deviation
     2.2e-8 / 2.7e-8 (contiguous / non-contiguous; target 1e-5, |S| up to
     2.3e-2). W is cached on the first
-    request (low.cache['w_grid']) and reused."""
+    request (low.cache['w_grid']) and reused. A casida result (df or
+    exact integrals) is refused, pointing to imagfrequency."""
     mf, _, eps, nocc = wat
     low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
     low_cas = run_low_level(mf, method='rpa', mode='casida')
@@ -590,6 +597,10 @@ def test_sigma_env_imag_axis_against_the_pole_sum(wat):
     w_grid = low_if.cache['w_grid']
     rpa.sigma_env_imag_axis(low_if, part, nodes)
     assert low_if.cache['w_grid'] is w_grid
+    for low in (low_cas, run_low_level(mf, method='rpa', df=False)):
+        with pytest.raises(NotImplementedError,
+                           match="use mode='imagfrequency'"):
+            rpa.sigma_env_imag_axis(low, part, nodes)
 
 
 def test_lowest_excitation(wat):
@@ -597,7 +608,8 @@ def test_lowest_excitation(wat):
     root, by the dense Casida solve when the pair space is small and by the
     Davidson otherwise; both equal the casida route's lowest omega (measured
     0.0 dense, the same solver, and 1.7e-15 Davidson), cached in
-    low.cache['omega_min']; so the pole-free windows agree."""
+    low.cache['omega_min']; so the pole-free windows agree. Without an
+    environment the window is the whole axis and no root is solved for."""
     mf, _, eps, nocc = wat
     low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
     low_cas = run_low_level(mf, method='rpa', mode='casida')
@@ -611,6 +623,11 @@ def test_lowest_excitation(wat):
     part = partition(_contiguous_44(eps, nocc), eps)
     assert np.allclose(rpa.pole_window(low_if, part),
                        rpa.pole_window(low_cas, part), atol=1e-8, rtol=0)
+    fresh = run_low_level(mf, method='rpa', mode='imagfrequency')
+    every = partition(ActiveSpace.from_counts(eps, nocc, nocc,
+                                              len(eps) - nocc), eps)
+    assert rpa.pole_window(fresh, every) == (-np.inf, np.inf)
+    assert 'omega_min' not in fresh.cache
 
 
 def test_pole_refusal_points_to_casida(wat):
@@ -672,3 +689,79 @@ def test_continuation_diagnostic_present(wat):
     with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
         _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg')
     assert en.diagnostics['sigma_continuation'].max() > 1e-4
+
+
+def _scaled_water(scale):
+    """Converged RHF of water/6-31G with both H positions of `water()`
+    scaled by `scale` towards the origin (the O-H bonds shortened and the
+    window edges moved, the reviewer's scan of ruling R22)."""
+    y, z = 0.7572 * scale, -0.4692 * scale
+    mol = gto.M(atom=f'O 0 0 0.1173; H 0 {y} {z}; H 0 {-y} {z}',
+                basis='6-31g', cart=False, verbose=0)
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    return mf.run()
+
+
+def _edge_distance(low, part):
+    lo, hi = rpa.pole_window(low, part)
+    e = low.eps[part.act]
+    return np.minimum(e - lo, hi - e).min()
+
+
+def test_continuation_margin_near_the_edge(wat):
+    """Ruling R22: on imagfrequency Sigma^E is refused within
+    max(pole_margin/sqrt(2 s), continuation_margin) = 0.26 Ha of the
+    pole-free window's edge, the Pade continuation's accurate range by
+    measurement (the scan of distance against error is in the comment of
+    DOWNFOLDING_CONTINUATION_MARGIN: the last case above 1e-4 Eh at 0.162 Ha,
+    every case beyond 0.171 below it, times 1.5). With the H positions at 0.8
+    (srg_s = None, casida on the same factors): occupied 3, 4 and virtual 5,
+    6, 11, 0.277 Ha from the edge, is accepted and meets 1e-4 (measured
+    6.9e-5 for both forms; its spread, 1.9e-4, warns there); virtual 12 in place of 11, 0.171 Ha from the
+    edge, is refused, naming orbital 12. At equilibrium the same space with
+    virtual 12 lies 0.089 Ha from the edge: refused by default, and with
+    both margins 0 it is continued and misses the target (measured 7.0e-4)
+    while the 'sigma_continuation' spread (3.6e-5, a lower-bound-type
+    indicator) stays below its 1e-4 warning level, without a warning."""
+    infinite = Numerics(downfolding={'srg_s': None})
+    mf = _scaled_water(0.8)
+    eps = mf.mo_energy
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency',
+                           numerics=infinite)
+    low_cas = run_low_level(mf, method='rpa', mode='casida',
+                            numerics=infinite)
+    outside = partition(ActiveSpace.from_indices(13, 5, [3, 4], [5, 6, 11]),
+                        eps)
+    inside = partition(ActiveSpace.from_indices(13, 5, [3, 4], [5, 6, 12]),
+                       eps)
+    margin = DOWNFOLDING_CONTINUATION_MARGIN
+    assert margin < _edge_distance(low_cas, outside) < 1.1 * margin
+    assert _edge_distance(low_cas, inside) < margin
+    for sigma in ('srg', 'mode_a'):
+        got = rpa.embedding_self_energy(low_if, outside, sigma)
+        want = rpa.embedding_self_energy(low_cas, outside, sigma)
+        assert np.abs(got - want).max() < 1e-4
+        with pytest.raises(ValueError, match=r'orbital 12 \(.*'
+                           r"continuation_margin.*mode='casida'"):
+            rpa.embedding_self_energy(low_if, inside, sigma)
+
+    mf, _, eps, nocc = wat
+    a = ActiveSpace.from_indices(13, 5, [3, 4], [5, 6, 12])
+    low = run_low_level(mf, method='rpa', mode='imagfrequency',
+                        numerics=infinite)
+    with pytest.raises(ValueError, match=r'orbital 12 \('):
+        rpa.embedding_self_energy(low, partition(a, eps), 'srg')
+    bare = Numerics(downfolding={'srg_s': None, 'pole_margin': 0.0,
+                                 'continuation_margin': 0.0})
+    low = run_low_level(mf, method='rpa', mode='imagfrequency', numerics=bare)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        _, _, en = build_effective_hamiltonian(low, a, sigma='srg')
+    assert en.diagnostics['sigma_continuation'].max() < 1e-4
+    part = partition(a, eps)
+    want = rpa.embedding_self_energy(run_low_level(
+        mf, method='rpa', mode='casida', numerics=bare), part, 'srg')
+    assert np.abs(rpa.embedding_self_energy(low, part, 'srg')
+                  - want).max() > 1e-4

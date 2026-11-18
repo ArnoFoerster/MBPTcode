@@ -245,19 +245,25 @@ per element, and each element is evaluated at its own point:
   check here, and `'sigma_poles'` records `srg_s` None.
 - `'mode_a'` is 1/2 Re[S_tu(eps_t) + S_tu(eps_u)] on the real axis.
 
-Without damping, both forms are refused near the poles on this route, as
-`'mode_a'` is on casida (margin pole_margin / sqrt(2 s), s = `srg_s` or 500
-when it is None), and the message points to `mode='casida'`, where `'srg'`
-is finite everywhere. Omega_min of the window is the lowest root of the same
-Casida problem (dense while it fits in memory, the Davidson above that),
-computed once and kept.
+Without damping, both forms are refused near the poles on this route, and
+with a wider margin than on casida: within the larger of pole_margin /
+sqrt(2 s) (s = `srg_s`, or 500 when it is None) and
+`numerics.downfolding.continuation_margin` (default 0.26 Ha) of the window's
+edge, or outside the window. The message names the orbitals and points to
+`mode='casida'`, where `'srg'` is finite everywhere. Omega_min of the window
+is the lowest root of the same Casida problem (dense while it fits in
+memory, the Davidson above that), computed once and kept.
 
 The measured accuracy: the exact Casida S^E fed through the continuation
 alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on
 benzene (6,6) cc-pVDZ (2e-9 on water), against a target of 1e-4; the whole
 route agrees with casida to 1.6e-7 Eh on benzene and 1e-7 on water, and E_0
-to 2.5e-10. The `'sigma_continuation'` diagnostic estimates the error at run
-time.
+to 2.5e-10. Towards the window's edge the continuation amplifies the small
+error of the sampled S^E (2e-8): on a water space with a high virtual active
+the error reaches 1e-4 at 0.16 Ha from the edge and 7e-4 at 0.09 Ha. Every
+case measured beyond 0.17 Ha met 1e-4 (a few much closer did too), and
+`continuation_margin` is 1.5 times that; the scan is in the comment of
+`DOWNFOLDING_CONTINUATION_MARGIN` in `src/Base/numerics/constants.py`.
 
 ## Kohn-Sham references
 
@@ -284,7 +290,8 @@ reference E_0 is a well-defined working choice, not a derived one.
 - **Option validation.** An unknown or not-yet-available mode, screening,
   sigma or diagnostic is refused with the valid list.
 - **Sigma^E poles.** `sigma='mode_a'` is refused near a pole of the
-  environment self-energy (see above).
+  environment self-energy; on `mode='imagfrequency'` both `'srg'` and
+  `'mode_a'` are, within the wider continuation margin (see above).
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all); a name that does not apply to the call is
@@ -311,9 +318,13 @@ imagfrequency all four:
   E_c^A on the same v_eff, 'difference': the quadrature value minus it}`.
 - `'sigma_continuation'` (imagfrequency, with `sigma`): per element of
   Sigma_bar, the difference between two Pade fits on the even- and the
-  odd-indexed nodes at the element's evaluation point. With half the nodes
-  each it overstates the error of the full fit (1e-5 against 2e-7 on
-  benzene). Above `DOWNFOLDING_SIGMA_CONTINUATION_WARN` (1e-4 Ha) a
+  odd-indexed nodes at the element's evaluation point. It is a
+  lower-bound-type indicator, not an error bound: near the window's edge
+  it falls short of the true error by ten to twenty times (3.6e-5 against
+  7.0e-4 at 0.09 Ha from the edge, a space the continuation margin
+  refuses), so a small spread does not certify Sigma_bar there; far from
+  the poles it can exceed the error (1.2e-5 against 1.6e-7 on benzene).
+  Above `DOWNFOLDING_SIGMA_CONTINUATION_WARN` (1e-4 Ha) a
   `SigmaContinuationWarning` names the elements: use more nodes or
   `mode='casida'`.
 

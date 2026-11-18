@@ -293,13 +293,44 @@ DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
 # The 'sigma_continuation' diagnostic of the imaginary-axis routes warns when
 # two Pade fits of S^E on disjoint halves of the nodes (even- and
 # odd-indexed) disagree by more than this, in Ha, at an element's evaluation
-# point. It is the target the Pade continuation of Sigma_bar^E was measured
-# against (spec §3.6): the exact S^E of benzene (6,6) through the full
-# 16-node fit misses its exact Sigma_bar by 1.8e-7, and the half-node fits
-# spread by about 1e-5 there, so the spread overestimates the error of the
-# full fit and a value above this level says the continuation is not to be
-# trusted at that element.
+# point: the 1e-4 Ha target of the continued Sigma_bar^E (spec §3.6). The
+# spread is a lower-bound-type indicator, not an error bound: near the
+# pole-free window's edge the continuation amplifies the small error of the
+# sampled S^E (2e-8) and the spread falls short of the error by ten to
+# twenty times (water/6-31G, occupied 3, 4 and virtual 5, 6, 12: 0.089 Ha
+# from the edge, spread 3.6e-5 against an error of 7.0e-4; with the H
+# positions at 0.95, 0.111 Ha, 3.0e-5 against 3.5e-4), so a quiet spread
+# does not certify the result there; the guard near the edge is
+# DOWNFOLDING_CONTINUATION_MARGIN. Elsewhere it can exceed the error
+# (benzene (6,6): spread 1.2e-5, error 1.6e-7; water virtual 11 at 0.277 Ha:
+# 1.9e-4, error 6.9e-5).
 DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
+# The numerical routes (imagfrequency, later space-time) refuse Sigma^E for an
+# active orbital closer than this, in Ha, to the edge of the pole-free window
+# (or pole_margin/sqrt(2 s), if larger): the Pade continuation from the
+# imaginary axis loses accuracy towards the poles. Fixed by measurement, the
+# error of Sigma_bar^E against casida on the same three-index object
+# (srg_s = None, default numerics), against the active orbitals' smallest
+# distance d to the window edge, over water/6-31G spaces along a symmetric
+# O-H scan (0.6 to 1.3 of equilibrium) and benzene (6,6) cc-pVDZ spaces:
+#   d (Ha)  error (Ha)   space (occupied | virtual), O-H scale
+#   0.049   1.1e-3       water 3, 4 | 5, 6, 12, 1.10
+#   0.089   7.0e-4       water 3, 4 | 5, 6, 12, 1.00
+#   0.111   3.5e-4       water 3, 4 | 5, 6, 12, 0.95
+#   0.143   3.4e-4       water 3, 4 | 5, 6, 12, 0.75
+#   0.153   1.2e-4       water 3, 4 | 5, 6, 12, 0.85
+#   0.162   1.1e-4       water 3, 4 | 5, 6, 12, 0.825  (the last above 1e-4)
+#   0.171   8.7e-5       water 3, 4 | 5, 6, 12, 0.80
+#   0.190   7.6e-5       water 3, 4 | 5, 6, 11, 0.75
+#   0.277   6.9e-5       water 3, 4 | 5, 6, 11, 0.80
+#   0.41-0.65  <= 1.7e-5 water 3, 4 | 5, 6, 9 / 10 / 11 and 2, 4 | 5, 6, 8
+#   0.078   1.2e-5       benzene 16, 19, 20 | 21, 22, 35
+#   0.316   1.6e-7       benzene 16, 19, 20 | 21, 22, 29 (the pi space)
+# Every case beyond d = 0.17 meets 1e-4 (some much closer do too, e.g. a
+# water high virtual whose nearest pole carries a small residue: 1.5e-6 at
+# d = 0.001, so the distance is a sufficient, not a sharp, criterion); 0.26
+# is 1.5 times that.
+DOWNFOLDING_CONTINUATION_MARGIN = 0.26
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.
