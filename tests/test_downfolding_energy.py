@@ -8,19 +8,35 @@ the spin-orbital oracle (tests/downfolding_oracle.py); measured agreement at
 most 1.4e-14 (tolerance 1e-10). The reference determinant of the assembled
 H_eff has the energy E_HF + E_c[v] - E_c^A whatever vtilde, Sigma_bar and the
 `dc` mode are (measured 7.1e-14, tolerance 1e-8).
-"""
-import numpy as np
 
+The driver with method='hf' gives the CASCI Hamiltonian (tolerance 1e-8):
+water/6-31G (4,4) on RHF, PBE and PBE0 orbitals (measured 0, 0, 1.4e-14),
+non-contiguous (0), on the orbitals of a density-fitted RHF against an
+exact-integral CASCI (0; a DF-CASCI differs by 4.1e-6), and packed in spin
+orbitals (4.3e-14). Its reference determinant is the RHF energy (5.7e-14), and
+with every H2/6-31G orbital active it is FCI (4.4e-16, tolerance 1e-9).
+"""
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from pyscf import dft, fci, gto, mcscf, scf
+
+from src.MultiReference.Downfolding import (build_effective_hamiltonian,
+                                            effective_hamiltonian,
+                                            run_low_level)
 from src.MultiReference.Downfolding.energy import (
     Energies, active_hf_energy, assemble_energies, environment_hf_energy,
     exchange_energy_term, sigma_trace)
+from src.MultiReference.Downfolding.methods import LOW_LEVEL
 from src.MultiReference.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body)
 from src.MultiReference.Downfolding.partition import partition
 from src.MultiReference.Downfolding.terms import DownfoldingTerms
 from src.SingleReference.common.active_space import ActiveSpace
+from src.Solvers.active_space import solve
 from tests.downfolding_oracle import (
-    mo_integrals, reference_energy, spin_orbital_energies,
+    h2, mo_integrals, reference_energy, spin_orbital_energies,
     spin_orbital_integrals, water)
 
 TOL = 1e-10
@@ -191,3 +207,173 @@ def test_reference_determinant_energy_is_hf_plus_correlation_pair():
         g_eff = {0: en.e0, 1: h_eff[0],
                  2: (v_act + vt).transpose(0, 2, 1, 3)}
         assert abs(reference_energy(g_eff, k) - expected) < 1e-8
+
+
+# --- the driver and the HF low-level method (HF = CASCI) --------------------
+
+def _water_mean_field(ref):
+    """Water/6-31G (spherical): RHF, or RKS with PBE or PBE0."""
+    if ref == 'hf':
+        return water()
+    mf = dft.RKS(water().mol, xc=ref)
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    return mf.run()
+
+
+def _casci(mf, mo=None):
+    """The (4,4) CASCI energy of `mf`, on `mo` when given."""
+    mc = mcscf.CASCI(mf, 4, 4)
+    mc.verbose = 0
+    return mc.kernel(mo)[0]
+
+
+def _hf_heff(mf, aspace, **kwargs):
+    return build_effective_hamiltonian(run_low_level(mf, method='hf'), aspace,
+                                       **kwargs)
+
+
+def _solve(g, space):
+    return solve('pyscf_fci', g, space['n_orbs'], space['n_elec_active'],
+                 spin_free=True)[0]
+
+
+@pytest.mark.parametrize('ref', ['hf', 'pbe', 'pbe0'])
+def test_hf_method_is_casci(ref):
+    """Contiguous (4,4) on water: H_eff of method='hf' is the CASCI
+    Hamiltonian, whose core potential is J - K/2 on the reference orbitals
+    also for a KS reference (pyscf's CASCI does not use the KS potential)."""
+    mf = _water_mean_field(ref)
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    g, space, en = _hf_heff(mf, aspace)
+    assert isinstance(en, Energies) and g[0] == en.e0
+    assert abs(_solve(g, space) - _casci(mf)) < 1e-8
+
+
+def test_hf_method_non_contiguous():
+    """Active orbitals 2, 4 (occupied) and 5, 7 (virtual); the core is 0, 1, 3."""
+    mf = water()
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 5, [2, 4], [5, 7])
+    g, space, _ = _hf_heff(mf, aspace)
+    mc = mcscf.CASCI(mf, 4, 4)
+    mc.verbose = 0
+    e_ref = mc.kernel(mc.sort_mo([3, 5, 6, 8]))[0]
+    assert abs(_solve(g, space) - e_ref) < 1e-8
+    assert sorted(space) == ['act_idx', 'act_occ_idx', 'act_vir_idx',
+                             'active_space', 'n_elec_active', 'n_orbs',
+                             'spin_free']
+    assert (space['n_orbs'], space['n_elec_active']) == (4, 4)
+    assert space['spin_free'] is True and space['active_space'] is aspace
+    assert space['act_idx'].tolist() == [2, 4, 5, 7]
+    assert space['act_occ_idx'].tolist() == [2, 4]
+    assert space['act_vir_idx'].tolist() == [5, 7]
+
+
+def test_spin_orbital_g_eff_solves_the_same():
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    g_sf, space_sf, _ = _hf_heff(mf, aspace)
+    g_so, space_so, _ = _hf_heff(mf, aspace, spin_free=False)
+    assert (space_so['n_orbs'], space_so['n_elec_active']) == (8, 4)
+    assert space_so['spin_free'] is False
+    e_so = solve('openfermion', g_so, space_so['n_orbs'],
+                 space_so['n_elec_active'])[0]
+    assert abs(e_so - _solve(g_sf, space_sf)) < 1e-8
+
+
+def test_density_fitted_mean_field_still_exact():
+    """A density-fitted mean field gives only the orbitals: every integral of
+    H_eff is exact, so it is CASCI with exact integrals on the same orbitals,
+    built on a plain RHF object (a CASCI of the DF object would be a DF-CASCI)."""
+    mol = water().mol
+    mf = scf.RHF(mol).density_fit()
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    mf.run()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    g, space, _ = _hf_heff(mf, aspace)
+    exact = scf.RHF(mol)
+    exact.verbose = 0
+    exact.mo_coeff, exact.mo_occ = mf.mo_coeff, mf.mo_occ
+    exact.mo_energy = mf.mo_energy
+    assert abs(_solve(g, space) - _casci(exact, mf.mo_coeff)) < 1e-8
+
+
+def test_reference_determinant_is_the_scf_energy():
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    g, _, en = _hf_heff(mf, aspace)
+    assert abs(reference_energy(g, 2) - mf.e_tot) < 1e-8
+    assert (en.e_c_full, en.e_c_active, en.e_hf_ee_vtilde) == (0.0, 0.0, 0.0)
+
+
+def test_unsupported_mean_fields_are_refused():
+    mol = water().mol
+    with pytest.raises(NotImplementedError, match='restricted'):
+        run_low_level(scf.UHF(mol), method='hf')
+    cation = gto.M(atom=mol.atom, basis='6-31g', charge=1, spin=1,
+                   cart=False, verbose=0)
+    with pytest.raises(NotImplementedError, match='closed-shell'):
+        run_low_level(scf.ROHF(cation), method='hf')
+    with pytest.raises(NotImplementedError, match='gas phase'):
+        run_low_level(scf.RHF(mol).PCM(), method='hf')
+    screened = scf.RHF(mol)
+    screened.with_screening = SimpleNamespace()   # any attached environment
+    with pytest.raises(NotImplementedError, match='gas phase'):
+        run_low_level(screened, method='hf')
+
+
+def test_unknown_method_and_stray_options():
+    mf = water()
+    with pytest.raises(ValueError, match="'hf'"):
+        run_low_level(mf, method='mp2')
+    with pytest.raises(TypeError, match="method='hf'.*screening"):
+        run_low_level(mf, method='hf', screening='crpa')
+    low = run_low_level(mf, method='hf')
+    assert low.method == 'hf' and low.mf is mf
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    with pytest.raises(TypeError, match="method='hf'.*screening"):
+        build_effective_hamiltonian(low, aspace, screening='crpa')
+
+
+def test_all_orbitals_active_is_fci():
+    mf = h2()
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
+    g, space, en = _hf_heff(mf, aspace)
+    assert (en.e_hf_core, en.e_hf_ee) == (0.0, 0.0)
+    assert abs(_solve(g, space) - fci.FCI(mf).kernel()[0]) < 1e-9
+
+
+def test_active_space_of_another_reference_is_refused():
+    mf = water()
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 4, [3], [4])
+    with pytest.raises(ValueError, match='occupied'):
+        _hf_heff(mf, aspace)
+
+
+def test_sigma_bar_with_full_double_counting_is_refused(monkeypatch):
+    """A static self-energy comes with the Hartree-only double counting; a
+    method that hands one with dc='full' is refused by name."""
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+
+    def terms(low, part):
+        n = part.n_act
+        z = np.zeros((n,) * 4)
+        return DownfoldingTerms(vtilde=(z, z, z),
+                                sigma_bar=(np.eye(n), np.eye(n)),
+                                e_c_full=0.0, e_c_active=0.0, dc='full')
+
+    probe = SimpleNamespace(
+        run=lambda mf: SimpleNamespace(method='probe', mf=mf), terms=terms)
+    monkeypatch.setitem(LOW_LEVEL, 'probe', probe)
+    low = run_low_level(mf, method='probe')
+    with pytest.raises(ValueError, match="probe"):
+        build_effective_hamiltonian(low, aspace)
+
+
+def test_mpi_rank_guard(monkeypatch):
+    monkeypatch.setattr(effective_hamiltonian, 'grid_comm',
+                        lambda comm=None: (object(), 0, 2))
+    with pytest.raises(NotImplementedError, match='serial'):
+        run_low_level(water(), method='hf')
