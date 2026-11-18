@@ -10,7 +10,10 @@ rounding (the static inverse involves no quadrature). E_c^A[v_eff] is the
 quadrature of Tr[ln(1 - Pi^A U) + Pi^A U] on the full system's grid, Pi^A =
 2 f(i omega) = -4 delta/(delta^2 + omega^2) the bare response of the active
 ph pairs (the spin factor and frequency factor of the full chi0); with every
-orbital active it is the full energy, so the E_c pair cancels to rounding.
+orbital active it is the full energy, so the E_c pair cancels to rounding
+(also on the coarsest grid, where the quadrature error is visible). With
+sigma, Sigma_bar^E (Lorentzian fit of W, Pade continuation) and the E_0 and
+FCI energies follow casida at srg_s = None to far below the 1e-4 target.
 
 Mean fields: water/6-31G RHF and PBE without density fitting (the
 three-index object is then the exact eigen-fit of the MO integrals) and a
@@ -64,6 +67,23 @@ def _low(ref, mode):
     """The RPA low-level result of `ref` on `mode` (casida with df=True, the
     same three-index object as imagfrequency)."""
     return run_low_level(_mean_field(ref), method='rpa', mode=mode)
+
+
+@cache
+def _low_infinite_s(ref, mode):
+    """`_low` with srg_s = None (s = inf: Eq. 42 on casida)."""
+    return run_low_level(_mean_field(ref), method='rpa', mode=mode,
+                         numerics=Numerics(downfolding={'srg_s': None}))
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _release_cached_mean_fields():
+    """Empty the caches when the module is done: a mean field still held at
+    interpreter shutdown leaves pyscf's temporary chkfile to be finalized
+    after the tempfile module, which warns (ResourceWarning)."""
+    yield
+    for cached in (_low_infinite_s, _low, _mean_field):
+        cached.cache_clear()
 
 
 def _aspace(mf, which):
@@ -326,19 +346,61 @@ def test_low_reuse():
     assert np.array_equal(low.cache['p0'], p0)
 
 
+@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('aspace', ('contiguous', 'no_virtual'))
+@pytest.mark.parametrize('ref', REFS)
+def test_sigma_bar_matches_casida(ref, aspace, sigma):
+    """Sigma_bar^E on imagfrequency (the Lorentzian fit of W on the minimax W
+    grid, Pade from the imaginary axis to z_tu or to the real axis) against
+    casida on the same three-index object at srg_s = None, where 'srg' is
+    Eq. 42 on both. Target 1e-4 Eh per element; measured max 5.8e-9 (HF,
+    DF-HF), 9.3e-8 (PBE), the largest on the space without active virtual
+    orbitals; equal for 'srg' and 'mode_a' (a diagonal element).
+    (The non-contiguous space here has virtual 7 active over the
+    environment's 6, beyond the pole-free window: refused on imagfrequency,
+    tests/test_downfolding_sigma.py.)"""
+    low_if = _low_infinite_s(ref, 'imagfrequency')
+    low_cas = _low_infinite_s(ref, 'casida')
+    part = partition(_aspace(low_if.mf, aspace), low_if.eps)
+    got = rpa.embedding_self_energy(low_if, part, sigma)
+    want = rpa.embedding_self_energy(low_cas, part, sigma)
+    assert np.abs(want).max() > 1e-3
+    assert np.abs(got - want).max() < 1e-4
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('ref', REFS)
+def test_route_agreement_with_sigma(ref, s):
+    """With sigma='srg' (srg_s = None) E_0, every Energies field and the FCI
+    energy of H_eff agree between imagfrequency and casida, contiguous (4,4):
+    the Sigma^E terms of E_0 and h_eff follow Sigma_bar^E. Target 1e-4;
+    measured max |E_0 difference| 2.5e-10 (every field 2.6e-10, h_eff
+    2.8e-9 on PBE), FCI 1.4e-11."""
+    low_if = _low_infinite_s(ref, 'imagfrequency')
+    low_cas = _low_infinite_s(ref, 'casida')
+    a = _aspace(low_if.mf, 'contiguous')
+    g, space, en = build_effective_hamiltonian(low_if, a, screening=s,
+                                               sigma='srg')
+    g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s,
+                                               sigma='srg')
+    assert abs(en.e_sigma_trace) > 1e-3
+    for f in dataclasses.fields(Energies):
+        if f.name != 'diagnostics':
+            assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 1e-4
+    assert np.abs(g[1] - g_c[1]).max() < 1e-4
+    assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-4
+
+
 def test_mrpa_refused_here():
-    """mRPA is casida only (spec §3.5); Sigma^E on imagfrequency is not built
-    yet; both refusals point to casida. df=False has no meaning here (the
-    route is density fitted) and space-time is not built. The residues of W
-    (`screened_residues`) need the Casida eigenvectors and refuse here too,
-    pointing to casida (ruling R19)."""
+    """mRPA is casida only (spec §3.5) and its refusal points to casida.
+    df=False has no meaning here (the route is density fitted) and
+    space-time is not built. The residues of W (`screened_residues`) need
+    the Casida eigenvectors and refuse here too, pointing to casida (ruling
+    R19)."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         build_effective_hamiltonian(low, a, screening='mrpa')
-    for sigma in ('srg', 'mode_a'):
-        with pytest.raises(NotImplementedError, match="mode='casida'"):
-            build_effective_hamiltonian(low, a, sigma=sigma)
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         rpa.screened_residues(low, partition(a, low.eps))
     with pytest.raises(ValueError, match="df=False.*mode='casida'"):

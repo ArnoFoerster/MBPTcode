@@ -3,9 +3,12 @@ benzene (6,6) in cc-pVDZ, downfolded from HF (CASCI) and from the RPA with bare,
 cRPA and cRPA_ph screening, and with cRPA and cRPA_ph plus the static
 environment self-energy Sigma^E (sigma='srg'; see docs/methods/downfolding.md).
 The Sigma^E column is the pair of E_0 terms that comes with it, the exchange
-energy term minus Tr[Sigma_bar gamma^A,0].
+energy term minus Tr[Sigma_bar gamma^A,0]. The rows marked 'if' are the
+density-fitted imaginary-frequency route (mode='imagfrequency'), where 'srg'
+is s = infinity, continued by Pade from the imaginary axis; they match the
+Casida rows above them to the density fit.
 
-One run_low_level per method and molecule serves every screening. The pi
+One run_low_level per method, route and molecule serves every screening. The pi
 orbitals are picked by Loewdin population on the carbons' p shell, and the
 lowest singlet and triplet excitation energies come from the singlet and
 triplet sectors of the active-space FCI."""
@@ -38,7 +41,9 @@ METHODS = (('HF (CASCI)', 'hf', {}),
            ('RPA cRPA', 'rpa', {'screening': 'crpa'}),
            ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph'}),
            ('cRPA+SRG', 'rpa', {'screening': 'crpa', 'sigma': 'srg'}),
-           ('cRPA_ph+SRG', 'rpa', {'screening': 'crpa_ph', 'sigma': 'srg'}))
+           ('cRPA_ph+SRG', 'rpa', {'screening': 'crpa_ph', 'sigma': 'srg'}),
+           ('cRPA if', 'rpa_if', {'screening': 'crpa'}),
+           ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}))
 
 
 def excitations(g_eff, space):
@@ -64,9 +69,14 @@ for name, atoms, n_pi in MOLECULES:
     print(f'\n{name}: pi orbitals (canonical) occupied {list(active.occ_active)}, '
           f'virtual {list(active.virt_active)}; E(RHF) = {mf.e_tot:.6f}')
 
-    # one low-level run per method; exact 4-centre integrals (df=False)
+    # one low-level run per method and route; casida on exact 4-centre
+    # integrals (df=False); imagfrequency is density fitted by construction,
+    # so it gets the same orbitals with a density fit attached (without one
+    # it would decompose the exact MO integrals: minutes for benzene)
     lows = {'hf': run_low_level(mf, method='hf'),
-            'rpa': run_low_level(mf, method='rpa', mode='casida', df=False)}
+            'rpa': run_low_level(mf, method='rpa', mode='casida', df=False),
+            'rpa_if': run_low_level(mf.density_fit(), method='rpa',
+                                    mode='imagfrequency')}
     print(f'{"method":<13}{"E_HF terms":>12}{"E_c - E_c^A":>13}{"Sigma^E":>10}'
           f'{"E_0":>12}{"E(S0)":>12}{"S1 (eV)":>9}{"T1 (eV)":>9}')
     for label, method, opts in METHODS:

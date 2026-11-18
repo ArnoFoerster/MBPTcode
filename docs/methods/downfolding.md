@@ -8,16 +8,18 @@ RPA-downfolding paper (cRPA, cRPA_ph and mRPA screening of an active-space
 Hamiltonian with a constant E_0), on canonical orbitals. The result goes to
 any active-space solver in `src.Solvers.active_space`.
 
-Available now (the Casida route, Stage 1):
+Available now:
 
 - `method='hf'`: the HF limit, which is CASCI.
-- `method='rpa'`, `mode='casida'`, with `screening` `'bare'`, `'crpa'` or
-  `'crpa_ph'`, and optionally `sigma='srg'` or `'mode_a'`: the static
-  environment self-energy Sigma^E that the paper drops (see below).
+- `method='rpa'`, `mode='casida'` (dense Casida, every pole) or
+  `mode='imagfrequency'` (density fitted, imaginary frequency, N^4), with
+  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally
+  `sigma='srg'` or `'mode_a'`: the static environment self-energy Sigma^E
+  that the paper drops (see below).
 - E_0 always, term by term.
 
-Not yet available, and refused when asked for: `mode='imagfrequency'` and
-`mode='space-time'` (the low-scaling routes), `screening='mrpa'`.
+Not yet available, and refused when asked for: `mode='space-time'` and
+`screening='mrpa'` (Casida only once built).
 
 ## Calling it
 
@@ -45,12 +47,26 @@ active spaces and screenings, so a comparison loop pays for the RPA once.
 `method='hf'` takes no options: `run_low_level(mf, method='hf')`, and
 `build_effective_hamiltonian(low_hf, active)` is CASCI.
 
+**The two routes.** `'casida'` diagonalizes the full Casida problem once and
+keeps every excitation energy and amplitude. `'imagfrequency'` diagonalizes
+nothing: it keeps the full RPA energy of the existing imaginary-axis code,
+its minimax frequency grid and the static polarizability P(0) of the whole
+system in the fitting basis. Its screening correction is P - P^A (P^A the
+active particle-hole pairs' part) and one Dyson step, which on the same
+three-index object is the Casida route's deletion to rounding. E_c^A[v_eff]
+is integrated on the full energy's grid (`numerics.quadrature.nfreq_rpa`), so
+the E_c pair is one quadrature and cancels to rounding with every orbital
+active, whatever the grid; the dense-Casida E_c^A is the
+`'ec_active_casida'` diagnostic. Both routes agree on every term of H_eff
+and E_0 to the quadrature error of E_c[v] (below 1e-11 Eh at the default
+grid on water).
+
 Options of the RPA:
 
 | call | option | values |
 |---|---|---|
-| `run_low_level` | `mode` | `'casida'` (the others: not yet available) |
-| | `df` | `True`: Casida matrices from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none); `False`: exact 4-centre integrals |
+| `run_low_level` | `mode` | `'casida'`, `'imagfrequency'` (`'space-time'`: not yet available) |
+| | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none); `False`: exact 4-centre integrals, `'casida'` only |
 | | `numerics` | a `Numerics`, or `None` for the defaults |
 | `build_effective_hamiltonian` | `spin_free` | `True` (default): spatial-orbital `g_eff`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'` |
@@ -214,6 +230,35 @@ pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
 or outside the window. `'srg'` is never refused on the Casida route; near a
 pole its damping matters, which the `'sigma_poles'` diagnostic reports.
 
+**Sigma^E on `mode='imagfrequency'`.** There are no residues on this route.
+S^E(mu + i omega), mu the whole system's mid-gap, comes from the GW
+density's Lorentzian fit of W - 1 on the minimax W grid
+(`numerics.imagfreq.nfreq` points; W built on the first Sigma^E request and
+kept), with the internal orbital restricted to the environment. It is
+sampled on the `numerics.quadrature.npade` Pade nodes (16 Gauss-Legendre
+points of scale `w0_gl`, the GW Pade settings), continued by one Pade fit
+per element, and each element is evaluated at its own point:
+
+- `'srg'` is Eq. 42, Sigma_bar_tu = Re S_tu(z_tu) with z_tu = (eps_t +
+  eps_u)/2 + i (eps_u - eps_t)/2, because (a + b)/(a^2 + b^2) = Re[(1 +
+  i)/(a + i b)]. That is **s = infinity**: `srg_s` enters only the pole
+  check here, and `'sigma_poles'` records `srg_s` None.
+- `'mode_a'` is 1/2 Re[S_tu(eps_t) + S_tu(eps_u)] on the real axis.
+
+Without damping, both forms are refused near the poles on this route, as
+`'mode_a'` is on casida (margin pole_margin / sqrt(2 s), s = `srg_s` or 500
+when it is None), and the message points to `mode='casida'`, where `'srg'`
+is finite everywhere. Omega_min of the window is the lowest root of the same
+Casida problem (dense while it fits in memory, the Davidson above that),
+computed once and kept.
+
+The measured accuracy: the exact Casida S^E fed through the continuation
+alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on
+benzene (6,6) cc-pVDZ (2e-9 on water), against a target of 1e-4; the whole
+route agrees with casida to 1.6e-7 Eh on benzene and 1e-7 on water, and E_0
+to 2.5e-10. The `'sigma_continuation'` diagnostic estimates the error at run
+time.
+
 ## Kohn-Sham references
 
 A restricted KS mean field (GGA or hybrid) runs, with the KS orbitals and
@@ -244,7 +289,8 @@ reference E_0 is a well-defined working choice, not a derived one.
 Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all); a name that does not apply to the call is
 skipped, so one tuple works across a loop. Results are in
-`energies.diagnostics`, keyed by name. On the casida route two apply:
+`energies.diagnostics`, keyed by name. On the casida route two apply; on
+imagfrequency all four:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
   active orbitals. It is zero for `crpa`, by construction, and measures how
@@ -258,7 +304,18 @@ skipped, so one tuple works across a loop. Results are in
   |Sigma_bar(s) - Sigma_bar(infinity)| (0 when no finite s is applied).
   When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-6 Ha) a
   `SigmaDampingWarning` names the active orbitals concerned: their
-  Sigma_bar depends on `srg_s`.
+  Sigma_bar depends on `srg_s`. On imagfrequency `'z'` comes from the
+  continued fraction, `'srg_s'` is None and `'srg_damping'` 0.0 (s =
+  infinity, no damping applied).
+- `'ec_active_casida'` (imagfrequency): `{'casida': the dense-Casida
+  E_c^A on the same v_eff, 'difference': the quadrature value minus it}`.
+- `'sigma_continuation'` (imagfrequency, with `sigma`): per element of
+  Sigma_bar, the difference between two Pade fits on the even- and the
+  odd-indexed nodes at the element's evaluation point. With half the nodes
+  each it overstates the error of the full fit (1e-5 against 2e-7 on
+  benzene). Above `DOWNFOLDING_SIGMA_CONTINUATION_WARN` (1e-4 Ha) a
+  `SigmaContinuationWarning` names the elements: use more nodes or
+  `mode='casida'`.
 
 ## What is checked against what
 
@@ -286,8 +343,7 @@ with the paper: Cartesian ones are far further from its numbers.
 
 ## Not yet available
 
-- `mode='imagfrequency'`, `'space-time'` (with Sigma^E there) and
-  `screening='mrpa'`.
+- `mode='space-time'` and `screening='mrpa'`.
 - Natural orbitals (RPA or GW), semicanonicalization and the Delta
   hybridization; the active space is the user's.
 - omega other than 0, and other ways of making W^r static.

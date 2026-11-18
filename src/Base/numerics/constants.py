@@ -290,6 +290,16 @@ DOWNFOLDING_POLE_MARGIN = 3.0
 # so below it the choice of s does not matter; above it the result depends on
 # srg_s through an active orbital near a pole of the environment self-energy.
 DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
+# The 'sigma_continuation' diagnostic of the imaginary-axis routes warns when
+# two Pade fits of S^E on disjoint halves of the nodes (even- and
+# odd-indexed) disagree by more than this, in Ha, at an element's evaluation
+# point. It is the target the Pade continuation of Sigma_bar^E was measured
+# against (spec §3.6): the exact S^E of benzene (6,6) through the full
+# 16-node fit misses its exact Sigma_bar by 1.8e-7, and the half-node fits
+# spread by about 1e-5 there, so the spread overestimates the error of the
+# full fit and a value above this level says the continuation is not to be
+# trusted at that element.
+DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.

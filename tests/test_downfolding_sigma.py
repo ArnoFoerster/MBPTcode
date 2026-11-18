@@ -1,4 +1,5 @@
-"""The static embedding self-energy Sigma_bar^E on the casida route.
+"""The static embedding self-energy Sigma_bar^E on the casida and the
+imagfrequency route.
 
 Sigma_bar^E is the static reduction of iG^E(W - v) on the active orbitals,
 the internal orbital r running over the environment (spec §3.6): 'srg' is
@@ -23,6 +24,15 @@ A term of Eq. 44 exactly at a pole is 0, not NaN (ruling R17). The
 the oracle's S^E, the s applied, the SRG damping) warns on the near-pole
 space only; along a short scan through a pole crossing 'srg' stays as
 smooth as on a space far from the poles, where Eq. 42 jumps.
+
+On imagfrequency S^E(mu + i w) comes from the Lorentzian fit of W and is
+continued by Pade to one complex frequency per element. The Pade error
+alone (the exact casida S^E through the continuation, water and benzene
+(6,6)) is far below the 1e-4 Eh target; the imaginary-axis S^E matches the
+casida pole sum; Omega_min is the lowest RPA root; the near-pole space is
+refused for both forms, pointing to casida; the 'sigma_continuation'
+diagnostic is present and warns on a too-coarse node set; on benzene the
+route matches casida.
 """
 import json
 import pathlib
@@ -35,7 +45,10 @@ from pyscf import gto, scf
 
 from src.Base.numerics.constants import (DOWNFOLDING_POLE_MARGIN,
                                          DOWNFOLDING_SRG_S)
-from src.Base.numerics.numerics import DownfoldingNumerics, Numerics
+from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
+                                        numerics_or_default)
+from src.Base.orbital_spaces import particle_hole_window
+from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.MultiReference.Downfolding.methods import rpa
@@ -279,24 +292,30 @@ def test_mode_a_margin_uses_srg_s(wat):
                                   part, 'mode_b')
 
 
-def _pinned(molecule):
-    """(low, part) of a prototype pin: an RHF on the pinned geometry and
-    basis carrying the prototype's mo_coeff, mo_energy and mo_occ (no SCF),
-    its casida RPA on exact integrals, and the pinned active orbitals (as in
-    tests/test_downfolding_reference.py)."""
+def _pinned_mean_field(molecule, density_fit=False):
+    """(mf, part) of a prototype pin: an RHF on the pinned geometry and basis
+    (density fitted if asked) carrying the prototype's mo_coeff, mo_energy
+    and mo_occ (no SCF), and the partition of the pinned active orbitals (as
+    in tests/test_downfolding_reference.py)."""
     c = PINS[molecule]
     mol = gto.M(atom=[(a[0], a[1:]) for a in c['atoms']], basis=c['basis'],
                 unit='A', charge=c['charge'], spin=c['spin'], cart=c['cart'],
                 verbose=0)
-    mf = scf.RHF(mol)
+    mf = scf.RHF(mol).density_fit() if density_fit else scf.RHF(mol)
     mf.mo_coeff = np.array(c['mo_coeff'])
     mf.mo_energy = np.array(c['mo_energy'])
     mf.mo_occ = np.where(np.arange(len(mf.mo_energy)) < c['nocc'], 2.0, 0.0)
-    low = run_low_level(mf, method='rpa', mode='casida', df=False)
     aspace = ActiveSpace.from_indices(len(mf.mo_energy), c['nocc'],
                                       np.array(c['act_occ']),
                                       np.array(c['act_virt']))
-    return low, partition(aspace, mf.mo_energy)
+    return mf, partition(aspace, mf.mo_energy)
+
+
+def _pinned(molecule):
+    """(low, part) of a prototype pin (`_pinned_mean_field`): its casida
+    RPA on exact integrals."""
+    mf, part = _pinned_mean_field(molecule)
+    return run_low_level(mf, method='rpa', mode='casida', df=False), part
 
 
 @pytest.mark.parametrize('case', sorted(PINS))
@@ -474,3 +493,182 @@ def test_srg_is_smooth_through_a_pole_crossing():
     baseline = np.maximum(second(plain), 1e-12)
     assert np.all(second(srg) < 10 * baseline)
     assert second(infinite).max() > 1e3 * second(plain).max()
+
+
+# --- the imagfrequency route: S^E(mu + i w), Pade to z_tu -----------------
+
+
+def _pole_sum(low, part, z):
+    """S^E_tu(z) (nz, n_act, n_act), the exact pole sum on the casida route:
+    sum_rn w_tr w_ur / (z - eps_r - sgn(eps_r - eps_F) Omega_n), the
+    residues of `screened_residues` (pinned to the oracle above)."""
+    env = part.env
+    sign = np.where(env < low.nocc, -1.0, 1.0)
+    poles = low.eps[env][None, :] + sign[None, :] * low.omega[:, None]
+    w = rpa.screened_residues(low, part)
+    g = 1.0 / (np.atleast_1d(z)[:, None, None] - poles[None])
+    return np.einsum('ntr,nur,qnr->qtu', w, w, g)
+
+
+def _pade_points(low):
+    """(nodes, mu): the Pade nodes of the default numerics and the mid-gap."""
+    return (pade_nodes(numerics_or_default(None).quadrature),
+            particle_hole_window(low.eps, low.nocc)[2])
+
+
+def _pade_alone_cases(wat, low_exact):
+    _, _, eps, nocc = wat
+    for space in (_contiguous_44, _non_contiguous):
+        yield low_exact, partition(space(eps, nocc), eps)
+    yield _pinned('benzene')
+
+
+def test_pade_alone(wat, low_exact):
+    """The Pade error alone: the exact casida S^E(mu + i w) on the Pade nodes
+    (16 Gauss-Legendre points of scale 1 Ha, `pade_nodes`) through
+    `continued_self_energy` against the exact Eq. 42 (Re S^E(z_tu)) and
+    mode A (S^E on the real axis): water/6-31G contiguous (4,4) and
+    non-contiguous, benzene (6,6) pi space cc-pVDZ on the prototype's
+    orbitals. Target 1e-4 Eh per element; measured max (srg / mode_a)
+    water 4.5e-10 / 4.5e-10 and 2.0e-9 / 2.0e-9, benzene 1.8e-7 / 1.8e-7
+    (the largest at a diagonal element, where both forms coincide)."""
+    for low, part in _pade_alone_cases(wat, low_exact):
+        nodes, mu = _pade_points(low)
+        samples = _pole_sum(low, part, mu + 1j * nodes)
+        args = _pure_args(low, part)
+        e = low.eps[part.act]
+        for sigma, exact in (('srg', rpa.srg_self_energy(*args, None)),
+                             ('mode_a', rpa.mode_a_self_energy(*args))):
+            got = rpa.continued_self_energy(mu + 1j * nodes, samples, e,
+                                            sigma)
+            assert np.array_equal(got, got.T)
+            assert np.abs(exact).max() > 1e-2
+            assert np.abs(got - exact).max() < 1e-4
+
+
+def test_sigma_bar_matches_casida_benzene():
+    """Benzene (6,6) pi space cc-pVDZ on the prototype's orbitals, density
+    fitted: Sigma_bar^E on imagfrequency against casida on the same
+    three-index object at srg_s = None, the case spec §3.6 fixes the route
+    tolerance on. Target 1e-4 Eh per element; measured 1.6e-7 for both
+    forms (|Sigma_bar| up to 4.5e-2; the Pade error alone is 1.8e-7,
+    test_pade_alone), the lowest root (Davidson) 2.1e-14 from casida's."""
+    mf, part = _pinned_mean_field('benzene', density_fit=True)
+    infinite = Numerics(downfolding={'srg_s': None})
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency',
+                           numerics=infinite)
+    low_cas = run_low_level(mf, method='rpa', mode='casida',
+                            numerics=infinite)
+    assert abs(rpa.lowest_excitation(low_if, solver='davidson')
+               - low_cas.omega.min()) < 1e-8
+    for sigma in ('srg', 'mode_a'):
+        got = rpa.embedding_self_energy(low_if, part, sigma)
+        want = rpa.embedding_self_energy(low_cas, part, sigma)
+        assert np.abs(want).max() > 1e-2
+        assert np.abs(got - want).max() < 1e-4
+
+
+def test_sigma_env_imag_axis_against_the_pole_sum(wat):
+    """sigma_env_imag_axis on imagfrequency against the casida pole sum on the
+    same three-index object (water/6-31G, df), on the Pade nodes, with the
+    internal orbital over the environment alone: the Lorentzian fit of W on
+    the minimax W grid against the exact residues. Measured max deviation
+    2.2e-8 / 2.7e-8 (contiguous / non-contiguous; target 1e-5, |S| up to
+    2.3e-2). W is cached on the first
+    request (low.cache['w_grid']) and reused."""
+    mf, _, eps, nocc = wat
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
+    low_cas = run_low_level(mf, method='rpa', mode='casida')
+    assert 'w_grid' not in low_if.cache
+    for space in (_contiguous_44, _non_contiguous):
+        part = partition(space(eps, nocc), eps)
+        nodes, mu = _pade_points(low_if)
+        got = rpa.sigma_env_imag_axis(low_if, part, nodes)
+        assert got.shape == (len(nodes), part.n_act, part.n_act)
+        ref = _pole_sum(low_cas, part, mu + 1j * nodes)
+        assert np.abs(got - ref).max() < 1e-5
+    w_grid = low_if.cache['w_grid']
+    rpa.sigma_env_imag_axis(low_if, part, nodes)
+    assert low_if.cache['w_grid'] is w_grid
+
+
+def test_lowest_excitation(wat):
+    """Omega_min on imagfrequency (no eigenvectors kept) is the lowest RPA
+    root, by the dense Casida solve when the pair space is small and by the
+    Davidson otherwise; both equal the casida route's lowest omega (measured
+    0.0 dense, the same solver, and 1.7e-15 Davidson), cached in
+    low.cache['omega_min']; so the pole-free windows agree."""
+    mf, _, eps, nocc = wat
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
+    low_cas = run_low_level(mf, method='rpa', mode='casida')
+    ref = low_cas.omega.min()
+    assert rpa.lowest_excitation(low_cas) == ref
+    for solver in ('dense', 'davidson'):
+        assert abs(rpa.lowest_excitation(low_if, solver=solver) - ref) < 1e-8
+    assert 'omega_min' not in low_if.cache
+    om = rpa.lowest_excitation(low_if)
+    assert low_if.cache['omega_min'] == om
+    part = partition(_contiguous_44(eps, nocc), eps)
+    assert np.allclose(rpa.pole_window(low_if, part),
+                       rpa.pole_window(low_cas, part), atol=1e-8, rtol=0)
+
+
+def test_pole_refusal_points_to_casida(wat):
+    """On imagfrequency both 'srg' (s = inf there) and 'mode_a' refuse the
+    near-pole space of the casida tests (virtual 7 beyond the window's edge),
+    naming orbital 7 alone and pointing to mode='casida', where 'srg' is
+    finite; the contiguous (4,4) is accepted."""
+    mf, _, eps, nocc = wat
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    near = partition(_high_virtual(eps, nocc), eps)
+    for sigma in ('srg', 'mode_a'):
+        with pytest.raises(ValueError, match=r'orbital 7 \(') as err:
+            rpa.embedding_self_energy(low, near, sigma)
+        assert "mode='casida'" in str(err.value)
+        assert 'orbital 5 ' not in str(err.value)
+        with pytest.raises(ValueError, match="mode='casida'"):
+            build_effective_hamiltonian(low, _high_virtual(eps, nocc),
+                                        sigma=sigma)
+        ok = rpa.embedding_self_energy(low, partition(
+            _contiguous_44(eps, nocc), eps), sigma)
+        assert np.all(np.isfinite(ok))
+
+
+def test_continuation_diagnostic_present(wat):
+    """'sigma_continuation' on imagfrequency: per element, |Pade on the even
+    nodes - Pade on the odd nodes| at the element's evaluation point, below
+    the 1e-4 Eh warning level on the contiguous (4,4) (measured max
+    6.7e-6), without a warning; absent on casida. 'sigma_poles' there records
+    the window of the lowest root, s = inf (srg_s None, srg_damping 0.0) and
+    Z_t from the continued fraction (against casida's, measured 9.1e-9).
+    With every orbital active (no environment) Sigma_bar and the spread are
+    zero. With npade = 4 the two halves are 2-point fits, the spread exceeds the
+    level (measured 1.1e-3) and a SigmaContinuationWarning names the
+    elements."""
+    mf, _, eps, nocc = wat
+    a = _contiguous_44(eps, nocc)
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        _, _, en = build_effective_hamiltonian(low, a, sigma='srg')
+    spread = en.diagnostics['sigma_continuation']
+    assert spread.shape == (4, 4)
+    assert np.all(spread >= 0) and spread.max() < 1e-4
+    poles = en.diagnostics['sigma_poles']
+    _, _, en_c = build_effective_hamiltonian(
+        run_low_level(mf, method='rpa', mode='casida'), a, sigma='srg')
+    assert 'sigma_continuation' not in en_c.diagnostics
+    ref = en_c.diagnostics['sigma_poles']
+    assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
+    assert np.allclose(poles['window'], ref['window'], atol=1e-8, rtol=0)
+    assert np.abs(poles['z'] - ref['z']).max() < 1e-4
+    every = ActiveSpace.from_counts(eps, nocc, nocc, len(eps) - nocc)
+    _, _, en = build_effective_hamiltonian(low, every, sigma='mode_a')
+    assert not en.diagnostics['sigma_continuation'].any()
+    assert not rpa.embedding_self_energy(low, partition(every, eps),
+                                         'srg').any()
+    coarse = run_low_level(mf, method='rpa', mode='imagfrequency',
+                           numerics=Numerics(quadrature={'npade': 4}))
+    with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
+        _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg')
+    assert en.diagnostics['sigma_continuation'].max() > 1e-4

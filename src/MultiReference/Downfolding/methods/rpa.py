@@ -34,6 +34,17 @@ by mode A at eta = 0 (Eq. 12, 'mode_a', refused near the poles,
 `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
 both spin channels with the Hartree-only double counting (dc='hartree'), and
 records the 'sigma_poles' diagnostic.
+
+On imagfrequency there are no residues: S^E(mu + i w) comes from the
+Lorentzian fit of W on the minimax W grid with the internal orbital
+restricted to the environment (`sigma_env_imag_axis`, W cached on the first
+request), is continued by one Pade fit per element, and each element is
+evaluated at its own point (`continued_self_energy`): Eq. 42, Re S^E_tu(z_tu),
+for 'srg' (s = inf; srg_s enters the pole check alone), the real axis for
+'mode_a'. Both refuse near the poles and point to casida; Omega_min of the
+window is the lowest root of the same Casida problem (`lowest_excitation`).
+The 'sigma_continuation' diagnostic is the spread of two Pade fits on the
+even and the odd nodes.
 """
 import warnings
 from dataclasses import dataclass, field
@@ -42,16 +53,27 @@ from typing import Optional
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
-from src.Base.numerics.constants import (DOWNFOLDING_SRG_DAMPING_WARN,
-                                         DOWNFOLDING_SRG_S)
+from src.Base.numerics.constants import (DOWNFOLDING_SIGMA_CONTINUATION_WARN,
+                                         DOWNFOLDING_SRG_DAMPING_WARN,
+                                         DOWNFOLDING_SRG_S,
+                                         GW_DENSITY_W_FIT_HIGH,
+                                         GW_DENSITY_W_FIT_LOW,
+                                         GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
 from src.Base.orbital_spaces import particle_hole_window
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
+from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
+                                                        pade_fit_elementwise,
+                                                        pade_nodes)
 from src.Base.utils.grids.grids import minimax_frequency_grid
 from src.SingleReference.common.active_space import closed_shell_nocc
-from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.GW.imaginary_axis import \
+    fitted_self_energy_matrix_imaginary_axis
+from src.SingleReference.LinearResponse.casida import (CasidaSolver,
+                                                       solver_choice)
+from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.SingleReference.LinearResponse.linear_response import \
@@ -100,7 +122,9 @@ class RPALowLevel:
         energy's minimax frequency quadrature, and 'p0', P(0) = 1 - W(0)^-1
         = chi0(0) = -4 B_ov diag(1/delta) B_ov^T (naux, naux) in the
         normalized fitting basis (the convention of
-        `solve_polarizability_imaginary_axis`).
+        `solve_polarizability_imaginary_axis`). The first Sigma^E request
+        adds 'omega_min' (`lowest_excitation`) and 'w_grid', the (points, W)
+        of `_screening_grid`.
     """
     mf: object
     mode: str
@@ -508,25 +532,63 @@ def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
     return 0.5 * (half + half.T)
 
 
+def lowest_excitation(low, solver=None):
+    """Omega_min, the lowest excitation energy of the full RPA (None without
+    a particle-hole pair), the one number the pole-free window needs.
+
+    casida: the lowest of low.omega. imagfrequency, which diagonalizes
+    nothing: the lowest root of the same restricted singlet Casida problem
+    on low.factors, by the dense solve while the pair (A, B) fits in memory
+    and by the Davidson above that (`solver_choice`), at the run's numerics;
+    cached in low.cache['omega_min'] on the first request. solver: 'dense'
+    or 'davidson' forces that solver and bypasses the cache (for tests).
+    """
+    if low.mode == 'casida':
+        return float(low.omega.min()) if low.omega.size else None
+    if solver is None and 'omega_min' in low.cache:
+        return low.cache['omega_min']
+    nocc = low.nocc
+    n_pair = nocc * (len(low.eps) - nocc)
+    om = None
+    if n_pair:
+        how = choice(solver or solver_choice(n_pair), ('dense', 'davidson'),
+                     'solver')
+        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                                  spin_mode='restricted')
+        if how == 'dense':
+            omega = CasidaSolver(*lr.build_casida_matrices(
+                nocc, lBSE=False)).solve(numerics=low.numerics)[0]
+        else:
+            omega = solve_casida_davidson(lr, nocc, numerics=low.numerics)[0]
+        om = float(np.min(omega))
+    if solver is None:
+        low.cache['omega_min'] = om
+    return om
+
+
 def pole_window(low, part):
     """(lo, hi), the pole-free window of the environment self-energy:
-    (max eps_I - Omega_min, min eps_Ev + Omega_min). Every pole of S^E lies
-    at eps_i - Omega_n <= lo (inactive i) or eps_a + Omega_n >= hi
-    (environment virtual a), so between them every D_tr is non-zero. A side
-    without orbitals (or no excitation at all) is -inf or +inf."""
-    if low.omega.size == 0:
+    (max eps_I - Omega_min, min eps_Ev + Omega_min), Omega_min from
+    `lowest_excitation`. Every pole of S^E lies at eps_i - Omega_n <= lo
+    (inactive i) or eps_a + Omega_n >= hi (environment virtual a), so between
+    them every D_tr is non-zero. A side without orbitals (or no excitation at
+    all) is -inf or +inf."""
+    om = lowest_excitation(low)
+    if om is None:
         return -np.inf, np.inf
-    om = low.omega.min()
     eps = low.eps
     lo = eps[part.inactive].max() - om if len(part.inactive) else -np.inf
     hi = eps[part.env_virt].min() + om if len(part.env_virt) else np.inf
     return float(lo), float(hi)
 
 
-def _refuse_near_poles(low, part, settings):
+def _refuse_near_poles(low, part, settings, sigma):
     """Refuse (ValueError) an active orbital whose energy is within
     pole_margin/sqrt(2 s) of an edge of `pole_window`, or outside it (spec
-    §3.6, sigma='mode_a'); s = DOWNFOLDING_SRG_S when srg_s is None."""
+    §3.6); s = DOWNFOLDING_SRG_S when srg_s is None. On casida this guards
+    sigma='mode_a' alone and points to 'srg'; on imagfrequency it guards
+    both forms, continued from the imaginary axis at s = inf, and points to
+    casida."""
     s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
     margin = settings.pole_margin / np.sqrt(2.0 * s)
     lo, hi = pole_window(low, part)
@@ -537,63 +599,164 @@ def _refuse_near_poles(low, part, settings):
         named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance {x:.6f})'
                           for p, e, x in zip(part.act[bad], eps[bad],
                                              dist[bad]))
+        if low.mode == 'casida':
+            advice = ("Use sigma='srg', which is finite everywhere, or move "
+                      "these orbitals out of the active space.")
+        else:
+            advice = (f"On mode={low.mode!r} sigma={sigma!r} is continued "
+                      f"from the imaginary axis without damping (s = inf); "
+                      f"use mode='casida', where sigma='srg' is finite "
+                      f"everywhere, or move these orbitals out of the active "
+                      f"space.")
         raise ValueError(
-            f"sigma='mode_a' diverges at the poles of the environment "
+            f"sigma={sigma!r} diverges at the poles of the environment "
             f"self-energy: the active {named} are within the margin "
             f"{margin:.6f} Ha (pole_margin {settings.pole_margin:g} / "
             f"sqrt(2 s), s = {s:g}) of the pole-free window "
             f"({lo:.6f}, {hi:.6f}) or outside it (a negative distance). "
-            f"Use sigma='srg', which is finite everywhere, or move these "
-            f"orbitals out of the active space.")
+            + advice)
 
 
 def embedding_self_energy(low, part, sigma):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
     part.act (occupied first): iG^E(W - v) with r over part.env, the full
-    RPA's W (`screened_residues`) and the mean-field energies eps and
-    Omega (spec §3.6).
+    RPA's W and the mean-field energies (spec §3.6).
 
-    sigma: 'srg', Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
+    casida: the residues of W (`screened_residues`) and the RPA's Omega.
+    sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
         finite everywhere; 'mode_a', Eq. 12 at eta = 0, refused (naming the
         orbitals) when an active energy is within pole_margin/sqrt(2 s) of
         the pole-free window's edge or outside it (`pole_window`).
+    imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
+        continued once and evaluated per element (`continued_self_energy`):
+        'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
+        (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
+        + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
+        on casida, pointing to mode='casida'.
     Zero when the environment is empty.
     """
     return _embedding(low, part, sigma)[0]
 
 
-def _refuse_sigma_off_casida(low, sigma):
-    """NotImplementedError for Sigma^E on a route other than casida: the
-    residues of W come from the Casida eigenvectors, which only casida
-    keeps."""
-    if low.mode != 'casida':
-        raise NotImplementedError(
-            f"method={METHOD!r} sigma={sigma!r} is not implemented on "
-            f"mode={low.mode!r} yet: use mode='casida'.")
-
-
 def _embedding(low, part, sigma):
-    """(Sigma_bar, args, srg_s) of `embedding_self_energy`: args = (w, eps_t,
-    eps_r, occupied_r, omega) of the environment, kept so that the
-    'sigma_poles' diagnostic does not build the residues again, and srg_s the
-    s of the run's numerics."""
+    """(Sigma_bar, kept) of `embedding_self_energy`, kept what the
+    diagnostics read without building it again: on casida 'args' = (w, eps_t,
+    eps_r, occupied_r, omega) of the environment and 'srg_s', the s applied
+    by 'srg'; on imagfrequency 'z' and 'samples', the Pade nodes and S^E
+    there, and 'fit', the (Z, A) of `pade_fit_elementwise` (None without an
+    environment)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
-    _refuse_sigma_off_casida(low, sigma)
     settings = numerics_or_default(low.numerics).downfolding
-    if sigma == 'mode_a':
-        _refuse_near_poles(low, part, settings)
+    if sigma == 'mode_a' or low.mode != 'casida':
+        _refuse_near_poles(low, part, settings, sigma)
+    if low.mode != 'casida':
+        return _embedding_imag_axis(low, part, sigma)
     env = part.env
     args = (screened_residues(low, part), low.eps[part.act], low.eps[env],
             env < low.nocc, low.omega)
+    kept = {'args': args, 'srg_s': settings.srg_s}
     if sigma == 'srg':
-        return srg_self_energy(*args, settings.srg_s), args, settings.srg_s
-    return mode_a_self_energy(*args), args, settings.srg_s
+        return srg_self_energy(*args, settings.srg_s), kept
+    return mode_a_self_energy(*args), kept
+
+
+def _screening_grid(low):
+    """(points, W): the full RPA's W(i w) = [1 - chi0(i w)]^-1 in the
+    normalized fitting basis on the minimax grid of numerics.imagfreq.nfreq
+    points over the particle-hole window, the W grid of the GW density's
+    `self_energy_matrix_imaginary_axis`; built on the first request and kept
+    in low.cache['w_grid'] (spec §4.5)."""
+    if 'w_grid' not in low.cache:
+        nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
+        e_min, e_max, _ = particle_hole_window(low.eps, low.nocc)
+        points = minimax_frequency_grid(nfreq, e_min, e_max)[0]
+        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                                  spin_mode='restricted')
+        low.cache['w_grid'] = (points, lr.solve_rpa_screening(
+            points, low.nocc, is_imaginary=True))
+    return low.cache['w_grid']
+
+
+def sigma_env_imag_axis(low, part, query_freqs):
+    """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
+    the correlation self-energy iG(W - v) of the full RPA's W on part.act
+    (occupied first) with the internal orbital restricted to part.env, mu
+    the whole system's mid-gap. imagfrequency only.
+
+    This is the GW density's `fitted_self_energy_matrix_imaginary_axis` on
+    the three-index factors sliced to B[Q, t, r] (t active, r environment)
+    and the environment's eps_r - mu: the Lorentzian fit of W - 1 on
+    `_screening_grid` with its poles and regularization
+    (GW_DENSITY_W_FIT_*), whose one-pole convolution with G_r is exact; the
+    full system's mu and fit range, so only the internal sum changes.
+    """
+    n, env = part.n_act, part.env
+    query_freqs = np.atleast_1d(query_freqs)
+    if n == 0 or len(env) == 0:
+        return np.zeros((len(query_freqs), n, n), dtype=complex)
+    points, w_grid = _screening_grid(low)
+    e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
+                         GW_DENSITY_W_FIT_HIGH * e_max, len(points))
+    b = low.factors[:, part.act][:, :, env]
+    return fitted_self_energy_matrix_imaginary_axis(
+        b, low.eps[env] - mu, points, w_grid, query_freqs, poles,
+        GW_DENSITY_W_FIT_TIKHONOV)
+
+
+def _evaluate_continued(fit, eps_act, sigma):
+    """The static reduction of a `pade_fit_elementwise` fit (Z, A) of S^E:
+    'srg', Re S_tu(z_tu) with z_tu = (eps_t + eps_u)/2 + i |eps_u - eps_t|/2
+    (Eq. 42; S(z*) = S(z)*, so the half plane of the fit's nodes serves both
+    t, u and u, t); 'mode_a', 1/2 Re[S_tu(eps_t) + S_tu(eps_u)]."""
+    e = np.asarray(eps_act, dtype=float)
+    n = len(e)
+    if sigma == 'srg':
+        z = 0.5 * (e[:, None] + e[None, :]) + 0.5j * np.abs(e[None, :]
+                                                            - e[:, None])
+        at = pade_eval_elementwise(z.ravel(), *fit).reshape((n,) * 4)
+        return np.einsum('tutu->tu', at).real
+    half = np.einsum('ttu->tu', pade_eval_elementwise(e, *fit)).real
+    return 0.5 * (half + half.T)
+
+
+def continued_self_energy(z, samples, eps_act, sigma):
+    """Sigma_bar (n_act, n_act) from S^E sampled at the complex frequencies z
+    (samples (nz, n_act, n_act), symmetric): one Thiele-Pade fit per element
+    (`pade_fit_elementwise`, greedy order, the upper triangle), then each
+    element at its own point, Re S_tu(z_tu) for 'srg' (Eq. 42, s = inf) or
+    1/2 Re[S_tu(eps_t) + S_tu(eps_u)] for 'mode_a', eps_act the active
+    orbitals' energies."""
+    if len(eps_act) == 0:
+        return np.zeros((0, 0))
+    fit = pade_fit_elementwise(z, samples, symmetric=True)
+    return _evaluate_continued(fit, eps_act, sigma)
+
+
+def _embedding_imag_axis(low, part, sigma):
+    """`_embedding` on imagfrequency: S^E on the Pade nodes of the run's
+    numerics (`pade_nodes`, on the line mu + i w), fitted once."""
+    nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
+    z = particle_hole_window(low.eps, low.nocc)[2] + 1j * nodes
+    samples = sigma_env_imag_axis(low, part, nodes)
+    kept = {'z': z, 'samples': samples, 'fit': None}
+    n = part.n_act
+    if n == 0 or len(part.env) == 0:
+        return np.zeros((n, n)), kept
+    kept['fit'] = pade_fit_elementwise(z, samples, symmetric=True)
+    return _evaluate_continued(kept['fit'], low.eps[part.act], sigma), kept
 
 
 class SigmaDampingWarning(RuntimeWarning):
     """The SRG damping of Sigma_bar^E is not negligible: an active orbital
     energy lies within a few 1/sqrt(2 s) of a pole of the environment
     self-energy, so 'srg' there depends on srg_s."""
+
+
+class SigmaContinuationWarning(RuntimeWarning):
+    """Two Pade fits of S^E on disjoint halves of the nodes disagree by more
+    than DOWNFOLDING_SIGMA_CONTINUATION_WARN at an element's evaluation
+    point: the continuation of Sigma_bar^E is not to be trusted there."""
 
 
 def _pole_weights(w, eps_t, eps_r, occupied_r, omega):
@@ -609,21 +772,48 @@ def _pole_weights(w, eps_t, eps_r, occupied_r, omega):
     return 1.0 / (1.0 + ratio.sum(axis=(0, 2)))
 
 
-def _sigma_poles(low, part, sigma, sigma_bar, args, srg_s):
+# The step of the central difference that gives S'_tt(eps_t) from the
+# continued fraction, Ha: the fraction is smooth on the real axis inside the
+# pole-free window (the poles are at least the pole margin away), so the
+# O(h^2) error is far below the continuation's own.
+_SLOPE_STEP = 1e-5
+
+
+def _continued_pole_weights(fit, eps_act):
+    """Z_t = 1/(1 - S'_tt(eps_t)) from a Pade fit of S^E, the slope by a
+    central difference of the continued fraction at eps_t. 1 for every t
+    without a fit (no environment)."""
+    e = np.asarray(eps_act, dtype=float)
+    if fit is None:
+        return np.ones(len(e))
+    h = _SLOPE_STEP
+    step = (pade_eval_elementwise(e + h, *fit)
+            - pade_eval_elementwise(e - h, *fit)).real / (2.0 * h)
+    return 1.0 / (1.0 - np.einsum('ttt->t', step))
+
+
+def _sigma_poles(low, part, sigma, sigma_bar, kept):
     """The 'sigma_poles' record (spec §4.6), and a SigmaDampingWarning naming
     the active orbitals whose row of Sigma_bar the SRG damping moves by more
     than DOWNFOLDING_SRG_DAMPING_WARN.
 
     window: `pole_window`. pole_distance: per active orbital, the distance
         of eps_t to the nearer edge of the window, negative outside it.
-    z: per active orbital, Z_t = 1/(1 - S'_tt(eps_t)) (`_pole_weights`).
-    srg_s: the s applied, None for s = inf and for 'mode_a' (undamped).
+    z: per active orbital, Z_t = 1/(1 - S'_tt(eps_t)): of the pole sum on
+        casida (`_pole_weights`), of the continued fraction on imagfrequency.
+    srg_s: the s applied, None for s = inf (always on imagfrequency, which
+        applies no damping) and for 'mode_a' (undamped).
     srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
         finite s is applied.
     """
     lo, hi = pole_window(low, part)
     eps = low.eps[part.act]
     dist = np.minimum(eps - lo, hi - eps)
+    if low.mode != 'casida':
+        return {'window': (lo, hi), 'pole_distance': dist,
+                'z': _continued_pole_weights(kept['fit'], eps),
+                'srg_s': None, 'srg_damping': 0.0}
+    args, srg_s = kept['args'], kept['srg_s']
     applied = srg_s if sigma == 'srg' else None
     damping = 0.0
     if applied is not None and sigma_bar.size:
@@ -644,6 +834,44 @@ def _sigma_poles(low, part, sigma, sigma_bar, args, srg_s):
     return {'window': (lo, hi), 'pole_distance': dist,
             'z': _pole_weights(*args), 'srg_s': applied,
             'srg_damping': damping}
+
+
+def continuation_spread(z, samples, eps_act, sigma):
+    """(n_act, n_act): per element, |Sigma_bar from the even-indexed z -
+    Sigma_bar from the odd-indexed z|, each by `continued_self_energy` at
+    the element's own evaluation point. Two fits on disjoint halves of the
+    nodes: an estimate of the continuation's error that, with half the
+    nodes each, overstates that of the full fit."""
+    z, samples = np.asarray(z), np.asarray(samples)
+    even, odd = (continued_self_energy(z[k::2], samples[k::2], eps_act,
+                                       sigma) for k in (0, 1))
+    return np.abs(even - odd)
+
+
+def _sigma_continuation(low, part, sigma, kept):
+    """The 'sigma_continuation' record (spec §4.6): `continuation_spread` on
+    the nodes Sigma_bar was continued from, and a SigmaContinuationWarning
+    naming the elements (as orbital pairs) above
+    DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without an environment."""
+    n = part.n_act
+    if kept['fit'] is None:
+        return np.zeros((n, n))
+    spread = continuation_spread(kept['z'], kept['samples'],
+                                 low.eps[part.act], sigma)
+    bad = np.argwhere(np.triu(spread > DOWNFOLDING_SIGMA_CONTINUATION_WARN))
+    if len(bad):
+        act = part.act
+        named = ', '.join(f'({act[t]}, {act[u]}) {spread[t, u]:.2e}'
+                          for t, u in bad)
+        warnings.warn(
+            f"sigma={sigma!r} on mode={low.mode!r}: two Pade fits of the "
+            f"environment self-energy on the even and the odd nodes differ "
+            f"by more than {DOWNFOLDING_SIGMA_CONTINUATION_WARN:g} Ha at the "
+            f"elements {named} (orbital pairs, Ha); the continued Sigma_bar^E "
+            f"there is uncertain. More nodes (numerics.quadrature.npade) or "
+            f"mode='casida' avoid the continuation.",
+            SigmaContinuationWarning, stacklevel=4)
+    return spread
 
 
 def _diagnostic_names(diagnostics):
@@ -668,13 +896,18 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
         §3.7). Allowed with every screening; the third term of the
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
-        exact only for 'crpa' in the static limit. Casida only for now; on
-        imagfrequency refused (NotImplementedError).
+        exact only for 'crpa' in the static limit. On imagfrequency 'srg'
+        is s = inf (Eq. 42) and both forms are refused near the poles,
+        pointing to casida (`embedding_self_energy`).
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
         that does not apply here (on casida 'ec_active_casida' and
-        'sigma_continuation', and 'sigma_poles' without sigma) is skipped and
-        absent, an unknown name refused. 'sigma_poles' (`_sigma_poles`)
-        warns (SigmaDampingWarning) when the SRG damping is not negligible.
+        'sigma_continuation', and 'sigma_poles' and 'sigma_continuation'
+        without sigma) is skipped and absent, an unknown name refused.
+        'sigma_poles' (`_sigma_poles`) warns (SigmaDampingWarning) when the
+        SRG damping is not negligible (casida). 'sigma_continuation'
+        (imagfrequency, `_sigma_continuation`): per element the spread of
+        two Pade fits on the even and the odd nodes, warning
+        (SigmaContinuationWarning) above DOWNFOLDING_SIGMA_CONTINUATION_WARN.
         'ec_active_casida' (imagfrequency): {'casida': the dense-Casida
         E_c^A on the same v_eff, 'difference': the route's quadrature value
         minus it}.
@@ -690,8 +923,6 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if sigma not in SIGMAS:
         raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
                          + ', '.join(repr(s) for s in SIGMAS) + '.')
-    if sigma is not None:
-        _refuse_sigma_off_casida(low, sigma)
     vt = screening_correction(low, part, screening)
     v_eff = _active_v(low, part.act)[0] + vt
     found = {}
@@ -706,11 +937,13 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        s_bar, args, srg_s = _embedding(low, part, sigma)
+        s_bar, kept = _embedding(low, part, sigma)
         sigma_bar, dc = (s_bar, s_bar), 'hartree'
         if 'sigma_poles' in names:
-            found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar,
-                                                args, srg_s)
+            found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar, kept)
+        if 'sigma_continuation' in names and low.mode != 'casida':
+            found['sigma_continuation'] = _sigma_continuation(low, part,
+                                                              sigma, kept)
     return DownfoldingTerms(
         vtilde=(vt, vt, vt), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=found)
