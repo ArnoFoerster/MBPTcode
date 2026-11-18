@@ -38,6 +38,9 @@
   1-RDMs
 - [Coupled cluster](methods/coupled-cluster.md) — CCSDT and EOM-CCSDT, and
   CCSDT/CCSDTQ as a solver for large active spaces
+- [Downfolding](methods/downfolding.md) — static effective Hamiltonians of an
+  active space from HF (CASCI) and RPA (bare, cRPA, cRPA_ph) low-level methods,
+  with the constant E_0
 - [Finite temperature](methods/finite-temperature.md) — Matsubara-axis grids
 - [Periodic systems](methods/periodic.md) — k-point RPA, BSE and GW for
   crystals, metals and slabs
