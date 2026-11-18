@@ -46,7 +46,7 @@ active spaces and screenings, so a comparison loop pays for the RPA once.
 `method='hf'` takes no options: `run_low_level(mf, method='hf')`, and
 `build_effective_hamiltonian(low_hf, active)` is CASCI.
 
-**The two routes.** `'casida'` diagonalizes the full Casida problem once and
+**The routes.** `'casida'` diagonalizes the full Casida problem once and
 keeps every excitation energy and amplitude. `'imagfrequency'` diagonalizes
 nothing: it keeps the full RPA energy of the existing imaginary-axis code,
 its minimax frequency grid and the static polarizability P(0) of the whole
@@ -82,7 +82,7 @@ Options of the RPA:
 | | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none; ISDF factors on `'space-time'`); `False`: exact 4-centre integrals, `'casida'` only |
 | | `numerics` | a `Numerics`, or `None` for the defaults (`'space-time'` needs one naming the ISDF grid) |
 | `build_effective_hamiltonian` | `spin_free` | `True` (default): spatial-orbital `g_eff`; `False`: the 2 n_act interleaved spin orbitals |
-| | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'` |
+| | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
 | | `diagnostics` | a tuple of names, default all; see below |
 
