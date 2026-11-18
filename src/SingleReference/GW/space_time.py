@@ -652,6 +652,23 @@ def _space_time_grids(spectra, noccs, anchors, sizes, w0, timings):
             'ranges': ranges}
 
 
+def space_time_axes(eps, nocc, numerics=None):
+    """The time and frequency axes of the restricted space-time self-energy
+    on the spectrum `eps` (closed shell, `nocc` occupied), sized by
+    numerics.quadrature (ntau_st, nfreq_st, npade, tau_target, w0_gl) as
+    `self_energy_matrix_space_time` sizes them: `_space_time_grids` on one
+    channel anchored on `eps` itself, the same dict ('ntau', 'grid',
+    'freq_points', 'freq_weights', 'pade_freq', 'tau_points', 'ranges'). For
+    a caller that builds W and the self-energy from these axes with its own
+    factors or orbital subsets and must sample the same Sigma."""
+    q = numerics_or_default(numerics).quadrature
+    eps = np.asarray(eps, dtype=float)
+    return _space_time_grids(
+        [eps], [nocc], [eps],
+        dict(ntau=q.ntau_st, nfreq=q.nfreq_st, pade_freq=pade_nodes(q),
+             tau_target=q.tau_target), q.w0_gl, None)
+
+
 def _continuum_shift(X_mos, D, w_static, transform, noccs):
     """(shifts, D): each channel's Eq. (18) shift from the static W, and the
     factor taken to the bare gauge the self-energy screens in; (None, D)
