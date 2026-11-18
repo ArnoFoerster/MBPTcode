@@ -325,7 +325,7 @@ def test_unsupported_mean_fields_are_refused():
 
 def test_unknown_method_and_stray_options():
     mf = water()
-    with pytest.raises(ValueError, match="'hf'"):
+    with pytest.raises(ValueError, match="'hf', 'rpa'"):
         run_low_level(mf, method='mp2')
     with pytest.raises(TypeError, match="method='hf'.*screening"):
         run_low_level(mf, method='hf', screening='crpa')

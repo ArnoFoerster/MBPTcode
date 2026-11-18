@@ -6,7 +6,9 @@ plain loops where that reads closest to the formula, on exact 4-centre
 integrals taken straight from `mol.intor`. Nothing in `src/` is used, so the
 production code in `src/MultiReference/Downfolding/` is checked against an
 independent implementation (tests/test_downfolding_one_body.py,
-tests/test_downfolding_energy.py).
+tests/test_downfolding_energy.py, tests/test_downfolding_two_body.py).
+The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
+(spec §3.3, row E_RPA,corr).
 
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
@@ -165,3 +167,37 @@ def reference_energy(g_eff, n_act_occ):
         for l in range(n_act_occ):
             e += 2 * eri[k, k, l, l] - eri[k, l, l, k]
     return e
+
+
+def _pair_space(eri, eps, nocc):
+    """(delta, K) on the nocc*nvirt (i, a) pairs in C order: delta_ia =
+    eps_a - eps_i and K_ia,jb = (ia|jb), a counted from nocc."""
+    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()
+    n = delta.size
+    return delta, eri[:nocc, nocc:, :nocc, nocc:].reshape(n, n)
+
+
+def drpa(eri, eps, nocc, keep=None):
+    """(omega, xpy): the restricted singlet direct RPA of chemist `eri`.
+
+    M = delta^1/2 (delta + 4K) delta^1/2 = Z omega^2 Z^T and
+    xpy = delta^1/2 Z omega^-1/2, one excitation per column, rows the (i, a)
+    pairs in C order. keep: a bool mask over those pairs; the problem is then
+    solved on the kept pairs alone and xpy has one row per kept pair.
+    """
+    delta, K = _pair_space(eri, eps, nocc)
+    if keep is not None:
+        delta, K = delta[keep], K[np.ix_(keep, keep)]
+    root = np.sqrt(delta)
+    M = root[:, None] * (np.diag(delta) + 4.0 * K) * root[None, :]
+    omega2, Z = np.linalg.eigh(M)
+    omega = np.sqrt(omega2)
+    return omega, root[:, None] * Z / np.sqrt(omega)[None, :]
+
+
+def rpa_energy(eri, eps, nocc):
+    """The restricted direct RPA correlation energy of chemist `eri`,
+    1/2 sum_n omega_n - 1/2 sum_ia (delta_ia + 2 K_ia,ia)."""
+    delta, K = _pair_space(eri, eps, nocc)
+    omega, _ = drpa(eri, eps, nocc)
+    return 0.5 * omega.sum() - 0.5 * np.sum(delta + 2.0 * np.diag(K))

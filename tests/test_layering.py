@@ -325,6 +325,9 @@ LAYERS = {
     'src.SingleReference.GW': 2.5,
     'src.SingleReference.ADC': 2.6, 'src.SingleReference.BSE': 2.6,
     'src.SingleReference.Periodic': 2.6,
+    # the RPA downfolding builds on the response machinery and GW; its driver
+    # reaches the methods through a registry, so the whole package sits here
+    'src.MultiReference.Downfolding': 2.6,
     'src.fragments': 2.7,
     'src.gradients': 3.0,                               # the method-neutral core
     'src.gradients.rpa': 3.1,                           # the RPA screening GW-BSE is built on
