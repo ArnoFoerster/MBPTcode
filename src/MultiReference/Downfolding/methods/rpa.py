@@ -68,10 +68,11 @@ from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import flag
-from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS,
+from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
                                          DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
                                          DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
                                          DOWNFOLDING_SIGMA_CONTINUATION_WARN,
+                                         DOWNFOLDING_SIGMA_TILE_GB,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
                                          GW_DENSITY_W_FIT_HIGH,
@@ -676,7 +677,59 @@ def _denominators(eps_t, eps_r, occupied_r, omega):
             + sign[None, None, :] * np.asarray(omega)[:, None, None])
 
 
-def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s):
+# The (nexc, n_act, n_act, n_r) arrays `_srg_pair` holds at once in one
+# block: a + b, lam, the s = inf kernel, -s lam and its expm1 (the damped
+# kernel overwrites one of them), counted for its byte budget.
+_SRG_BLOCK_ARRAYS = 5
+
+
+def _excitation_blocks(nexc, n_act, n_r, tile_gb):
+    """Slices of the nexc excitations, consecutive, each with as many as
+    keep the _SRG_BLOCK_ARRAYS (n, n_act, n_act, n_r) temporaries of one
+    block within tile_gb GB, at least one."""
+    per = _SRG_BLOCK_ARRAYS * 8 * max(n_act, 1) ** 2 * max(n_r, 1)
+    size = max(1, int(tile_gb * BYTES_PER_GB // per))
+    return [slice(k, min(k + size, nexc)) for k in range(0, nexc, size)]
+
+
+def _sigma_tile_gb(numerics):
+    """The byte budget, GB, of one block of `srg_self_energy`:
+    numerics.layout.tile_gb, DOWNFOLDING_SIGMA_TILE_GB where it is None."""
+    gb = numerics_or_default(numerics).layout.tile_gb
+    return DOWNFOLDING_SIGMA_TILE_GB if gb is None else float(gb)
+
+
+def _srg_pair(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None,
+              infinite=False):
+    """(Sigma(s), Sigma(inf) or None) of `srg_self_energy`, both from one
+    loop over blocks of excitations (`_excitation_blocks` at tile_gb, None:
+    DOWNFOLDING_SIGMA_TILE_GB): the four-index kernel of a block is built,
+    contracted and dropped, so the working set is tile_gb and not
+    (nexc, n_act, n_act, n_r). infinite: also Sigma at s = inf from the
+    same block's kernel before its damping, the damping diagnostic's
+    reference, the very numbers a separate s = None call gives."""
+    tile_gb = DOWNFOLDING_SIGMA_TILE_GB if tile_gb is None else tile_gb
+    d = _denominators(eps_t, eps_r, occupied_r, omega)
+    n_act = d.shape[1]
+    out = np.zeros((n_act, n_act))
+    out_inf = np.zeros((n_act, n_act)) if infinite and s is not None else None
+    for blk in _excitation_blocks(len(d), n_act, d.shape[2], tile_gb):
+        a, b = d[blk, :, None, :], d[blk, None, :, :]
+        lam = a * a + b * b
+        kern = np.divide(a + b, lam, out=np.zeros_like(lam), where=lam > 0)
+        wb = w[blk]
+        if out_inf is not None:
+            out_inf += np.einsum('ntr,nur,ntur->tu', wb, wb, kern)
+        if s is not None:
+            kern *= -np.expm1(-s * lam)
+        out += np.einsum('ntr,nur,ntur->tu', wb, wb, kern)
+    out = 0.5 * (out + out.T)
+    if out_inf is not None:
+        return out, 0.5 * (out_inf + out_inf.T)
+    return out, (out if infinite else None)
+
+
+def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None):
     """The SRG static self-energy (n_act, n_act), Marie and Loos Eq. 44:
 
         Sigma_tu = sum_rn (D_tr + D_ur)/(D_tr^2 + D_ur^2) w_tr w_ur
@@ -690,15 +743,14 @@ def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s):
     needs no pole check; it is symmetric in t, u by construction. A term
     exactly at a pole (D_tr = D_ur = 0, 0/0 as written) is 0, its limit at
     finite s; Eq. 42 has no value there and gets the same 0.
+
+    The sum over n runs over blocks of excitations whose four-index kernel
+    fits in tile_gb GB (None: DOWNFOLDING_SIGMA_TILE_GB; `_srg_pair`):
+    whole, that kernel is nexc n_act^2 n_r doubles per array, about 1 GB on
+    benzene/cc-pVTZ (10,10), where w is 0.1 GB. The blocks change only the
+    order of the sum.
     """
-    d = _denominators(eps_t, eps_r, occupied_r, omega)
-    a, b = d[:, :, None, :], d[:, None, :, :]
-    lam = a * a + b * b
-    kern = np.divide(a + b, lam, out=np.zeros_like(lam), where=lam > 0)
-    if s is not None:
-        kern *= -np.expm1(-s * lam)
-    out = np.einsum('ntr,nur,ntur->tu', w, w, kern)
-    return 0.5 * (out + out.T)
+    return _srg_pair(w, eps_t, eps_r, occupied_r, omega, s, tile_gb)[0]
 
 
 def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
@@ -709,7 +761,9 @@ def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
 
     S the pole sum of iG(W - v) over the internal orbitals r, arguments as
     in `srg_self_energy`. Undamped: a D_tr near zero makes it diverge, which
-    `embedding_self_energy` refuses before calling it.
+    `embedding_self_energy` refuses before calling it. Its temporaries are
+    the size of w (one denominator per t, r), so unlike Eq. 44 it needs no
+    blocks.
     """
     d = _denominators(eps_t, eps_r, occupied_r, omega)
     half = np.einsum('ntr,nur,ntr->tu', w, w, 1.0 / d)
@@ -879,11 +933,13 @@ def embedding_self_energy(low, part, sigma):
     return _embedding(low, part, sigma)[0]
 
 
-def _embedding(low, part, sigma):
+def _embedding(low, part, sigma, infinite=False):
     """(Sigma_bar, kept) of `embedding_self_energy`, kept what the
     diagnostics read without building it again: on casida 'args' = (w, eps_t,
-    eps_r, occupied_r, omega) of the environment and 'srg_s', the s applied
-    by 'srg'; on imagfrequency and space-time 'z' and 'samples', the Pade
+    eps_r, occupied_r, omega) of the environment, 'srg_s', the s applied
+    by 'srg', and, with infinite and sigma 'srg', 'srg_inf', Sigma_bar at
+    s = inf from the same block loop (`_srg_pair`; the damping diagnostic's
+    reference); on imagfrequency and space-time 'z' and 'samples', the Pade
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
@@ -897,7 +953,9 @@ def _embedding(low, part, sigma):
             env < low.nocc, low.omega)
     kept = {'args': args, 'srg_s': settings.srg_s}
     if sigma == 'srg':
-        return srg_self_energy(*args, settings.srg_s), kept
+        s_bar, kept['srg_inf'] = _srg_pair(
+            *args, settings.srg_s, _sigma_tile_gb(low.numerics), infinite)
+        return s_bar, kept
     return mode_a_self_energy(*args), kept
 
 
@@ -1107,7 +1165,7 @@ def _sigma_poles(low, part, sigma, sigma_bar, kept):
     applied = srg_s if sigma == 'srg' else None
     damping = 0.0
     if applied is not None and sigma_bar.size:
-        moved = np.abs(sigma_bar - srg_self_energy(*args, None))
+        moved = np.abs(sigma_bar - kept['srg_inf'])
         damping = float(moved.max())
         rows = moved.max(axis=1) > DOWNFOLDING_SRG_DAMPING_WARN
         if rows.any():
@@ -1230,7 +1288,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        s_bar, kept = _embedding(low, part, sigma)
+        s_bar, kept = _embedding(low, part, sigma,
+                                 infinite='sigma_poles' in names)
         sigma_bar, dc = (s_bar, s_bar), 'hartree'
         if 'sigma_poles' in names:
             found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar, kept)

@@ -345,6 +345,16 @@ DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS = 2000
 # stand-in then lies above Omega_min and widens the pole-free window in the
 # unsafe direction (ruling R25).
 DOWNFOLDING_OMEGA_DAVIDSON_GUESS = 10
+# Working set, in GB, of one block of excitations of the SRG Sigma_bar^E
+# (`rpa.srg_self_energy`, Eq. 44) when numerics.layout.tile_gb is None: the
+# kernel (D_tr + D_ur)/(D_tr^2 + D_ur^2) [1 - exp(-(D_tr^2 + D_ur^2) s)] is
+# (nexc, n_act, n_act, n_r), and whole, with its four other temporaries,
+# about 5 GB on benzene/cc-pVTZ (10,10) (nexc 5103, n_r 254), where the
+# residues w are 0.1 GB and X+Y 0.2 GB. A quarter GB keeps the block below
+# what the casida route already holds, and still hundreds of excitations
+# (246 there), so the loop costs nothing; the block moves only the memory
+# and the order of the sum over excitations.
+DOWNFOLDING_SIGMA_TILE_GB = 0.25
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.

@@ -384,6 +384,43 @@ def test_srg_term_at_an_exact_pole_is_zero():
     assert out[0, 0] == kept[0, 0] and kept[0, 0] != 0.0
 
 
+def test_srg_kernel_blocked_over_excitations(wat, low_exact, monkeypatch):
+    """Ruling R27(b): the (nexc, n_act, n_act, n_r) kernel of Eq. 44 is
+    built a block of excitations at a time, the block from the byte budget
+    tile_gb, so the working set is bounded and only the order of the sum
+    over n changes. One excitation per block (tile_gb 1e-12) against all of
+    them in one (tile_gb 1e3, the unblocked formula), at s = 500 and s = inf,
+    on the environment of the contiguous (4,4) and the near-pole space of
+    water/6-31G (40 excitations): measured 0.0, bitwise (bar 1e-14, the
+    rounding a reordered sum may bring on a larger case). The damping diagnostic
+    reads Sigma_bar(inf) from the same block loop as Sigma_bar(s), without
+    a second srg_self_energy, bitwise the separate call."""
+    _, _, eps, nocc = wat
+    for space in (_contiguous_44, _high_virtual):
+        args = _pure_args(low_exact, partition(space(eps, nocc), eps))
+        nexc = len(args[-1])
+        assert len(rpa._excitation_blocks(nexc, 4, len(args[2]),
+                                          1e-12)) == nexc
+        assert len(rpa._excitation_blocks(nexc, 4, len(args[2]),
+                                          1e3)) == 1
+        for s in (DOWNFOLDING_SRG_S, None):
+            one = rpa.srg_self_energy(*args, s, tile_gb=1e-12)
+            whole = rpa.srg_self_energy(*args, s, tile_gb=1e3)
+            assert np.abs(whole).max() > 1e-2
+            assert np.abs(one - whole).max() < 1e-14
+    calls = []
+    srg = rpa.srg_self_energy
+    monkeypatch.setattr(rpa, 'srg_self_energy',
+                        lambda *a, **k: calls.append(a) or srg(*a, **k))
+    aspace = _high_virtual(eps, nocc)
+    with pytest.warns(rpa.SigmaDampingWarning):
+        poles = _poles(low_exact, aspace)
+    assert calls == []
+    args = _pure_args(low_exact, partition(aspace, eps))
+    s_bar = srg(*args, DOWNFOLDING_SRG_S)
+    assert poles['srg_damping'] == np.abs(s_bar - srg(*args, None)).max()
+
+
 def _poles(low, aspace, sigma='srg', **opts):
     """energies.diagnostics['sigma_poles'] of `aspace` on `low` (crpa)."""
     return build_effective_hamiltonian(low, aspace, sigma=sigma,
