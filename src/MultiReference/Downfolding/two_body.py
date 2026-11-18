@@ -19,17 +19,25 @@ def active_eri(mol, mo_act):
     mo_act = (C_Aa, C_Ab) are the active orbital coefficients of the two spin
     channels. The integrals are the exact 4-centre ones of `mol`, never from a
     density-fitted object, because the bare v must not carry a fitting error.
+    An empty active space gives zero-size blocks without a transformation.
     """
     ca, cb = mo_act
-    na, nb = ca.shape[1], cb.shape[1]
-    aa = ao2mo.general(mol, (ca, ca, ca, ca), compact=False)
-    ab = ao2mo.general(mol, (ca, ca, cb, cb), compact=False)
-    bb = ao2mo.general(mol, (cb, cb, cb, cb), compact=False)
-    return (aa.reshape(na, na, na, na), ab.reshape(na, na, nb, nb),
-            bb.reshape(nb, nb, nb, nb))
+    return (_block(mol, ca, ca), _block(mol, ca, cb), _block(mol, cb, cb))
+
+
+def _block(mol, c1, c2):
+    n1, n2 = c1.shape[1], c2.shape[1]
+    if n1 == 0 or n2 == 0:
+        return np.zeros((n1, n1, n2, n2))
+    eri = ao2mo.general(mol, (c1, c1, c2, c2), compact=False)
+    return eri.reshape(n1, n1, n2, n2)
 
 
 def _same(x, y):
+    if x.shape != y.shape:
+        return False
+    if x.size == 0:
+        return True
     scale = max(1.0, float(np.max(np.abs(x))), float(np.max(np.abs(y))))
     return np.max(np.abs(x - y)) <= RESTRICTED_TOL * scale
 
@@ -44,8 +52,9 @@ def pack(h_eff, v_eff, e0, spin_free):
 
     Only a restricted Hamiltonian is packed: the two spin channels of h_eff
     and the three blocks of v_eff must agree to 1e-12 (relative to max(1, max
-    element)). A spin-resolved g_eff for the unrestricted case, solved by
-    fci.direct_uhf, is deferred.
+    element)). The arrays of g_eff are copies, never views of the inputs; an
+    empty active space packs zero-size arrays. A spin-resolved g_eff for the
+    unrestricted case, solved by fci.direct_uhf, is deferred.
     """
     h_a, h_b = h_eff
     aa, ab, bb = v_eff
@@ -54,7 +63,7 @@ def pack(h_eff, v_eff, e0, spin_free):
             "pack takes a restricted Hamiltonian only (equal alpha and beta "
             "channels); the unrestricted extension, a spin-resolved g_eff "
             "solved with fci.direct_uhf, is deferred.")
-    spatial = {1: h_a, 2: aa.transpose(0, 2, 1, 3)}
+    spatial = {1: np.array(h_a), 2: np.array(aa.transpose(0, 2, 1, 3))}
     if spin_free:
         return {0: e0, **spatial}
     g = spatial_to_spin_orbitals(spatial, h_a.shape[0])
