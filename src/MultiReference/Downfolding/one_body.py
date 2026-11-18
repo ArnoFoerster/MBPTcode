@@ -15,6 +15,22 @@ from .terms import choice
 DC_MODES = ('full', 'hartree')
 
 
+def inactive_jk(mol, mo, parts):
+    """(dms, j, k): the inactive densities D_I^sigma = C_I C_I^T of the two
+    spin channels as one (2, nao, nao) array, the Coulomb matrix
+    J[D_I^a + D_I^b] of the whole core, and the exchange matrices
+    (K[D_I^a], K[D_I^b]).
+
+    J and K are the exact 4-centre ones of `mol`: the bare v of the effective
+    Hamiltonian is never density fitted. mo = (C_a, C_b), parts = (part_a,
+    part_b).
+    """
+    dms = np.array([c[:, p.inactive] @ c[:, p.inactive].T
+                    for c, p in zip(mo, parts)])
+    vj, vk = get_jk(mol, dms)
+    return dms, vj[0] + vj[1], (vk[0], vk[1])
+
+
 def core_fock(mol, hcore_ao, mo, parts):
     """(f_a, f_b), each (n_act, n_act): the Fock operator of the inactive core
     on the active orbitals of each spin channel.
@@ -22,14 +38,10 @@ def core_fock(mol, hcore_ao, mo, parts):
     f^sigma = h + J[D_I^a + D_I^b] - K[D_I^sigma] with D_I^sigma = C_I C_I^T
     the inactive density of one spin (one electron per spin orbital), so a
     restricted reference gives h_tu + sum_{i in I} [2(tu|ii) - (ti|iu)].
-    J and K are the exact 4-centre ones of `mol`: the bare v of the effective
-    Hamiltonian is never density fitted. mo = (C_a, C_b), parts = (part_a,
-    part_b); hcore_ao is the AO core Hamiltonian.
+    J and K are the exact ones of `inactive_jk`. mo = (C_a, C_b), parts =
+    (part_a, part_b); hcore_ao is the AO core Hamiltonian.
     """
-    dms = np.array([c[:, p.inactive] @ c[:, p.inactive].T
-                    for c, p in zip(mo, parts)])
-    vj, vk = get_jk(mol, dms)
-    j = vj[0] + vj[1]
+    _, j, vk = inactive_jk(mol, mo, parts)
     return tuple(c[:, p.act].T @ (hcore_ao + j - k) @ c[:, p.act]
                  for c, p, k in zip(mo, parts, vk))
 

@@ -76,6 +76,7 @@ pytest test_docs_parallel_example.py
 pytest test_df_check.py
 pytest test_df_ladder.py
 pytest test_downfolded_seeds.py
+pytest test_downfolding_energy.py
 pytest test_downfolding_layout.py
 pytest test_downfolding_one_body.py
 pytest test_downfolding_partition.py

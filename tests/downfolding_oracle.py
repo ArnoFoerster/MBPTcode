@@ -5,7 +5,8 @@ downfolding spec (§3.3, "Every formula in both forms"), literally and with
 plain loops where that reads closest to the formula, on exact 4-centre
 integrals taken straight from `mol.intor`. Nothing in `src/` is used, so the
 production code in `src/MultiReference/Downfolding/` is checked against an
-independent implementation (tests/test_downfolding_one_body.py).
+independent implementation (tests/test_downfolding_one_body.py,
+tests/test_downfolding_energy.py).
 
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
@@ -112,3 +113,55 @@ def spin_orbital_one_body(h_so, eri_so, occ_env, act, vtilde_so, occ_act, dc):
                         raise ValueError(dc)
                     t_dc[t, u] += term * rho[v, w]
     return f, t_dc
+
+
+def spin_orbital_energies(h_so, eri_so, occ_env, vtilde_so, occ_act,
+                          sigma_bar_so=None):
+    """The E_0 terms of spec §3.3's spin-orbital column, as a dict.
+
+    e_core        = sum_{i in E} h_ii rho_ii
+    e_ee          = 1/2 sum_{ij in E} (v_ii,jj - v_ij,ji) rho_ii rho_jj
+    hartree       = 1/2 sum_{tu in A} vt_tt,uu rho_tt rho_uu
+    exchange      = -1/2 sum_{tu in A} vt_tu,ut rho_tt rho_uu
+                    (hartree + exchange = E_HF,ee[vt])
+    exchange_term = sum_{t,v occ. active} vt_tv,vt      (the term with Sigma^E)
+    sigma_trace   = sum_{t occ. active} Sigma_bar_tt    (enters E_0 with a minus)
+
+    Arguments as in `spin_orbital_one_body`; sigma_bar_so is the static
+    self-energy on the active spin orbitals (local indices), or None for 0.
+    """
+    e_core = sum(h_so[i, i] for i in occ_env)
+    e_ee = 0.0
+    for i in occ_env:
+        for j in occ_env:
+            e_ee += 0.5 * (eri_so[i, i, j, j] - eri_so[i, j, j, i])
+    hartree = exchange = exchange_term = 0.0
+    for t in occ_act:
+        for u in occ_act:
+            hartree += 0.5 * vtilde_so[t, t, u, u]
+            exchange -= 0.5 * vtilde_so[t, u, u, t]
+            exchange_term += vtilde_so[t, u, u, t]
+    trace = 0.0
+    if sigma_bar_so is not None:
+        trace = sum(sigma_bar_so[t, t] for t in occ_act)
+    return {'e_core': e_core, 'e_ee': e_ee, 'hartree': hartree,
+            'exchange': exchange, 'exchange_term': exchange_term,
+            'sigma_trace': trace}
+
+
+def reference_energy(g_eff, n_act_occ):
+    """The energy of the closed-shell reference determinant of a spin-free
+    g_eff (keys 0, 1, 2; g_eff[2] is physicist <tu|vw>, so its chemist form is
+    g_eff[2].transpose(0, 2, 1, 3)) with the first n_act_occ active orbitals
+    doubly occupied:
+
+    E = g_eff[0] + 2 sum_k h_kk + sum_kl [2 (kk|ll) - (kl|lk)].
+    """
+    h = g_eff[1]
+    eri = g_eff[2].transpose(0, 2, 1, 3)
+    e = g_eff[0]
+    for k in range(n_act_occ):
+        e += 2 * h[k, k]
+        for l in range(n_act_occ):
+            e += 2 * eri[k, k, l, l] - eri[k, l, l, k]
+    return e
