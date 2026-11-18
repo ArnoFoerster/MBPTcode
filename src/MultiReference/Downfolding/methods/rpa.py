@@ -13,7 +13,14 @@ active space on the casida route: the active pairs deleted from A+B and one
 Cholesky solve. `terms` assembles an active space's DownfoldingTerms from it:
 vtilde, the correlation-energy pair E_c[v] - E_c^A[v_eff] (both by the
 plasmon formula, on the same v) and the static defect
-|W(0) - W^A[v_eff](0)|, zero for crpa. Sigma^E (`sigma`) is not built yet.
+|W(0) - W^A[v_eff](0)|, zero for crpa.
+
+`embedding_self_energy` gives the static environment self-energy
+Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
+between the active and the environment orbitals (`screened_residues`) and
+the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
+by mode A at eta = 0 (Eq. 12, 'mode_a', refused near the poles,
+`pole_window`). `terms` does not take `sigma` yet.
 """
 from dataclasses import dataclass, field
 from typing import Optional
@@ -21,6 +28,8 @@ from typing import Optional
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
+from src.Base.numerics.constants import DOWNFOLDING_SRG_S
+from src.Base.numerics.numerics import Numerics
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
@@ -256,6 +265,148 @@ def static_defect(low, part, v_eff):
         w_act -= (4.0 * v_ph @ cho_solve(cho_factor(apb), v_ph.T)).reshape(
             (n,) * 4)
     return float(np.abs(w_full - w_act).max())
+
+
+def screened_residues(low, part, orbitals=None):
+    """w (nexc, n_act, n_r): the residues of the full W between the active
+    orbitals (part.act, occupied first) and `orbitals` (default part.env,
+    the inactive then the environment virtual orbitals), one slice per RPA
+    excitation:
+
+        w[n, t, r] = sqrt(2) sum_ia (t r|i a) xpy_ia,n.
+
+    The sqrt(2) makes w the spin-orbital residue for either spin of t and r
+    (a restricted singlet mode puts xpy/sqrt(2) on both spins of each pair),
+    so sum_r w_tr w_ur over spatial r is the spin-orbital sum over the r of
+    t's spin and the self-energy formulas need no further spin factor; W - v
+    = sum_n w w^T 2 Omega_n/(omega^2 - Omega_n^2), which at omega = 0 is the
+    -4/Omega_n of `static_defect` on the residues without sqrt(2). With r
+    over every orbital, `srg_self_energy` of these w is the active block of
+    the qsGW SRG kernel (`SelfEnergySolver.static_self_energy_matrix`,
+    2 sum chi chi K with chi = w/sqrt(2)); tests/test_downfolding_sigma.py
+    pins the factor there. (tr|ia) is built from the integrals of the full
+    RPA, low.factors or low.eri.
+    """
+    act = part.act
+    orbs = part.env if orbitals is None else np.asarray(orbitals, dtype=int)
+    n, m, nocc = len(act), len(orbs), low.nocc
+    if low.factors is not None:
+        b = low.factors
+        rho = b[:, :nocc, nocc:].reshape(b.shape[0], -1) @ low.xpy
+        w = rho.T @ b[:, act][:, :, orbs].reshape(b.shape[0], n * m)
+    else:
+        v = low.eri[np.ix_(act, orbs)][:, :, :nocc, nocc:]
+        w = low.xpy.T @ v.reshape(n * m, low.xpy.shape[0]).T
+    return np.sqrt(2.0) * w.reshape(len(low.omega), n, m)
+
+
+def _denominators(eps_t, eps_r, occupied_r, omega):
+    """D[n, t, r] = eps_t - eps_r - sgn(eps_r - eps_F) Omega_n: + Omega_n for
+    an occupied r, - Omega_n for an empty one."""
+    sign = np.where(np.asarray(occupied_r, dtype=bool), 1.0, -1.0)
+    return (np.asarray(eps_t)[None, :, None] - np.asarray(eps_r)[None, None, :]
+            + sign[None, None, :] * np.asarray(omega)[:, None, None])
+
+
+def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s):
+    """The SRG static self-energy (n_act, n_act), Marie and Loos Eq. 44:
+
+        Sigma_tu = sum_rn (D_tr + D_ur)/(D_tr^2 + D_ur^2) w_tr w_ur
+                   [1 - exp(-(D_tr^2 + D_ur^2) s)],
+
+    D_tr = eps_t - eps_r - sgn(eps_r - eps_F) Omega_n (`_denominators`), w
+    the residues of `screened_residues` (nexc, n_act, n_r), occupied_r a bool
+    array over the internal orbitals r. s = None is s = inf, Eq. 42, the
+    bracket 1. Every term is finite for finite s (the kernel is bounded by
+    (1 + sqrt 2)/(2 max(|a|, |b|)) and vanishes with a^2 + b^2), so this
+    needs no pole check; it is symmetric in t, u by construction.
+    """
+    d = _denominators(eps_t, eps_r, occupied_r, omega)
+    a, b = d[:, :, None, :], d[:, None, :, :]
+    lam = a * a + b * b
+    kern = (a + b) / lam
+    if s is not None:
+        kern *= -np.expm1(-s * lam)
+    out = np.einsum('ntr,nur,ntur->tu', w, w, kern)
+    return 0.5 * (out + out.T)
+
+
+def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
+    """Mode A (n_act, n_act), Marie and Loos Eq. 12 at eta = 0:
+
+        Sigma_tu = 1/2 sum_rn [1/D_tr + 1/D_ur] w_tr w_ur
+                 = 1/2 [S_tu(eps_t) + S_tu(eps_u)],
+
+    S the pole sum of iG(W - v) over the internal orbitals r, arguments as
+    in `srg_self_energy`. Undamped: a D_tr near zero makes it diverge, which
+    `embedding_self_energy` refuses before calling it.
+    """
+    d = _denominators(eps_t, eps_r, occupied_r, omega)
+    half = np.einsum('ntr,nur,ntr->tu', w, w, 1.0 / d)
+    return 0.5 * (half + half.T)
+
+
+def pole_window(low, part):
+    """(lo, hi), the pole-free window of the environment self-energy:
+    (max eps_I - Omega_min, min eps_Ev + Omega_min). Every pole of S^E lies
+    at eps_i - Omega_n <= lo (inactive i) or eps_a + Omega_n >= hi
+    (environment virtual a), so between them every D_tr is non-zero. A side
+    without orbitals (or no excitation at all) is -inf or +inf."""
+    if low.omega.size == 0:
+        return -np.inf, np.inf
+    om = low.omega.min()
+    eps = low.eps
+    lo = eps[part.inactive].max() - om if len(part.inactive) else -np.inf
+    hi = eps[part.env_virt].min() + om if len(part.env_virt) else np.inf
+    return float(lo), float(hi)
+
+
+def _refuse_near_poles(low, part, settings):
+    """Refuse (ValueError) an active orbital whose energy is within
+    pole_margin/sqrt(2 s) of an edge of `pole_window`, or outside it (spec
+    §3.6, sigma='mode_a'); s = DOWNFOLDING_SRG_S when srg_s is None."""
+    s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
+    margin = settings.pole_margin / np.sqrt(2.0 * s)
+    lo, hi = pole_window(low, part)
+    eps = low.eps[part.act]
+    dist = np.minimum(eps - lo, hi - eps)
+    bad = dist <= margin
+    if bad.any():
+        named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance {x:.6f})'
+                          for p, e, x in zip(part.act[bad], eps[bad],
+                                             dist[bad]))
+        raise ValueError(
+            f"sigma='mode_a' diverges at the poles of the environment "
+            f"self-energy: the active {named} are within the margin "
+            f"{margin:.6f} Ha (pole_margin {settings.pole_margin:g} / "
+            f"sqrt(2 s), s = {s:g}) of the pole-free window "
+            f"({lo:.6f}, {hi:.6f}) or outside it (a negative distance). "
+            f"Use sigma='srg', which is finite everywhere, or move these "
+            f"orbitals out of the active space.")
+
+
+def embedding_self_energy(low, part, sigma):
+    """Sigma_bar^E (n_act, n_act), the static environment self-energy on
+    part.act (occupied first): iG^E(W - v) with r over part.env, the full
+    RPA's W (`screened_residues`) and the mean-field energies eps and
+    Omega (spec §3.6).
+
+    sigma: 'srg', Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
+        finite everywhere; 'mode_a', Eq. 12 at eta = 0, refused (naming the
+        orbitals) when an active energy is within pole_margin/sqrt(2 s) of
+        the pole-free window's edge or outside it (`pole_window`).
+    Zero when the environment is empty.
+    """
+    sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    settings = (low.numerics or Numerics()).downfolding
+    if sigma == 'mode_a':
+        _refuse_near_poles(low, part, settings)
+    env = part.env
+    args = (screened_residues(low, part), low.eps[part.act], low.eps[env],
+            env < low.nocc, low.omega)
+    if sigma == 'srg':
+        return srg_self_energy(*args, settings.srg_s)
+    return mode_a_self_energy(*args)
 
 
 def _diagnostic_names(diagnostics):

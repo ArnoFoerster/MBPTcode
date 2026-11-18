@@ -12,6 +12,11 @@ The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
 zeroing variants, spec §3.4) is the pole sum of its modes, and
 `vtilde_crpa_so` the same correction built in spin orbitals without spin
 adaptation; `w_static_active` is the full W(0) on the active orbitals.
+The environment self-energy (spec §3.6) has its own residues of the full W
+(`env_residues`), the exact pole sum S^E(z) at a complex frequency
+(`sigma_env`) and the static reductions written from Marie and Loos's
+Eq. 12 at eta = 0 (`sigma_mode_a`) and Eq. 44 (`sigma_srg`)
+(tests/test_downfolding_sigma.py).
 
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
@@ -352,3 +357,75 @@ def vtilde_crpa_so(eri, eps, nocc, part):
     vt = (-2.0 * v @ np.linalg.solve(apb, v.T)).reshape((m,) * 4)
     n = len(part.act)
     return vt[:n, :n, :n, :n]
+
+
+def env_residues(eri, eps, nocc, part):
+    """(omega, w, c) of the full restricted direct RPA of chemist `eri` for
+    the environment self-energy of part.act.
+
+    w[n, t, r] = sqrt(2) sum_ia (t r|i a) xpy_ia,n, t over part.act and r over
+    the environment orbitals (inactive, then environment virtual): the
+    spin-orbital residue of W between t and r for either spin (the restricted
+    singlet mode puts xpy/sqrt(2) on both spins of each pair, see
+    `_pole_sum`), so that sum_r w_tr w_ur over spatial r is the spin-orbital
+    sum over the r of t's spin. c[n, r] = eps_r + sgn(eps_r - eps_F) omega_n,
+    the pole of S^E: eps_r - omega_n for an occupied r, eps_r + omega_n for an
+    empty one.
+    """
+    omega, xpy = drpa(eri, eps, nocc)
+    occ, virt = zip(*_pair_labels(eps, nocc))
+    env = list(part.inactive) + list(part.env_virt)
+    act = list(part.act)
+    v = eri[np.ix_(act, env)][:, :, list(occ), list(virt)]
+    w = np.sqrt(2.0) * np.einsum('trP,Pn->ntr', v, xpy)
+    sign = np.array([-1.0 if r < nocc else 1.0 for r in env])
+    c = np.asarray(eps)[env][None, :] + sign[None, :] * omega[:, None]
+    return omega, w, c
+
+
+def sigma_env(z, eri, eps, nocc, part):
+    """S^E_tu(z) = sum_{r in E} sum_n w_tr w_ur / (z - eps_r - sgn(eps_r - eps_F) omega_n),
+    the correlation part of G^E (W - v) at the complex frequency z, on
+    part.act (local indices); `env_residues` gives w and the poles."""
+    _, w, c = env_residues(eri, eps, nocc, part)
+    n = len(part.act)
+    out = np.zeros((n, n), dtype=complex)
+    for t in range(n):
+        for u in range(n):
+            out[t, u] = np.sum(w[:, t, :] * w[:, u, :] / (z - c))
+    return out
+
+
+def sigma_mode_a(eri, eps, nocc, part):
+    """Eq. 12 of Marie and Loos at eta = 0: 1/2 [S^E_tu(eps_t) + S^E_tu(eps_u)],
+    the pole sum `sigma_env` on the real axis at the mean-field energies."""
+    act = list(part.act)
+    n = len(act)
+    out = np.zeros((n, n))
+    for t in range(n):
+        for u in range(n):
+            out[t, u] = 0.5 * (sigma_env(eps[act[t]], eri, eps, nocc, part)[t, u]
+                               + sigma_env(eps[act[u]], eri, eps, nocc, part)[t, u]).real
+    return out
+
+
+def sigma_srg(eri, eps, nocc, part, s):
+    """Eq. 44 of Marie and Loos on the environment orbitals r:
+
+        Sigma_tu = sum_rn (D_tr + D_ur) / (D_tr^2 + D_ur^2) w_tr w_ur
+                   [1 - exp(-(D_tr^2 + D_ur^2) s)],
+
+    D_tr = eps_t - eps_r - sgn(eps_r - eps_F) omega_n; s = None is s = inf
+    (Eq. 42), the bracket 1."""
+    _, w, c = env_residues(eri, eps, nocc, part)
+    act = list(part.act)
+    n = len(act)
+    out = np.zeros((n, n))
+    for t in range(n):
+        for u in range(n):
+            d_t, d_u = eps[act[t]] - c, eps[act[u]] - c
+            lam = d_t**2 + d_u**2
+            damp = 1.0 if s is None else 1.0 - np.exp(-lam * s)
+            out[t, u] = np.sum((d_t + d_u) / lam * w[:, t, :] * w[:, u, :]
+                               * damp)
+    return out
