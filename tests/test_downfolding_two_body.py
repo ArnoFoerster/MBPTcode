@@ -227,7 +227,7 @@ def test_mode_refusals(wat):
     mf = wat[0]
     with pytest.raises(ValueError, match="'casida'"):
         run_low_level(mf, method='rpa', mode='spacetime')
-    for mode in ('space-time', 'space_time', 'imagfrequency', 'imag_frequency'):
+    for mode in ('space-time', 'space_time'):
         with pytest.raises(NotImplementedError, match="'casida'"):
             run_low_level(mf, method='rpa', mode=mode)
     with pytest.raises(TypeError, match="method='rpa'.*screening"):

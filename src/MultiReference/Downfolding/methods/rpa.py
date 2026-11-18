@@ -15,6 +15,17 @@ vtilde, the correlation-energy pair E_c[v] - E_c^A[v_eff] (both by the
 plasmon formula, on the same v) and the static defect
 |W(0) - W^A[v_eff](0)|, zero for crpa.
 
+On the imagfrequency route (density fitted, N^4) `run` keeps the existing
+imaginary-axis energy, its minimax frequency grid and the static
+polarizability P(0) of the whole system in the normalized fitting basis.
+The screening correction is P - P^A and one Dyson step, with P^A the active
+ph pairs' part of P(0) (`active_polarizability_static`), projected on the
+factors of every active pair (`active_pair_factors`): the casida route's
+deletion written another way, equal to rounding on the same three-index
+object. E_c^A[v_eff] is the same quadrature on the same grid with the bare
+response of the active ph pairs, so the E_c pair is one formula on both
+sides; the dense-Casida E_c^A is kept as the 'ec_active_casida' diagnostic.
+
 `embedding_self_energy` gives the static environment self-energy
 Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
 between the active and the environment orbitals (`screened_residues`) and
@@ -33,21 +44,29 @@ from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.numerics.constants import (DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S)
-from src.Base.numerics.numerics import numerics_or_default
+from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
+from src.Base.orbital_spaces import particle_hole_window
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
+from src.Base.utils.grids.grids import minimax_frequency_grid
 from src.SingleReference.common.active_space import closed_shell_nocc
 from src.SingleReference.LinearResponse.casida import CasidaSolver
+from src.SingleReference.LinearResponse.imaginary_frequency import \
+    frequency_factor
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
+from src.SingleReference.LinearResponse.rpa_energy import (
+    rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
+from src.SingleReference.LinearResponse.space_time import (
+    chi0_aux, dielectric_log_determinant, dyson_screening)
 
 from ..partition import active_pair_mask, ph_element_mask
 from ..terms import DownfoldingTerms, choice
 
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
-BUILT_MODES = ('casida',)
+BUILT_MODES = ('casida', 'imagfrequency')
 SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
@@ -59,8 +78,11 @@ class RPALowLevel:
     """The RPA low-level result: the mean field, the full RPA, and a cache.
 
     eps, nocc: the orbital energies and the occupied count of `mf`.
-    e_c_full: E_RPA,corr of the whole system, 1/2 (sum omega - Tr A).
-    omega: (n_pair,) the RPA excitation energies, ascending.
+    e_c_full: E_RPA,corr of the whole system: on casida 1/2 (sum omega -
+        Tr A), on imagfrequency the minimax quadrature of
+        `rpa_correlation_energy_imaginary_axis`.
+    omega: (n_pair,) the RPA excitation energies, ascending; None on
+        imagfrequency, which does not diagonalize.
     xpy: (n_pair, n_pair) X+Y, one excitation per column; the rows are the
         n_pair = nocc*nvirt (i, a) pairs in C order, i over all occupied and
         a over all virtual orbitals, the order of `active_pair_mask`.
@@ -69,11 +91,16 @@ class RPALowLevel:
             xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 4K)^-1,
         so the static density response is chi(0)_ia,jb = -4 [(A+B)^-1]_ia,jb
         = -4 sum_n xpy_ia,n xpy_jb,n / omega_n (tests/test_downfolding_two_body.py
-        pins the factor).
+        pins the factor). None on imagfrequency.
     factors: the three-index object B[Q, p, q] of the MOs, (naux, nmo, nmo),
         with (pq|rs) = sum_Q B_Q,pq B_Q,rs, when df; else None.
     eri: the exact chemist MO integrals (pq|rs) when not df; else None.
-    cache: what a later `terms` call builds the first time it needs it.
+    cache: what a later `terms` call builds the first time it needs it. On
+        imagfrequency `run` puts there 'grid', the (points, weights) of the
+        energy's minimax frequency quadrature, and 'p0', P(0) = 1 - W(0)^-1
+        = chi0(0) = -4 B_ov diag(1/delta) B_ov^T (naux, naux) in the
+        normalized fitting basis (the convention of
+        `solve_polarizability_imaginary_axis`).
     """
     mf: object
     mode: str
@@ -82,8 +109,8 @@ class RPALowLevel:
     eps: np.ndarray
     nocc: int
     e_c_full: float
-    omega: np.ndarray
-    xpy: np.ndarray
+    omega: Optional[np.ndarray]
+    xpy: Optional[np.ndarray]
     factors: Optional[np.ndarray]
     eri: Optional[np.ndarray]
     cache: dict = field(default_factory=dict)
@@ -99,15 +126,20 @@ def _refuse_options(opts, which):
 def run(mf, mode='casida', df=True, numerics=None, **opts):
     """The RPALowLevel of `mf`: the full direct RPA of `mode`, solved once.
 
-    mode: 'casida' | 'imagfrequency' | 'space-time'; only 'casida' is built.
-    df: casida only. True builds the Casida matrices from the mean field's
-        density fit (for a mean field without one, the helper's exact
-        eigendecomposition of the MO integrals, eigenvalues below 1e-12
-        dropped); False from the exact 4-centre integrals.
+    mode: 'casida' | 'imagfrequency' | 'space-time'; 'space-time' is not
+        built yet.
+    df: True builds everything from the mean field's density fit (for a
+        mean field without one, the helper's exact eigendecomposition of the
+        MO integrals, eigenvalues below 1e-12 dropped). False, casida only:
+        the exact 4-centre integrals; imagfrequency is density fitted by
+        construction and refuses it.
     numerics: the run's Numerics (None: the defaults), kept on the result
-        and read by the eigensolve.
+        and read by the eigensolve (casida) or the frequency count of the
+        energy (imagfrequency, `rpa_quadrature`).
 
-    E_RPA,corr comes from the same solve as Omega and X+Y.
+    On casida E_RPA,corr comes from the same solve as Omega and X+Y; on
+    imagfrequency from `rpa_correlation_energy_imaginary_axis` on the
+    minimax grid kept in low.cache['grid'], with P(0) in low.cache['p0'].
     """
     _refuse_options(opts, 'run')
     mode = choice(mode, MODES, 'mode')
@@ -115,20 +147,46 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         raise NotImplementedError(
             f"method={METHOD!r} mode={mode!r} is not implemented yet; built: "
             + ', '.join(repr(m) for m in BUILT_MODES) + '.')
+    df = bool(df)
+    if mode == 'imagfrequency' and not df:
+        raise ValueError(
+            f"method={METHOD!r} mode='imagfrequency' is density fitted; "
+            f"df=False (the exact 4-centre screening) is mode='casida' only.")
     mol = mf.mol
     eps = np.asarray(get_orbital_energies(mf))
     nocc = closed_shell_nocc(mf.mo_occ)
-    df = bool(df)
     if df:
         factors = get_density_fitting_coefficients(mol, mf, 'spatial')
         eri = None
     else:
         factors = None
         eri = get_two_electron_integrals_chemist(mol, mf, 'spatial')
+    if mode == 'imagfrequency':
+        e_c, cache = _imaginary_axis(eps, nocc, factors, numerics)
+        return RPALowLevel(
+            mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
+            e_c_full=e_c, omega=None, xpy=None, factors=factors, eri=None,
+            cache=cache)
     e_c, omega, xpy = _plasmon(eps, nocc, factors, eri, numerics)
     return RPALowLevel(
         mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
         e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
+
+
+def _imaginary_axis(eps, nocc, factors, numerics):
+    """(E_c, cache) of the restricted direct RPA on the imaginary axis:
+    E_c by `rpa_correlation_energy_imaginary_axis` (minimax grid), and the
+    cache with 'grid', the points and weights that energy integrates on
+    (the same `rpa_quadrature` count and particle-hole window), and 'p0',
+    P(0) = 1 - W(0)^-1 in the normalized fitting basis. The active E_c^A is
+    integrated on this grid so that the E_c pair is one quadrature."""
+    lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode='restricted')
+    e_c = rpa_correlation_energy_imaginary_axis(lr, nocc, numerics)
+    nfreq = rpa_quadrature(numerics_or_default(numerics), 'minimax')[1]
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    grid = minimax_frequency_grid(nfreq, e_min, e_max)
+    p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]
+    return float(e_c), {'grid': grid, 'p0': p0}
 
 
 def _plasmon(eps, nocc, factors, eri, numerics):
@@ -168,9 +226,22 @@ def screening_correction(low, part, screening):
     no pair is left to screen and the correction is zero, without a solve;
     with no active occupied or no active virtual orbital nothing is deleted
     and it is the fully screened W(0) - v on those orbitals.
+
+    On imagfrequency the same correction is P - P^A and one Dyson step
+    (spec §3.4), vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw with W^r =
+    [1 - (P(0) - P^A(0))]^-1 in the normalized fitting basis, P(0) from
+    low.cache['p0'], P^A(0) `active_polarizability_static` and B the
+    factors of every active pair (`active_pair_factors`). By the
+    push-through identity this is the casida formula on the same factors,
+    and P - P^A, not W - W^A: screening is not additive.
     """
     screening = choice(screening, SCREENINGS, 'screening')
     if screening == 'mrpa':
+        if low.mode != 'casida':
+            raise NotImplementedError(
+                f"method={METHOD!r} screening='mrpa' is built on the "
+                f"Casida eigenvectors only: use mode='casida' (this low-level"
+                f" result is mode={low.mode!r}).")
         raise NotImplementedError(
             f"method={METHOD!r} screening='mrpa' is not implemented yet; "
             f"built: 'bare', 'crpa', 'crpa_ph'.")
@@ -178,6 +249,15 @@ def screening_correction(low, part, screening):
     vt = np.zeros((n,) * 4)
     res = ~active_pair_mask(part)
     if screening == 'bare' or n == 0 or not res.any():
+        return vt
+    if low.mode == 'imagfrequency':
+        b_act = active_pair_factors(low, part).reshape(-1, n * n)
+        w_r = dyson_screening(
+            low.cache['p0'] - active_polarizability_static(low, part),
+            correlation=True)
+        vt = (b_act.T @ w_r @ b_act).reshape((n,) * 4)
+        if screening == 'crpa_ph':
+            vt *= ph_element_mask(part)
         return vt
     nocc, act = low.nocc, part.act
     if low.factors is not None:
@@ -198,6 +278,32 @@ def screening_correction(low, part, screening):
     if screening == 'crpa_ph':
         vt *= ph_element_mask(part)
     return vt
+
+
+def active_pair_factors(low, part):
+    """B[Q, t, u] (naux, n_act, n_act): the fitting factors of every active
+    pair, occupied-occupied, occupied-virtual and virtual-virtual, on
+    part.act (occupied first), so (tu|vw) = sum_Q B_Q,tu B_Q,vw is the
+    full RPA's fitted v on the active orbitals. vtilde needs all of them,
+    not only the ov block (spec §3.4)."""
+    act = part.act
+    return low.factors[:, act][:, :, act]
+
+
+def active_polarizability_static(low, part):
+    """P^A(0) (naux, naux): the static bare response of the active ph pairs
+    alone (i active occupied, a active virtual) in the normalized fitting
+    basis, chi0(0) of the full P(0) restricted to those columns of B_ov,
+    2 sum_ia B_ia f_ia(0) B_ia^T = -4 sum_ia B_ia B_ia^T / delta_ia, with
+    the same frequency factor and spin factor as the full one, so P - P^A
+    keeps every other pair exactly. Zero without an active ph pair."""
+    nocc = low.nocc
+    b = low.factors
+    mask = active_pair_mask(part)
+    c_a = b[:, :nocc, nocc:].reshape(b.shape[0], -1)[:, mask]
+    eps = low.eps
+    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[mask]
+    return chi0_aux([(c_a, frequency_factor(delta, 0.0, True))], 2.0)
 
 
 def _active_v(low, act):
@@ -235,11 +341,47 @@ def active_correlation_energy(low, part, v_eff):
     orbital energies of the reference, by the plasmon formula of the full
     RPA. v_eff is (n_act,)*4 chemist; for the E_c pair to cancel when every
     orbital is active it has to be built on the same v as low.e_c_full
-    (spec §3.2). Zero when there is no active ph pair."""
+    (spec §3.2). Zero when there is no active ph pair.
+
+    On imagfrequency it is the full energy's quadrature on the full
+    energy's grid (low.cache['grid'], not one of the active window):
+
+        E_c^A = 1/(2 pi) sum_k w_k Tr[ln(1 - Pi^A(i w_k) U) + Pi^A(i w_k) U],
+
+    in the active ph space, U = K^A the ph block of v_eff and Pi^A the
+    diagonal bare response 2 f(i w) = -4 delta/(delta^2 + w^2), the spin
+    and frequency factor of the full chi0
+    (`solve_polarizability_imaginary_axis`). With every orbital active and v_eff the fitted v, U = B^T B and
+    Tr ln(1 - Pi B^T B) = ln det(1 - B Pi B^T): the full integrand at every
+    point, so the pair cancels to rounding. The dense-Casida value on the
+    same v_eff is the 'ec_active_casida' diagnostic."""
     k = part.n_act_occ
     if k == 0 or k == part.n_act:
         return 0.0
-    return _plasmon(low.eps[part.act], k, None, v_eff, low.numerics)[0]
+    if low.mode == 'imagfrequency':
+        return _active_ec_quadrature(low, part, v_eff)
+    return _active_ec_casida(low, part, v_eff)
+
+
+def _active_ec_casida(low, part, v_eff):
+    """The dense dRPA E_c^A[v_eff] of the active ph pairs by the plasmon
+    formula (there is at least one active ph pair)."""
+    return _plasmon(low.eps[part.act], part.n_act_occ, None, v_eff,
+                    low.numerics)[0]
+
+
+def _active_ec_quadrature(low, part, v_eff):
+    """E_c^A[v_eff] on the imaginary axis, the formula of
+    `active_correlation_energy`, with `dielectric_log_determinant` (its
+    warning and flag for a non-positive det(1 - Pi^A U))."""
+    delta, k_ph, _ = _active_ph(low, part, v_eff)
+    eye = np.eye(delta.size)
+    points, weights = low.cache['grid']
+    e_c = 0.0
+    for k, (w, wt) in enumerate(zip(points, weights)):
+        pu = (2.0 * frequency_factor(delta, w, True))[:, None] * k_ph
+        e_c += wt * (dielectric_log_determinant(eye - pu, k) + np.trace(pu))
+    return float(e_c / (2.0 * np.pi))
 
 
 def static_defect(low, part, v_eff):
@@ -254,13 +396,22 @@ def static_defect(low, part, v_eff):
     definite for every built screening (for crpa it is a Schur complement of
     delta + 4K), so one Cholesky solve gives the active response.
     Zero for an empty active space.
+
+    On imagfrequency W(0) is the cache's: B_act^T [1 - P(0)]^-1 B_act with
+    B_act `active_pair_factors` (ruling R4), against the same W^A on v_eff
+    of the fitted v + vtilde, so the crpa defect is again an identity.
     """
     n = part.n_act
     if n == 0:
         return 0.0
-    v_act, v_ov = _active_v(low, part.act)
-    r = v_ov @ low.xpy
-    w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
+    if low.mode == 'imagfrequency':
+        b_act = active_pair_factors(low, part).reshape(-1, n * n)
+        w_full = (b_act.T @ dyson_screening(low.cache['p0'])
+                  @ b_act).reshape((n,) * 4)
+    else:
+        v_act, v_ov = _active_v(low, part.act)
+        r = v_ov @ low.xpy
+        w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
     w_act = v_eff.copy()
     delta, k_ph, v_ph = _active_ph(low, part, v_eff)
     if delta.size:
@@ -406,12 +557,23 @@ def embedding_self_energy(low, part, sigma):
     return _embedding(low, part, sigma)[0]
 
 
+def _refuse_sigma_off_casida(low, sigma):
+    """NotImplementedError for Sigma^E on a route other than casida: the
+    residues of W come from the Casida eigenvectors, which only casida
+    keeps."""
+    if low.mode != 'casida':
+        raise NotImplementedError(
+            f"method={METHOD!r} sigma={sigma!r} is not implemented on "
+            f"mode={low.mode!r} yet: use mode='casida'.")
+
+
 def _embedding(low, part, sigma):
     """(Sigma_bar, args, srg_s) of `embedding_self_energy`: args = (w, eps_t,
     eps_r, occupied_r, omega) of the environment, kept so that the
     'sigma_poles' diagnostic does not build the residues again, and srg_s the
     s of the run's numerics."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    _refuse_sigma_off_casida(low, sigma)
     settings = numerics_or_default(low.numerics).downfolding
     if sigma == 'mode_a':
         _refuse_near_poles(low, part, settings)
@@ -491,9 +653,9 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
           **opts):
     """The DownfoldingTerms of the RPA on the active space `part`.
 
-    screening: 'bare' | 'crpa' | 'crpa_ph' ('mrpa' not built yet); vtilde
-        is its static correction (`screening_correction`), the same in every
-        spin block (restricted).
+    screening: 'bare' | 'crpa' | 'crpa_ph' ('mrpa' not built yet, and
+        casida only); vtilde is its static correction
+        (`screening_correction`), the same in every spin block (restricted).
     sigma: None, the paper's scheme: full double counting, no Sigma_bar.
         'srg' or 'mode_a': the static environment self-energy
         (`embedding_self_energy`) in both spin channels with dc='hartree',
@@ -501,12 +663,16 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
         §3.7). Allowed with every screening; the third term of the
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
-        exact only for 'crpa' in the static limit.
+        exact only for 'crpa' in the static limit. Casida only for now; on
+        imagfrequency refused (NotImplementedError).
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
         that does not apply here (on casida 'ec_active_casida' and
         'sigma_continuation', and 'sigma_poles' without sigma) is skipped and
         absent, an unknown name refused. 'sigma_poles' (`_sigma_poles`)
         warns (SigmaDampingWarning) when the SRG damping is not negligible.
+        'ec_active_casida' (imagfrequency): {'casida': the dense-Casida
+        E_c^A on the same v_eff, 'difference': the route's quadrature value
+        minus it}.
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
@@ -519,11 +685,20 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if sigma not in SIGMAS:
         raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
                          + ', '.join(repr(s) for s in SIGMAS) + '.')
+    if sigma is not None:
+        _refuse_sigma_off_casida(low, sigma)
     vt = screening_correction(low, part, screening)
     v_eff = _active_v(low, part.act)[0] + vt
     found = {}
     if 'static_defect' in names:
         found['static_defect'] = static_defect(low, part, v_eff)
+    e_c_active = active_correlation_energy(low, part, v_eff)
+    if 'ec_active_casida' in names and low.mode != 'casida':
+        k = part.n_act_occ
+        dense = (0.0 if k in (0, part.n_act)
+                 else _active_ec_casida(low, part, v_eff))
+        found['ec_active_casida'] = {'casida': dense,
+                                     'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
         s_bar, args, srg_s = _embedding(low, part, sigma)
@@ -533,5 +708,4 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                                 args, srg_s)
     return DownfoldingTerms(
         vtilde=(vt, vt, vt), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
-        e_c_active=active_correlation_energy(low, part, v_eff), dc=dc,
-        diagnostics=found)
+        e_c_active=e_c_active, dc=dc, diagnostics=found)
