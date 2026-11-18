@@ -440,8 +440,13 @@ def screened_residues(low, part, orbitals=None):
     the qsGW SRG kernel (`SelfEnergySolver.static_self_energy_matrix`,
     2 sum chi chi K with chi = w/sqrt(2)); tests/test_downfolding_sigma.py
     pins the factor there. (tr|ia) is built from the integrals of the full
-    RPA, low.factors or low.eri.
+    RPA, low.factors or low.eri. Casida only: the other routes keep no
+    eigenvectors, and refuse (NotImplementedError).
     """
+    if low.mode != 'casida':
+        raise NotImplementedError(
+            f"screened_residues needs the Casida eigenvectors X+Y, which "
+            f"mode={low.mode!r} does not keep: use mode='casida'.")
     act = part.act
     orbs = part.env if orbitals is None else np.asarray(orbitals, dtype=int)
     n, m, nocc = len(act), len(orbs), low.nocc

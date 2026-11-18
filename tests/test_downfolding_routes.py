@@ -25,7 +25,8 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
+from src.Base.numerics.numerics import (Numerics, numerics_or_default,
+                                        rpa_quadrature)
 from src.Base.orbital_spaces import ov_energies, particle_hole_window
 from src.Base.utils.grids.grids import minimax_frequency_grid
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
@@ -206,6 +207,25 @@ def test_all_active_ec_pair_cancels(s):
 
 
 @pytest.mark.parametrize('s', SCREENINGS_1)
+def test_all_active_ec_pair_cancels_on_a_coarse_grid(s):
+    """Water/6-31G with every orbital active on the coarsest minimax grid
+    (nfreq_rpa = 6): the quadrature error of E_c[v] against casida is
+    measured 2.0e-6, the E_c pair cancels to 1.3e-14 (ruling R19). Only if
+    both energies are integrated on one grid does the pair cancel below
+    1e-12, so this fails when E_c^A leaves the full energy's grid; at the
+    default 20 points the quadrature error (6.2e-13) is too small to tell."""
+    mf = _mean_field('hf')
+    low = run_low_level(mf, mode='imagfrequency',
+                        numerics=Numerics(quadrature={'nfreq_rpa': 6}))
+    assert len(low.cache['grid'][0]) == 6
+    assert abs(low.e_c_full - _low('hf', 'casida').e_c_full) > 1e-7
+    part = partition(ActiveSpace.from_indices(13, 5, range(5), range(5, 13)),
+                     low.eps)
+    t = rpa.terms(low, part, s)
+    assert abs(t.e_c_full - t.e_c_active) < 1e-12
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
 @pytest.mark.parametrize('aspace', ('contiguous', 'non_contiguous'))
 @pytest.mark.parametrize('ref', REFS)
 def test_e0_terms_match_casida(ref, aspace, s):
@@ -309,7 +329,9 @@ def test_low_reuse():
 def test_mrpa_refused_here():
     """mRPA is casida only (spec §3.5); Sigma^E on imagfrequency is not built
     yet; both refusals point to casida. df=False has no meaning here (the
-    route is density fitted) and space-time is not built."""
+    route is density fitted) and space-time is not built. The residues of W
+    (`screened_residues`) need the Casida eigenvectors and refuse here too,
+    pointing to casida (ruling R19)."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
     with pytest.raises(NotImplementedError, match="mode='casida'"):
@@ -317,6 +339,8 @@ def test_mrpa_refused_here():
     for sigma in ('srg', 'mode_a'):
         with pytest.raises(NotImplementedError, match="mode='casida'"):
             build_effective_hamiltonian(low, a, sigma=sigma)
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        rpa.screened_residues(low, partition(a, low.eps))
     with pytest.raises(ValueError, match="df=False.*mode='casida'"):
         run_low_level(low.mf, mode='imagfrequency', df=False)
     with pytest.raises(NotImplementedError, match="'imagfrequency'"):
