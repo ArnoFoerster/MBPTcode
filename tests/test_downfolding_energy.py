@@ -565,11 +565,14 @@ def test_pbe_all_active_fci_equals_hf(s):
 
 def test_empty_active_space_e0(wat_rpa):
     """Spec §3.9: with no active orbital E_0 = E_HF + E_c[v]; ActiveSpace
-    takes the empty selection. No solver is called. Measured 1.4e-14."""
-    mf, low, _ = wat_rpa
+    takes the empty selection. No solver is called. On the fitted and on the
+    exact integrals of the low-level run. Measured 1.4e-14."""
+    mf, low_df, _ = wat_rpa
     empty = ActiveSpace.from_indices(len(mf.mo_energy), 5, [], [])
-    for s in SCREENINGS_1:
-        g, space, en = build_effective_hamiltonian(low, empty, screening=s)
-        assert space['n_orbs'] == 0 and en.e_c_active == 0.0
-        assert abs(en.e0 - (mf.e_tot + low.e_c_full)) < 1e-9
-        assert g[0] == en.e0 and g[2].shape == (0, 0, 0, 0)
+    for low in (low_df, run_low_level(mf, df=False)):
+        for s in SCREENINGS_1:
+            g, space, en = build_effective_hamiltonian(low, empty,
+                                                       screening=s)
+            assert space['n_orbs'] == 0 and en.e_c_active == 0.0
+            assert abs(en.e0 - (mf.e_tot + low.e_c_full)) < 1e-9
+            assert g[0] == en.e0 and g[2].shape == (0, 0, 0, 0)

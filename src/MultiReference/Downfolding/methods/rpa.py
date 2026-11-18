@@ -198,8 +198,9 @@ def _active_v(low, act):
         b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
         return (b_act.T @ b_act).reshape((n,) * 4), b_act.T @ b_ov
     eri = low.eri[np.ix_(act, act)]
+    n_pair = nocc * (low.eri.shape[0] - nocc)  # spelt out: n may be 0
     return (eri[:, :, act][:, :, :, act],
-            eri[:, :, :nocc, nocc:].reshape(n * n, -1))
+            eri[:, :, :nocc, nocc:].reshape(n * n, n_pair))
 
 
 def _active_ph(low, part, v_eff):
