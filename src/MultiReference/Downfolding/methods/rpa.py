@@ -60,7 +60,6 @@ cached on the first request) with G built from the environment orbitals
 alone; continuation, refusal, Omega_min and both diagnostics are
 imagfrequency's.
 """
-import warnings
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
@@ -68,6 +67,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS,
                                          DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
                                          DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
@@ -1082,9 +1082,9 @@ def _continued_pole_weights(fit, eps_act):
 
 
 def _sigma_poles(low, part, sigma, sigma_bar, kept):
-    """The 'sigma_poles' record (spec §4.6), and a SigmaDampingWarning naming
-    the active orbitals whose row of Sigma_bar the SRG damping moves by more
-    than DOWNFOLDING_SRG_DAMPING_WARN.
+    """The 'sigma_poles' record (spec §4.6), and a SigmaDampingWarning (the
+    named flag 'sigma_srg_damping') naming the active orbitals whose row of
+    Sigma_bar the SRG damping moves by more than DOWNFOLDING_SRG_DAMPING_WARN.
 
     window: `pole_window`. pole_distance: per active orbital, the distance
         of eps_t to the nearer edge of the window, negative outside it.
@@ -1114,7 +1114,8 @@ def _sigma_poles(low, part, sigma, sigma_bar, kept):
             named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance to the '
                               f'window {x:.6f})' for p, e, x in
                               zip(part.act[rows], eps[rows], dist[rows]))
-            warnings.warn(
+            flag(
+                'sigma_srg_damping',
                 f"sigma='srg': the SRG damping (s = {applied:g}) changes "
                 f"Sigma_bar^E by up to {damping:.2e} Ha on the active {named}"
                 f", within a few 1/sqrt(2 s) = {1 / np.sqrt(2 * applied):.4f}"
@@ -1141,8 +1142,9 @@ def continuation_spread(z, samples, eps_act, sigma):
 def _sigma_continuation(low, part, sigma, kept):
     """The 'sigma_continuation' record (spec §4.6): `continuation_spread` on
     the nodes Sigma_bar was continued from, and a SigmaContinuationWarning
-    naming the elements (as orbital pairs) above
-    DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without an environment."""
+    (the named flag 'sigma_continuation_spread') naming the elements (as
+    orbital pairs) above DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without
+    an environment."""
     n = part.n_act
     if kept['fit'] is None:
         return np.zeros((n, n))
@@ -1153,7 +1155,8 @@ def _sigma_continuation(low, part, sigma, kept):
         act = part.act
         named = ', '.join(f'({act[t]}, {act[u]}) {spread[t, u]:.2e}'
                           for t, u in bad)
-        warnings.warn(
+        flag(
+            'sigma_continuation_spread',
             f"sigma={sigma!r} on mode={low.mode!r}: two Pade fits of the "
             f"environment self-energy on the even and the odd nodes differ "
             f"by more than {DOWNFOLDING_SIGMA_CONTINUATION_WARN:g} Ha at the "
