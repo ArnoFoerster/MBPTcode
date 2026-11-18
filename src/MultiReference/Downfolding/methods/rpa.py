@@ -26,6 +26,14 @@ object. E_c^A[v_eff] is the same quadrature on the same grid with the bare
 response of the active ph pairs, so the E_c pair is one formula on both
 sides; the dense-Casida E_c^A is kept as the 'ec_active_casida' diagnostic.
 
+The space-time route (separable ISDF factors (X, D), imaginary time, N^3,
+serial) is the same on its own machinery: `run` keeps the factors, the static
+tau grid with P(0) on it, and the energy of `rpa_correlation_energy_space_time`
+with its time-frequency grid. P^A(0) is built as P(0) was, with the active
+columns of X on the same grid, so with every orbital active P - P^A is zero
+to the bit; E_c^A takes the active ph pairs' exp(-delta tau) through the
+energy's own tau -> omega transform. Sigma^E is not built there yet.
+
 `embedding_self_energy` gives the static environment self-energy
 Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
 between the active and the environment orbitals (`screened_residues`) and
@@ -53,6 +61,7 @@ from typing import Optional
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
+from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerics.constants import (DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
@@ -67,10 +76,14 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
                                                         pade_fit_elementwise,
                                                         pade_nodes)
-from src.Base.utils.grids.grids import minimax_frequency_grid
+from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
+                                        minimax_frequency_grid)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
+                                                 minimax_points_for_accuracy)
 from src.SingleReference.common.active_space import closed_shell_nocc
 from src.SingleReference.GW.imaginary_axis import \
     fitted_self_energy_matrix_imaginary_axis
+from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import (CasidaSolver,
                                                        solver_choice)
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
@@ -81,14 +94,14 @@ from src.SingleReference.LinearResponse.linear_response import \
 from src.SingleReference.LinearResponse.rpa_energy import (
     rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
-    chi0_aux, dielectric_log_determinant, dyson_screening)
+    chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
+    dyson_screening, rpa_correlation_energy_space_time, static_screening_grid)
 
 from ..partition import active_pair_mask, ph_element_mask
 from ..terms import DownfoldingTerms, choice
 
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
-BUILT_MODES = ('casida', 'imagfrequency')
 SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
@@ -102,9 +115,10 @@ class RPALowLevel:
     eps, nocc: the orbital energies and the occupied count of `mf`.
     e_c_full: E_RPA,corr of the whole system: on casida 1/2 (sum omega -
         Tr A), on imagfrequency the minimax quadrature of
-        `rpa_correlation_energy_imaginary_axis`.
+        `rpa_correlation_energy_imaginary_axis`, on space-time
+        `rpa_correlation_energy_space_time`.
     omega: (n_pair,) the RPA excitation energies, ascending; None on
-        imagfrequency, which does not diagonalize.
+        imagfrequency and space-time, which do not diagonalize.
     xpy: (n_pair, n_pair) X+Y, one excitation per column; the rows are the
         n_pair = nocc*nvirt (i, a) pairs in C order, i over all occupied and
         a over all virtual orbitals, the order of `active_pair_mask`.
@@ -113,9 +127,10 @@ class RPALowLevel:
             xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 4K)^-1,
         so the static density response is chi(0)_ia,jb = -4 [(A+B)^-1]_ia,jb
         = -4 sum_n xpy_ia,n xpy_jb,n / omega_n (tests/test_downfolding_two_body.py
-        pins the factor). None on imagfrequency.
+        pins the factor). None on imagfrequency and space-time.
     factors: the three-index object B[Q, p, q] of the MOs, (naux, nmo, nmo),
-        with (pq|rs) = sum_Q B_Q,pq B_Q,rs, when df; else None.
+        with (pq|rs) = sum_Q B_Q,pq B_Q,rs, when df; else None, and None on
+        space-time, which never builds it whole (`active_pair_factors`).
     eri: the exact chemist MO integrals (pq|rs) when not df; else None.
     cache: what a later `terms` call builds the first time it needs it. On
         imagfrequency `run` puts there 'grid', the (points, weights) of the
@@ -124,7 +139,8 @@ class RPALowLevel:
         normalized fitting basis (the convention of
         `solve_polarizability_imaginary_axis`). The first Sigma^E request
         adds 'omega_min' (`lowest_excitation`) and 'w_grid', the (points, W)
-        of `_screening_grid`.
+        of `_screening_grid`. On space-time `run` puts there 'factors',
+        'static_grid', 'p0' and 'energy_grid' (`_space_time`).
     """
     mf: object
     mode: str
@@ -150,35 +166,42 @@ def _refuse_options(opts, which):
 def run(mf, mode='casida', df=True, numerics=None, **opts):
     """The RPALowLevel of `mf`: the full direct RPA of `mode`, solved once.
 
-    mode: 'casida' | 'imagfrequency' | 'space-time'; 'space-time' is not
-        built yet.
+    mode: 'casida' | 'imagfrequency' | 'space-time'.
     df: True builds everything from the mean field's density fit (for a
         mean field without one, the helper's exact eigendecomposition of the
-        MO integrals, eigenvalues below 1e-12 dropped). False, casida only:
-        the exact 4-centre integrals; imagfrequency is density fitted by
-        construction and refuses it.
+        MO integrals, eigenvalues below 1e-12 dropped); on space-time from
+        the separable (ISDF) factors instead. False, casida only: the exact
+        4-centre integrals; imagfrequency is density fitted and space-time
+        ISDF fitted by construction, and both refuse it.
     numerics: the run's Numerics (None: the defaults), kept on the result
-        and read by the eigensolve (casida) or the frequency count of the
-        energy (imagfrequency, `rpa_quadrature`).
+        and read by the eigensolve (casida), the frequency count of the
+        energy (imagfrequency, `rpa_quadrature`), or on space-time the ISDF
+        grid (numerics.isdf, which has no default: None is refused there)
+        and the tau and frequency counts of `_space_time`.
 
     On casida E_RPA,corr comes from the same solve as Omega and X+Y; on
     imagfrequency from `rpa_correlation_energy_imaginary_axis` on the
-    minimax grid kept in low.cache['grid'], with P(0) in low.cache['p0'].
+    minimax grid kept in low.cache['grid'], with P(0) in low.cache['p0'];
+    on space-time from `rpa_correlation_energy_space_time` (`_space_time`).
     """
     _refuse_options(opts, 'run')
     mode = choice(mode, MODES, 'mode')
-    if mode not in BUILT_MODES:
-        raise NotImplementedError(
-            f"method={METHOD!r} mode={mode!r} is not implemented yet; built: "
-            + ', '.join(repr(m) for m in BUILT_MODES) + '.')
     df = bool(df)
-    if mode == 'imagfrequency' and not df:
+    if mode != 'casida' and not df:
+        how = ('density fitted' if mode == 'imagfrequency'
+               else 'ISDF fitted (separable factors)')
         raise ValueError(
-            f"method={METHOD!r} mode='imagfrequency' is density fitted; "
-            f"df=False (the exact 4-centre screening) is mode='casida' only.")
-    mol = mf.mol
+            f"method={METHOD!r} mode={mode!r} is {how}; df=False (the exact "
+            f"4-centre screening) is mode='casida' only.")
     eps = np.asarray(get_orbital_energies(mf))
     nocc = closed_shell_nocc(mf.mo_occ)
+    if mode == 'space-time':
+        e_c, cache = _space_time(mf, eps, nocc, numerics)
+        return RPALowLevel(
+            mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
+            e_c_full=e_c, omega=None, xpy=None, factors=None, eri=None,
+            cache=cache)
+    mol = mf.mol
     if df:
         factors = get_density_fitting_coefficients(mol, mf, 'spatial')
         eri = None
@@ -211,6 +234,53 @@ def _imaginary_axis(eps, nocc, factors, numerics):
     grid = minimax_frequency_grid(nfreq, e_min, e_max)
     p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]
     return float(e_c), {'grid': grid, 'p0': p0}
+
+
+def _space_time(mf, eps, nocc, numerics):
+    """(E_c, cache) of the restricted direct RPA in imaginary time, serial,
+    on the separable factors (X, D) of `separable_factors` on
+    numerics.isdf's grid (refused, ValueError, when it names none):
+
+    'factors': (X, D), X (M, nmo) the MO collocation, D (M, naux), so the
+        fitted v is (pq|rs) = sum_Q B_Q,pq B_Q,rs with B_Q,pq = sum_P D_PQ
+        X_Pp X_Pq.
+    'static_grid': the one-frequency (omega = 0) minimax grid of a static
+        screening (`static_screening_grid` at quadrature.ntau_w, as the BSE's
+        W), and 'p0' P(0) = chi0(0) on it (`chi0_imaginary_frequency`), the
+        chi0 `static_screening_matrix` inverts: 1 - W(0)^-1, built directly.
+    'energy_grid': the TimeFrequencyGrid of E_c, the grid of the RPA
+        ground-state chain: minimax tau (quadrature.ntau_rpa, else ntau_w,
+        else the minimax count of the window at tau_target) transformed onto
+        a Gauss-Legendre frequency axis (quadrature.nfreq_rpa, else
+        RPA_ENERGY_NFREQ; `rpa_quadrature`) scaled to the gap.
+
+    E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
+    E_c^A are built on these same grids and transforms, so the active part
+    cancels to rounding with every orbital active."""
+    num = numerics_or_default(numerics)
+    if not num.isdf.grid_named():
+        raise ValueError(
+            f"method={METHOD!r} mode='space-time' builds separable (ISDF) "
+            f"factors on the grid numerics.isdf names, and this run's names "
+            f"none: pass numerics with numerics.isdf.level (e.g. 'G1') or "
+            f"counts.")
+    x, d = unpack_factors(separable_factors(mf, mf.mol, numerics=numerics,
+                                            comm=None))[:2]
+    q = num.quadrature
+    static_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
+                                        tau_target=q.tau_target)
+    p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid)[0]
+    ntau, nfreq = rpa_quadrature(num)
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    if ntau is None:
+        ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
+    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(eps, nocc))
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
+                                           with_sine=False,
+                                           with_inverse=False)
+    e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid, comm=None)
+    return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
+                        'p0': p0, 'energy_grid': grid}
 
 
 def _plasmon(eps, nocc, factors, eri, numerics):
@@ -257,7 +327,9 @@ def screening_correction(low, part, screening):
     low.cache['p0'], P^A(0) `active_polarizability_static` and B the
     factors of every active pair (`active_pair_factors`). By the
     push-through identity this is the casida formula on the same factors,
-    and P - P^A, not W - W^A: screening is not additive.
+    and P - P^A, not W - W^A: screening is not additive. On space-time it is
+    the same Dyson step on the ISDF factors, P(0) and P^A(0) both on the
+    static tau grid (low.cache['static_grid']).
     """
     screening = choice(screening, SCREENINGS, 'screening')
     if screening == 'mrpa':
@@ -274,7 +346,7 @@ def screening_correction(low, part, screening):
     res = ~active_pair_mask(part)
     if screening == 'bare' or n == 0 or not res.any():
         return vt
-    if low.mode == 'imagfrequency':
+    if low.mode != 'casida':
         b_act = active_pair_factors(low, part).reshape(-1, n * n)
         w_r = dyson_screening(
             low.cache['p0'] - active_polarizability_static(low, part),
@@ -309,8 +381,19 @@ def active_pair_factors(low, part):
     pair, occupied-occupied, occupied-virtual and virtual-virtual, on
     part.act (occupied first), so (tu|vw) = sum_Q B_Q,tu B_Q,vw is the
     full RPA's fitted v on the active orbitals. vtilde needs all of them,
-    not only the ov block (spec §3.4)."""
-    act = part.act
+    not only the ov block (spec §3.4). On space-time they are built from
+    the active columns of the collocation X alone, B_Q,tu = sum_P D_PQ X_Pt
+    X_Pu (low.cache['factors']), the factors chi0 is built from."""
+    return _pair_factors(low, part.act)
+
+
+def _pair_factors(low, act):
+    """`active_pair_factors` on the orbitals `act`."""
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        n, x_act = len(act), x[:, act]
+        pairs = (x_act[:, :, None] * x_act[:, None, :]).reshape(len(x), n * n)
+        return (d.T @ pairs).reshape(d.shape[1], n, n)
     return low.factors[:, act][:, :, act]
 
 
@@ -320,7 +403,23 @@ def active_polarizability_static(low, part):
     basis, chi0(0) of the full P(0) restricted to those columns of B_ov,
     2 sum_ia B_ia f_ia(0) B_ia^T = -4 sum_ia B_ia B_ia^T / delta_ia, with
     the same frequency factor and spin factor as the full one, so P - P^A
-    keeps every other pair exactly. Zero without an active ph pair."""
+    keeps every other pair exactly. Zero without an active ph pair.
+
+    On space-time it is the full P(0)'s own build on the stored static grid
+    (`chi0_imaginary_frequency`: `polarizability_projected_tau` at every
+    tau point, transformed by the grid's cosine weights) with X restricted
+    to the active columns and the full system's mid-gap mu, i.e. the
+    transform of -2 sum_ia B_ia B_ia^T exp(-delta_ia tau) over the active ph
+    pairs: with every orbital active it is P(0) itself, to the bit."""
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        k = part.n_act_occ
+        if k == 0 or k == part.n_act:
+            return np.zeros((d.shape[1],) * 2)
+        act = part.act
+        mu = particle_hole_window(low.eps, low.nocc)[2]
+        return chi0_imaginary_frequency(x[:, act], d, low.eps[act], k,
+                                        low.cache['static_grid'], mu=mu)[0]
     nocc = low.nocc
     b = low.factors
     mask = active_pair_mask(part)
@@ -333,8 +432,13 @@ def active_polarizability_static(low, part):
 def _active_v(low, act):
     """The v of the full RPA (low.factors or low.eri) on the orbitals `act`:
     (v_act, v_ov), v_act the (n,)*4 chemist (pq|rs) and v_ov the
-    (n*n, n_pair) (pq|ia) over every (i, a) pair in C order."""
+    (n*n, n_pair) (pq|ia) over every (i, a) pair in C order. On space-time
+    v_act is the ISDF v of `active_pair_factors` and v_ov None: only the
+    casida static defect reads it."""
     n, nocc = len(act), low.nocc
+    if low.mode == 'space-time':
+        b_act = _pair_factors(low, act).reshape(-1, n * n)
+        return (b_act.T @ b_act).reshape((n,) * 4), None
     if low.factors is not None:
         b = low.factors
         b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
@@ -375,14 +479,22 @@ def active_correlation_energy(low, part, v_eff):
     in the active ph space, U = K^A the ph block of v_eff and Pi^A the
     diagonal bare response 2 f(i w) = -4 delta/(delta^2 + w^2), the spin
     and frequency factor of the full chi0
-    (`solve_polarizability_imaginary_axis`). With every orbital active and v_eff the fitted v, U = B^T B and
+    (`solve_polarizability_imaginary_axis`). With every orbital active and
+    v_eff the fitted v, U = B^T B and
     Tr ln(1 - Pi B^T B) = ln det(1 - B Pi B^T): the full integrand at every
     point, so the pair cancels to rounding. The dense-Casida value on the
-    same v_eff is the 'ec_active_casida' diagnostic."""
+    same v_eff is the 'ec_active_casida' diagnostic.
+
+    On space-time the same quadrature on the energy's grid
+    (low.cache['energy_grid']), with Pi^A(i w_k) = -2 sum_tau
+    cosft_wt[k, tau] exp(-delta tau): exp(-delta tau) pushed through the
+    energy's own tau -> omega transform, as the full chi0 was
+    (`rpa_correlation_energy_space_time`), not the exact Lorentzian, so the
+    pair again cancels to rounding with every orbital active."""
     k = part.n_act_occ
     if k == 0 or k == part.n_act:
         return 0.0
-    if low.mode == 'imagfrequency':
+    if low.mode != 'casida':
         return _active_ec_quadrature(low, part, v_eff)
     return _active_ec_casida(low, part, v_eff)
 
@@ -400,10 +512,16 @@ def _active_ec_quadrature(low, part, v_eff):
     warning and flag for a non-positive det(1 - Pi^A U))."""
     delta, k_ph, _ = _active_ph(low, part, v_eff)
     eye = np.eye(delta.size)
-    points, weights = low.cache['grid']
+    if low.mode == 'space-time':
+        grid = low.cache['energy_grid']
+        weights = grid.omega_weights
+        pi = -2.0 * grid.cosft_wt @ np.exp(-np.outer(grid.tau_points, delta))
+    else:
+        points, weights = low.cache['grid']
+        pi = [2.0 * frequency_factor(delta, w, True) for w in points]
     e_c = 0.0
-    for k, (w, wt) in enumerate(zip(points, weights)):
-        pu = (2.0 * frequency_factor(delta, w, True))[:, None] * k_ph
+    for k, (pi_k, wt) in enumerate(zip(pi, weights)):
+        pu = pi_k[:, None] * k_ph
         e_c += wt * (dielectric_log_determinant(eye - pu, k) + np.trace(pu))
     return float(e_c / (2.0 * np.pi))
 
@@ -423,12 +541,17 @@ def static_defect(low, part, v_eff):
 
     On imagfrequency W(0) is the cache's: B_act^T [1 - P(0)]^-1 B_act with
     B_act `active_pair_factors` (ruling R4), against the same W^A on v_eff
-    of the fitted v + vtilde, so the crpa defect is again an identity.
+    of the fitted v + vtilde, so the crpa defect is again an identity. On
+    space-time likewise, with the static grid's response of each active ph
+    pair in W^A: -4/delta becomes pi(0) = -2 sum_tau cosft_wt[0, tau]
+    exp(-delta tau), the one P^A(0) carries (`active_polarizability_static`),
+    i.e. delta_A -> -4/pi(0) above, without which the crpa defect would be
+    the transform's error and not zero.
     """
     n = part.n_act
     if n == 0:
         return 0.0
-    if low.mode == 'imagfrequency':
+    if low.mode != 'casida':
         b_act = active_pair_factors(low, part).reshape(-1, n * n)
         w_full = (b_act.T @ dyson_screening(low.cache['p0'])
                   @ b_act).reshape((n,) * 4)
@@ -439,6 +562,10 @@ def static_defect(low, part, v_eff):
     w_act = v_eff.copy()
     delta, k_ph, v_ph = _active_ph(low, part, v_eff)
     if delta.size:
+        if low.mode == 'space-time':
+            grid = low.cache['static_grid']
+            delta = 2.0 / (np.exp(-np.outer(delta, grid.tau_points))
+                           @ grid.cosft_wt[0])
         apb = 4.0 * k_ph
         apb[np.diag_indices_from(apb)] += delta
         w_act -= (4.0 * v_ph @ cho_solve(cho_factor(apb), v_ph.T)).reshape(
@@ -641,6 +768,8 @@ def embedding_self_energy(low, part, sigma):
         + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
         on casida, within the larger of pole_margin/sqrt(2 s) and
         numerics.downfolding.continuation_margin, pointing to mode='casida'.
+    space-time: not built yet (NotImplementedError, pointing to casida and
+        imagfrequency).
     Zero when the environment is empty.
     """
     return _embedding(low, part, sigma)[0]
@@ -652,8 +781,13 @@ def _embedding(low, part, sigma):
     eps_r, occupied_r, omega) of the environment and 'srg_s', the s applied
     by 'srg'; on imagfrequency 'z' and 'samples', the Pade nodes and S^E
     there, and 'fit', the (Z, A) of `pade_fit_elementwise` (None without an
-    environment)."""
+    environment). Not built on space-time (NotImplementedError)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    if low.mode == 'space-time':
+        raise NotImplementedError(
+            f"method={METHOD!r} sigma={sigma!r} (the environment self-energy)"
+            f" is not built on mode='space-time' yet: use mode='casida' or "
+            f"mode='imagfrequency'.")
     settings = numerics_or_default(low.numerics).downfolding
     if sigma == 'mode_a' or low.mode != 'casida':
         _refuse_near_poles(low, part, settings, sigma)
@@ -913,7 +1047,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency 'srg'
         is s = inf (Eq. 42) and both forms are refused near the poles,
-        pointing to casida (`embedding_self_energy`).
+        pointing to casida (`embedding_self_energy`); not built on
+        space-time (NotImplementedError).
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
         that does not apply here (on casida 'ec_active_casida' and
         'sigma_continuation', and 'sigma_poles' and 'sigma_continuation'
@@ -923,9 +1058,9 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         (imagfrequency, `_sigma_continuation`): per element the spread of
         two Pade fits on the even and the odd nodes, warning
         (SigmaContinuationWarning) above DOWNFOLDING_SIGMA_CONTINUATION_WARN.
-        'ec_active_casida' (imagfrequency): {'casida': the dense-Casida
-        E_c^A on the same v_eff, 'difference': the route's quadrature value
-        minus it}.
+        'ec_active_casida' (imagfrequency, space-time): {'casida': the
+        dense-Casida E_c^A on the same v_eff, 'difference': the route's
+        quadrature value minus it}.
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA

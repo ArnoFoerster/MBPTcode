@@ -11,15 +11,16 @@ any active-space solver in `src.Solvers.active_space`.
 Available now:
 
 - `method='hf'`: the HF limit, which is CASCI.
-- `method='rpa'`, `mode='casida'` (dense Casida, every pole) or
-  `mode='imagfrequency'` (density fitted, imaginary frequency, N^4), with
-  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally
-  `sigma='srg'` or `'mode_a'`: the static environment self-energy Sigma^E
-  that the paper drops (see below).
+- `method='rpa'`, `mode='casida'` (dense Casida, every pole),
+  `mode='imagfrequency'` (density fitted, imaginary frequency, N^4) or
+  `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
+  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally (casida and
+  imagfrequency) `sigma='srg'` or `'mode_a'`: the static environment
+  self-energy Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
 
-Not yet available, and refused when asked for: `mode='space-time'` and
-`screening='mrpa'` (Casida only once built).
+Not yet available, and refused when asked for: `sigma` on
+`mode='space-time'`, and `screening='mrpa'` (Casida only once built).
 
 ## Calling it
 
@@ -61,13 +62,25 @@ active, whatever the grid; the dense-Casida E_c^A is the
 and E_0 to the quadrature error of E_c[v] (below 1e-11 Eh at the default
 grid on water).
 
+`'space-time'` is the same in imaginary time on separable (ISDF) factors
+(X, D), built on the grid `numerics.isdf` names (there is no default grid:
+pass e.g. `Numerics(isdf={'level': 'G1'})`). It keeps the factors, P(0) on
+the static tau grid (`quadrature.ntau_w`) and the full RPA energy with its
+time-frequency grid (`quadrature.ntau_rpa`, `nfreq_rpa`). P^A is built as P
+was, from the active columns of X on the same grid, and E_c^A takes the
+active pairs through the energy's own tau -> omega transform, so with every
+orbital active both cancel to rounding on any grid. Against casida on the
+mean field's RI factors the route differs by the ISDF fit (NH3/cc-pVDZ, G1
+grid: v~ 5e-6 per element, the FCI energy of H_eff 1e-6 Eh, E_0 3e-5 Eh
+through E_HF,ee[v~], which cancels against h_eff in the energy).
+
 Options of the RPA:
 
 | call | option | values |
 |---|---|---|
-| `run_low_level` | `mode` | `'casida'`, `'imagfrequency'` (`'space-time'`: not yet available) |
-| | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none); `False`: exact 4-centre integrals, `'casida'` only |
-| | `numerics` | a `Numerics`, or `None` for the defaults |
+| `run_low_level` | `mode` | `'casida'`, `'imagfrequency'`, `'space-time'` |
+| | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none; ISDF factors on `'space-time'`); `False`: exact 4-centre integrals, `'casida'` only |
+| | `numerics` | a `Numerics`, or `None` for the defaults (`'space-time'` needs one naming the ISDF grid) |
 | `build_effective_hamiltonian` | `spin_free` | `True` (default): spatial-orbital `g_eff`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'` |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
@@ -297,7 +310,8 @@ Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all); a name that does not apply to the call is
 skipped, so one tuple works across a loop. Results are in
 `energies.diagnostics`, keyed by name. On the casida route two apply; on
-imagfrequency all four:
+imagfrequency all four; on space-time `'static_defect'` and
+`'ec_active_casida'`:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
   active orbitals. It is zero for `crpa`, by construction, and measures how
@@ -314,8 +328,9 @@ imagfrequency all four:
   Sigma_bar depends on `srg_s`. On imagfrequency `'z'` comes from the
   continued fraction, `'srg_s'` is None and `'srg_damping'` 0.0 (s =
   infinity, no damping applied).
-- `'ec_active_casida'` (imagfrequency): `{'casida': the dense-Casida
-  E_c^A on the same v_eff, 'difference': the quadrature value minus it}`.
+- `'ec_active_casida'` (imagfrequency, space-time): `{'casida': the
+  dense-Casida E_c^A on the same v_eff, 'difference': the quadrature value
+  minus it}`.
 - `'sigma_continuation'` (imagfrequency, with `sigma`): per element of
   Sigma_bar, the difference between two Pade fits on the even- and the
   odd-indexed nodes at the element's evaluation point. It is a
@@ -354,7 +369,7 @@ with the paper: Cartesian ones are far further from its numbers.
 
 ## Not yet available
 
-- `mode='space-time'` and `screening='mrpa'`.
+- Sigma^E on `mode='space-time'`, and `screening='mrpa'`.
 - Natural orbitals (RPA or GW), semicanonicalization and the Delta
   hybridization; the active space is the user's.
 - omega other than 0, and other ways of making W^r static.

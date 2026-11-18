@@ -228,7 +228,9 @@ def test_mode_refusals(wat):
     with pytest.raises(ValueError, match="'casida'"):
         run_low_level(mf, method='rpa', mode='spacetime')
     for mode in ('space-time', 'space_time'):
-        with pytest.raises(NotImplementedError, match="'casida'"):
+        # both spellings reach the space-time route, which needs an ISDF grid
+        with pytest.raises(ValueError,
+                           match="mode='space-time'.*numerics.isdf"):
             run_low_level(mf, method='rpa', mode=mode)
     with pytest.raises(TypeError, match="method='rpa'.*screening"):
         run_low_level(mf, method='rpa', screening='crpa')

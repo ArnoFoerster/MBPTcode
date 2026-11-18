@@ -1,4 +1,5 @@
-"""The RPA downfolding on the imagfrequency route against the casida route.
+"""The RPA downfolding on the imagfrequency and space-time routes against the
+casida route.
 
 mode='imagfrequency' keeps the static polarizability P(0) of the whole system
 in the normalized density-fitting basis, takes E_RPA,corr from the existing
@@ -20,6 +21,14 @@ three-index object is then the exact eigen-fit of the MO integrals) and a
 density-fitted RHF; the contiguous (4,4) active space, a non-contiguous one
 and one without active virtual orbitals. Measured values in each test's
 docstring.
+
+mode='space-time' does the same on the separable (ISDF) factors in imaginary
+time: P(0) and P^A(0) on one static tau grid (P^A with the active columns of
+X), E_c^A with exp(-delta tau) pushed through the energy's own tau -> omega
+transform. With every orbital active P - P^A and the E_c pair vanish to
+rounding (also on a coarse grid); against casida on the mean field's RI
+factors the routes differ by the ISDF fit (NH3/cc-pVDZ, HF and PBE0, on the
+G1 grid; water/cc-pVDZ for the all-active cases).
 """
 import dataclasses
 from functools import cache
@@ -28,22 +37,32 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
+from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
                                         rpa_quadrature)
 from src.Base.orbital_spaces import ov_energies, particle_hole_window
-from src.Base.utils.grids.grids import minimax_frequency_grid
+from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
+                                        minimax_frequency_grid)
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.MultiReference.Downfolding.energy import Energies
 from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
+from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import (
     rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
+from src.SingleReference.LinearResponse.space_time import (
+    rpa_correlation_energy_space_time, static_screening_grid,
+    static_screening_matrix)
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import h2, water
+from tests.gw_density_routes import fitted
+from tests.gw_density_routes import mean_field as nh3_mean_field
+from tests.gw_density_routes import water as gw_water
+from tests.isdf_test_grid import g1_numerics
 
 REFS = ('hf', 'pbe', 'df_hf')
 ASPACES = ('contiguous', 'non_contiguous', 'no_virtual')
@@ -393,10 +412,9 @@ def test_route_agreement_with_sigma(ref, s):
 
 def test_mrpa_refused_here():
     """mRPA is casida only (spec §3.5) and its refusal points to casida.
-    df=False has no meaning here (the route is density fitted) and
-    space-time is not built. The residues of W (`screened_residues`) need
-    the Casida eigenvectors and refuse here too, pointing to casida (ruling
-    R19)."""
+    df=False has no meaning here (the route is density fitted). The residues
+    of W (`screened_residues`) need the Casida eigenvectors and refuse here
+    too, pointing to casida (ruling R19)."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
     with pytest.raises(NotImplementedError, match="mode='casida'"):
@@ -405,5 +423,285 @@ def test_mrpa_refused_here():
         rpa.screened_residues(low, partition(a, low.eps))
     with pytest.raises(ValueError, match="df=False.*mode='casida'"):
         run_low_level(low.mf, mode='imagfrequency', df=False)
-    with pytest.raises(NotImplementedError, match="'imagfrequency'"):
-        run_low_level(low.mf, mode='space-time')
+
+
+# The space-time route: ISDF factors (X, D) on the G1 grid of NH3/cc-pVDZ
+# against casida on the mean field's own density fit (cc-pvdz-ri, the basis
+# the ISDF fits too), as tests/gw_density_routes.py; water/cc-pVDZ for the
+# all-active cases (6-31G has no validated ISDF grid).
+
+ST_REFS = ('HF', 'PBE0')
+
+
+@cache
+def _st_mean_field(ref):
+    """NH3/cc-pVDZ, HF or PBE0, density fitted on cc-pvdz-ri ('water': the
+    HF of water/cc-pVDZ, fitted the same way)."""
+    if ref == 'water':
+        return fitted(scf.RHF(gw_water()))
+    return nh3_mean_field(ref)
+
+
+@cache
+def _st_low(ref, mode, quadrature=()):
+    """The RPA low-level result of `ref` (`_st_mean_field`) on `mode`; on
+    space-time on the G1 grid, with the quadrature settings `quadrature`
+    (pairs)."""
+    mf = _st_mean_field(ref)
+    numerics = None
+    if mode == 'space-time':
+        numerics = g1_numerics(mf, Numerics(quadrature=dict(quadrature)))
+    return run_low_level(mf, method='rpa', mode=mode, numerics=numerics)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _release_space_time_caches():
+    """As `_release_cached_mean_fields`, for the space-time caches."""
+    yield
+    for cached in (_st_low, _st_mean_field):
+        cached.cache_clear()
+
+
+def _st_aspace(mf, which):
+    """NH3 (nocc 5; 2, 3 and 6, 7 and 8, 9 degenerate): (6,6) contiguous,
+    a non-contiguous (5,4) one and one without active virtual orbitals."""
+    n = len(mf.mo_energy)
+    if which == 'contiguous':
+        return ActiveSpace.from_indices(n, 5, [2, 3, 4], [5, 6, 7])
+    if which == 'non_contiguous':
+        return ActiveSpace.from_indices(n, 5, [1, 4], [5, 8, 9])
+    return ActiveSpace.from_indices(n, 5, [2, 3, 4], [])
+
+
+def _all_active(low):
+    n = len(low.eps)
+    return partition(ActiveSpace.from_indices(n, low.nocc, range(low.nocc),
+                                              range(low.nocc, n)), low.eps)
+
+
+def test_space_time_full_rpa():
+    """run(mode='space-time') keeps the ISDF factors (X, D) of
+    `separable_factors` on numerics.isdf's grid, the static tau grid
+    (`static_screening_grid` at quadrature.ntau_w) with P(0) built on it,
+    which is 1 - W(0)^-1 of `static_screening_matrix` (measured 9.4e-16),
+    and the energy's grid: minimax tau (the static count rule) to a
+    Gauss-Legendre frequency axis of `rpa_quadrature`, the grid of the RPA
+    ground-state chain. e_c_full is `rpa_correlation_energy_space_time` on
+    it (equal) and the casida one to the ISDF error (measured 8.5e-7, target
+    1e-5)."""
+    low, cas = _st_low('HF', 'space-time'), _st_low('HF', 'casida')
+    mf = low.mf
+    assert low.mode == 'space-time' and low.df is True
+    assert low.omega is None and low.xpy is None
+    assert low.factors is None and low.eri is None
+    x, d = low.cache['factors']
+    want = unpack_factors(separable_factors(mf, mf.mol, numerics=low.numerics,
+                                            comm=None))
+    assert np.array_equal(x, want[0]) and np.array_equal(d, want[1])
+    eps, nocc = low.eps, low.nocc
+    q = low.numerics.quadrature
+    g0 = low.cache['static_grid']
+    ref0 = static_screening_grid(eps, nocc, ntau=q.ntau_w,
+                                 tau_target=q.tau_target)
+    assert np.array_equal(g0.tau_points, ref0.tau_points)
+    assert np.array_equal(g0.cosft_wt, ref0.cosft_wt)
+    w0 = static_screening_matrix(x, d, eps, nocc, g0, comm=None)
+    p0 = low.cache['p0']
+    assert np.abs(p0 - (np.eye(len(p0)) - np.linalg.inv(w0))).max() < 1e-12
+    grid = low.cache['energy_grid']
+    ntau, nfreq = rpa_quadrature(low.numerics)
+    assert ntau is None and grid.ntau == g0.ntau
+    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(eps, nocc))
+    assert np.array_equal(grid.omega_points, nu)
+    assert np.array_equal(grid.omega_weights, wt)
+    assert low.e_c_full == rpa_correlation_energy_space_time(
+        x, d, eps, nocc, grid, comm=None)
+    assert abs(low.e_c_full - cas.e_c_full) < 1e-5
+
+
+def test_active_part_cancels_exactly():
+    """With every orbital active P^A, built on the stored static grid with
+    the active columns of X, is the full P(0) (measured max |P - P^A| 0.0),
+    so the Dyson step of P - P^A leaves nothing to screen and vtilde == 0
+    for every screening (water/cc-pVDZ)."""
+    low = _st_low('water', 'space-time')
+    part = _all_active(low)
+    p_a = rpa.active_polarizability_static(low, part)
+    assert np.abs(low.cache['p0'] - p_a).max() < 1e-10
+    n = part.n_act
+    b_act = rpa.active_pair_factors(low, part).reshape(-1, n * n)
+    w_r = np.linalg.inv(np.eye(len(p_a)) - (low.cache['p0'] - p_a))
+    w_r -= np.eye(len(p_a))
+    assert np.abs(b_act.T @ w_r @ b_act).max() < 1e-10
+    for s in SCREENINGS_1:
+        t = rpa.terms(low, part, s, diagnostics=())
+        assert np.abs(t.vtilde[0]).max() == 0.0
+
+
+def test_space_time_active_pair_factors_and_polarizability():
+    """active_pair_factors are D^T (X_t X_u) of every active pair, so (tu|vw)
+    = sum_Q B_Q,tu B_Q,vw is the ISDF v (measured 4.4e-16 against the
+    einsum); P^A(0) is the static grid's transform of -2 sum_ia B_ia B_ia^T
+    exp(-delta_ia tau) over the active ph pairs (3.8e-17 against the pair
+    sum), whose pi(0) is -4/delta to the transform's 2.0e-6 (relative)."""
+    low = _st_low('HF', 'space-time')
+    part = partition(_st_aspace(low.mf, 'non_contiguous'), low.eps)
+    x, d = low.cache['factors']
+    act = part.act
+    b_act = rpa.active_pair_factors(low, part)
+    want = np.einsum('PQ,Pt,Pu->Qtu', d, x[:, act], x[:, act])
+    assert b_act.shape == (d.shape[1], 5, 5)
+    assert np.abs(b_act - want).max() < 1e-12
+    g0 = low.cache['static_grid']
+    occ, vir = act[:2], act[2:]
+    b_a = want[:, :2, 2:].reshape(d.shape[1], -1)
+    delta = (low.eps[vir][None, :] - low.eps[occ][:, None]).ravel()
+    pi0 = -2.0 * np.exp(-np.outer(delta, g0.tau_points)) @ g0.cosft_wt[0]
+    p_a = rpa.active_polarizability_static(low, part)
+    assert np.abs(p_a - (b_a * pi0) @ b_a.T).max() < 1e-12
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_all_active_ec_pair_cancels_space_time(s):
+    """Water/cc-pVDZ, every orbital active: Pi^A(i w_k), e^(-delta tau)
+    pushed through the energy's own tau -> omega transform, makes Pi^A U the
+    full chi0 v at every frequency, so E_c^A = E_c[v] (measured 4.3e-13)."""
+    low = _st_low('water', 'space-time')
+    t = rpa.terms(low, _all_active(low), s)
+    assert abs(t.e_c_full - t.e_c_active) < 1e-10
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_all_active_ec_pair_cancels_on_a_coarse_space_time_grid(s):
+    """The same on a coarse grid, 10 tau points (the fewest whose transform
+    fit does not warn here) and 6 Gauss-Legendre frequencies: E_c[v] moves
+    from the default grid's (14, 40) by 3.0e-3, the quadrature error made
+    visible, and the pair still cancels (measured 6.7e-15). E_c^A on the
+    exact Lorentzian -4 delta/(delta^2 + w^2) at the same frequencies would
+    miss by 1.4e-6 (1.8e-10 at the default grid, too small to tell): only
+    the energy's own points, weights and transform make the pair cancel."""
+    low = _st_low('water', 'space-time', (('ntau_rpa', 10), ('nfreq_rpa', 6)))
+    grid = low.cache['energy_grid']
+    assert grid.ntau == 10 and grid.nfreq == 6
+    assert abs(low.e_c_full - _st_low('water', 'space-time').e_c_full) > 1e-7
+    t = rpa.terms(low, _all_active(low), s)
+    assert abs(t.e_c_full - t.e_c_active) < 1e-10
+
+
+@pytest.mark.parametrize('aspace', ASPACES)
+@pytest.mark.parametrize('ref', ST_REFS)
+def test_space_time_vtilde_matches_casida(ref, aspace):
+    """P - P^A on the static tau grid and one Dyson step, on the ISDF
+    factors, against casida's deletion on the RI factors of the same
+    auxiliary basis: per element within the ISDF error, crpa and crpa_ph,
+    also with no active virtual orbital. Target 1e-5; measured at most
+    3.6e-6 (HF) and 4.7e-6 (PBE0), on the non-contiguous space. The ISDF's
+    bare v itself differs from the RI v on the contiguous space's orbitals
+    by 7.6e-6 (G1), 9.6e-6 (G3): the residual is the fit's, not the static
+    tau quadrature's (unchanged from 14 to 30 tau points)."""
+    low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
+    mf = low_st.mf
+    part = partition(_st_aspace(mf, aspace), mf.mo_energy)
+    for s in ('crpa', 'crpa_ph'):
+        vt = rpa.screening_correction(low_st, part, s)
+        ref_vt = rpa.screening_correction(low_cas, part, s)
+        if s == 'crpa' or part.n_act > part.n_act_occ:
+            assert np.abs(ref_vt).max() > 1e-3
+        assert np.abs(vt - ref_vt).max() < 1e-5
+        t = rpa.terms(low_st, part, s, diagnostics=())
+        assert all(np.array_equal(x, vt) for x in t.vtilde)
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('aspace', ('contiguous', 'non_contiguous'))
+@pytest.mark.parametrize('ref', ST_REFS)
+def test_space_time_e0_terms_match_casida(ref, aspace, s):
+    """Every Energies field, E_0, h_eff, v_eff and the FCI energy of H_eff
+    on space-time against casida: the ISDF error of E_c[v] and vtilde plus
+    the quadrature's. Target 1e-5. Measured: E_c[v] 8.5e-7 (HF) / 1.4e-6
+    (PBE0), E_c^A at most 5.7e-7; for bare and crpa_ph every field and E_0
+    at most 1.4e-6; for crpa E_HF,ee[vtilde] = 1/2 Tr[t^DC rho^A,0] sums the
+    vtilde error over the active occupied orbitals, 2.6e-5, and E_0 follows
+    (2.5e-5), as does h_eff = f - t^DC (1.6e-5): the target missed by 2.6x,
+    hence 5e-5 on those (the same at G3, 2.2e-5, so the ISDF fit's). The
+    two cancel in the energy of H_eff: FCI at most 1.1e-6, v_eff 4.7e-6.
+    The route's E_c^A against the dense one on the same v_eff
+    ('ec_active_casida'): 1.9e-11."""
+    low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
+    a = _st_aspace(low_st.mf, aspace)
+    g, space, en = build_effective_hamiltonian(low_st, a, screening=s)
+    g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    for f in dataclasses.fields(Energies):
+        if f.name != 'diagnostics':
+            assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 5e-5
+    assert abs(en.e0 - en_c.e0) < 5e-5
+    assert np.abs(g[1] - g_c[1]).max() < 5e-5
+    assert np.abs(g[2] - g_c[2]).max() < 1e-5
+    assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
+    assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-9
+
+
+@pytest.mark.parametrize('ref', ST_REFS)
+def test_space_time_static_defect_zero_for_crpa(ref):
+    """W(0) = [1 - P(0)]^-1 of the static grid, projected on the active
+    pairs, against the active dRPA of the ISDF v + vtilde with the ph pairs'
+    static response on the same grid (R3, R4): an identity for crpa
+    (measured 4.4e-16; with the exact -4/delta in W^A it would be the
+    transform's error instead), and the casida route's defect for bare and
+    crpa_ph to the ISDF error (target 1e-5; measured at most 3.7e-6 on
+    this space, 8.6e-6 on the non-contiguous one)."""
+    low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
+    a = _st_aspace(low_st.mf, 'contiguous')
+    _, _, en = build_effective_hamiltonian(low_st, a, screening='crpa')
+    assert en.diagnostics['static_defect'] < 1e-8
+    for s in ('bare', 'crpa_ph'):
+        _, _, en = build_effective_hamiltonian(low_st, a, screening=s)
+        _, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
+        assert en.diagnostics['static_defect'] > 1e-4
+        assert abs(en.diagnostics['static_defect']
+                   - en_c.diagnostics['static_defect']) < 1e-5
+
+
+def test_space_time_low_reuse():
+    """One space-time low-level result, used for crpa, crpa_ph, bare and a
+    second active space in turn, gives each the same H_eff as a fresh one,
+    and its cache keeps only what run put there."""
+    mf = _st_mean_field('HF')
+    numerics = g1_numerics(mf)
+    low = run_low_level(mf, mode='space-time', numerics=numerics)
+    p0 = low.cache['p0'].copy()
+    a = _st_aspace(mf, 'contiguous')
+    other = _st_aspace(mf, 'non_contiguous')
+    calls = [(a, 'crpa'), (a, 'crpa_ph'), (a, 'bare'), (other, 'crpa'),
+             (a, 'crpa')]
+    shared = [build_effective_hamiltonian(low, x, screening=s)
+              for x, s in calls]
+    for (x, s), got in zip(calls, shared):
+        fresh = run_low_level(mf, mode='space-time', numerics=numerics)
+        _same(got, build_effective_hamiltonian(fresh, x, screening=s))
+    assert set(low.cache) == {'factors', 'static_grid', 'p0', 'energy_grid'}
+    assert np.array_equal(low.cache['p0'], p0)
+
+
+def test_space_time_refusals():
+    """mRPA is casida only and points there; df=False has no meaning on the
+    ISDF route; without an ISDF grid in numerics run says where to name one;
+    Sigma^E is not built on space-time yet and points to casida and
+    imagfrequency."""
+    low = _st_low('HF', 'space-time')
+    mf = low.mf
+    a = _st_aspace(mf, 'contiguous')
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        build_effective_hamiltonian(low, a, screening='mrpa')
+    with pytest.raises(ValueError, match="df=False.*mode='casida'"):
+        run_low_level(mf, mode='space-time', df=False,
+                      numerics=low.numerics)
+    with pytest.raises(ValueError, match='numerics.isdf'):
+        run_low_level(mf, mode='space-time')
+    for sigma in ('srg', 'mode_a'):
+        with pytest.raises(NotImplementedError,
+                           match="mode='casida'.*mode='imagfrequency'"):
+            build_effective_hamiltonian(low, a, sigma=sigma)
+        with pytest.raises(NotImplementedError,
+                           match="mode='casida'.*mode='imagfrequency'"):
+            rpa.embedding_self_energy(low, partition(a, low.eps), sigma)
