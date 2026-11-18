@@ -17,9 +17,17 @@ active space whose orbital energy leaves the pole-free window (or comes
 within the margin of its edge), where 'srg' stays finite and equal to the
 oracle. On the prototype's own orbitals 'mode_a' is its Sigma_bar. The
 `downfolding` numerics section holds srg_s and pole_margin.
+
+A term of Eq. 44 exactly at a pole is 0, not NaN (ruling R17). The
+'sigma_poles' diagnostic of `terms` (window, pole distances, Z_t against
+the oracle's S^E, the s applied, the SRG damping) warns on the near-pole
+space only; along a short scan through a pole crossing 'srg' stays as
+smooth as on a space far from the poles, where Eq. 42 jumps.
 """
 import json
 import pathlib
+import re
+import warnings
 
 import numpy as np
 import pytest
@@ -28,7 +36,8 @@ from pyscf import gto, scf
 from src.Base.numerics.constants import (DOWNFOLDING_POLE_MARGIN,
                                          DOWNFOLDING_SRG_S)
 from src.Base.numerics.numerics import DownfoldingNumerics, Numerics
-from src.MultiReference.Downfolding import run_low_level
+from src.MultiReference.Downfolding import (build_effective_hamiltonian,
+                                            run_low_level)
 from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
@@ -318,3 +327,150 @@ def test_numerics_section():
                 {'srg_s': float('inf')}, {'srg_s': float('nan')}):
         with pytest.raises(ValueError):
             Numerics(downfolding=bad)
+
+
+def test_srg_term_at_an_exact_pole_is_zero():
+    """Ruling R17: a term with D_tr = D_ur = 0 exactly is 0/0 in Eq. 44; its
+    limit at finite s is 0 (the kernel is about 2 D s near D = 0), and that
+    is what it gives, without a NaN or a floating-point warning. The other
+    term is untouched. Energies chosen exactly representable: D = 1 - 1/2 -
+    1/2 = 0 for r = 0, D = 1 - 1/4 - 1/2 = 1/4 for r = 1."""
+    w = np.array([[[0.3, 0.2]]])
+    args = (np.array([1.0]), np.array([0.5, 0.25]), np.array([False, False]),
+            np.array([0.5]))
+    with np.errstate(all='raise'):
+        out = rpa.srg_self_energy(w, *args, 500.0)
+        kept = rpa.srg_self_energy(w[:, :, 1:], args[0], args[1][1:],
+                                   args[2][1:], args[3], 500.0)
+    assert np.all(np.isfinite(out))
+    assert out[0, 0] == kept[0, 0] and kept[0, 0] != 0.0
+
+
+def _poles(low, aspace, sigma='srg', **opts):
+    """energies.diagnostics['sigma_poles'] of `aspace` on `low` (crpa)."""
+    return build_effective_hamiltonian(low, aspace, sigma=sigma,
+                                       **opts)[2].diagnostics['sigma_poles']
+
+
+@pytest.mark.parametrize('space', [_contiguous_44, _high_virtual],
+                         ids=['contiguous_44', 'high_virtual'])
+def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
+    """'sigma_poles': the pole-free window, each active orbital's distance to
+    its nearer edge (negative outside), Z_t = 1/(1 - S'_tt(eps_t)) against
+    a central difference of the oracle's exact pole sum S^E (h = 1e-5;
+    measured 3.1e-13 / 1.1e-9, tolerance 1e-7; Z from 0.963 at orbital 7
+    to 0.995), the s applied and the SRG damping max |Sigma_bar(s) -
+    Sigma_bar(inf)|. On the contiguous (4,4) the damping is exactly 0 and
+    nothing warns; on the near-pole space it is 1.5e-4 and a
+    SigmaDampingWarning names orbital 7 alone. 'mode_a' applies no s:
+    srg_s None, damping 0. With diagnostics=() there is no record and no
+    warning."""
+    _, eri, eps, nocc = wat
+    aspace = space(eps, nocc)
+    part = partition(aspace, eps)
+    near = space is _high_virtual
+    if near:
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always', rpa.SigmaDampingWarning)
+            poles = _poles(low_exact, aspace)
+        rec = [r for r in rec if r.category is rpa.SigmaDampingWarning]
+        assert len(rec) == 1
+        assert re.search(r'orbital 7\b', str(rec[0].message))
+        assert 'orbital 5' not in str(rec[0].message)
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', RuntimeWarning)
+            poles = _poles(low_exact, aspace)
+            mode_a = _poles(low_exact, aspace, sigma='mode_a')
+        assert mode_a['srg_s'] is None and mode_a['srg_damping'] == 0.0
+        assert np.array_equal(mode_a['z'], poles['z'])
+    assert set(poles) == {'window', 'pole_distance', 'z', 'srg_s',
+                          'srg_damping'}
+    lo, hi = rpa.pole_window(low_exact, part)
+    e = eps[part.act]
+    assert poles['window'] == (lo, hi)
+    assert np.array_equal(poles['pole_distance'], np.minimum(e - lo, hi - e))
+    assert (poles['pole_distance'] < 0).tolist() == [False, False, False, near]
+    assert poles['srg_s'] == DOWNFOLDING_SRG_S
+    w, e_t, e_r, occ_r, omega = _pure_args(low_exact, part)
+    damping = np.abs(rpa.srg_self_energy(w, e_t, e_r, occ_r, omega,
+                                         DOWNFOLDING_SRG_S)
+                     - rpa.srg_self_energy(w, e_t, e_r, occ_r, omega,
+                                           None)).max()
+    assert poles['srg_damping'] == damping
+    assert (damping > 1e-6) == near
+    h = 1e-5
+    slope = np.array([(sigma_env(x + h, eri, eps, nocc, part)[t, t]
+                       - sigma_env(x - h, eri, eps, nocc, part)[t, t]).real
+                      / (2 * h) for t, x in enumerate(e)])
+    assert np.abs(poles['z'] - 1.0 / (1.0 - slope)).max() < 1e-7
+    assert np.all((poles['z'] > 0) & (poles['z'] <= 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        _, _, en = build_effective_hamiltonian(low_exact, aspace,
+                                               sigma='srg', diagnostics=())
+    assert en.diagnostics == {}
+
+
+def _stretched_water(r_oh):
+    """Converged RHF of water/6-31G with both O-H bonds at r_oh Angstrom,
+    the angle and the O position of `water()`."""
+    o = np.array([0.0, 0.0, 0.1173])
+    hs = np.array([[0.0, 0.7572, -0.4692], [0.0, -0.7572, -0.4692]])
+    u = (hs - o) / np.linalg.norm(hs - o, axis=1)[:, None]
+    mol = gto.M(atom=[('O', o)] + [('H', o + r_oh * x) for x in u],
+                basis='6-31g', cart=False, verbose=0)
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1e-11
+    mf.verbose = 0
+    return mf.run()
+
+
+SCAN = (1.08, 1.09, 1.10, 1.11, 1.12)
+
+
+def test_srg_is_smooth_through_a_pole_crossing():
+    """Along a symmetric O-H stretch of water, 0.01 A steps, the near-pole
+    space (occupied 3, 4; virtual 5, 7, with 6 in the environment) crosses a
+    pole: eps_7 - eps_6 - Omega_1 changes sign between 1.10 and 1.11 A
+    (-1.2e-3 -> +2.7e-3 Ha, residue |w| = 8.5e-3). The active orbitals'
+    signs are fixed to the first geometry (orbitals 6 and 7 flip in the
+    SCF along the scan). Each element's largest second difference of 'srg'
+    (s = 500) stays below 10 times that element's on the plain (4,4) space
+    (occupied 3, 4; virtual 5, 6) along the same scan, with a floor of
+    1e-12 for the elements that symmetry makes zero (both at 1e-15 noise):
+    the largest ratio is 7.0, at the pole's own element (7, 7): 3.9e-5
+    against 5.6e-6. The undamped Eq. 42 (s = inf) on the same scan jumps
+    through the pole (1.3e-1 on (7, 7)), so the scan has teeth."""
+    srg, infinite, plain, gaps = [], [], [], []
+    ref = None
+    for r_oh in SCAN:
+        mf = _stretched_water(r_oh)
+        eps, nocc = mf.mo_energy, 5
+        act = [3, 4, 5, 6, 7]
+        c = mf.mo_coeff
+        if ref is None:
+            ref = c[:, act]
+        sign = np.sign(np.einsum('ap,ab,bp->p', ref, mf.get_ovlp(),
+                                 c[:, act]))
+        mf.mo_coeff = c.copy()
+        mf.mo_coeff[:, act] *= sign
+        low = run_low_level(mf, method='rpa', df=False)
+        near = partition(_high_virtual(eps, nocc), eps)
+        srg.append(rpa.embedding_self_energy(low, near, 'srg'))
+        args = _pure_args(low, near)
+        infinite.append(rpa.srg_self_energy(*args, None))
+        plain.append(rpa.embedding_self_energy(
+            low, partition(_contiguous_44(eps, nocc), eps), 'srg'))
+        gaps.append(eps[7] - eps[6] - low.omega[1])
+
+    def second(xs):
+        """Each element's largest |second difference| along the scan."""
+        xs = np.array(xs)
+        return np.abs(xs[2:] - 2 * xs[1:-1] + xs[:-2]).max(axis=0)
+
+    assert gaps[2] < 0 < gaps[3]
+    assert np.all(np.isfinite(srg))
+    baseline = np.maximum(second(plain), 1e-12)
+    assert np.all(second(srg) < 10 * baseline)
+    assert second(infinite).max() > 1e3 * second(plain).max()

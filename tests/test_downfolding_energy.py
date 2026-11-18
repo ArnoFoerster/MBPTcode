@@ -25,6 +25,14 @@ the crpa static defect is zero (also on a density-fitted mean field). The
 diagnostics keyword, the option refusals and one low-level result reused
 for many active spaces and screenings are tested too. Measured values in
 each test's docstring.
+
+With sigma='srg' or 'mode_a' (Sigma^E, Hartree-only double counting, the
+exchange energy term and -Tr[Sigma_bar gamma^A,0] in E_0): the reference
+determinant keeps its energy with the real Sigma_bar and with Sigma_bar
+forced to 0, for every screening; crpa_ph has no exchange term and h_eff =
+f + Sigma_bar; every orbital active still gives FCI and no orbital active
+E_HF + E_c[v]; at s = inf both forms give the same E_0; method='hf' refuses
+sigma.
 """
 from types import SimpleNamespace
 
@@ -32,13 +40,14 @@ import numpy as np
 import pytest
 from pyscf import dft, fci, gto, mcscf, scf
 
+from src.Base.numerics.numerics import Numerics
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             effective_hamiltonian,
                                             run_low_level)
 from src.MultiReference.Downfolding.energy import (
     Energies, active_hf_energy, assemble_energies, environment_hf_energy,
     exchange_energy_term, sigma_trace)
-from src.MultiReference.Downfolding.methods import LOW_LEVEL
+from src.MultiReference.Downfolding.methods import LOW_LEVEL, rpa
 from src.MultiReference.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body)
 from src.MultiReference.Downfolding.partition import partition
@@ -508,9 +517,6 @@ def test_rpa_option_refusals(wat_rpa):
         build_effective_hamiltonian(low, aspace, screening='rpa')
     with pytest.raises(NotImplementedError, match="screening='mrpa'"):
         build_effective_hamiltonian(low, aspace, screening='mrpa')
-    for sigma in ('srg', 'mode_a'):
-        with pytest.raises(NotImplementedError, match='sigma'):
-            build_effective_hamiltonian(low, aspace, sigma=sigma)
     for sigma in ('None', 'none', 'SRG', 'gw'):
         with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
             build_effective_hamiltonian(low, aspace, sigma=sigma)
@@ -576,3 +582,130 @@ def test_empty_active_space_e0(wat_rpa):
             assert space['n_orbs'] == 0 and en.e_c_active == 0.0
             assert abs(en.e0 - (mf.e_tot + low.e_c_full)) < 1e-9
             assert g[0] == en.e0 and g[2].shape == (0, 0, 0, 0)
+
+
+# --- Sigma^E in H_eff and E_0 (spec §3.6, §3.7) -------------------------------
+
+SIGMAS_1 = ('srg', 'mode_a')
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('sigma', SIGMAS_1)
+def test_reference_determinant_is_unchanged_by_sigma(wat_rpa, s, sigma):
+    """Switching Sigma^E on changes h_eff by Sigma_bar minus the exchange
+    double counting and E_0 by 2 K~ - 2 sum_k Sigma_bar_kk, so the reference
+    determinant keeps E_HF + E_c[v] - E_c^A[v_eff] with the real Sigma_bar.
+    The switch does change H_eff (Sigma_bar and h_eff differ by more than
+    1e-3), not v_eff and not the E_c pair. Measured 0.0 in all six cases
+    (tolerance 1e-9): Sigma_trace -0.0777 for every screening."""
+    mf, low, aspace = wat_rpa
+    g_plain, _, en_plain = build_effective_hamiltonian(low, aspace,
+                                                       screening=s)
+    g, _, en = build_effective_hamiltonian(low, aspace, screening=s,
+                                           sigma=sigma)
+    assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
+    assert abs(en.e_sigma_trace) > 1e-3
+    assert np.abs(g[1] - g_plain[1]).max() > 1e-3
+    assert np.array_equal(g[2], g_plain[2])
+    assert (en.e_c_full, en.e_c_active) == (en_plain.e_c_full,
+                                            en_plain.e_c_active)
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('sigma', SIGMAS_1)
+def test_sigma_switch_with_zero_sigma_bar(wat_rpa, monkeypatch, s, sigma):
+    """Spec §6.2 sign test: with Sigma_bar forced to 0 (the residues of W
+    zeroed) the switch changes only the double counting and E_0 (the exchange
+    energy term), and the reference determinant keeps its energy. Measured
+    0.0 in all six cases (tolerance 1e-9); for crpa the switch moves h_eff by the
+    exchange double counting (more than 1e-3)."""
+    mf, low, aspace = wat_rpa
+    g_plain, _, _ = build_effective_hamiltonian(low, aspace, screening=s)
+    monkeypatch.setattr(rpa, 'screened_residues',
+                        lambda low, part: np.zeros((len(low.omega),
+                                                    part.n_act,
+                                                    len(part.env))))
+    g, _, en = build_effective_hamiltonian(low, aspace, screening=s,
+                                           sigma=sigma)
+    assert en.e_sigma_trace == 0.0
+    assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
+    if s == 'crpa':
+        assert abs(en.e_exchange_term) > 1e-3
+        assert np.abs(g[1] - g_plain[1]).max() > 1e-3
+
+
+@pytest.mark.parametrize('sigma', SIGMAS_1)
+def test_exchange_term_vanishes_for_ph_screening(wat_rpa, sigma):
+    """crpa_ph: vtilde has no (kl|lk) and no (tu|kk) element, so K~ = 0 and
+    the Hartree double counting is zero: with Sigma^E the exchange energy
+    term is exactly 0 and h_eff = f + Sigma_bar, f the core Fock operator of
+    method='hf' (nothing double counted is left). Measured 0.0 (tolerance
+    1e-12); crpa's exchange term is -0.585."""
+    mf, low, aspace = wat_rpa
+    g, _, en = build_effective_hamiltonian(low, aspace, screening='crpa_ph',
+                                           sigma=sigma)
+    assert en.e_exchange_term == 0.0
+    g_hf, _, _ = _hf_heff(mf, aspace)
+    part = partition(aspace, mf.mo_energy)
+    s_bar = rpa.embedding_self_energy(low, part, sigma)
+    assert np.abs(g[1] - (g_hf[1] + s_bar)).max() < 1e-12
+    assert abs(en.e_sigma_trace - 2.0 * np.trace(s_bar[:2, :2])) < 1e-12
+    _, _, en_crpa = build_effective_hamiltonian(low, aspace, screening='crpa',
+                                                sigma=sigma)
+    assert abs(en_crpa.e_exchange_term) > 1e-3
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('sigma', SIGMAS_1)
+def test_all_active_sigma_is_zero(s, sigma):
+    """H2/6-31G with every orbital active: no environment, so Sigma_bar = 0,
+    and vtilde = 0, so both Sigma^E terms of E_0 are exactly zero and H_eff
+    is still the full Hamiltonian. Measured |E - E_FCI| at most 4.4e-16
+    (tolerance 1e-9)."""
+    mf = h2()
+    low = run_low_level(mf)
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
+    g, space, en = build_effective_hamiltonian(low, aspace, screening=s,
+                                               sigma=sigma)
+    assert (en.e_exchange_term, en.e_sigma_trace) == (0.0, 0.0)
+    assert abs(_solve(g, space) - fci.FCI(mf).kernel()[0]) < 1e-9
+
+
+def test_empty_active_space_with_sigma(wat_rpa):
+    """No active orbital: Sigma_bar is (0, 0) and E_0 = E_HF + E_c[v] with
+    Sigma^E too. Measured 1.4e-14 (tolerance 1e-9)."""
+    mf, low, _ = wat_rpa
+    empty = ActiveSpace.from_indices(len(mf.mo_energy), 5, [], [])
+    for sigma in SIGMAS_1:
+        _, _, en = build_effective_hamiltonian(low, empty, sigma=sigma)
+        assert (en.e_exchange_term, en.e_sigma_trace) == (0.0, 0.0)
+        assert abs(en.e0 - (mf.e_tot + low.e_c_full)) < 1e-9
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+def test_e0_terms_do_not_depend_on_the_form_at_infinite_s(wat_rpa, s):
+    """srg_s = None: the diagonal of 'srg' is that of 'mode_a' and
+    gamma^A,0 is diagonal, so every E_0 term agrees between the two forms
+    while the off-diagonal h_eff does not. Measured |Delta E_0| = 0.0 for every
+    screening (tolerance 1e-12); the off-diagonal h_eff differs by up to
+    1.9e-4."""
+    mf, _, aspace = wat_rpa
+    low = run_low_level(mf, numerics=Numerics(downfolding={'srg_s': None}))
+    (g_srg, _, srg), (g_a, _, mode_a) = (
+        build_effective_hamiltonian(low, aspace, screening=s, sigma=sigma)
+        for sigma in SIGMAS_1)
+    for name in ('e_hf_ee_vtilde', 'e_exchange_term', 'e_sigma_trace', 'e0'):
+        assert abs(getattr(srg, name) - getattr(mode_a, name)) < 1e-12
+    assert np.abs(np.diag(g_srg[1]) - np.diag(g_a[1])).max() < 1e-12
+    assert np.abs(g_srg[1] - g_a[1]).max() > 1e-6
+    poles = srg.diagnostics['sigma_poles']
+    assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
+
+
+def test_sigma_with_hf_is_refused():
+    """method='hf' has no self-energy and takes no options."""
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    for sigma in SIGMAS_1:
+        with pytest.raises(TypeError, match="method='hf'.*sigma"):
+            _hf_heff(mf, aspace, sigma=sigma)

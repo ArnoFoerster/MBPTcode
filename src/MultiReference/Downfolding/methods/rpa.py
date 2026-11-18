@@ -20,16 +20,20 @@ Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
 between the active and the environment orbitals (`screened_residues`) and
 the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
 by mode A at eta = 0 (Eq. 12, 'mode_a', refused near the poles,
-`pole_window`). `terms` does not take `sigma` yet.
+`pole_window`). `terms(..., sigma=...)` hands it to the general layer in
+both spin channels with the Hartree-only double counting (dc='hartree'), and
+records the 'sigma_poles' diagnostic.
 """
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
-from src.Base.numerics.constants import DOWNFOLDING_SRG_S
-from src.Base.numerics.numerics import Numerics
+from src.Base.numerics.constants import (DOWNFOLDING_SRG_DAMPING_WARN,
+                                         DOWNFOLDING_SRG_S)
+from src.Base.numerics.numerics import numerics_or_default
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
@@ -319,12 +323,14 @@ def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s):
     array over the internal orbitals r. s = None is s = inf, Eq. 42, the
     bracket 1. Every term is finite for finite s (the kernel is bounded by
     (1 + sqrt 2)/(2 max(|a|, |b|)) and vanishes with a^2 + b^2), so this
-    needs no pole check; it is symmetric in t, u by construction.
+    needs no pole check; it is symmetric in t, u by construction. A term
+    exactly at a pole (D_tr = D_ur = 0, 0/0 as written) is 0, its limit at
+    finite s; Eq. 42 has no value there and gets the same 0.
     """
     d = _denominators(eps_t, eps_r, occupied_r, omega)
     a, b = d[:, :, None, :], d[:, None, :, :]
     lam = a * a + b * b
-    kern = (a + b) / lam
+    kern = np.divide(a + b, lam, out=np.zeros_like(lam), where=lam > 0)
     if s is not None:
         kern *= -np.expm1(-s * lam)
     out = np.einsum('ntr,nur,ntur->tu', w, w, kern)
@@ -397,16 +403,80 @@ def embedding_self_energy(low, part, sigma):
         the pole-free window's edge or outside it (`pole_window`).
     Zero when the environment is empty.
     """
+    return _embedding(low, part, sigma)[0]
+
+
+def _embedding(low, part, sigma):
+    """(Sigma_bar, args, srg_s) of `embedding_self_energy`: args = (w, eps_t,
+    eps_r, occupied_r, omega) of the environment, kept so that the
+    'sigma_poles' diagnostic does not build the residues again, and srg_s the
+    s of the run's numerics."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
-    settings = (low.numerics or Numerics()).downfolding
+    settings = numerics_or_default(low.numerics).downfolding
     if sigma == 'mode_a':
         _refuse_near_poles(low, part, settings)
     env = part.env
     args = (screened_residues(low, part), low.eps[part.act], low.eps[env],
             env < low.nocc, low.omega)
     if sigma == 'srg':
-        return srg_self_energy(*args, settings.srg_s)
-    return mode_a_self_energy(*args)
+        return srg_self_energy(*args, settings.srg_s), args, settings.srg_s
+    return mode_a_self_energy(*args), args, settings.srg_s
+
+
+class SigmaDampingWarning(RuntimeWarning):
+    """The SRG damping of Sigma_bar^E is not negligible: an active orbital
+    energy lies within a few 1/sqrt(2 s) of a pole of the environment
+    self-energy, so 'srg' there depends on srg_s."""
+
+
+def _pole_weights(w, eps_t, eps_r, occupied_r, omega):
+    """Z_t = 1/(1 - S'_tt(eps_t)) of each active orbital t, S the pole sum
+    of `mode_a_self_energy`, S_tt(x) = sum_rn w_tr^2 / (x - eps_r - sgn
+    Omega_n), so S'_tt(eps_t) = -sum_rn w_tr^2 / D_tr^2 and Z_t = 1/(1 +
+    sum_rn w_tr^2 / D_tr^2), in (0, 1]: 1 far from every pole, towards 0
+    near one. A term exactly at a pole (D_tr = 0) makes Z_t 0."""
+    d = _denominators(eps_t, eps_r, occupied_r, omega)
+    w2, d2 = w * w, d * d
+    ratio = np.divide(w2, d2, out=np.where(w2 > 0, np.inf, 0.0),
+                      where=d2 > 0)
+    return 1.0 / (1.0 + ratio.sum(axis=(0, 2)))
+
+
+def _sigma_poles(low, part, sigma, sigma_bar, args, srg_s):
+    """The 'sigma_poles' record (spec §4.6), and a SigmaDampingWarning naming
+    the active orbitals whose row of Sigma_bar the SRG damping moves by more
+    than DOWNFOLDING_SRG_DAMPING_WARN.
+
+    window: `pole_window`. pole_distance: per active orbital, the distance
+        of eps_t to the nearer edge of the window, negative outside it.
+    z: per active orbital, Z_t = 1/(1 - S'_tt(eps_t)) (`_pole_weights`).
+    srg_s: the s applied, None for s = inf and for 'mode_a' (undamped).
+    srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
+        finite s is applied.
+    """
+    lo, hi = pole_window(low, part)
+    eps = low.eps[part.act]
+    dist = np.minimum(eps - lo, hi - eps)
+    applied = srg_s if sigma == 'srg' else None
+    damping = 0.0
+    if applied is not None and sigma_bar.size:
+        moved = np.abs(sigma_bar - srg_self_energy(*args, None))
+        damping = float(moved.max())
+        rows = moved.max(axis=1) > DOWNFOLDING_SRG_DAMPING_WARN
+        if rows.any():
+            named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance to the '
+                              f'window {x:.6f})' for p, e, x in
+                              zip(part.act[rows], eps[rows], dist[rows]))
+            warnings.warn(
+                f"sigma='srg': the SRG damping (s = {applied:g}) changes "
+                f"Sigma_bar^E by up to {damping:.2e} Ha on the active {named}"
+                f", within a few 1/sqrt(2 s) = {1 / np.sqrt(2 * applied):.4f}"
+                f" Ha of a pole of the environment self-energy (pole-free "
+                f"window ({lo:.6f}, {hi:.6f})); Sigma_bar depends on srg_s "
+                f"there.", SigmaDampingWarning, stacklevel=4)
+    return {'window': (lo, hi), 'pole_distance': dist,
+            'z': _pole_weights(*args), 'srg_s': applied,
+            'srg_damping': damping}
 
 
 def _diagnostic_names(diagnostics):
@@ -424,11 +494,19 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     screening: 'bare' | 'crpa' | 'crpa_ph' ('mrpa' not built yet); vtilde
         is its static correction (`screening_correction`), the same in every
         spin block (restricted).
-    sigma: None, the paper's scheme (full double counting, no Sigma_bar);
-        'srg' and 'mode_a' are not built yet.
+    sigma: None, the paper's scheme: full double counting, no Sigma_bar.
+        'srg' or 'mode_a': the static environment self-energy
+        (`embedding_self_energy`) in both spin channels with dc='hartree',
+        the Hartree-only double counting that goes with it; E_0 then gains
+        the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
+        §3.7). Allowed with every screening; the third term of the
+        embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
+        exact only for 'crpa' in the static limit.
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
-        that does not apply here (casida, no sigma: everything but
-        'static_defect') is skipped and absent, an unknown name refused.
+        that does not apply here (on casida 'ec_active_casida' and
+        'sigma_continuation', and 'sigma_poles' without sigma) is skipped and
+        absent, an unknown name refused. 'sigma_poles' (`_sigma_poles`)
+        warns (SigmaDampingWarning) when the SRG damping is not negligible.
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
@@ -441,16 +519,19 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if sigma not in SIGMAS:
         raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
                          + ', '.join(repr(s) for s in SIGMAS) + '.')
-    if sigma is not None:
-        raise NotImplementedError(
-            f"method={METHOD!r} sigma={sigma!r} is not implemented yet; "
-            f"built: sigma=None.")
     vt = screening_correction(low, part, screening)
     v_eff = _active_v(low, part.act)[0] + vt
     found = {}
     if 'static_defect' in names:
         found['static_defect'] = static_defect(low, part, v_eff)
+    sigma_bar, dc = None, 'full'
+    if sigma is not None:
+        s_bar, args, srg_s = _embedding(low, part, sigma)
+        sigma_bar, dc = (s_bar, s_bar), 'hartree'
+        if 'sigma_poles' in names:
+            found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar,
+                                                args, srg_s)
     return DownfoldingTerms(
-        vtilde=(vt, vt, vt), sigma_bar=None, e_c_full=low.e_c_full,
-        e_c_active=active_correlation_energy(low, part, v_eff), dc='full',
+        vtilde=(vt, vt, vt), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
+        e_c_active=active_correlation_energy(low, part, v_eff), dc=dc,
         diagnostics=found)

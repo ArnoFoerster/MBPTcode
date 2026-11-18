@@ -12,13 +12,12 @@ Available now (the Casida route, Stage 1):
 
 - `method='hf'`: the HF limit, which is CASCI.
 - `method='rpa'`, `mode='casida'`, with `screening` `'bare'`, `'crpa'` or
-  `'crpa_ph'`.
+  `'crpa_ph'`, and optionally `sigma='srg'` or `'mode_a'`: the static
+  environment self-energy Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
 
-Not yet available, and refused when asked for: `sigma='srg'` and
-`sigma='mode_a'` (the static self-energy Sigma^E that the paper drops),
-`mode='imagfrequency'` and `mode='space-time'` (the low-scaling routes),
-`screening='mrpa'`.
+Not yet available, and refused when asked for: `mode='imagfrequency'` and
+`mode='space-time'` (the low-scaling routes), `screening='mrpa'`.
 
 ## Calling it
 
@@ -55,7 +54,7 @@ Options of the RPA:
 | | `numerics` | a `Numerics`, or `None` for the defaults |
 | `build_effective_hamiltonian` | `spin_free` | `True` (default): spatial-orbital `g_eff`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'` |
-| | `sigma` | `None` (the paper's scheme; `'srg'`, `'mode_a'` not yet available) |
+| | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
 | | `diagnostics` | a tuple of names, default all; see below |
 
 `g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and `space` follow the QDPT
@@ -67,8 +66,8 @@ Options of the RPA:
 
 `energies` is a frozen record holding every term of E_0 separately (`e_nuc`,
 `e_hf_core`, `e_hf_ee`, `e_hf_ee_vtilde`, `e_c_full`, `e_c_active`, and the
-Sigma^E terms `e_exchange_term`, `e_sigma_trace`, zero for now), `e0` for their
-sum, and `diagnostics`.
+Sigma^E terms `e_exchange_term`, `e_sigma_trace`, zero without `sigma`), `e0`
+for their sum, and `diagnostics`.
 
 ## What is built
 
@@ -144,6 +143,77 @@ Cross pairs (active occupied to environment virtual, environment occupied to
 active virtual) and environment-environment pairs stay in the residual
 response.
 
+## The environment self-energy Sigma^E (`sigma=`)
+
+The paper keeps only the screened interaction and drops the self-energy the
+environment gives the active orbitals. With the same assumption as the paper
+(delta v_eff / delta G = 0) the correlation self-energy of the embedded
+active space is, in general,
+
+    Sigma_emb = iG^E (W - v) + iG^A v~ + iG^A (W - W^A[v_eff]),
+
+W the full screened interaction and W^A[v_eff] the active-space RPA screened
+interaction built from v_eff. `sigma='srg'` or `'mode_a'` keeps the first two
+terms and drops the third, for every screening:
+
+| screening | W^A[v_eff] against W | the dropped term iG^A (W - W^A[v_eff]) |
+|---|---|---|
+| `crpa` | equal at omega = 0, differ at omega != 0 (v_eff is static) | the paper's static approximation |
+| `crpa_ph` | the same active response, bare outer legs on non-ph pairs | nonzero, also at omega = 0 |
+| `bare` | active-space screening only | the environment screening `bare` leaves out by design |
+
+So the two-term split is exact only for `crpa`, and only in the static limit;
+the `'static_defect'` diagnostic measures W(0) - W^A[v_eff](0) for the others.
+
+The two kept terms change the one-body term and E_0 together, in one code
+path (`dc='hartree'` in `DownfoldingTerms`):
+
+- **One-body.** iG^A v~ is the exchange of v~ with the active reference
+  density, so it cancels the exchange half of t^DC: only the Hartree double
+  counting is left, h_eff = f - J~[gamma^A,0] + Sigma_bar^E (as in QDET).
+  For `crpa_ph` v~ has no (tu|kk) element, the Hartree part vanishes and
+  h_eff = f + Sigma_bar^E.
+- **E_0** gains the exchange energy term and -Tr[Sigma_bar^E gamma^A,0], at
+  the same static Sigma_bar^E the solver sees (not in the paper). Together
+  they undo what the one-body change does to the reference determinant,
+  which keeps the energy E_HF + E_c[v] - E_c^A. For `crpa_ph` the exchange
+  term is zero.
+
+| quantity with Sigma^E | restricted |
+|---|---|
+| t^DC_tu | sum over k in A_o of 2 v~_tu,kk (Hartree only) |
+| exchange energy term | + 2 K~, K~ = sum over t, v in A_o of v~_tv,vt |
+| trace term | - 2 sum over t in A_o of Sigma_bar_tt |
+
+**The static reduction.** iG^E(W - v), with the internal orbital r over the
+environment (inactive and environment virtual orbitals), is a pole sum
+S_tu(omega) of the residues w of the full W (Casida route: from the RPA's
+X + Y) with denominators D_tr = eps_t - eps_r - sgn(eps_r - eps_F) Omega_n.
+Every energy (eps_t, eps_r, Omega_n) is the mean field's. It is made static
+in one of two ways (Marie and Loos, JCTC 19, 3943 (2023)):
+
+- `'srg'` (recommended): Eq. 44 at s = `numerics.downfolding.srg_s`
+  (default 500 Ha^-2),
+  Sigma_bar_tu = sum_rn (D_tr + D_ur)/(D_tr^2 + D_ur^2) w_tr w_ur
+  [1 - exp(-(D_tr^2 + D_ur^2) s)].
+  Finite everywhere: a term at an exact pole is 0, its limit. `srg_s=None`
+  is s = infinity, Eq. 42.
+- `'mode_a'`: Eq. 12 at eta = 0, Sigma_bar_tu = 1/2 [S_tu(eps_t) +
+  S_tu(eps_u)], the form of the user's PySCF prototype. Undamped, so it
+  diverges at the poles.
+
+At s = infinity the diagonal of `'srg'` is that of `'mode_a'`, and since
+gamma^A,0 is diagonal every E_0 term is the same for the two; only the
+off-diagonal h_eff differs.
+
+**The pole check** (always on with `sigma`). Every pole of S lies outside the
+window (max over inactive i of eps_i - Omega_min, min over environment
+virtuals a of eps_a + Omega_min). `'mode_a'` is refused, with the orbitals
+named, when an active orbital energy is within `numerics.downfolding.
+pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
+or outside the window. `'srg'` is never refused on the Casida route; near a
+pole its damping matters, which the `'sigma_poles'` diagnostic reports.
+
 ## Kohn-Sham references
 
 A restricted KS mean field (GGA or hybrid) runs, with the KS orbitals and
@@ -168,13 +238,27 @@ reference E_0 is a well-defined working choice, not a derived one.
   the whole calculation).
 - **Option validation.** An unknown or not-yet-available mode, screening,
   sigma or diagnostic is refused with the valid list.
+- **Sigma^E poles.** `sigma='mode_a'` is refused near a pole of the
+  environment self-energy (see above).
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
-a tuple of names; a name that does not apply to the call is skipped, so one
-tuple works across a loop. On the casida route one applies: `'static_defect'`,
-the norm of W(0) - W^A[v_eff](0) on the active pairs, found in
-`energies.diagnostics['static_defect']`; it is zero for `crpa`, by
-construction, and measures how far `bare` and `crpa_ph` are from it.
+a tuple of names (default: all); a name that does not apply to the call is
+skipped, so one tuple works across a loop. Results are in
+`energies.diagnostics`, keyed by name. On the casida route two apply:
+
+- `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
+  active orbitals. It is zero for `crpa`, by construction, and measures how
+  far `bare` and `crpa_ph` are from it.
+- `'sigma_poles'` (with `sigma` only): a dict with `'window'`, the pole-free
+  window (lo, hi); `'pole_distance'`, per active orbital the distance of
+  its energy to the nearer edge (negative outside); `'z'`, per active
+  orbital Z_t = 1/(1 - S'_tt(eps_t)) = 1/(1 + sum w_tr^2 / D_tr^2), 1 far
+  from the poles and small near one; `'srg_s'`, the s applied (None for
+  s = infinity and for `'mode_a'`); and `'srg_damping'`, the largest
+  |Sigma_bar(s) - Sigma_bar(infinity)| (0 when no finite s is applied).
+  When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-6 Ha) a
+  `SigmaDampingWarning` names the active orbitals concerned: their
+  Sigma_bar depends on `srg_s`.
 
 ## What is checked against what
 
@@ -188,17 +272,22 @@ construction, and measures how far `bare` and `crpa_ph` are from it.
 - The user's PySCF prototype, run on its own orbitals: v_eff, f, t^DC, h_eff,
   the excitation energies and the CAS energies of the ethylene (2,2) and
   benzene (6,6) pi spaces for `bare`, `crpa` and `crpa_ph`, to machine
-  precision. The orbitals are pinned because the degenerate pi pairs of
-  benzene rotate arbitrarily from one SCF to the next.
+  precision, and its Sigma_bar (`'mode_a'`). The orbitals are pinned because
+  the degenerate pi pairs of benzene rotate arbitrarily from one SCF to the
+  next.
+- Sigma^E: `'srg'` with every orbital as the environment is the active block
+  of the qsGW SRG kernel; both forms equal the oracle's pole sums; the
+  reference determinant keeps its energy when the switch is turned on (with
+  the real Sigma_bar and with Sigma_bar forced to 0); every orbital active
+  still gives FCI; along a scan through a pole crossing `'srg'` stays smooth.
 
 Use spherical basis functions (`cart=False`, the PySCF default) when comparing
 with the paper: Cartesian ones are far further from its numbers.
 
 ## Not yet available
 
-- The static self-energy Sigma^E (`sigma='srg'`, `'mode_a'`), the term the
-  paper drops, with its extra E_0 terms; and `mode='imagfrequency'`,
-  `'space-time'` and `screening='mrpa'`.
+- `mode='imagfrequency'`, `'space-time'` (with Sigma^E there) and
+  `screening='mrpa'`.
 - Natural orbitals (RPA or GW), semicanonicalization and the Delta
   hybridization; the active space is the user's.
 - omega other than 0, and other ways of making W^r static.

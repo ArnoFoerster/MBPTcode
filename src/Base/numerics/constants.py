@@ -284,6 +284,12 @@ DOWNFOLDING_SRG_S = 500.0
 # regularization is not needed there; closer in, the undamped terms of
 # 'mode_a' (eta = 0) grow without bound.
 DOWNFOLDING_POLE_MARGIN = 3.0
+# The 'sigma_poles' diagnostic warns when the SRG damping moves an element of
+# Sigma_bar^E by more than this, in Ha: max |Sigma_bar(s) - Sigma_bar(inf)|.
+# A micro-Hartree is well below the accuracy of a one-shot static Sigma^E,
+# so below it the choice of s does not matter; above it the result depends on
+# srg_s through an active orbital near a pole of the environment self-energy.
+DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.
