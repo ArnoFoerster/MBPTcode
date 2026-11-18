@@ -338,6 +338,13 @@ DOWNFOLDING_CONTINUATION_MARGIN = 0.26
 # defeats an N^4 or N^3 route long before its (A, B) stops fitting in memory
 # (BSE_DENSE_MAX_NOV = 12000); at 2000 pairs it takes a few seconds.
 DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS = 2000
+# The fewest unit vectors that Davidson for the one root Omega_min starts
+# from: the count the run's own Davidson seeds (BSE_DAVIDSON_NROOTS = 5
+# roots, DAVIDSON_GUESS_FACTOR = 2 each), more when the run asks for more. A
+# one-root guess (5 vectors) can miss the irrep of the lowest root, whose
+# stand-in then lies above Omega_min and widens the pole-free window in the
+# unsafe direction (ruling R25).
+DOWNFOLDING_OMEGA_DAVIDSON_GUESS = 10
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.

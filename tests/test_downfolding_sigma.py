@@ -51,11 +51,13 @@ import pytest
 from pyscf import gto, scf
 
 from src.Base.numerics.constants import (DOWNFOLDING_CONTINUATION_MARGIN,
+                                         DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
                                          DOWNFOLDING_POLE_MARGIN,
                                          DOWNFOLDING_SRG_S)
 from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
                                         numerics_or_default)
 from src.Base.orbital_spaces import particle_hole_window
+from src.Base.step_failed import DavidsonNotConverged
 from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
@@ -825,6 +827,42 @@ def test_environment_only_g_is_what_the_kernel_sees(nh3_space_time):
         assert min(np.abs(s_e).max(), np.abs(s_a).max()) > 1e-2
         assert np.abs(s_e + s_a - full[:, act][:, :, act]).max() < 1e-10
     assert low.cache['w_grid'][1] is w
+
+
+def test_lowest_excitation_davidson_is_hardened(wat, monkeypatch):
+    """Ruling R25: the Davidson for Omega_min solves one root from at least
+    DOWNFOLDING_OMEGA_DAVIDSON_GUESS (10) unit vectors -- the count the
+    run's own Davidson (BSE_DAVIDSON_NROOTS roots, guess_factor each) seeds,
+    more when the run asks for more -- and refuses an unconverged root
+    (DavidsonNotConverged, here forced by max_cycle = 1): an unconverged
+    root, or one whose irrep the guess missed, lies above Omega_min and
+    widens the pole-free window in the unsafe direction. Its root is still
+    the dense one (water/6-31G, measured 1.8e-15; bar 1e-8)."""
+    mf = wat[0]
+    seen = []
+    solve = rpa.solve_casida_davidson
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(rpa, 'solve_casida_davidson', spy)
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    davidson = rpa.lowest_excitation(low, solver='davidson')
+    assert abs(davidson - rpa.lowest_excitation(low, solver='dense')) < 1e-8
+    bse = seen[-1]['numerics'].bse
+    assert bse.nroots == 1
+    assert bse.guess_factor == DOWNFOLDING_OMEGA_DAVIDSON_GUESS == 10
+    assert seen[-1]['refuse_unconverged'] is True
+    wide = run_low_level(mf, method='rpa', mode='imagfrequency',
+                         numerics=Numerics(bse={'nroots': 6,
+                                                'guess_factor': 3}))
+    rpa.lowest_excitation(wide, solver='davidson')
+    assert seen[-1]['numerics'].bse.guess_factor == 18
+    starved = run_low_level(mf, method='rpa', mode='imagfrequency',
+                            numerics=Numerics(bse={'max_cycle': 1}))
+    with pytest.raises(DavidsonNotConverged):
+        rpa.lowest_excitation(starved, solver='davidson')
 
 
 def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):

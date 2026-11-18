@@ -282,7 +282,9 @@ edge, or outside the window. The message names the orbitals and points to
 `mode='casida'`, where `'srg'` is finite everywhere. Omega_min of the window
 is the lowest root of the same Casida problem on the route's own v (dense
 up to 2000 particle-hole pairs, `DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS`, the
-Davidson for one root above that), computed once and kept.
+Davidson for one root above that, started from at least 10 unit vectors
+and refused with `DavidsonNotConverged` if it does not converge, since a
+root above Omega_min would widen the window), computed once and kept.
 
 The measured accuracy: the exact Casida S^E fed through the continuation
 alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on

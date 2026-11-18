@@ -68,7 +68,9 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
-from src.Base.numerics.constants import (DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
+from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS,
+                                         DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
+                                         DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
                                          DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
@@ -769,17 +771,29 @@ def _lowest_dense(low):
 def _lowest_davidson(low):
     """The lowest root of the same problem by the matrix-free Davidson for
     one root (`solve_casida_davidson`, the run's other Davidson settings):
-    the DF block action on low.factors, the ISDF one on (X, D)."""
+    the DF block action on low.factors, the ISDF one on (X, D).
+
+    Ruling R25: the one root starts from as many unit vectors as the run's
+    own Davidson would seed for its nroots (guess_factor each), never fewer
+    than DOWNFOLDING_OMEGA_DAVIDSON_GUESS, and an unconverged root is
+    refused (DavidsonNotConverged): a root above Omega_min, unconverged or
+    from a guess that missed its irrep, widens the pole-free window in the
+    unsafe direction."""
     num = numerics_or_default(low.numerics)
-    num = replace(num, bse=replace(num.bse, nroots=1))
+    bse = num.bse
+    guesses = max(bse.guess_factor * (bse.nroots or BSE_DAVIDSON_NROOTS),
+                  DOWNFOLDING_OMEGA_DAVIDSON_GUESS)
+    num = replace(num, bse=replace(bse, nroots=1, guess_factor=guesses))
     if low.mode == 'space-time':
         lr = LinearResponseSolver(low.eps, spin_mode='restricted')
         omega = solve_casida_davidson(lr, low.nocc, numerics=num,
-                                      isdf_factors=low.cache['factors'])[0]
+                                      isdf_factors=low.cache['factors'],
+                                      refuse_unconverged=True)[0]
     else:
         lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
                                   spin_mode='restricted')
-        omega = solve_casida_davidson(lr, low.nocc, numerics=num)[0]
+        omega = solve_casida_davidson(lr, low.nocc, numerics=num,
+                                      refuse_unconverged=True)[0]
     return float(np.min(omega))
 
 
