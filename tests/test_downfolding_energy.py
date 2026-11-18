@@ -515,8 +515,6 @@ def test_rpa_option_refusals(wat_rpa):
     mf, low, aspace = wat_rpa
     with pytest.raises(ValueError, match="'crpa'"):
         build_effective_hamiltonian(low, aspace, screening='rpa')
-    with pytest.raises(NotImplementedError, match="screening='mrpa'"):
-        build_effective_hamiltonian(low, aspace, screening='mrpa')
     for sigma in ('None', 'none', 'SRG', 'gw'):
         with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
             build_effective_hamiltonian(low, aspace, sigma=sigma)

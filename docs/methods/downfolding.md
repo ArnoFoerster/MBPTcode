@@ -14,13 +14,11 @@ Available now:
 - `method='rpa'`, `mode='casida'` (dense Casida, every pole),
   `mode='imagfrequency'` (density fitted, imaginary frequency, N^4) or
   `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
-  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally (every
-  route) `sigma='srg'` or `'mode_a'`: the static environment self-energy
-  Sigma^E that the paper drops (see below).
+  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and on `mode='casida'`
+  also `'mrpa'` (the numerical routes refuse it and point to casida); and
+  optionally (every route) `sigma='srg'` or `'mode_a'`: the static
+  environment self-energy Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
-
-Not yet available, and refused when asked for: `screening='mrpa'` (Casida
-only once built).
 
 ## Calling it
 
@@ -111,8 +109,22 @@ with the active-space orbitals t, u, v, w:
   is the static (omega = 0) screening of the *residual* polarizability, the
   one with the active particle-hole pairs removed, so that v + v~ is the
   partially screened W^r. `crpa_ph` keeps only the elements of v~ with a
-  particle-hole pair in them, those that enter as (ia|jb). Only omega = 0 is
-  implemented.
+  particle-hole pair in them, those that enter as (ia|jb). `mrpa`
+  (Scott and Booth, PRL 132, 076401 (2024), Eq. 5; `mode='casida'` only)
+  replaces the particle-hole elements by the static interaction whose RPA
+  on the active particle-hole pairs alone has the full RPA's zeroth moment
+  eta0 = (X+Y)(X+Y)^T on those pairs (and its first, A - B = Delta, by
+  construction): (ia|jb)_eff = 1/4 [eta0_S^-1 Delta_A eta0_S^-1 - Delta_A],
+  v~ = (ia|jb)_eff - (ia|jb), with eta0_S the active block of
+  (X+Y)(X+Y)^T of the full singlet Casida solve, normalized so that
+  (X+Y) Omega^-1 (X+Y)^T = (Delta + 4K)^-1, with no further factor: in spin
+  orbitals a singlet mode puts (X+Y)/sqrt(2) on each spin and a triplet
+  mode of the direct RPA has X+Y = 1 (A + B = A - B = Delta), so the
+  same-spin block of eta0 is (eta0_S + 1)/2 and the opposite-spin block
+  (eta0_S - 1)/2, and Eq. 5 gives 1/4 [eta0_S^-1 Delta eta0_S^-1 - Delta]
+  in both blocks and nothing in the triplet channel. v~ is zero outside
+  the particle-hole elements and zero with every orbital active. Only
+  omega = 0 is implemented.
 - **h_eff = f - t^DC.** f is the Fock operator of the inactive core, built
   from h^(0) and the bare v. t^DC removes what v~ would otherwise count twice:
   the Hartree and exchange of v~ with the active reference density. For
@@ -148,6 +160,7 @@ orbitals, `Delta` the orbital-energy differences:
 | E_HF,ee[v~] | sum over k, l in A_o of [2 v~_kk,ll - v~_kl,lk] |
 | E_RPA,corr | 1/2 sum Omega - 1/2 sum_ia (Delta_ia + 2 K_ia,ia); Omega from Delta^1/2 (Delta + 4K) Delta^1/2, singlet modes only |
 | cRPA v~_tu,vw | -4 (tu\|ia) [(Delta + 4K)_rr^-1]_ia,jb (jb\|vw), "rr" the residual pairs |
+| mRPA (ia\|jb)_eff | 1/4 [eta0_S^-1 Delta_A eta0_S^-1 - Delta_A]; spin orbitals: 1/2 [eta0_A^-1 Delta_A eta0_A^-1 - Delta_A] |
 
 ## Where the code differs from the printed paper
 
@@ -160,7 +173,7 @@ own appendix and its numerical data use:
 | E_RPA,corr (Eq. 2.22) | mixed forms of the sums | **1/2 Tr[Omega - A]** |
 | E_HF,ee[v_eff] | not written | **1/2 Tr[t^DC rho^A,0]** (matches the SI's Hartree and exchange terms of H2 cRPA) |
 | E_HF,core, E_HF,ee (Eq. 2.6) | environment | **environment only**, the active-environment terms are in f |
-| t^DC for cRPA_ph | exchange-like only | **no special case**; the Hartree part vanishes because v~ has no (kk\|ll) element |
+| t^DC for cRPA_ph, mRPA | exchange-like only | **no special case**; the Hartree part vanishes because v~ has no (kk\|ll) element |
 
 **Deletion is the paper's zeroing.** The paper makes the residual response by
 zeroing the active-active block of A and B (Eq. 2.14). The code instead
@@ -191,6 +204,7 @@ terms and drops the third, for every screening:
 |---|---|---|
 | `crpa` | equal at omega = 0, differ at omega != 0 (v_eff is static) | the paper's static approximation |
 | `crpa_ph` | the same active response, bare outer legs on non-ph pairs | nonzero, also at omega = 0 |
+| `mrpa` | the same zeroth moment on the active ph pairs, not the same W(0) | nonzero, also at omega = 0 |
 | `bare` | active-space screening only | the environment screening `bare` leaves out by design |
 
 So the two-term split is exact only for `crpa`, and only in the static limit;
@@ -202,13 +216,13 @@ path (`dc='hartree'` in `DownfoldingTerms`):
 - **One-body.** iG^A v~ is the exchange of v~ with the active reference
   density, so it cancels the exchange half of t^DC: only the Hartree double
   counting is left, h_eff = f - J~[gamma^A,0] + Sigma_bar^E (as in QDET).
-  For `crpa_ph` v~ has no (tu|kk) element, the Hartree part vanishes and
-  h_eff = f + Sigma_bar^E.
+  For `crpa_ph` and `mrpa` v~ has no (tu|kk) element, the Hartree part
+  vanishes and h_eff = f + Sigma_bar^E.
 - **E_0** gains the exchange energy term and -Tr[Sigma_bar^E gamma^A,0], at
   the same static Sigma_bar^E the solver sees (not in the paper). Together
   they undo what the one-body change does to the reference determinant,
-  which keeps the energy E_HF + E_c[v] - E_c^A. For `crpa_ph` the exchange
-  term is zero.
+  which keeps the energy E_HF + E_c[v] - E_c^A. For `crpa_ph` and `mrpa`
+  the exchange term is zero.
 
 | quantity with Sigma^E | restricted |
 |---|---|
@@ -330,7 +344,7 @@ imagfrequency and space-time all four:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
   active orbitals. It is zero for `crpa`, by construction, and measures how
-  far `bare` and `crpa_ph` are from it.
+  far `bare`, `crpa_ph` and `mrpa` are from it.
 - `'sigma_poles'` (with `sigma` only): a dict with `'window'`, the pole-free
   window (lo, hi); `'pole_distance'`, per active orbital the distance of
   its energy to the nearer edge (negative outside); `'z'`, per active
@@ -365,8 +379,18 @@ imagfrequency and space-time all four:
 - The paper's SI numbers for H2 (2 electrons in 2 orbitals) and N2 (6 in 6),
   with spherical basis functions and exact integrals. The energy terms agree
   to at most 1.6e-5 Eh for H2 and 6.8e-4 Eh for N2 (the N2 numbers are the
-  absolute HF terms; the screening-dependent differences agree far better).
-  The SI comes from a different code and basis representation.
+  absolute HF terms; the screening-dependent differences agree far better),
+  for every screening including `mrpa`. The SI comes from a different code
+  and basis representation. Benzene, whose geometry the SI does not give,
+  on the QUEST geometry instead: the Frobenius norms of v~ of the (6,6) pi
+  space agree to 1.5e-3 (crpa) and 2e-4 (crpa_ph, mrpa) relative, and the
+  lowest environment excitations Omega^R of the (10,10) space lie 1 to 3
+  mEh above the SI's, the size a 0.5% change of the geometry makes.
+- mRPA: the restricted form equals Eq. 5 written in spin orbitals (both
+  spins, every singlet and triplet mode) to 2e-13, whose same-spin and
+  opposite-spin blocks are equal; the RPA of the active pairs with the
+  mRPA v_eff has the full RPA's projected zeroth moment; mRPA and crpa_ph
+  norms differ by 8% on benzene (6,6), as in the SI.
 - The user's PySCF prototype, run on its own orbitals: v_eff, f, t^DC, h_eff,
   the excitation energies and the CAS energies of the ethylene (2,2) and
   benzene (6,6) pi spaces for `bare`, `crpa` and `crpa_ph`, to machine
@@ -384,7 +408,6 @@ with the paper: Cartesian ones are far further from its numbers.
 
 ## Not yet available
 
-- `screening='mrpa'`.
 - Natural orbitals (RPA or GW), semicanonicalization and the Delta
   hybridization; the active space is the user's.
 - omega other than 0, and other ways of making W^r static.

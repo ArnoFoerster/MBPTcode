@@ -12,6 +12,8 @@ The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
 zeroing variants, spec §3.4) is the pole sum of its modes, and
 `vtilde_crpa_so` the same correction built in spin orbitals without spin
 adaptation; `w_static_active` is the full W(0) on the active orbitals.
+`vtilde_mrpa` is the mRPA interaction (Scott and Booth's Eq. 5) in spin
+orbitals, from its own solve of every singlet and triplet mode.
 The environment self-energy (spec §3.6) has its own residues of the full W
 (`env_residues`), the exact pole sum S^E(z) at a complex frequency
 (`sigma_env`) and the static reductions written from Marie and Loos's
@@ -357,6 +359,57 @@ def vtilde_crpa_so(eri, eps, nocc, part):
     vt = (-2.0 * v @ np.linalg.solve(apb, v.T)).reshape((m,) * 4)
     n = len(part.act)
     return vt[:n, :n, :n, :n]
+
+
+def vtilde_mrpa(eri, eps, nocc, part):
+    """The mRPA correction written in spin orbitals: (vt_aa, vt_ab).
+
+    Scott and Booth, PRL 132, 076401 (2024), Eq. 5, on the spin-blocked
+    particle-hole space: the 2 nocc nvirt same-spin pairs (i s, a s), alpha
+    then beta, with A - B = delta and A + B = delta + 2K_so,
+    K_(i s a s),(j t b t) = (i a|j b) for any two spins s, t, as in
+    `vtilde_crpa_so`. Its own direct RPA of every mode, singlet and triplet
+    alike: M = delta^1/2 (A+B) delta^1/2 = Z Omega^2 Z^T and X+Y =
+    delta^1/2 Z Omega^-1/2 (X^T X - Y^T Y = 1). The zeroth moment
+    eta0 = (X+Y)(X+Y)^T and eta1 = A - B = delta are projected on the pairs
+    whose i and a are both active, for both spins, and Eq. 5 gives the
+    interaction on that block,
+        v_eff = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A],
+    and vt = v_eff - K_so on it. vt is set on (ia|jb), (ai|jb), (ia|bj) and
+    (ai|bj) of the active spin orbitals (real orbitals) and is zero on every
+    other element. Returned: the (n_act,)*4 chemist blocks with both pairs
+    alpha (vt_aa) and with the first pair alpha, the second beta (vt_ab),
+    local indices on part.act. Spin orbitals as at the top of this module."""
+    nmo = len(eps)
+    labels = _pair_labels(eps, nocc)
+    pairs = [(s * nmo + i, s * nmo + a) for s in (0, 1) for (i, a) in labels]
+    act_so = [p for p in part.act] + [nmo + p for p in part.act]
+    keep = [x for x, (i, a) in enumerate(pairs)
+            if i in act_so and a in act_so]
+    delta = np.array([eps[a % nmo] - eps[i % nmo] for (i, a) in pairs])
+    k_so = np.array([[eri[i % nmo, a % nmo, j % nmo, b % nmo]
+                      for (j, b) in pairs] for (i, a) in pairs])
+    root = np.sqrt(delta)
+    omega2, z = np.linalg.eigh(root[:, None] * (np.diag(delta) + 2.0 * k_so)
+                               * root[None, :])
+    xpy = root[:, None] * z / np.sqrt(np.sqrt(omega2))[None, :]
+    eta0 = (xpy @ xpy.T)[np.ix_(keep, keep)]
+    d_a = np.diag(delta[keep])
+    inv = np.linalg.inv(eta0)
+    v_eff = 0.5 * (inv @ d_a @ inv - d_a)
+    vt_ph = v_eff - k_so[np.ix_(keep, keep)]
+    m = len(act_so)
+    local = {p: x for x, p in enumerate(act_so)}
+    vt = np.zeros((m,) * 4)
+    for x, px in enumerate(keep):
+        i, a = (local[p] for p in pairs[px])
+        for y, py in enumerate(keep):
+            j, b = (local[p] for p in pairs[py])
+            for t, u in ((i, a), (a, i)):
+                for v, w in ((j, b), (b, j)):
+                    vt[t, u, v, w] = vt_ph[x, y]
+    n = len(part.act)
+    return vt[:n, :n, :n, :n], vt[:n, :n, n:, n:]
 
 
 def env_residues(eri, eps, nocc, part):

@@ -28,6 +28,14 @@ restricted factor -4 on delta + 4K.
 E_c^A[v_eff], the dRPA of the active ph pairs with v_eff, and the static
 defect max |W(0) - W^A[v_eff](0)| equal the oracle's for bare, crpa and
 crpa_ph; the crpa defect is zero, and with no active ph pair E_c^A = 0.
+
+mRPA (Scott and Booth's Eq. 5) equals the oracle's spin-orbital
+construction, which solves every singlet and triplet mode itself; its
+same-spin and opposite-spin blocks are equal (no triplet-type correction),
+which fixes the restricted eta0_S as the active block of xpy xpy^T with
+factor 1. It touches only the ph elements, the dRPA of the active pairs
+with its v_eff has the full RPA's projected zeroth moment, it is zero with
+every orbital active, and with Sigma^E its exchange energy term is zero.
 """
 import numpy as np
 import pytest
@@ -47,9 +55,10 @@ from src.SingleReference.LinearResponse.linear_response import \
 from src.SingleReference.LinearResponse.rpa_energy import \
     rpa_correlation_energy_casida
 from src.Solvers.active_space import solve
-from tests.downfolding_oracle import (drpa, h2, mo_integrals, rpa_energy,
+from tests.downfolding_oracle import (drpa, h2, mo_integrals,
+                                      reference_energy, rpa_energy,
                                       vtilde_crpa, vtilde_crpa_so,
-                                      vtilde_crpa_zeroing,
+                                      vtilde_crpa_zeroing, vtilde_mrpa,
                                       vtilde_zero_apb_only, w0_minus_v,
                                       w_static_active, water)
 
@@ -357,8 +366,6 @@ def test_screening_refusals(wat, low_exact):
     part = partition(_contiguous_44(eps, nocc), eps)
     with pytest.raises(ValueError, match="'crpa'"):
         rpa.screening_correction(low_exact, part, 'rpa')
-    with pytest.raises(NotImplementedError, match="screening='mrpa'"):
-        rpa.screening_correction(low_exact, part, 'mrpa')
 
 
 @pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
@@ -436,3 +443,129 @@ def test_no_active_pair_correlation_and_defect(wat, low_exact, occ, virt):
     v_eff = _v_eff(eri, part, 'crpa', low_exact)
     assert rpa.active_correlation_energy(low_exact, part, v_eff) == 0.0
     assert rpa.static_defect(low_exact, part, v_eff) < 1e-8
+
+
+# --- mRPA (spec §3.3, §3.5; Scott and Booth, PRL 132, 076401, Eq. 5) --------
+
+@pytest.mark.parametrize('df', [False, True])
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_mrpa_against_the_spin_orbital_oracle(wat, aspace, df):
+    """The restricted mRPA, (ia|jb)_eff = 1/4 [eta0_S^-1 Delta_A eta0_S^-1 -
+    Delta_A] with eta0_S the active block of xpy xpy^T (factor 1), against
+    Eq. 5 in spin orbitals on the spin-blocked ph space, from the oracle's own
+    solve of every singlet and triplet mode: its alpha-alpha block, every
+    element. df=True (the exact eigendecomposition on this non-DF RHF) also.
+    Measured max deviation (contiguous / non-contiguous): df=False 3.5e-14 /
+    1.8e-13, df=True 2.6e-14 / 4.8e-14; max |vt| 7.1e-3 / 6.7e-3. Factors
+    1/2 or 2 on eta0_S miss by 0.18 to 1.5.
+    """
+    mf, eri, eps, nocc = wat
+    low = run_low_level(mf, method='rpa', df=df)
+    part = partition(aspace(eps, nocc), eps)
+    v = rpa.screening_correction(low, part, 'mrpa')
+    aa, _ = vtilde_mrpa(eri, eps, nocc, part)
+    assert v.shape == (part.n_act,) * 4
+    assert np.abs(v - aa).max() < 1e-8
+    assert np.abs(aa).max() > 1e-3
+
+
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_mrpa_is_spin_independent(wat, aspace):
+    """Spec §3.5: in spin orbitals the same-spin and the opposite-spin blocks
+    of the mRPA correction are equal, i.e. the triplet-type channel (alpha
+    minus beta) gives no correction; that is what lets the restricted form
+    carry one interaction for every spin block. Measured 3.9e-14 / 3.7e-14
+    (contiguous / non-contiguous)."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    aa, ab = vtilde_mrpa(eri, eps, nocc, part)
+    assert np.abs(aa - ab).max() < 1e-10
+
+
+def test_mrpa_only_touches_ph_elements(wat, low_exact):
+    """mRPA changes the particle-hole elements alone, (ia|jb), (ai|jb),
+    (ia|bj) and (ai|bj) all equal, symmetric as a real chemist integral, and
+    is exactly zero on every other element. Measured symmetry deviation
+    4.7e-17, max |vt| 6.7e-3."""
+    _, _, eps, nocc = wat
+    part = partition(_non_contiguous(eps, nocc), eps)
+    v = rpa.screening_correction(low_exact, part, 'mrpa')
+    mask = ph_element_mask(part)
+    assert not np.any(v[~mask])
+    assert np.abs(v[mask]).max() > 1e-3
+    for perm in ((1, 0, 2, 3), (0, 1, 3, 2), (2, 3, 0, 1)):
+        assert np.abs(v - v.transpose(perm)).max() < 1e-12
+
+
+@pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
+                         ids=['contiguous_44', 'non_contiguous'])
+def test_active_rpa_with_mrpa_reproduces_the_moments(wat, low_exact, aspace):
+    """The point of mRPA: the dRPA of the active ph pairs alone with v_eff =
+    v + vtilde has the zeroth moment eta0 = (X+Y)(X+Y)^T of the full RPA
+    projected on those pairs (and eta1 = Delta_A by construction). Both sides
+    from the oracle's `drpa`, the full one on every pair, the active one on
+    v_eff and the active orbital energies. Measured (contiguous /
+    non-contiguous): 4.8e-14 / 2.1e-13; the bare v misses by 1.6e-2 /
+    6.1e-3."""
+    mf, eri, eps, nocc = wat
+    part = partition(aspace(eps, nocc), eps)
+    v_eff = _v_eff(eri, part, 'mrpa', low_exact)
+    _, xpy = drpa(eri, eps, nocc)
+    mask = active_pair_mask(part)
+    eta0 = (xpy @ xpy.T)[np.ix_(mask, mask)]
+    _, xpy_a = drpa(v_eff, eps[part.act], part.n_act_occ)
+    assert np.abs(xpy_a @ xpy_a.T - eta0).max() < 1e-8
+    # the bare v does not: the moments are what the correction is for
+    _, xpy_v = drpa(_v_eff(eri, part, 'bare', low_exact), eps[part.act],
+                    part.n_act_occ)
+    assert np.abs(xpy_v @ xpy_v.T - eta0).max() > 1e-4
+
+
+def test_all_active_mrpa_is_bare():
+    """H2/6-31G with every orbital active: eta0 is the full moment, and
+    eta0^-1 Delta eta0^-1 = Delta + 4K gives back the bare (ia|jb), so the
+    correction is zero to rounding (computed, not short-cut). Measured
+    2.4e-16."""
+    mf = h2()
+    low = run_low_level(mf, method='rpa', df=False)
+    part = partition(ActiveSpace(4, 1, [0], [1, 2, 3]), mf.mo_energy)
+    v = rpa.screening_correction(low, part, 'mrpa')
+    assert v.shape == (4,) * 4 and np.abs(v).max() < 1e-9
+
+
+@pytest.fixture(scope='module')
+def wat_df():
+    """(mf, low, aspace): water/6-31G RHF, its default casida RPA (df=True)
+    and the contiguous (4,4) active space."""
+    mf = water()
+    return mf, run_low_level(mf), ActiveSpace.from_counts(mf.mo_energy, 5,
+                                                          2, 2)
+
+
+def test_reference_determinant_energy_mrpa(wat_df):
+    """As for the other screenings: the reference determinant of H_eff is
+    E_HF + E_c[v] - E_c^A[v_eff]; vtilde has no (kk|ll) or (kl|lk) element,
+    so E_HF,ee[vtilde] = 0. Measured 5.7e-14 (tolerance 1e-9)."""
+    mf, low, aspace = wat_df
+    g, _, en = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    assert abs(reference_energy(g, 2)
+               - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
+    assert en.e_hf_ee_vtilde == 0.0
+    assert en.e_c_active < 0.0 and en.e_c_full < en.e_c_active
+
+
+@pytest.mark.parametrize('sigma', ['srg', 'mode_a'])
+def test_sigma_with_mrpa(wat_df, sigma):
+    """mRPA with Sigma^E: vtilde has no (kl|lk) element, so the exchange
+    energy term is exactly 0, and switching Sigma^E on keeps the energy of
+    the reference determinant. Measured 0.0 for both forms (tolerance
+    1e-9); Sigma_trace -0.0777."""
+    mf, low, aspace = wat_df
+    g_plain, _, _ = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    g, _, en = build_effective_hamiltonian(low, aspace, screening='mrpa',
+                                           sigma=sigma)
+    assert en.e_exchange_term == 0.0 and abs(en.e_sigma_trace) > 1e-3
+    assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
+    assert np.array_equal(g[2], g_plain[2])

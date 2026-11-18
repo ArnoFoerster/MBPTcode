@@ -10,10 +10,12 @@ modes contribute nothing to the direct RPA.
 
 `screening_correction` gives the static (omega = 0) screening correction of an
 active space on the casida route: the active pairs deleted from A+B and one
-Cholesky solve. `terms` assembles an active space's DownfoldingTerms from it:
-vtilde, the correlation-energy pair E_c[v] - E_c^A[v_eff] (both by the
-plasmon formula, on the same v) and the static defect
-|W(0) - W^A[v_eff](0)|, zero for crpa.
+Cholesky solve, or for 'mrpa' (casida only) the interaction that keeps the
+full RPA's zeroth moment eta0 = (X+Y)(X+Y)^T on the active ph pairs
+(Scott and Booth's Eq. 5, from the kept X+Y). `terms` assembles an active
+space's DownfoldingTerms from it: vtilde, the correlation-energy pair
+E_c[v] - E_c^A[v_eff] (both by the plasmon formula, on the same v) and the
+static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
 
 On the imagfrequency route (density fitted, N^4) `run` keeps the existing
 imaginary-axis energy, its minimax frequency grid and the static
@@ -326,7 +328,24 @@ def screening_correction(low, part, screening):
     modes dropped, and the static response chi^r(0) = -4 [(A+B)_rr]^-1 of
     the spin-summed restricted singlet is one Cholesky solve on the deleted
     matrix. 'crpa_ph' keeps that correction on the particle-hole elements
-    alone (`ph_element_mask`). 'mrpa' is not built yet.
+    alone (`ph_element_mask`). 'mrpa', casida only, is Scott and Booth's
+    moment-conserving interaction (PRL 132, 076401, Eq. 5) on the active ph
+    pairs (spec §3.3, §3.5),
+        (ia|jb)_eff = 1/4 [eta0_S^-1 delta_A eta0_S^-1 - delta_A],
+        vt_ia,jb = (ia|jb)_eff - (ia|jb),
+    eta0_S = xpy_A xpy_A^T the zeroth moment of the full RPA's singlet
+    modes on the active pairs (xpy_A the rows of low.xpy of
+    `active_pair_mask`, factor 1) and delta_A their eps_a - eps_i. In spin
+    orbitals eta0 = (X+Y)(X+Y)^T over the same-spin pairs of both spins is
+    1/2 (S + T) on the same-spin and 1/2 (S - T) on the opposite-spin
+    blocks, S = xpy xpy^T of the singlet modes (xpy/sqrt(2) on each spin)
+    and T = 1 of the triplet ones (A + B = A - B = delta), so Eq. 5,
+    v = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A], is the same in both
+    blocks, 1/4 [S_A^-1 delta_A S_A^-1 - delta_A], and zero in the triplet
+    channel. With every orbital active S^-1 delta S^-1 = delta + 4K and
+    vt is zero to rounding. vt is set on (ia|jb), (ai|jb), (ia|bj) and
+    (ai|bj) and is zero on every other element; zero without an active ph
+    pair.
 
     (A+B)_rr and (tu|ia) are built here from the same integrals as the full
     RPA, low.factors (K = B_ov^T B_ov) or low.eri. With every orbital active
@@ -351,9 +370,7 @@ def screening_correction(low, part, screening):
                 f"method={METHOD!r} screening='mrpa' is built on the "
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
-        raise NotImplementedError(
-            f"method={METHOD!r} screening='mrpa' is not implemented yet; "
-            f"built: 'bare', 'crpa', 'crpa_ph'.")
+        return _mrpa_correction(low, part)
     n = part.n_act
     vt = np.zeros((n,) * 4)
     res = ~active_pair_mask(part)
@@ -386,6 +403,29 @@ def screening_correction(low, part, screening):
     vt = (-4.0 * v_rt.T @ cho_solve(cho_factor(apb), v_rt)).reshape((n,) * 4)
     if screening == 'crpa_ph':
         vt *= ph_element_mask(part)
+    return vt
+
+
+def _mrpa_correction(low, part):
+    """The 'mrpa' vt of `screening_correction` (casida). (ia|jb) is the v
+    of the full RPA (low.factors or low.eri), the v eta0 was solved with, so
+    that vt vanishes with every orbital active; it is computed there too,
+    not short-cut. eta0_S is a principal block of a positive definite
+    matrix, so one Cholesky factor serves both solves."""
+    n, k = part.n_act, part.n_act_occ
+    vt = np.zeros((n,) * 4)
+    if k == 0 or k == n:
+        return vt
+    xpy_a = low.xpy[active_pair_mask(part)]
+    delta, k_ph, _ = _active_ph(low, part, _active_v(low, part.act)[0])
+    eta0 = cho_factor(xpy_a @ xpy_a.T)
+    k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
+    k_eff = 0.25 * (0.5 * (k_eff + k_eff.T) - np.diag(delta))
+    ph = (k_eff - k_ph).reshape(k, n - k, k, n - k)
+    vt[:k, k:, :k, k:] = ph
+    vt[k:, :k, :k, k:] = ph.transpose(1, 0, 2, 3)
+    vt[:k, k:, k:, :k] = ph.transpose(0, 1, 3, 2)
+    vt[k:, :k, k:, :k] = ph.transpose(1, 0, 3, 2)
     return vt
 
 
@@ -550,7 +590,8 @@ def static_defect(low, part, v_eff):
     to be built on that same v (spec §3.2): for crpa, W^A[W^r](0) = W(0)
     exactly and the defect is zero to rounding. delta_A + 4 K^A is positive
     definite for every built screening (for crpa it is a Schur complement of
-    delta + 4K), so one Cholesky solve gives the active response.
+    delta + 4K, for mrpa eta0_S^-1 delta_A eta0_S^-1), so one Cholesky
+    solve gives the active response.
     Zero for an empty active space.
 
     On imagfrequency W(0) is the cache's: B_act^T [1 - P(0)]^-1 B_act with
@@ -1121,8 +1162,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
           **opts):
     """The DownfoldingTerms of the RPA on the active space `part`.
 
-    screening: 'bare' | 'crpa' | 'crpa_ph' ('mrpa' not built yet, and
-        casida only); vtilde is its static correction
+    screening: 'bare' | 'crpa' | 'crpa_ph' | 'mrpa' (casida only, refused
+        on imagfrequency and space-time); vtilde is its static correction
         (`screening_correction`), the same in every spin block (restricted).
     sigma: None, the paper's scheme: full double counting, no Sigma_bar.
         'srg' or 'mode_a': the static environment self-energy

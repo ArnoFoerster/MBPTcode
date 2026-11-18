@@ -1,7 +1,8 @@
 """Downfolding onto a pi space: the effective Hamiltonian of ethylene (2,2) and
 benzene (6,6) in cc-pVDZ, downfolded from HF (CASCI) and from the RPA with bare,
-cRPA and cRPA_ph screening, and with cRPA and cRPA_ph plus the static
-environment self-energy Sigma^E (sigma='srg'; see docs/methods/downfolding.md).
+cRPA, cRPA_ph and mRPA (moment-conserving, Casida only) screening, and with
+cRPA, cRPA_ph and mRPA plus the static environment self-energy Sigma^E
+(sigma='srg'; see docs/methods/downfolding.md).
 The Sigma^E column is the pair of E_0 terms that comes with it, the exchange
 energy term minus Tr[Sigma_bar gamma^A,0]. The rows marked 'if' are the
 density-fitted imaginary-frequency route (mode='imagfrequency'), where 'srg'
@@ -44,8 +45,10 @@ METHODS = (('HF (CASCI)', 'hf', {}),
            ('RPA bare', 'rpa', {'screening': 'bare'}),
            ('RPA cRPA', 'rpa', {'screening': 'crpa'}),
            ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph'}),
+           ('RPA mRPA', 'rpa', {'screening': 'mrpa'}),
            ('cRPA+SRG', 'rpa', {'screening': 'crpa', 'sigma': 'srg'}),
            ('cRPA_ph+SRG', 'rpa', {'screening': 'crpa_ph', 'sigma': 'srg'}),
+           ('mRPA+SRG', 'rpa', {'screening': 'mrpa', 'sigma': 'srg'}),
            ('cRPA if', 'rpa_if', {'screening': 'crpa'}),
            ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}),
            ('cRPA st', 'rpa_st', {'screening': 'crpa'}),

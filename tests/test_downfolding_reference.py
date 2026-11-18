@@ -37,27 +37,34 @@ What the SI columns are, determined from the rows:
 Measured deviations (ours - SI), against the targets of the plan:
 - H2/cc-pVTZ, HF and PBE, (0,0): Ecore, Eh, Ex up to 1.6e-5, Ec 2.9e-6,
   Etot 7.9e-6 (target 5e-5).
-- H2 (1,1) bare/crpa/crpa_ph and (-1,-1): Etot up to 1.0e-5, Eact 1.0e-5,
-  Ec 1.5e-6, Eh/Ex 5.7e-6, Enuc 6.8e-8 (target 5e-5).
+- H2 (1,1) bare/crpa/crpa_ph/mrpa and (-1,-1): Etot up to 1.0e-5, Eact
+  1.0e-5, Ec 1.5e-6, Eh/Ex 5.7e-6, Enuc 6.8e-8 (target 5e-5); the mrpa
+  rows alone Etot 7.8e-6, Eact 9.1e-6, Ec 1.4e-6, Eh = Ex = 0 on both
+  sides.
 - N2/cc-pVDZ HF, (3,3) and (0,0): Ecore, Eh, Ex up to 6.8e-4 (target
-  1e-3), Ec 9.5e-6, Etot(screening) - Etot(BARE) 5.2e-6 (target 1e-4),
-  Eact 6.3e-5, Etot 5.2e-4.
+  1e-3), Ec 9.8e-6, Etot(screening) - Etot(BARE) 5.2e-6 (target 1e-4),
+  Eact 6.3e-5, Etot 5.2e-4; the mrpa rows alone Ec 9.8e-6,
+  Etot(mrpa) - Etot(BARE) 5.1e-6, Eact 5.0e-5.
 
 The traces (ruling R14). The primary check is trW - trV, the screening
 content, on every row: measured 5.4e-6 (H2) and 2.0e-5 (N2), tolerance
-5e-5. The absolute traces see the bare integrals of the two codes' basis
-representations, which differ where the cc-pVTZ overlap of H2 is nearly
-singular: the smallest eigenvalue of S is 3.3e-4, 1.7e-3, 0.064, 0.093 at
-r = 0.5, 0.75, 1.5, 3.0, and the full-space (-1,-1) trace misses by 10.5,
-0.58, 0.064, 0.049 (HF and PBE alike), the (1,1) trace at r = 0.5 by
-5.5e-4 (HF) and 1.5e-4 (PBE), while the energies of those rows agree to
-1e-5. So the absolute H2 traces are tested at 5e-5 on the (1,1) rows with
-r >= 0.75 (measured 1.7e-5) and skipped at r = 0.5 and on (-1,-1). The N2
+5e-5 (the mrpa rows 3.0e-6 and 4.8e-6). The absolute traces see the bare
+integrals of the two codes' basis representations, which differ where the
+cc-pVTZ overlap of H2 is nearly singular: the smallest eigenvalue of S is
+3.3e-4, 1.7e-3, 0.064, 0.093 at r = 0.5, 0.75, 1.5, 3.0, and the
+full-space (-1,-1) trace misses by 10.5, 0.58, 0.064, 0.049 (HF and PBE
+alike), the (1,1) trace at r = 0.5 by 5.5e-4 (HF) and 1.5e-4 (PBE), while
+the energies of those rows agree to 1e-5. So the absolute H2 traces are
+tested at 5e-5 on the (1,1) rows with r >= 0.75 (measured 1.7e-5, the mrpa
+rows too) and skipped at r = 0.5 and on (-1,-1). The N2
 absolute traces miss the plan's 1e-4 (measured 1.28e-4 trV and 1.41e-4 trW
 at r = 1.1, 1.0e-4 / 1.08e-4 at 1.6, 5.1e-5 at 2.2), in line with the N2
 HF terms' 6.8e-4, and are tested at 2e-4.
 
-The mRPA rows and the two benzene entries wait for Task 19 (mRPA).
+Benzene (ruling R26): the SI's (6,6) Frobenius norms of vtilde and its
+(10,10) Omega^R list, on the QUEST geometry of the prototype pins, since the
+SI does not give its own; the tests at the end of this module say what that
+leaves to compare.
 
 The prototype pins (tests/data/downfolding_prototype_pins.json) are the
 user's independent PySCF prototype (~/PhD/ClaudeProjects/workdir/downfold,
@@ -80,13 +87,15 @@ from pyscf import dft, gto, scf
 
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
+from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.one_body import (core_fock,
                                                      double_counting)
-from src.MultiReference.Downfolding.partition import partition
+from src.MultiReference.Downfolding.partition import (active_pair_mask,
+                                                      partition)
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 from src.Solvers.active_space_solver import PyscfFCISolver
-from tests.downfolding_oracle import reference_energy, water
+from tests.downfolding_oracle import drpa, reference_energy, water
 
 DATA = json.loads((pathlib.Path(__file__).parent / 'data'
                    / 'downfolding_paper_si.json').read_text())
@@ -97,7 +106,6 @@ PIN_SCREENING = {'bare': 'bare', 'cRPA': 'crpa', 'cRPAph': 'crpa_ph'}
 PIN_CASES = [pytest.param(m, s, id=f'{m}-{s}')
              for m in PINS for s in PIN_SCREENING]
 ENERGIES = ('Enuc', 'Ecore', 'Eh', 'Ex', 'Ec', 'Eact', 'Etot')
-MRPA_SKIP = pytest.mark.skip(reason='mRPA comes in Task 19')
 H2_TRACE_SKIP = pytest.mark.skip(
     reason='absolute trace of the bare H2/cc-pVTZ integrals: near-singular '
            'overlap (smallest S eigenvalue 3.3e-4 at r = 0.5, 1.7e-3 at '
@@ -109,16 +117,14 @@ H2_TRACE_SKIP = pytest.mark.skip(
 
 def _cases(molecule, spaces, skip_if=None):
     """pytest params of the JSON cases of `molecule` with (n_act_occ,
-    n_act_virt) in `spaces`, the mRPA ones skipped, and those for which
-    skip_if returns a mark marked with it."""
+    n_act_virt) in `spaces`, those for which skip_if returns a mark marked
+    with it."""
     out = []
     for c in CASES:
         if c['molecule'] != molecule or (c['n_act_occ'],
                                          c['n_act_virt']) not in spaces:
             continue
-        marks = MRPA_SKIP if c['screening'] == 'mrpa' else ()
-        if not marks and skip_if is not None and skip_if(c):
-            marks = skip_if(c)
+        marks = (skip_if and skip_if(c)) or ()
         cid = (f"{c['xc']}-r{c['r']}-{c['screening']}-"
                f"{c['n_act_occ']}_{c['n_act_virt']}")
         out.append(pytest.param(c, id=cid, marks=marks))
@@ -210,9 +216,9 @@ def test_h2_all_environment_row(case):
 
 @pytest.mark.parametrize('case', _cases('H2', {(1, 1), (-1, -1)}))
 def test_h2_downfolded_rows(case):
-    """H2/cc-pVTZ (1,1) for bare, crpa, crpa_ph and every orbital active:
-    every energy column and trW - trV. Measured: energies at most 1.0e-5
-    (Etot, Eact), trW - trV 5.4e-6 (tolerance 5e-5)."""
+    """H2/cc-pVTZ (1,1) for bare, crpa, crpa_ph, mrpa and every orbital
+    active: every energy column and trW - trV. Measured: energies at most
+    1.0e-5 (Etot, Eact), trW - trV 5.4e-6 (tolerance 5e-5)."""
     ours, en = _ours(case)
     assert abs(ours['Eh'] + ours['Ex']
                - (en.e_hf_ee + en.e_hf_ee_vtilde)) < 1e-10
@@ -238,9 +244,9 @@ def test_h2_absolute_traces(case):
 
 @pytest.mark.parametrize('case', _cases('N2', {(3, 3), (0, 0)}))
 def test_n2_downfolded_rows(case):
-    """N2/cc-pVDZ HF (3,3) for bare, crpa, crpa_ph, and every orbital in the
-    environment. The absolute HF terms differ by up to 6.8e-4 from AMS
-    (tolerance 1e-3); Ec (9.5e-6) and Etot(screening) - Etot(BARE)
+    """N2/cc-pVDZ HF (3,3) for bare, crpa, crpa_ph, mrpa, and every orbital
+    in the environment. The absolute HF terms differ by up to 6.8e-4 from AMS
+    (tolerance 1e-3); Ec (9.8e-6) and Etot(screening) - Etot(BARE)
     (5.2e-6) to 1e-4; Eact (6.3e-5) to 1e-4; Etot (5.2e-4) to 1e-3;
     trW - trV (2.0e-5) to 5e-5 and the absolute traces (1.41e-4, ruling
     R14) to 2e-4."""
@@ -274,17 +280,6 @@ def test_pbe0_orbitals_no_xc_leak():
     active = reference_energy(g, 2) - g[0]
     e_hf = scf.RHF(mf.mol).energy_tot(dm=mf.make_rdm1())
     assert abs(en.e_nuc + en.e_hf_core + en.e_hf_ee + active - e_hf) < 1e-9
-
-
-@pytest.mark.skip(reason='mRPA and the benzene geometry come in Task 19')
-def test_benzene_66_frobenius():
-    """sqrt(sum C^2) of the (6,6) screening tables (see the JSON's
-    multiplicity note)."""
-
-
-@pytest.mark.skip(reason='mRPA and the benzene geometry come in Task 19')
-def test_benzene_1010_omega_r():
-    """The environment's neutral excitations Omega^R of benzene (10,10)."""
 
 
 @functools.lru_cache(maxsize=None)
@@ -377,3 +372,65 @@ def test_total_minus_e0_is_the_prototype_cas_energy(molecule, screening):
     root = solve('pyscf_fci', g, space['n_orbs'], space['n_elec_active'],
                  spin_free=True)[0]
     assert abs(root - en.e0 - pin['cas_ground']) < 1e-7
+
+
+# --- benzene against the SI (ruling R26) -------------------------------------
+# The SI does not give its benzene geometry. These tests run on the QUEST
+# benzene geometry of the prototype pins (cc-pVDZ, spherical, the pinned
+# orbitals), so they check magnitudes, not decimals: scaling that geometry by
+# 1.005 moves the lowest Omega^R by -2.0e-3 Eh and the (6,6) norms by +2e-3
+# (crpa) and +6e-3 (crpa_ph, mrpa) relative, the size of the misses below.
+
+# |norm - SI| / SI allowed per screening: the plan's 1e-3 where it is met
+# (measured crpa_ph 2.0e-4, mrpa 1.5e-4); crpa misses it (measured 1.5e-3),
+# so 1.5 times that
+BENZENE_FROBENIUS_TOL = {'crpa': 2.3e-3, 'crpa_ph': 1e-3, 'mrpa': 1e-3}
+
+
+@functools.lru_cache(maxsize=None)
+def _benzene_vtilde(screening):
+    """vtilde of the benzene (6,6) pi space of the pins (canonical [16, 19,
+    20] and [21, 22, 29], the prototype's orbitals), (n_act,)*4 chemist."""
+    low, aspace = _pinned_low('benzene')
+    return rpa.screening_correction(low, partition(aspace, low.eps),
+                                    screening)
+
+
+@pytest.mark.parametrize('screening', BENZENE_FROBENIUS_TOL)
+def test_benzene_66_frobenius(screening):
+    """sqrt(sum vt^2) over the full (n,)*4 tensor of the (6,6) pi space,
+    against the SI's 'four_index' norm of its |v_eff - v| tables (each
+    compound (pq, rs) of a table weighted by its multiplicity, see the
+    JSON), which does not see a rotation inside the degenerate pi pairs.
+    Measured relative misses: crpa -1.5e-3, crpa_ph -2.0e-4, mrpa -1.5e-4
+    (tolerances in BENZENE_FROBENIUS_TOL; the geometry caveat above)."""
+    ref = DATA['benzene_66_frobenius']['values'][screening]['four_index']
+    got = np.linalg.norm(_benzene_vtilde(screening))
+    assert abs(got - ref) < BENZENE_FROBENIUS_TOL[screening] * ref
+
+
+def test_mrpa_close_to_crpa_ph():
+    """Spec §6.2 (the paper's Figs. 1 and 2a): at omega = 0 mRPA and cRPA_ph
+    screen the benzene (6,6) particle-hole elements alike: Frobenius norms
+    within 20%. Measured |mrpa| / |crpa_ph| = 0.924 (the SI's 0.924)."""
+    m, c = (np.linalg.norm(_benzene_vtilde(s)) for s in ('mrpa', 'crpa_ph'))
+    assert abs(m / c - 1.0) < 0.2
+
+
+def test_benzene_1010_omega_r():
+    """The neutral excitations Omega^R of the environment response of the
+    benzene (10,10) space, HOMO-4..LUMO+4 (orbitals 16-20 and 21-25 of the
+    pins' orbitals, a contiguous window the degenerate-pair check accepts):
+    the eigenvalues of the oracle's direct RPA with the active pairs
+    deleted, 1928 of them as in the SI list. The lowest 20 lie above the
+    SI's by 1.2e-3 to 3.0e-3 Eh, all upwards and with the SI's degeneracy
+    pattern (measured max 2.95e-3; the geometry caveat above), so the
+    tolerance is 4.5e-3 Eh, not the plan's 1e-4."""
+    low, _ = _pinned_low('benzene')
+    aspace = ActiveSpace.from_counts(low.eps, low.nocc, 5, 5)
+    part = partition(aspace, low.eps)
+    assert list(part.act) == list(range(16, 26))
+    omega, _ = drpa(low.eri, low.eps, low.nocc, keep=~active_pair_mask(part))
+    ref = np.array(DATA['benzene_1010_omega_r']['values'])
+    assert omega.size == ref.size
+    assert np.abs(np.sort(omega)[:20] - ref[:20]).max() < 4.5e-3
