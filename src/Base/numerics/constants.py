@@ -267,6 +267,24 @@ QSGW_SRG_FLOW = 100.0
 # each term of Sigma~ is off by at most this fraction of itself.
 QSGW_SRG_QUAD_TOL = 1e-7
 
+# Defaults of `numerics.downfolding`, the static embedding self-energy of the
+# RPA downfolding (`MultiReference.Downfolding.methods.rpa`).
+# The SRG flow parameter s of Sigma_bar^E, Hartree^-2 (Marie and Loos, JCTC
+# 2023, doi 10.1021/acs.jctc.3c00281, eq. 44): Marie and Loos recommend 500
+# to 1000 for their one-shot and self-consistent schemes. Separate from
+# QSGW_SRG_FLOW: that one is held at 100 by the self-consistent qsGW loop's
+# branch problems in the high virtuals, which a one-shot Sigma_bar^E on the
+# active orbitals does not have. A term with denominators a, b is damped by
+# 1 - exp(-(a^2 + b^2) s), so terms further than about 1/sqrt(2 s) = 0.03 Ha
+# from a pole are kept whole.
+DOWNFOLDING_SRG_S = 500.0
+# The 'mode_a' pole check refuses an active orbital energy within this many
+# 1/sqrt(2 s) of the pole-free window's edge: beyond three such widths the SRG
+# damping exp(-(a^2 + b^2) s) of every term is below exp(-9), so a
+# regularization is not needed there; closer in, the undamped terms of
+# 'mode_a' (eta = 0) grow without bound.
+DOWNFOLDING_POLE_MARGIN = 3.0
+
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.
 FCI_CONV_TOL = 1e-13
