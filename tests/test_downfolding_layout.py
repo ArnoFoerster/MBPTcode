@@ -5,8 +5,10 @@
 `effective_hamiltonian`) plus one file per low-level method under `methods/`.
 The two sides meet only in `DownfoldingTerms`, and the driver reaches the
 methods only through the `LOW_LEVEL` registry. Both rules are read off the
-source by AST, so no module is imported to check them. A module that does
-not exist yet is skipped, so the test tightens as files land.
+source by AST, so no module is imported to check them. Every import is
+checked by its module and by each module.name it takes (`from . import
+methods` reaches the methods as surely as `from .methods import rpa`). Every
+module named here exists: a renamed or missing one fails, it is not skipped.
 """
 import ast
 import pathlib
@@ -18,9 +20,9 @@ from src.MultiReference.Downfolding.terms import choice
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
            / 'src' / 'MultiReference' / 'Downfolding')
 GENERAL = ['terms', 'partition', 'two_body', 'one_body', 'energy']
-FORBIDDEN = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW',
-             'src.MultiReference.Downfolding.methods')
+KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
 METHODS = 'src.MultiReference.Downfolding.methods'
+FORBIDDEN = KERNELS + (METHODS,)
 
 
 def _imports(path):
@@ -44,34 +46,38 @@ def _under(module, prefix):
     return module == prefix or module.startswith(prefix + '.')
 
 
+def _targets(module, names):
+    """The module an import names and each module.name it takes: `from
+    src.MultiReference.Downfolding import methods` reaches the methods
+    package through its name, not its module."""
+    return [module] + [f'{module}.{n}' for n in names]
+
+
+def _source(name):
+    path = PACKAGE / f'{name}.py'
+    assert path.exists(), f'{path} is gone: rename it here too'
+    return path
+
+
 def test_general_layer_imports_no_method_code():
-    checked = 0
     for name in GENERAL:
-        path = PACKAGE / f'{name}.py'
-        if not path.exists():
-            continue
-        checked += 1
-        for module, names in _imports(path):
-            # `from src.MultiReference.Downfolding import methods` too
-            targets = [module] + [f'{module}.{n}' for n in names]
-            for target in targets:
+        for module, names in _imports(_source(name)):
+            for target in _targets(module, names):
                 for banned in FORBIDDEN:
                     assert not _under(target, banned), (
                         f'{name}.py imports {target}, method code')
-    assert checked >= 1  # terms.py at the least
 
 
 def test_driver_imports_only_the_registry():
-    path = PACKAGE / 'effective_hamiltonian.py'
-    if not path.exists():
-        pytest.skip('effective_hamiltonian.py is not written yet')
-    for module, names in _imports(path):
-        assert not _under(module, 'src.SingleReference.LinearResponse')
-        assert not _under(module, 'src.SingleReference.GW')
-        if _under(module, METHODS):
-            assert module == METHODS and names == ['LOW_LEVEL'], (
-                f'the driver takes only LOW_LEVEL from methods, not '
-                f'{module}: {names}')
+    for module, names in _imports(_source('effective_hamiltonian')):
+        for target in _targets(module, names):
+            for banned in KERNELS:
+                assert not _under(target, banned), (
+                    f'the driver imports {target}, method code')
+            if _under(target, METHODS):
+                assert module == METHODS and names == ['LOW_LEVEL'], (
+                    f'the driver takes only LOW_LEVEL from methods, not '
+                    f'{module}: {names}')
 
 
 def test_choice_refuses_and_normalizes():

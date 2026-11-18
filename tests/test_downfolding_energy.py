@@ -496,6 +496,10 @@ def test_diagnostics_keyword(wat_rpa):
     mf, low, aspace = wat_rpa
     _, _, en = build_effective_hamiltonian(low, aspace, diagnostics=())
     assert en.diagnostics == {}
+    # None is no diagnostics, as () (ruling R27c), not a TypeError
+    _, _, en = build_effective_hamiltonian(low, aspace, sigma='srg',
+                                           diagnostics=None)
+    assert en.diagnostics == {}
     with pytest.raises(ValueError, match="'static_defect', 'ec_active_casida'"):
         build_effective_hamiltonian(low, aspace, diagnostics=('nope',))
     # names that do not apply (casida, no sigma) are skipped, not zero
@@ -515,9 +519,16 @@ def test_rpa_option_refusals(wat_rpa):
     mf, low, aspace = wat_rpa
     with pytest.raises(ValueError, match="'crpa'"):
         build_effective_hamiltonian(low, aspace, screening='rpa')
-    for sigma in ('None', 'none', 'SRG', 'gw'):
+    for sigma in ('None', 'none', '', 'gw', 1):
         with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
             build_effective_hamiltonian(low, aspace, sigma=sigma)
+    # the string members in any case and either of '-', '_' (ruling R27c),
+    # as screening and mode take them; None alone is no Sigma^E
+    for canonical, spellings in (('srg', ('SRG', 'Srg')),
+                                 ('mode_a', ('MODE_A', 'mode-a', 'Mode-A'))):
+        want = build_effective_hamiltonian(low, aspace, sigma=canonical)
+        for sigma in spellings:
+            _same(build_effective_hamiltonian(low, aspace, sigma=sigma), want)
     with pytest.raises(TypeError, match="method='rpa'.*nope"):
         build_effective_hamiltonian(low, aspace, nope=1)
 

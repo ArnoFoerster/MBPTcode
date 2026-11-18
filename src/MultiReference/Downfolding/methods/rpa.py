@@ -1225,9 +1225,27 @@ def _sigma_continuation(low, part, sigma, kept):
     return spread
 
 
+def _sigma_name(sigma):
+    """None, or the SIGMAS entry the string `sigma` names, in any case and
+    with '-' or '_' (`choice`, as screening and mode); refused (ValueError)
+    otherwise. None is kept apart, not passed through `choice`, which would
+    read it as 'none' and so accept the string 'None' (ruling R13)."""
+    if sigma is None:
+        return None
+    if isinstance(sigma, str):
+        try:
+            return choice(sigma, SIGMAS[1:], 'sigma')
+        except ValueError:
+            pass
+    raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
+                     + ', '.join(repr(s) for s in SIGMAS) + '.')
+
+
 def _diagnostic_names(diagnostics):
-    """The DIAGNOSTICS entries `diagnostics` names (a name or an iterable of
-    names), each refused unless it is one."""
+    """The DIAGNOSTICS entries `diagnostics` names (a name, an iterable of
+    names, or None for none), each refused unless it is one."""
+    if diagnostics is None:
+        return set()
     if isinstance(diagnostics, str):
         diagnostics = (diagnostics,)
     return {choice(d, DIAGNOSTICS, 'diagnostics') for d in diagnostics}
@@ -1249,11 +1267,15 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
         space-time 'srg' is s = inf (Eq. 42) and both forms are refused
-        near the poles, pointing to casida (`embedding_self_energy`).
-    diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
-        that does not apply here (on casida 'ec_active_casida' and
-        'sigma_continuation', and 'sigma_poles' and 'sigma_continuation'
-        without sigma) is skipped and absent, an unknown name refused.
+        near the poles, pointing to casida (`embedding_self_energy`). The
+        names in any case and with '-' or '_' ('SRG', 'mode-a'), as
+        screening; anything but None and those is refused.
+    diagnostics: the DIAGNOSTICS to record in energies.diagnostics (None:
+        none, as ()); a name that does not apply here (on casida
+        'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
+        'sigma_continuation' without sigma) is skipped and absent, an
+        unknown name refused. One that applies is recorded even when it is
+        exactly zero (an empty space, no environment, no ph pair: 0.0).
         'sigma_poles' (`_sigma_poles`) warns (SigmaDampingWarning) when the
         SRG damping is not negligible (casida). 'sigma_continuation'
         (imagfrequency, space-time, `_sigma_continuation`): per element the
@@ -1271,9 +1293,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     _refuse_options(opts, 'terms')
     names = _diagnostic_names(diagnostics)
     screening = choice(screening, SCREENINGS, 'screening')
-    if sigma not in SIGMAS:
-        raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
-                         + ', '.join(repr(s) for s in SIGMAS) + '.')
+    sigma = _sigma_name(sigma)
     vt = screening_correction(low, part, screening)
     v_eff = _active_v(low, part.act)[0] + vt
     found = {}

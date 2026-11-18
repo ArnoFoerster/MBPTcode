@@ -23,11 +23,16 @@ Available now:
 ## Calling it
 
 ```python
+from pyscf import gto, scf
+
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 
+mol = gto.M(atom='C 0 0.6695 0; C 0 -0.6695 0; H 0.9289 1.2321 0; '
+                 'H -0.9289 1.2321 0; H 0.9289 -1.2321 0; H -0.9289 -1.2321 0',
+            basis='cc-pvdz')   # ethylene; the snippet's pi space is on atoms 0, 1
 mf = scf.RHF(mol).run()
 active = ActiveSpace.from_population(mf, atoms=[0, 1], ao_type='p',
                                      n_occ=1, n_virt=1)
@@ -259,6 +264,10 @@ pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
 or outside the window. `'srg'` is never refused on the Casida route; near a
 pole its damping matters, which the `'sigma_poles'` diagnostic reports.
 
+`srg_s`, `pole_margin` and `continuation_margin` are read from `low.numerics`,
+the `Numerics` given to `run_low_level`: they are fixed with the low-level
+result, and a new value needs a new `run_low_level`.
+
 **Sigma^E on `mode='imagfrequency'`.** There are no residues on this route.
 S^E(mu + i omega), mu the whole system's mid-gap, comes from the GW
 density's Lorentzian fit of W - 1 on the minimax W grid
@@ -332,15 +341,21 @@ reference E_0 is a well-defined working choice, not a derived one.
 - **Serial only.** More than one MPI rank is refused (every rank would repeat
   the whole calculation).
 - **Option validation.** An unknown or not-yet-available mode, screening,
-  sigma or diagnostic is refused with the valid list.
+  sigma or diagnostic is refused with the valid list. Their names are taken
+  in any case and with `-` or `_` (`'SRG'`, `'mode-a'`, `'CRPA-PH'`); for
+  `sigma` only `None` itself means no Sigma^E (the string `'None'` is
+  refused).
 - **Sigma^E poles.** `sigma='mode_a'` is refused near a pole of the
   environment self-energy; on `mode='imagfrequency'` and `'space-time'`
   both `'srg'` and `'mode_a'` are, within the wider continuation margin
   (see above).
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
-a tuple of names (default: all); a name that does not apply to the call is
-skipped, so one tuple works across a loop. Results are in
+a tuple of names (default: all; `None` is the same as `()`); a name that does
+not apply to the call is skipped, so one tuple works across a loop. A
+diagnostic that applies but is exactly zero (an empty active space, no
+environment, no particle-hole pair) is recorded as 0.0; one that does not
+apply is absent. Results are in
 `energies.diagnostics`, keyed by name. On the casida route two apply; on
 imagfrequency and space-time all four:
 

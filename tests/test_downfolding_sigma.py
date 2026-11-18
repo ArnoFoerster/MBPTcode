@@ -265,10 +265,13 @@ def test_pole_window(wat, low_exact):
 
 
 def test_near_pole_space(wat, low_exact):
-    """The virtual 7 made active over the environment virtual 6 lies beyond
-    the window's upper edge (asserted here before the refusal): 'mode_a'
-    refuses, naming orbital 7 and its distance; 'srg' is finite and equal to
-    the oracle (measured 2.7e-16, tolerance 1e-8), and its damping matters
+    """The virtual 7 made active over the environment virtual 6 has its
+    energy above hi - margin, within the 'mode_a' pole margin of the
+    window's upper edge hi (asserted here before the refusal, as is the
+    active virtual 5 below hi - margin; eps_7 in fact lies 0.030 Ha beyond
+    hi): 'mode_a' refuses, naming orbital 7 and its distance; 'srg' is
+    finite and equal to the oracle (measured 2.7e-16, tolerance 1e-8), and
+    its damping matters
     there (|srg(500) - srg(inf)| = 1.5e-4, the nearest pole 0.030 Ha away)."""
     _, eri, eps, nocc = wat
     part = partition(_high_virtual(eps, nocc), eps)

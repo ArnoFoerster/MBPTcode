@@ -38,8 +38,10 @@ run with k-point sampling, for crystals and slabs.
 - **[Coupled cluster](docs/methods/coupled-cluster.md)** — CCSDT and
   EOM-CCSDT (IP/EA/EE).
 - **[Downfolding](docs/methods/downfolding.md)** — static active-space
-  effective Hamiltonians with HF (CASCI) and RPA (bare, cRPA, cRPA_ph)
-  screening, and their constant E_0.
+  effective Hamiltonians with HF (CASCI) and RPA (bare, cRPA, cRPA_ph, mRPA)
+  screening on the casida, imaginary-frequency and space-time routes,
+  optionally with the static environment self-energy Sigma^E, and their
+  constant E_0.
 - **[Finite temperature](docs/methods/finite-temperature.md)** — Matsubara-axis
   grids via the intermediate representation.
 - **[Periodic systems](docs/methods/periodic.md)** — k-point RPA, BSE and GW

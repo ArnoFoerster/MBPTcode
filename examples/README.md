@@ -29,7 +29,7 @@ periodic H2 slab.
 | `19_ee_adc.py` | electronic-excitation ADC(2)/ADC(3): spin-free, matrix-free, DF, and the singlet and triplet channels |
 | `20_vibronic_band_shape.py` | formaldehyde S1: both minima, Huang-Rhys factors by the gradient and the displacement route, and the absorption and emission bands at 300 K with their FWHM (eV, cm^-1, nm) and Stokes shift (`band_shape`) |
 | `21_ee_fold.py` | the folded EE solver: ADC(2), GF2 and the one-doubles-set BSE@GW of Monino and Loos (2023) solved on the singles space, one Davidson for every root at its own frequency with a Newton polish per root, the folded ADC(2) roots beside the full solve; `fold=True`, the tiled density-fitted fold for large molecules, in the gas phase and in toluene |
-| `22_rpa_downfolding.py` | downfolding onto the pi space of ethylene (2,2) and benzene (6,6): one low-level run per method, HF (CASCI) and RPA with bare, cRPA and cRPA_ph screening, the E_0 breakdown and the lowest singlet and triplet excitation energies |
+| `22_rpa_downfolding.py` | downfolding onto the pi space of ethylene (2,2) and benzene (6,6): one low-level run per method and route, HF (CASCI) and RPA with bare, cRPA, cRPA_ph and mRPA screening, with and without the environment self-energy Sigma^E (`sigma='srg'`), on the casida, imaginary-frequency and space-time routes, the E_0 breakdown and the lowest singlet and triplet excitation energies |
 
 The auxiliary basis is a choice, not a detail. `<basis>-ri` is an MP2
 correlation-fitting set for occupied-virtual products, while J, K and the BSE
