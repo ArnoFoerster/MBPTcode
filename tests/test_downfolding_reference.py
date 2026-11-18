@@ -58,6 +58,17 @@ at r = 1.1, 1.0e-4 / 1.08e-4 at 1.6, 5.1e-5 at 2.2), in line with the N2
 HF terms' 6.8e-4, and are tested at 2e-4.
 
 The mRPA rows and the two benzene entries wait for Task 19 (mRPA).
+
+The prototype pins (tests/data/downfolding_prototype_pins.json) are the
+user's independent PySCF prototype (~/PhD/ClaudeProjects/workdir/downfold,
+frozen by its freeze_pins.py; file hashes, env and conventions in the JSON's
+provenance): ethylene (2,2) and benzene (6,6) pi spaces, cc-pVDZ, HF,
+screenings bare, cRPA, cRPAph. The pins hold the prototype's mo_coeff and
+mo_energy, and the mean field here is rebuilt on exactly those orbitals, not
+on a new SCF: benzene's active space holds degenerate pi pairs (canonical
+[16, 19, 20] and [21, 22, 29], non-contiguous) whose arbitrary rotation
+would change single elements. Every compared quantity agrees to rounding
+(measured at most 1.8e-14).
 """
 import functools
 import json
@@ -69,13 +80,22 @@ from pyscf import dft, gto, scf
 
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
+from src.MultiReference.Downfolding.one_body import (core_fock,
+                                                     double_counting)
+from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
+from src.Solvers.active_space_solver import PyscfFCISolver
 from tests.downfolding_oracle import reference_energy, water
 
 DATA = json.loads((pathlib.Path(__file__).parent / 'data'
                    / 'downfolding_paper_si.json').read_text())
 CASES = DATA['cases']
+PINS = json.loads((pathlib.Path(__file__).parent / 'data'
+                   / 'downfolding_prototype_pins.json').read_text())['cases']
+PIN_SCREENING = {'bare': 'bare', 'cRPA': 'crpa', 'cRPAph': 'crpa_ph'}
+PIN_CASES = [pytest.param(m, s, id=f'{m}-{s}')
+             for m in PINS for s in PIN_SCREENING]
 ENERGIES = ('Enuc', 'Ecore', 'Eh', 'Ex', 'Ec', 'Eact', 'Etot')
 MRPA_SKIP = pytest.mark.skip(reason='mRPA comes in Task 19')
 H2_TRACE_SKIP = pytest.mark.skip(
@@ -265,3 +285,95 @@ def test_benzene_66_frobenius():
 @pytest.mark.skip(reason='mRPA and the benzene geometry come in Task 19')
 def test_benzene_1010_omega_r():
     """The environment's neutral excitations Omega^R of benzene (10,10)."""
+
+
+@functools.lru_cache(maxsize=None)
+def _pinned_low(molecule):
+    """(low, active_space) of a prototype pin: an RHF on the pinned geometry
+    and basis whose mo_coeff, mo_energy and mo_occ are the prototype's (no
+    SCF run here), its casida RPA on exact integrals, and the pinned active
+    orbitals."""
+    c = PINS[molecule]
+    mol = gto.M(atom=[(a[0], a[1:]) for a in c['atoms']], basis=c['basis'],
+                unit='A', charge=c['charge'], spin=c['spin'], cart=c['cart'],
+                verbose=0)
+    mf = scf.RHF(mol)
+    mf.mo_coeff = np.array(c['mo_coeff'])
+    mf.mo_energy = np.array(c['mo_energy'])
+    mf.mo_occ = np.where(np.arange(len(mf.mo_energy)) < c['nocc'], 2.0, 0.0)
+    low = run_low_level(mf, method='rpa', mode='casida', df=False)
+    aspace = ActiveSpace.from_indices(len(mf.mo_energy), c['nocc'],
+                                      np.array(c['act_occ']),
+                                      np.array(c['act_virt']))
+    return low, aspace
+
+
+@functools.lru_cache(maxsize=None)
+def _pinned_build(molecule, screening):
+    """build_effective_hamiltonian of a pin's active space with the
+    prototype screening name `screening` (bare, cRPA, cRPAph)."""
+    low, aspace = _pinned_low(molecule)
+    return build_effective_hamiltonian(low, aspace,
+                                       screening=PIN_SCREENING[screening])
+
+
+@pytest.mark.parametrize('molecule, screening', PIN_CASES)
+def test_prototype_elements(molecule, screening):
+    """v_eff (g_eff[2] back to chemist), f and t^DC (one_body's core_fock
+    and double_counting, dc='full': hartree - exchange) and h_eff = f - t^DC
+    against the prototype's, element by element, on its own orbitals (which
+    give its SCF energy back). Measured: v_eff 1.9e-16, f 0, t^DC 3.6e-16,
+    h_eff 2.2e-16 (tolerance 1e-7)."""
+    c = PINS[molecule]
+    pin = c['screenings'][screening]
+    low, aspace = _pinned_low(molecule)
+    mf = low.mf
+    assert abs(mf.energy_tot() - c['e_scf']) < 1e-8
+    v = _pinned_build(molecule, 'bare')[0][2].transpose(0, 2, 1, 3)
+    g = _pinned_build(molecule, screening)[0]
+    v_eff = g[2].transpose(0, 2, 1, 3)
+    part = partition(aspace, mf.mo_energy)
+    mo, parts = (mf.mo_coeff, mf.mo_coeff), (part, part)
+    f = core_fock(mf.mol, mf.get_hcore(), mo, parts)[0]
+    n_occ = (part.n_act_occ, part.n_act_occ)
+    hartree, exchange = double_counting((v_eff - v,) * 3, n_occ)
+    t_dc = hartree[0] - exchange[0]
+    for ours, ref in ((v_eff, pin['v_eff']), (f, c['f']),
+                      (t_dc, pin['t_dc']),
+                      (g[1], np.array(c['f']) - np.array(pin['t_dc']))):
+        assert np.abs(ours - np.array(ref)).max() < 1e-7
+
+
+@pytest.mark.parametrize('molecule, screening', PIN_CASES)
+def test_prototype_excitations(molecule, screening):
+    """The lowest singlet and triplet excitation energies against the
+    prototype's (spin from <S^2> of its dense CASCI). solve('pyscf_fci')
+    returns the Sz = 0 roots of every spin without labels, so the spin comes
+    from PyscfFCISolver on the same h_eff and v_eff: S1 - S0 from its
+    singlet sector (spin=0) and T1 - S0 from the lowest Ms = 1 state
+    (spin=2); both must also be excitations of solve's spectrum, whose
+    lowest root is S0. Measured 6.2e-15 (tolerance 1e-6)."""
+    pin = PINS[molecule]['screenings'][screening]
+    g, space, _ = _pinned_build(molecule, screening)
+    n, nelec = space['n_orbs'], space['n_elec_active']
+    roots = solve('pyscf_fci', g, n, nelec, spin_free=True, nroots=8)
+    h1, eri = g[1], g[2].transpose(0, 2, 1, 3)
+    singlets = PyscfFCISolver().roots(h1, eri, n, nelec, nroots=2, spin=0)[0]
+    triplet = PyscfFCISolver().roots(h1, eri, n, nelec, nroots=1, spin=2)[0]
+    assert abs(roots[0] - g[0] - singlets[0]) < 1e-8
+    for exc, ref in ((singlets[1] - singlets[0], pin['exc_singlet']),
+                     (triplet[0] - singlets[0], pin['exc_triplet'])):
+        assert abs(exc - ref) < 1e-6
+        assert np.abs(roots - roots[0] - ref).min() < 1e-6
+
+
+@pytest.mark.parametrize('molecule, screening', PIN_CASES)
+def test_total_minus_e0_is_the_prototype_cas_energy(molecule, screening):
+    """The lowest root minus E_0 is the prototype's CAS ground-state energy,
+    which leaves out the constant E_0 (h = f - t^DC, the same v_eff).
+    Measured 1.8e-14 (tolerance 1e-7)."""
+    pin = PINS[molecule]['screenings'][screening]
+    g, space, en = _pinned_build(molecule, screening)
+    root = solve('pyscf_fci', g, space['n_orbs'], space['n_elec_active'],
+                 spin_free=True)[0]
+    assert abs(root - en.e0 - pin['cas_ground']) < 1e-7
