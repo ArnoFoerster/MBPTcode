@@ -32,7 +32,7 @@ tau grid with P(0) on it, and the energy of `rpa_correlation_energy_space_time`
 with its time-frequency grid. P^A(0) is built as P(0) was, with the active
 columns of X on the same grid, so with every orbital active P - P^A is zero
 to the bit; E_c^A takes the active ph pairs' exp(-delta tau) through the
-energy's own tau -> omega transform. Sigma^E is not built there yet.
+energy's own tau -> omega transform.
 
 `embedding_self_energy` gives the static environment self-energy
 Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
@@ -52,17 +52,22 @@ for 'srg' (s = inf; srg_s enters the pole check alone), the real axis for
 'mode_a'. Both refuse near the poles and point to casida; Omega_min of the
 window is the lowest root of the same Casida problem (`lowest_excitation`).
 The 'sigma_continuation' diagnostic is the spread of two Pade fits on the
-even and the odd nodes.
+even and the odd nodes. On space-time S^E(mu + i w) is the space-time GW
+self-energy (`self_energy_matrix_imaginary_time`, W on the GW route's axes,
+cached on the first request) with G built from the environment orbitals
+alone; continuation, refusal, Omega_min and both diagnostics are
+imagfrequency's.
 """
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
-from src.Base.numerics.constants import (DOWNFOLDING_SIGMA_CONTINUATION_WARN,
+from src.Base.numerics.constants import (DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
+                                         DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
                                          GW_DENSITY_W_FIT_HIGH,
@@ -83,9 +88,11 @@ from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
 from src.SingleReference.common.active_space import closed_shell_nocc
 from src.SingleReference.GW.imaginary_axis import \
     fitted_self_energy_matrix_imaginary_axis
-from src.SingleReference.GW.space_time import separable_factors
-from src.SingleReference.LinearResponse.casida import (CasidaSolver,
-                                                       solver_choice)
+from src.SingleReference.GW.imaginary_time import \
+    self_energy_matrix_imaginary_time
+from src.SingleReference.GW.space_time import (separable_factors,
+                                               space_time_axes)
+from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
@@ -95,7 +102,8 @@ from src.SingleReference.LinearResponse.rpa_energy import (
     rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
-    dyson_screening, rpa_correlation_energy_space_time, static_screening_grid)
+    dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
+    static_screening_grid)
 
 from ..partition import active_pair_mask, ph_element_mask
 from ..terms import DownfoldingTerms, choice
@@ -140,7 +148,9 @@ class RPALowLevel:
         `solve_polarizability_imaginary_axis`). The first Sigma^E request
         adds 'omega_min' (`lowest_excitation`) and 'w_grid', the (points, W)
         of `_screening_grid`. On space-time `run` puts there 'factors',
-        'static_grid', 'p0' and 'energy_grid' (`_space_time`).
+        'static_grid', 'p0' and 'energy_grid' (`_space_time`); the first
+        Sigma^E request adds 'omega_min' and 'w_grid', there the (axes, W)
+        of `_screening_grid`.
     """
     mf: object
     mode: str
@@ -269,7 +279,9 @@ def _space_time(mf, eps, nocc, numerics):
     q = num.quadrature
     static_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
                                         tau_target=q.tau_target)
-    p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid)[0]
+    tile_gb = layout_tile_gb(numerics)
+    p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
+                                  tile_memory_gb=tile_gb)[0]
     ntau, nfreq = rpa_quadrature(num)
     e_min, e_max, _ = particle_hole_window(eps, nocc)
     if ntau is None:
@@ -278,7 +290,8 @@ def _space_time(mf, eps, nocc, numerics):
     grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
                                            with_sine=False,
                                            with_inverse=False)
-    e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid, comm=None)
+    e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid,
+                                            tile_gb=tile_gb, comm=None)
     return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
                         'p0': p0, 'energy_grid': grid}
 
@@ -418,8 +431,9 @@ def active_polarizability_static(low, part):
             return np.zeros((d.shape[1],) * 2)
         act = part.act
         mu = particle_hole_window(low.eps, low.nocc)[2]
-        return chi0_imaginary_frequency(x[:, act], d, low.eps[act], k,
-                                        low.cache['static_grid'], mu=mu)[0]
+        return chi0_imaginary_frequency(
+            x[:, act], d, low.eps[act], k, low.cache['static_grid'], mu=mu,
+            tile_memory_gb=layout_tile_gb(low.numerics))[0]
     nocc = low.nocc
     b = low.factors
     mask = active_pair_mask(part)
@@ -663,12 +677,15 @@ def lowest_excitation(low, solver=None):
     """Omega_min, the lowest excitation energy of the full RPA (None without
     a particle-hole pair), the one number the pole-free window needs.
 
-    casida: the lowest of low.omega. imagfrequency, which diagonalizes
-    nothing: the lowest root of the same restricted singlet Casida problem
-    on low.factors, by the dense solve while the pair (A, B) fits in memory
-    and by the Davidson above that (`solver_choice`), at the run's numerics;
-    cached in low.cache['omega_min'] on the first request. solver: 'dense'
-    or 'davidson' forces that solver and bypasses the cache (for tests).
+    casida: the lowest of low.omega. imagfrequency and space-time, which
+    diagonalize nothing: the lowest root of the same restricted singlet
+    Casida problem on the route's own v (low.factors, or the ISDF factors
+    (X, D) of low.cache['factors']), A = delta + 2K, B = 2K; by the dense
+    solve up to DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs and above that by
+    the Davidson for one root (the DF or the ISDF block action, the run's
+    other Davidson settings), ruling R21; cached in low.cache['omega_min']
+    on the first request. solver: 'dense' or 'davidson' forces that solver
+    and bypasses the cache (for tests).
     """
     if low.mode == 'casida':
         return float(low.omega.min()) if low.omega.size else None
@@ -678,19 +695,51 @@ def lowest_excitation(low, solver=None):
     n_pair = nocc * (len(low.eps) - nocc)
     om = None
     if n_pair:
-        how = choice(solver or solver_choice(n_pair), ('dense', 'davidson'),
-                     'solver')
-        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                                  spin_mode='restricted')
-        if how == 'dense':
-            omega = CasidaSolver(*lr.build_casida_matrices(
-                nocc, lBSE=False)).solve(numerics=low.numerics)[0]
-        else:
-            omega = solve_casida_davidson(lr, nocc, numerics=low.numerics)[0]
-        om = float(np.min(omega))
+        rule = ('dense' if n_pair <= DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS
+                else 'davidson')
+        how = choice(solver or rule, ('dense', 'davidson'), 'solver')
+        om = (_lowest_dense(low) if how == 'dense'
+              else _lowest_davidson(low))
     if solver is None:
         low.cache['omega_min'] = om
     return om
+
+
+def _lowest_dense(low):
+    """The lowest root of the dense restricted singlet Casida problem on the
+    occupied-virtual factors of the route: K = B_ov^T B_ov, B_ov from
+    low.factors or, on space-time, sum_P D_PQ X_Pi X_Pa."""
+    nocc, eps = low.nocc, low.eps
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        pairs = x[:, :nocc, None] * x[:, None, nocc:]
+        b_ov = d.T @ pairs.reshape(len(x), -1)
+    else:
+        b = low.factors
+        b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
+    k = b_ov.T @ b_ov
+    a = 2.0 * k
+    a[np.diag_indices_from(a)] += (eps[nocc:][None, :]
+                                   - eps[:nocc][:, None]).ravel()
+    return float(np.min(CasidaSolver(a, 2.0 * k).solve(
+        numerics=low.numerics)[0]))
+
+
+def _lowest_davidson(low):
+    """The lowest root of the same problem by the matrix-free Davidson for
+    one root (`solve_casida_davidson`, the run's other Davidson settings):
+    the DF block action on low.factors, the ISDF one on (X, D)."""
+    num = numerics_or_default(low.numerics)
+    num = replace(num, bse=replace(num.bse, nroots=1))
+    if low.mode == 'space-time':
+        lr = LinearResponseSolver(low.eps, spin_mode='restricted')
+        omega = solve_casida_davidson(lr, low.nocc, numerics=num,
+                                      isdf_factors=low.cache['factors'])[0]
+    else:
+        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                                  spin_mode='restricted')
+        omega = solve_casida_davidson(lr, low.nocc, numerics=num)[0]
+    return float(np.min(omega))
 
 
 def pole_window(low, part):
@@ -716,9 +765,9 @@ def _refuse_near_poles(low, part, settings, sigma):
     margin of an edge of `pole_window`, or outside it (spec §3.6): on casida
     pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when srg_s is None,
     guarding sigma='mode_a' alone and pointing to 'srg'; on imagfrequency
-    the larger of that and continuation_margin (ruling R22: the Pade
-    continuation loses accuracy towards the poles), guarding both forms and
-    pointing to casida."""
+    and space-time the larger of that and continuation_margin (ruling R22:
+    the Pade continuation loses accuracy towards the poles), guarding both
+    forms and pointing to casida."""
     s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
     margin = settings.pole_margin / np.sqrt(2.0 * s)
     why = (f"pole_margin {settings.pole_margin:g} / sqrt(2 s), s = {s:g}")
@@ -768,8 +817,8 @@ def embedding_self_energy(low, part, sigma):
         + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
         on casida, within the larger of pole_margin/sqrt(2 s) and
         numerics.downfolding.continuation_margin, pointing to mode='casida'.
-    space-time: not built yet (NotImplementedError, pointing to casida and
-        imagfrequency).
+    space-time: the same, with S^E(mu + i w) from the space-time GW kernel
+        (`sigma_env_imag_axis`).
     Zero when the environment is empty.
     """
     return _embedding(low, part, sigma)[0]
@@ -779,15 +828,10 @@ def _embedding(low, part, sigma):
     """(Sigma_bar, kept) of `embedding_self_energy`, kept what the
     diagnostics read without building it again: on casida 'args' = (w, eps_t,
     eps_r, occupied_r, omega) of the environment and 'srg_s', the s applied
-    by 'srg'; on imagfrequency 'z' and 'samples', the Pade nodes and S^E
-    there, and 'fit', the (Z, A) of `pade_fit_elementwise` (None without an
-    environment). Not built on space-time (NotImplementedError)."""
+    by 'srg'; on imagfrequency and space-time 'z' and 'samples', the Pade
+    nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
+    (None without an environment)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
-    if low.mode == 'space-time':
-        raise NotImplementedError(
-            f"method={METHOD!r} sigma={sigma!r} (the environment self-energy)"
-            f" is not built on mode='space-time' yet: use mode='casida' or "
-            f"mode='imagfrequency'.")
     settings = numerics_or_default(low.numerics).downfolding
     if sigma == 'mode_a' or low.mode != 'casida':
         _refuse_near_poles(low, part, settings, sigma)
@@ -803,19 +847,39 @@ def _embedding(low, part, sigma):
 
 
 def _screening_grid(low):
-    """(points, W): the full RPA's W(i w) = [1 - chi0(i w)]^-1 in the
+    """The full RPA's screened interaction on the route's frequency grid,
+    built on the first request and kept in low.cache['w_grid'] (spec §4.5).
+
+    imagfrequency: (points, W), W(i w) = [1 - chi0(i w)]^-1 in the
     normalized fitting basis on the minimax grid of numerics.imagfreq.nfreq
     points over the particle-hole window, the W grid of the GW density's
-    `self_energy_matrix_imaginary_axis`; built on the first request and kept
-    in low.cache['w_grid'] (spec §4.5)."""
-    if 'w_grid' not in low.cache:
-        nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
-        e_min, e_max, _ = particle_hole_window(low.eps, low.nocc)
-        points = minimax_frequency_grid(nfreq, e_min, e_max)[0]
-        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                                  spin_mode='restricted')
-        low.cache['w_grid'] = (points, lr.solve_rpa_screening(
-            points, low.nocc, is_imaginary=True))
+    `self_energy_matrix_imaginary_axis`.
+    space-time: (axes, W), the time and frequency axes of the space-time GW
+    self-energy (`space_time_axes`, numerics.quadrature's ntau_st and
+    nfreq_st) and W = [1 - chi0(i w)]^-1 on axes['freq_points'] in the ISDF
+    basis, chi0 from the factors (X, D) on axes['grid'] with the mid-gap mu:
+    the W of `self_energy_matrix_space_time`, which W - 1 of
+    `self_energy_matrix_imaginary_time` transforms to tau."""
+    if 'w_grid' in low.cache:
+        return low.cache['w_grid']
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        axes = space_time_axes(low.eps, low.nocc, low.numerics)
+        mu = particle_hole_window(low.eps, low.nocc)[2]
+        w = chi0_imaginary_frequency(
+            x, d, low.eps, low.nocc, axes['grid'], mu=mu,
+            tile_memory_gb=layout_tile_gb(low.numerics))
+        for k in range(len(w)):
+            w[k] = dyson_screening(w[k])
+        low.cache['w_grid'] = (axes, w)
+        return low.cache['w_grid']
+    nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
+    e_min, e_max, _ = particle_hole_window(low.eps, low.nocc)
+    points = minimax_frequency_grid(nfreq, e_min, e_max)[0]
+    lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                              spin_mode='restricted')
+    low.cache['w_grid'] = (points, lr.solve_rpa_screening(
+        points, low.nocc, is_imaginary=True))
     return low.cache['w_grid']
 
 
@@ -823,28 +887,48 @@ def sigma_env_imag_axis(low, part, query_freqs):
     """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
     the correlation self-energy iG(W - v) of the full RPA's W on part.act
     (occupied first) with the internal orbital restricted to part.env, mu
-    the whole system's mid-gap. imagfrequency only (NotImplementedError
-    otherwise).
+    the whole system's mid-gap. imagfrequency and space-time
+    (NotImplementedError on casida, which has the residues instead).
 
-    This is the GW density's `fitted_self_energy_matrix_imaginary_axis` on
-    the three-index factors sliced to B[Q, t, r] (t active, r environment)
-    and the environment's eps_r - mu: the Lorentzian fit of W - 1 on
-    `_screening_grid` with its poles and regularization
+    imagfrequency: the GW density's `fitted_self_energy_matrix_imaginary_axis`
+    on the three-index factors sliced to B[Q, t, r] (t active, r
+    environment) and the environment's eps_r - mu: the Lorentzian fit of
+    W - 1 on `_screening_grid` with its poles and regularization
     (GW_DENSITY_W_FIT_*), whose one-pole convolution with G_r is exact; the
     full system's mu and fit range, so only the internal sum changes.
+
+    space-time: `self_energy_matrix_imaginary_time` on the W and the axes of
+    `_screening_grid` with G built from the environment orbitals alone (their
+    energies, nocc = the inactive count) and the full system's mu and fit
+    ranges passed explicitly, so again only the internal sum changes. The
+    MO collocation X stands in for the AO one, with the environment columns
+    of the identity as the orbital coefficients: G's collocation is then X's
+    environment columns and the result is in the MO basis, whose active block
+    is the AO result projected with the active MO coefficients.
     """
-    if low.mode != 'imagfrequency':
+    if low.mode == 'casida':
         raise NotImplementedError(
-            f"sigma_env_imag_axis samples the density-fitted W of "
-            f"mode='imagfrequency'; this low-level result is mode="
-            f"{low.mode!r} (its self-energy is `embedding_self_energy`): "
-            f"use mode='imagfrequency'.")
+            f"sigma_env_imag_axis samples the screened interaction of the "
+            f"numerical routes on the imaginary axis; this low-level result "
+            f"is mode='casida' (its self-energy is `embedding_self_energy`, "
+            f"from the residues of W): use mode='imagfrequency' or "
+            f"mode='space-time'.")
     n, env = part.n_act, part.env
-    query_freqs = np.atleast_1d(query_freqs)
+    query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
     if n == 0 or len(env) == 0:
         return np.zeros((len(query_freqs), n, n), dtype=complex)
-    points, w_grid = _screening_grid(low)
     e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+    if low.mode == 'space-time':
+        axes, w = _screening_grid(low)
+        x, d = low.cache['factors']
+        act = part.act
+        sigma = self_energy_matrix_imaginary_time(
+            x, d, w, np.eye(x.shape[1])[:, env], low.eps[env],
+            len(part.inactive), axes['tau_points'], axes['freq_points'],
+            query_freqs, mu=mu, ranges=axes['ranges'],
+            block_memory_gb=layout_tile_gb(low.numerics))
+        return sigma[:, act][:, :, act]
+    points, w_grid = _screening_grid(low)
     poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
                          GW_DENSITY_W_FIT_HIGH * e_max, len(points))
     b = low.factors[:, part.act][:, :, env]
@@ -883,8 +967,9 @@ def continued_self_energy(z, samples, eps_act, sigma):
 
 
 def _embedding_imag_axis(low, part, sigma):
-    """`_embedding` on imagfrequency: S^E on the Pade nodes of the run's
-    numerics (`pade_nodes`, on the line mu + i w), fitted once."""
+    """`_embedding` on imagfrequency and space-time: S^E on the Pade nodes
+    of the run's numerics (`pade_nodes`, on the line mu + i w), fitted
+    once."""
     nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
     z = particle_hole_window(low.eps, low.nocc)[2] + 1j * nodes
     samples = sigma_env_imag_axis(low, part, nodes)
@@ -949,9 +1034,10 @@ def _sigma_poles(low, part, sigma, sigma_bar, kept):
     window: `pole_window`. pole_distance: per active orbital, the distance
         of eps_t to the nearer edge of the window, negative outside it.
     z: per active orbital, Z_t = 1/(1 - S'_tt(eps_t)): of the pole sum on
-        casida (`_pole_weights`), of the continued fraction on imagfrequency.
-    srg_s: the s applied, None for s = inf (always on imagfrequency, which
-        applies no damping) and for 'mode_a' (undamped).
+        casida (`_pole_weights`), of the continued fraction on imagfrequency
+        and space-time.
+    srg_s: the s applied, None for s = inf (always on imagfrequency and
+        space-time, which apply no damping) and for 'mode_a' (undamped).
     srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
         finite s is applied.
     """
@@ -1045,18 +1131,17 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
         §3.7). Allowed with every screening; the third term of the
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
-        exact only for 'crpa' in the static limit. On imagfrequency 'srg'
-        is s = inf (Eq. 42) and both forms are refused near the poles,
-        pointing to casida (`embedding_self_energy`); not built on
-        space-time (NotImplementedError).
+        exact only for 'crpa' in the static limit. On imagfrequency and
+        space-time 'srg' is s = inf (Eq. 42) and both forms are refused
+        near the poles, pointing to casida (`embedding_self_energy`).
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics; a name
         that does not apply here (on casida 'ec_active_casida' and
         'sigma_continuation', and 'sigma_poles' and 'sigma_continuation'
         without sigma) is skipped and absent, an unknown name refused.
         'sigma_poles' (`_sigma_poles`) warns (SigmaDampingWarning) when the
         SRG damping is not negligible (casida). 'sigma_continuation'
-        (imagfrequency, `_sigma_continuation`): per element the spread of
-        two Pade fits on the even and the odd nodes, warning
+        (imagfrequency, space-time, `_sigma_continuation`): per element the
+        spread of two Pade fits on the even and the odd nodes, warning
         (SigmaContinuationWarning) above DOWNFOLDING_SIGMA_CONTINUATION_WARN.
         'ec_active_casida' (imagfrequency, space-time): {'casida': the
         dense-Casida E_c^A on the same v_eff, 'difference': the route's

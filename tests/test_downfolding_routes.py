@@ -28,9 +28,13 @@ X), E_c^A with exp(-delta tau) pushed through the energy's own tau -> omega
 transform. With every orbital active P - P^A and the E_c pair vanish to
 rounding (also on a coarse grid); against casida on the mean field's RI
 factors the routes differ by the ISDF fit (NH3/cc-pVDZ, HF and PBE0, on the
-G1 grid; water/cc-pVDZ for the all-active cases).
+G1 grid; water/cc-pVDZ for the all-active cases). With sigma, Sigma_bar^E
+(the space-time GW kernel with the environment's G, Pade as on
+imagfrequency) and the E_0 and FCI energies follow casida and
+imagfrequency to the same ISDF error, and the near-pole space is refused.
 """
 import dataclasses
+import warnings
 from functools import cache
 
 import numpy as np
@@ -443,15 +447,20 @@ def _st_mean_field(ref):
 
 
 @cache
-def _st_low(ref, mode, quadrature=()):
-    """The RPA low-level result of `ref` (`_st_mean_field`) on `mode`; on
-    space-time on the G1 grid, with the quadrature settings `quadrature`
-    (pairs)."""
+def _st_low(ref, mode, quadrature=(), downfolding=()):
+    """The RPA low-level result of `ref` (`_st_mean_field`) on `mode`, with
+    the quadrature and downfolding settings `quadrature`, `downfolding`
+    (pairs); on space-time on the G1 grid."""
     mf = _st_mean_field(ref)
-    numerics = None
+    numerics = Numerics(quadrature=dict(quadrature),
+                        downfolding=dict(downfolding))
     if mode == 'space-time':
-        numerics = g1_numerics(mf, Numerics(quadrature=dict(quadrature)))
+        numerics = g1_numerics(mf, numerics)
     return run_low_level(mf, method='rpa', mode=mode, numerics=numerics)
+
+
+#: srg_s = None (s = inf), where 'srg' is Eq. 42 on casida too.
+INFINITE_S = (('srg_s', None),)
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -623,19 +632,21 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     at most 1.4e-6; for crpa E_HF,ee[vtilde] = 1/2 Tr[t^DC rho^A,0] sums the
     vtilde error over the active occupied orbitals, 2.6e-5, and E_0 follows
     (2.5e-5), as does h_eff = f - t^DC (1.6e-5): the target missed by 2.6x,
-    hence 5e-5 on those (the same at G3, 2.2e-5, so the ISDF fit's). The
-    two cancel in the energy of H_eff: FCI at most 1.1e-6, v_eff 4.7e-6.
-    The route's E_c^A against the dense one on the same v_eff
-    ('ec_active_casida'): 1.9e-11."""
+    hence 5e-5 on those for crpa alone (ruling R23; the same at G3, 2.2e-5,
+    so the ISDF fit's), 1e-5 for bare and crpa_ph (R24). The two cancel in
+    the energy of H_eff: FCI at most 1.1e-6, v_eff 4.7e-6. The route's
+    E_c^A against the dense one on the same v_eff ('ec_active_casida'):
+    1.9e-11."""
     low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
     a = _st_aspace(low_st.mf, aspace)
     g, space, en = build_effective_hamiltonian(low_st, a, screening=s)
     g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    tol = 5e-5 if s == 'crpa' else 1e-5
     for f in dataclasses.fields(Energies):
         if f.name != 'diagnostics':
-            assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 5e-5
-    assert abs(en.e0 - en_c.e0) < 5e-5
-    assert np.abs(g[1] - g_c[1]).max() < 5e-5
+            assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < tol
+    assert abs(en.e0 - en_c.e0) < tol
+    assert np.abs(g[1] - g_c[1]).max() < tol
     assert np.abs(g[2] - g_c[2]).max() < 1e-5
     assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
     assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-9
@@ -686,8 +697,12 @@ def test_space_time_low_reuse():
 def test_space_time_refusals():
     """mRPA is casida only and points there; df=False has no meaning on the
     ISDF route; without an ISDF grid in numerics run says where to name one;
-    Sigma^E is not built on space-time yet and points to casida and
-    imagfrequency."""
+    Sigma^E is refused near the poles as on imagfrequency (ruling R22): on
+    the non-contiguous space occupied 1 and virtual 8, 9 lie 0.108 and 0.165
+    Ha from the pole-free window's edges, inside the continuation margin,
+    and both forms name them (not orbital 4) and point to mode='casida'.
+    A casida result has no imaginary-axis
+    S^E to sample and points to the numerical routes."""
     low = _st_low('HF', 'space-time')
     mf = low.mf
     a = _st_aspace(mf, 'contiguous')
@@ -698,10 +713,75 @@ def test_space_time_refusals():
                       numerics=low.numerics)
     with pytest.raises(ValueError, match='numerics.isdf'):
         run_low_level(mf, mode='space-time')
+    near = _st_aspace(mf, 'non_contiguous')
     for sigma in ('srg', 'mode_a'):
-        with pytest.raises(NotImplementedError,
-                           match="mode='casida'.*mode='imagfrequency'"):
-            build_effective_hamiltonian(low, a, sigma=sigma)
-        with pytest.raises(NotImplementedError,
-                           match="mode='casida'.*mode='imagfrequency'"):
-            rpa.embedding_self_energy(low, partition(a, low.eps), sigma)
+        with pytest.raises(ValueError, match=r'orbital 1 \(.*orbital 8 \('
+                           r".*orbital 9 \(.*continuation_margin"
+                           r".*mode='casida'") as err:
+            build_effective_hamiltonian(low, near, sigma=sigma)
+        assert 'orbital 4 ' not in str(err.value)
+    part = partition(a, low.eps)
+    with pytest.raises(NotImplementedError,
+                       match="mode='imagfrequency' or mode='space-time'"):
+        rpa.sigma_env_imag_axis(_st_low('HF', 'casida'), part, [1.0])
+
+
+@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('aspace', ('contiguous', 'no_virtual'))
+@pytest.mark.parametrize('ref', ST_REFS)
+def test_space_time_sigma_bar_matches_casida(ref, aspace, sigma):
+    """Sigma_bar^E on space-time (S^E(mu + i w) of the imaginary-time kernel
+    with the environment's G on the Pade nodes, continued as on
+    imagfrequency) against casida on the mean field's RI factors at
+    srg_s = None: the ISDF fit's error, the quadratures' and the
+    continuation's. Target 1e-4 Eh per element; measured max 2.6e-6 (HF) /
+    3.5e-6 (PBE0) on the contiguous (6,6), 1.4e-6 / 3.1e-6 without active
+    virtual orbitals (|Sigma_bar| up to 3.9e-2), equal for both forms; the
+    imagfrequency route on the same RI factors is within 3.1e-7 of casida,
+    so the residual is the ISDF fit's, as for vtilde."""
+    low_st = _st_low(ref, 'space-time', downfolding=INFINITE_S)
+    low_cas = _st_low(ref, 'casida', downfolding=INFINITE_S)
+    part = partition(_st_aspace(low_st.mf, aspace), low_st.eps)
+    got = rpa.embedding_self_energy(low_st, part, sigma)
+    want = rpa.embedding_self_energy(low_cas, part, sigma)
+    assert np.array_equal(got, got.T)
+    assert np.abs(want).max() > 1e-2
+    assert np.abs(got - want).max() < 1e-4
+
+
+@pytest.mark.parametrize('s', SCREENINGS_1)
+@pytest.mark.parametrize('ref', ST_REFS)
+def test_space_time_route_agreement_with_sigma(ref, s):
+    """With sigma='srg' (srg_s = None) every Energies field, E_0, h_eff and
+    the FCI energy of H_eff on the three routes, contiguous (6,6): space-time
+    against casida and against imagfrequency (the mean field's RI factors).
+    Target 1e-4 on the fields, E_0 and h_eff, 1e-5 on FCI. Measured
+    space-time - casida: fields at most 1.4e-5 (bare, crpa_ph) and 2.4e-5
+    (crpa, E_HF,ee[vtilde] as without sigma), E_0 at most 3.8e-5 (HF crpa),
+    h_eff 1.1e-5, FCI 1.2e-6; imagfrequency - casida 2.3e-8 (E_0), 7.4e-11
+    (FCI), so space-time - imagfrequency is the same ISDF error. The
+    'sigma_continuation' spread is 3.1e-6 (HF) / 8.4e-6 (PBE0), without a
+    warning, and 'sigma_poles' records s = inf and the window of the
+    route's Omega_min, casida's to the ISDF error (2.7e-6)."""
+    lows = [_st_low(ref, m, downfolding=INFINITE_S)
+            for m in ('space-time', 'casida', 'imagfrequency')]
+    a = _st_aspace(lows[0].mf, 'contiguous')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        (g, space, en), *others = [
+            build_effective_hamiltonian(low, a, screening=s, sigma='srg')
+            for low in lows]
+    assert abs(en.e_sigma_trace) > 1e-2
+    e_fci = _solve(g, space)
+    for g_o, _, en_o in others:
+        for f in dataclasses.fields(Energies):
+            if f.name != 'diagnostics':
+                assert abs(getattr(en, f.name) - getattr(en_o, f.name)) < 1e-4
+        assert np.abs(g[1] - g_o[1]).max() < 1e-4
+        assert abs(e_fci - _solve(g_o, space)) < 1e-5
+    assert en.diagnostics['sigma_continuation'].max() < 1e-4
+    poles = en.diagnostics['sigma_poles']
+    ref_poles = others[0][2].diagnostics['sigma_poles']
+    assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
+    assert np.allclose(poles['window'], ref_poles['window'], atol=1e-5,
+                       rtol=0)

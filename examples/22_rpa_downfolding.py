@@ -6,7 +6,10 @@ The Sigma^E column is the pair of E_0 terms that comes with it, the exchange
 energy term minus Tr[Sigma_bar gamma^A,0]. The rows marked 'if' are the
 density-fitted imaginary-frequency route (mode='imagfrequency'), where 'srg'
 is s = infinity, continued by Pade from the imaginary axis; they match the
-Casida rows above them to the density fit.
+Casida rows above them to the density fit. The rows marked 'st' are the
+space-time route (mode='space-time': separable ISDF factors on the G1 grid,
+imaginary time), the same continuation of Sigma^E; they differ from the 'if'
+rows by the ISDF fit, mostly in E_0, much less in the excitation energies.
 
 One run_low_level per method, route and molecule serves every screening. The pi
 orbitals are picked by Loewdin population on the carbons' p shell, and the
@@ -20,6 +23,7 @@ from pyscf import gto, scf
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.Base.numerics.constants import HARTREE_TO_EV
+from src.Base.numerics.numerics import Numerics
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.SingleReference.common.active_space import ActiveSpace
@@ -43,7 +47,9 @@ METHODS = (('HF (CASCI)', 'hf', {}),
            ('cRPA+SRG', 'rpa', {'screening': 'crpa', 'sigma': 'srg'}),
            ('cRPA_ph+SRG', 'rpa', {'screening': 'crpa_ph', 'sigma': 'srg'}),
            ('cRPA if', 'rpa_if', {'screening': 'crpa'}),
-           ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}))
+           ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}),
+           ('cRPA st', 'rpa_st', {'screening': 'crpa'}),
+           ('cRPA+SRG st', 'rpa_st', {'screening': 'crpa', 'sigma': 'srg'}))
 
 
 def excitations(g_eff, space):
@@ -72,11 +78,15 @@ for name, atoms, n_pi in MOLECULES:
     # one low-level run per method and route; casida on exact 4-centre
     # integrals (df=False); imagfrequency is density fitted by construction,
     # so it gets the same orbitals with a density fit attached (without one
-    # it would decompose the exact MO integrals: minutes for benzene)
+    # it would decompose the exact MO integrals: minutes for benzene);
+    # space-time builds ISDF factors on the grid numerics.isdf names
     lows = {'hf': run_low_level(mf, method='hf'),
             'rpa': run_low_level(mf, method='rpa', mode='casida', df=False),
             'rpa_if': run_low_level(mf.density_fit(), method='rpa',
-                                    mode='imagfrequency')}
+                                    mode='imagfrequency'),
+            'rpa_st': run_low_level(mf.density_fit(), method='rpa',
+                                    mode='space-time',
+                                    numerics=Numerics(isdf={'level': 'G1'}))}
     print(f'{"method":<13}{"E_HF terms":>12}{"E_c - E_c^A":>13}{"Sigma^E":>10}'
           f'{"E_0":>12}{"E(S0)":>12}{"S1 (eV)":>9}{"T1 (eV)":>9}')
     for label, method, opts in METHODS:

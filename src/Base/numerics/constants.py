@@ -305,7 +305,7 @@ DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
 # (benzene (6,6): spread 1.2e-5, error 1.6e-7; water virtual 11 at 0.277 Ha:
 # 1.9e-4, error 6.9e-5).
 DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
-# The numerical routes (imagfrequency, later space-time) refuse Sigma^E for an
+# The numerical routes (imagfrequency, space-time) refuse Sigma^E for an
 # active orbital closer than this, in Ha, to the edge of the pole-free window
 # (or pole_margin/sqrt(2 s), if larger): the Pade continuation from the
 # imaginary axis loses accuracy towards the poles. Fixed by measurement, the
@@ -331,6 +331,13 @@ DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
 # d = 0.001, so the distance is a sufficient, not a sharp, criterion); 0.26
 # is 1.5 times that.
 DOWNFOLDING_CONTINUATION_MARGIN = 0.26
+# Omega_min of the pole-free window on the numerical routes (imagfrequency,
+# space-time), which diagonalize nothing, is the lowest root of the full
+# Casida problem: by the dense solve up to this many particle-hole pairs, by
+# the Davidson (one root) above. The dense solve is N^6 for one number, which
+# defeats an N^4 or N^3 route long before its (A, B) stops fitting in memory
+# (BSE_DENSE_MAX_NOV = 12000); at 2000 pairs it takes a few seconds.
+DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS = 2000
 
 # Energy convergence of the active-space exact diagonalization (pyscf FCI);
 # tight because its densities land in a gradient, not only its energy.

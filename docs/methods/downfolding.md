@@ -14,13 +14,13 @@ Available now:
 - `method='rpa'`, `mode='casida'` (dense Casida, every pole),
   `mode='imagfrequency'` (density fitted, imaginary frequency, N^4) or
   `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
-  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally (casida and
-  imagfrequency) `sigma='srg'` or `'mode_a'`: the static environment
-  self-energy Sigma^E that the paper drops (see below).
+  `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and optionally (every
+  route) `sigma='srg'` or `'mode_a'`: the static environment self-energy
+  Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
 
-Not yet available, and refused when asked for: `sigma` on
-`mode='space-time'`, and `screening='mrpa'` (Casida only once built).
+Not yet available, and refused when asked for: `screening='mrpa'` (Casida
+only once built).
 
 ## Calling it
 
@@ -66,7 +66,9 @@ grid on water).
 (X, D), built on the grid `numerics.isdf` names (there is no default grid:
 pass e.g. `Numerics(isdf={'level': 'G1'})`). It keeps the factors, P(0) on
 the static tau grid (`quadrature.ntau_w`) and the full RPA energy with its
-time-frequency grid (`quadrature.ntau_rpa`, `nfreq_rpa`). P^A is built as P
+time-frequency grid (`quadrature.ntau_rpa`, `nfreq_rpa`). The same
+`nfreq_rpa` counts Gauss-Legendre points here (default 40) but minimax
+points on imagfrequency (default 20, tables up to 34). P^A is built as P
 was, from the active columns of X on the same grid, and E_c^A takes the
 active pairs through the energy's own tau -> omega transform, so with every
 orbital active both cancel to rounding on any grid. Against casida on the
@@ -264,8 +266,9 @@ sqrt(2 s) (s = `srg_s`, or 500 when it is None) and
 `numerics.downfolding.continuation_margin` (default 0.26 Ha) of the window's
 edge, or outside the window. The message names the orbitals and points to
 `mode='casida'`, where `'srg'` is finite everywhere. Omega_min of the window
-is the lowest root of the same Casida problem (dense while it fits in
-memory, the Davidson above that), computed once and kept.
+is the lowest root of the same Casida problem on the route's own v (dense
+up to 2000 particle-hole pairs, `DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS`, the
+Davidson for one root above that), computed once and kept.
 
 The measured accuracy: the exact Casida S^E fed through the continuation
 alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on
@@ -277,6 +280,18 @@ the error reaches 1e-4 at 0.16 Ha from the edge and 7e-4 at 0.09 Ha. Every
 case measured beyond 0.17 Ha met 1e-4 (a few much closer did too), and
 `continuation_margin` is 1.5 times that; the scan is in the comment of
 `DOWNFOLDING_CONTINUATION_MARGIN` in `src/Base/numerics/constants.py`.
+
+**Sigma^E on `mode='space-time'`** is the same continuation, refusal and
+diagnostics, with S^E(mu + i omega) from the space-time GW self-energy
+(`self_energy_matrix_imaginary_time`) on the ISDF factors: W on the GW
+route's time and frequency axes (`numerics.quadrature.ntau_st`,
+`nfreq_st`; built on the first Sigma^E request and kept) and G built from
+the environment orbitals alone, with the whole system's mu and fit ranges,
+so the GW route's Sigma_c on the active block is S^E plus the same sum over
+the active orbitals (to 1e-16). Against casida on the mean field's RI
+factors Sigma_bar^E agrees to the ISDF fit, 3.5e-6 Eh per element on
+NH3/cc-pVDZ (G1 grid), and the FCI energy of H_eff with `sigma='srg'` to
+1.2e-6 Eh.
 
 ## Kohn-Sham references
 
@@ -303,15 +318,15 @@ reference E_0 is a well-defined working choice, not a derived one.
 - **Option validation.** An unknown or not-yet-available mode, screening,
   sigma or diagnostic is refused with the valid list.
 - **Sigma^E poles.** `sigma='mode_a'` is refused near a pole of the
-  environment self-energy; on `mode='imagfrequency'` both `'srg'` and
-  `'mode_a'` are, within the wider continuation margin (see above).
+  environment self-energy; on `mode='imagfrequency'` and `'space-time'`
+  both `'srg'` and `'mode_a'` are, within the wider continuation margin
+  (see above).
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all); a name that does not apply to the call is
 skipped, so one tuple works across a loop. Results are in
 `energies.diagnostics`, keyed by name. On the casida route two apply; on
-imagfrequency all four; on space-time `'static_defect'` and
-`'ec_active_casida'`:
+imagfrequency and space-time all four:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the
   active orbitals. It is zero for `crpa`, by construction, and measures how
@@ -325,15 +340,15 @@ imagfrequency all four; on space-time `'static_defect'` and
   |Sigma_bar(s) - Sigma_bar(infinity)| (0 when no finite s is applied).
   When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-6 Ha) a
   `SigmaDampingWarning` names the active orbitals concerned: their
-  Sigma_bar depends on `srg_s`. On imagfrequency `'z'` comes from the
-  continued fraction, `'srg_s'` is None and `'srg_damping'` 0.0 (s =
+  Sigma_bar depends on `srg_s`. On imagfrequency and space-time `'z'`
+  comes from the continued fraction, `'srg_s'` is None and `'srg_damping'` 0.0 (s =
   infinity, no damping applied).
 - `'ec_active_casida'` (imagfrequency, space-time): `{'casida': the
   dense-Casida E_c^A on the same v_eff, 'difference': the quadrature value
   minus it}`.
-- `'sigma_continuation'` (imagfrequency, with `sigma`): per element of
-  Sigma_bar, the difference between two Pade fits on the even- and the
-  odd-indexed nodes at the element's evaluation point. It is a
+- `'sigma_continuation'` (imagfrequency, space-time, with `sigma`): per
+  element of Sigma_bar, the difference between two Pade fits on the even-
+  and the odd-indexed nodes at the element's evaluation point. It is a
   lower-bound-type indicator, not an error bound: near the window's edge
   it falls short of the true error by ten to twenty times (3.6e-5 against
   7.0e-4 at 0.09 Ha from the edge, a space the continuation margin
@@ -369,7 +384,7 @@ with the paper: Cartesian ones are far further from its numbers.
 
 ## Not yet available
 
-- Sigma^E on `mode='space-time'`, and `screening='mrpa'`.
+- `screening='mrpa'`.
 - Natural orbitals (RPA or GW), semicanonicalization and the Delta
   hybridization; the active space is the user's.
 - omega other than 0, and other ways of making W^r static.

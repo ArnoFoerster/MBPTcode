@@ -518,8 +518,8 @@ class DownfoldingNumerics:
     an active orbital energy may come to the edge of the pole-free window
     before sigma='mode_a' refuses (s = DOWNFOLDING_SRG_S when srg_s is None);
     continuation_margin, Hartree, the least such distance on the numerical
-    routes (imagfrequency), where both forms are continued from the
-    imaginary axis and refused within max(pole_margin/sqrt(2 s),
+    routes (imagfrequency, space-time), where both forms are continued from
+    the imaginary axis and refused within max(pole_margin/sqrt(2 s),
     continuation_margin).
 
     Refused when built: srg_s that is not a finite positive number or None,

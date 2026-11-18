@@ -1,5 +1,5 @@
-"""The static embedding self-energy Sigma_bar^E on the casida and the
-imagfrequency route.
+"""The static embedding self-energy Sigma_bar^E on the casida, the
+imagfrequency and the space-time route.
 
 Sigma_bar^E is the static reduction of iG^E(W - v) on the active orbitals,
 the internal orbital r running over the environment (spec §3.6): 'srg' is
@@ -34,6 +34,12 @@ casida pole sum; Omega_min is the lowest RPA root; the near-pole space is
 refused for both forms, pointing to casida; the 'sigma_continuation'
 diagnostic is present and warns on a too-coarse node set; on benzene the
 route matches casida.
+
+On space-time S^E(mu + i w) is the space-time GW kernel with the
+environment's G: plus the same call with the active orbitals' G it is the GW
+route's full Sigma_c on the active block, and Omega_min (dense or Davidson,
+ruling R21) is the lowest root on the ISDF v. Its agreement with casida is
+in tests/test_downfolding_routes.py.
 """
 import json
 import pathlib
@@ -56,13 +62,18 @@ from src.MultiReference.Downfolding import (build_effective_hamiltonian,
 from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
+from src.SingleReference.GW.imaginary_time import \
+    self_energy_matrix_imaginary_time
 from src.SingleReference.GW.self_energy import SelfEnergySolver
+from src.SingleReference.GW.space_time import self_energy_matrix_space_time
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from tests.downfolding_oracle import (env_residues, mo_integrals,
                                       sigma_env, sigma_mode_a, sigma_srg,
                                       water)
+from tests.gw_density_routes import mean_field as nh3_mean_field
+from tests.isdf_test_grid import g1_numerics
 
 PINS = json.loads((pathlib.Path(__file__).parent / 'data'
                    / 'downfolding_prototype_pins.json').read_text())['cases']
@@ -765,3 +776,78 @@ def test_continuation_margin_near_the_edge(wat):
         mf, method='rpa', mode='casida', numerics=bare), part, 'srg')
     assert np.abs(rpa.embedding_self_energy(low, part, 'srg')
                   - want).max() > 1e-4
+
+
+# --- the space-time route: S^E from the imaginary-time GW kernel ----------
+
+
+@pytest.fixture(scope='module')
+def nh3_space_time():
+    """The space-time RPA of NH3/cc-pVDZ HF (density fitted on cc-pvdz-ri)
+    on the G1 ISDF grid."""
+    mf = nh3_mean_field('HF')
+    return run_low_level(mf, method='rpa', mode='space-time',
+                         numerics=g1_numerics(mf))
+
+
+def _nh3_part(mf, occ, virt):
+    return partition(ActiveSpace.from_indices(len(mf.mo_energy), 5, occ,
+                                              virt), mf.mo_energy)
+
+
+def test_environment_only_g_is_what_the_kernel_sees(nh3_space_time):
+    """S^E on space-time (G of the environment orbitals alone, the full
+    system's mu and fit ranges) plus S^A (the same kernel call with the
+    active orbitals' G) is the GW route's full Sigma_c on the active block,
+    `self_energy_matrix_space_time` on the same numerics, at the Pade nodes:
+    the orbital restriction is the only change, and the W and the axes of
+    `_screening_grid` are the GW route's. Target 1e-10; measured 1.1e-16 on
+    the contiguous (6,6) and the non-contiguous (2,3) of NH3 (|Sigma| up to
+    6.8e-2, |S^E| and |S^A| each above 4e-2). W is built on the first
+    request and kept in low.cache['w_grid']."""
+    low = nh3_space_time
+    mf, eps, nmo = low.mf, low.eps, len(low.eps)
+    nodes = pade_nodes(low.numerics.quadrature)
+    full = self_energy_matrix_space_time(mf, mf.mol, low.nocc, nodes,
+                                         low.numerics)[0]
+    mu = particle_hole_window(eps, low.nocc)[2]
+    assert 'w_grid' not in low.cache
+    for occ, virt in (([2, 3, 4], [5, 6, 7]), ([1, 4], [5, 8, 9])):
+        part = _nh3_part(mf, occ, virt)
+        act = part.act
+        s_e = rpa.sigma_env_imag_axis(low, part, nodes)
+        axes, w = low.cache['w_grid']
+        x, d = low.cache['factors']
+        s_a = self_energy_matrix_imaginary_time(
+            x, d, w, np.eye(nmo)[:, act], eps[act], part.n_act_occ,
+            axes['tau_points'], axes['freq_points'], nodes, mu=mu,
+            ranges=axes['ranges'])[:, act][:, :, act]
+        assert min(np.abs(s_e).max(), np.abs(s_a).max()) > 1e-2
+        assert np.abs(s_e + s_a - full[:, act][:, :, act]).max() < 1e-10
+    assert low.cache['w_grid'][1] is w
+
+
+def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):
+    """Omega_min on space-time is the lowest root of the Casida problem on
+    the ISDF v: the dense solve and the Davidson (ISDF block action, one
+    root) agree (measured 3.8e-14) and both are casida's on the RI factors
+    to the ISDF error (2.7e-6; target 1e-5). Ruling R21: dense up to
+    DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs (NH3 has 120), the Davidson
+    above; the window is the route's own, no factors needed."""
+    low = nh3_space_time
+    dense = rpa.lowest_excitation(low, solver='dense')
+    davidson = rpa.lowest_excitation(low, solver='davidson')
+    assert abs(dense - davidson) < 1e-10
+    cas = run_low_level(low.mf, method='rpa', mode='casida')
+    assert abs(dense - cas.omega.min()) < 1e-5
+    fresh = run_low_level(low.mf, method='rpa', mode='space-time',
+                          numerics=low.numerics)
+    assert rpa.lowest_excitation(fresh) == dense
+    assert fresh.cache['omega_min'] == dense
+    part = _nh3_part(low.mf, [2, 3, 4], [5, 6, 7])
+    assert np.allclose(rpa.pole_window(fresh, part),
+                       rpa.pole_window(cas, part), atol=1e-5, rtol=0)
+    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 100)
+    fresh = run_low_level(low.mf, method='rpa', mode='space-time',
+                          numerics=low.numerics)
+    assert rpa.lowest_excitation(fresh) == davidson
