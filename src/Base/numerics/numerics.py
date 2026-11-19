@@ -516,11 +516,12 @@ class DownfoldingNumerics:
     the SRG flow parameter s of sigma='srg', Hartree^-2, None for s = inf
     (Eq. 42, no damping); pole_margin, how close, in units of 1/sqrt(2 s),
     an active orbital energy may come to the edge of the pole-free window
-    before sigma='mode_a' refuses (s = DOWNFOLDING_SRG_S when srg_s is None);
+    before sigma='mode_a' warns (s = DOWNFOLDING_SRG_S when srg_s is None);
     continuation_margin, Hartree, the least such distance on the numerical
     routes (imagfrequency, space-time), where both forms are continued from
-    the imaginary axis and refused within max(pole_margin/sqrt(2 s),
-    continuation_margin).
+    the imaginary axis and warn within max(pole_margin/sqrt(2 s),
+    continuation_margin). The margins decide the warning alone
+    (SigmaNearPoleWarning); Sigma_bar is computed either way.
 
     Refused when built: srg_s that is not a finite positive number or None,
     and a negative pole_margin or continuation_margin."""

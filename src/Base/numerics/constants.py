@@ -278,7 +278,7 @@ QSGW_SRG_QUAD_TOL = 1e-7
 # 1 - exp(-(a^2 + b^2) s), so terms further than about 1/sqrt(2 s) = 0.03 Ha
 # from a pole are kept whole.
 DOWNFOLDING_SRG_S = 500.0
-# The 'mode_a' pole check refuses an active orbital energy within this many
+# The 'mode_a' pole check warns of an active orbital energy within this many
 # 1/sqrt(2 s) of the pole-free window's edge: beyond three such widths the SRG
 # damping exp(-(a^2 + b^2) s) of every term is below exp(-9), so a
 # regularization is not needed there; closer in, the undamped terms of
@@ -305,10 +305,12 @@ DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
 # (benzene (6,6): spread 1.2e-5, error 1.6e-7; water virtual 11 at 0.277 Ha:
 # 1.9e-4, error 6.9e-5).
 DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
-# The numerical routes (imagfrequency, space-time) refuse Sigma^E for an
+# The numerical routes (imagfrequency, space-time) warn of Sigma^E for an
 # active orbital closer than this, in Ha, to the edge of the pole-free window
-# (or pole_margin/sqrt(2 s), if larger): the Pade continuation from the
-# imaginary axis loses accuracy towards the poles. Fixed by measurement, the
+# (or pole_margin/sqrt(2 s), if larger), and compute it all the same: the
+# Pade continuation from the imaginary axis loses accuracy towards the poles
+# (3.5e-4 at 0.111 Ha and 7.0e-4 at 0.089 Ha from the edge, the comment of
+# DOWNFOLDING_SIGMA_CONTINUATION_WARN above). Fixed by measurement, the
 # error of Sigma_bar^E against casida on the same three-index object
 # (srg_s = None, default numerics), against the active orbitals' smallest
 # distance d to the window edge, over water/6-31G spaces along a symmetric

@@ -98,17 +98,6 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     (`low.numerical_flags`) and those raised while building it, each
     distinct {'flag': name, 'message': text} once; empty for a clean result.
     """
-    flags = []
-    with collecting(flags):
-        g_eff, space, energies = _build(low, active_space, spin_free,
-                                        method_opts)
-    inherited = list(getattr(low, 'numerical_flags', ()))
-    return g_eff, space, replace(
-        energies, numerical_flags=gathered(inherited + flags))
-
-
-def _build(low, active_space, spin_free, method_opts):
-    """`build_effective_hamiltonian` without the collection of the flags."""
     mf = low.mf
     mol = mf.mol
     eps = get_orbital_energies(mf)
@@ -120,38 +109,46 @@ def _build(low, active_space, spin_free, method_opts):
             f'occupied of {len(eps)}.')
     part = partition(active_space, eps)
     method = choice(low.method, tuple(LOW_LEVEL), 'method')
-    terms = LOW_LEVEL[method].terms(low, part, **method_opts)
-    dc = choice(terms.dc, DC_MODES, 'dc')
-    if terms.sigma_bar is not None and dc == 'full':
-        raise ValueError(
-            f"method={method!r} returned a static self-energy with dc='full'; "
-            f"Sigma_bar carries the exchange, so it comes with dc='hartree', "
-            f"which also sets the double counting and E_0 to match.")
-    channels = [len(terms.vtilde)]
-    if terms.sigma_bar is not None:
-        channels.append(len(terms.sigma_bar))
-    if channels != [1] * len(channels):
-        raise NotImplementedError(
-            f"method={method!r} returned {len(terms.vtilde)} vtilde blocks"
-            + (f" and {len(terms.sigma_bar)} Sigma_bar blocks"
-               if terms.sigma_bar is not None else "")
-            + "; this driver runs a restricted reference, which is one spin "
-              "channel: vtilde = (v,), sigma_bar = (s,). The unrestricted "
-              "form, (aa, ab, bb) and (a, b), is deferred.")
+    flags = []
+    with collecting(flags):
+        # `terms` is called from this function itself, not from a helper:
+        # the method's warnings count the frames up to the caller of this one
+        terms = LOW_LEVEL[method].terms(low, part, **method_opts)
+        dc = choice(terms.dc, DC_MODES, 'dc')
+        if terms.sigma_bar is not None and dc == 'full':
+            raise ValueError(
+                f"method={method!r} returned a static self-energy with "
+                f"dc='full'; Sigma_bar carries the exchange, so it comes "
+                f"with dc='hartree', which also sets the double counting and "
+                f"E_0 to match.")
+        channels = [len(terms.vtilde)]
+        if terms.sigma_bar is not None:
+            channels.append(len(terms.sigma_bar))
+        if channels != [1] * len(channels):
+            raise NotImplementedError(
+                f"method={method!r} returned {len(terms.vtilde)} vtilde blocks"
+                + (f" and {len(terms.sigma_bar)} Sigma_bar blocks"
+                   if terms.sigma_bar is not None else "")
+                + "; this driver runs a restricted reference, which is one "
+                  "spin channel: vtilde = (v,), sigma_bar = (s,). The "
+                  "unrestricted form, (aa, ab, bb) and (a, b), is deferred.")
 
-    c = mf.mo_coeff
-    mo, parts = (c,), (part,)
-    n_act_occ = (part.n_act_occ,)
-    hcore = mf.get_hcore()
-    jk = inactive_jk(mol, mo, parts)
-    f = core_fock(mol, hcore, mo, parts, jk=jk)
-    hartree, exchange = double_counting(terms.vtilde, n_act_occ)
-    h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
-    v_eff = effective_interaction(mol, (c[:, part.act],), terms.vtilde)
-    environment = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
-    energies = assemble_energies(mf.energy_nuc(), *environment, terms,
-                                 n_act_occ)
-    g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
+        c = mf.mo_coeff
+        mo, parts = (c,), (part,)
+        n_act_occ = (part.n_act_occ,)
+        hcore = mf.get_hcore()
+        jk = inactive_jk(mol, mo, parts)
+        f = core_fock(mol, hcore, mo, parts, jk=jk)
+        hartree, exchange = double_counting(terms.vtilde, n_act_occ)
+        h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
+        v_eff = effective_interaction(mol, (c[:, part.act],), terms.vtilde)
+        environment = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
+        energies = assemble_energies(mf.energy_nuc(), *environment, terms,
+                                     n_act_occ)
+        g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
+    inherited = list(getattr(low, 'numerical_flags', ()))
+    energies = replace(energies,
+                       numerical_flags=gathered(inherited + flags))
 
     space = {
         'n_orbs': part.n_act if spin_free else 2 * part.n_act,

@@ -31,7 +31,7 @@ factors the routes differ by the ISDF fit (NH3/cc-pVDZ, HF and PBE0, on the
 G1 grid; water/cc-pVDZ for the all-active cases). With sigma, Sigma_bar^E
 (the fit of W on the ISDF factors with the environment's G, Pade as on
 imagfrequency) and the E_0 and FCI energies follow casida and
-imagfrequency to the same ISDF error, and the near-pole space is refused.
+imagfrequency to the same ISDF error, and the near-pole space warns.
 """
 import dataclasses
 import warnings
@@ -700,10 +700,11 @@ def test_space_time_low_reuse():
 def test_space_time_refusals():
     """mRPA is casida only and points there; df=False has no meaning on the
     ISDF route; without an ISDF grid in numerics run says where to name one;
-    Sigma^E is refused near the poles as on imagfrequency (ruling R22): on
-    the non-contiguous space occupied 1 and virtual 8, 9 lie 0.108 and 0.165
-    Ha from the pole-free window's edges, inside the continuation margin,
-    and both forms name them (not orbital 4) and point to mode='casida'.
+    Sigma^E near the poles is not refused but warns, as on imagfrequency:
+    on the non-contiguous space occupied 1 and virtual 8, 9 lie 0.108 and
+    0.165 Ha from the pole-free window's edges, inside the continuation
+    margin; both forms name them (not orbital 4), point to mode='casida',
+    and the Hamiltonian is built with 'sigma_near_pole' among its flags.
     A casida result has no imaginary-axis
     S^E to sample and points to the numerical routes."""
     low = _st_low('HF', 'space-time')
@@ -718,11 +719,19 @@ def test_space_time_refusals():
         run_low_level(mf, mode='space-time')
     near = _st_aspace(mf, 'non_contiguous')
     for sigma in ('srg', 'mode_a'):
-        with pytest.raises(ValueError, match=r'orbital 1 \(.*orbital 8 \('
-                           r".*orbital 9 \(.*continuation_margin"
-                           r".*mode='casida'") as err:
-            build_effective_hamiltonian(low, near, sigma=sigma)
-        assert 'orbital 4 ' not in str(err.value)
+        with pytest.warns(rpa.SigmaNearPoleWarning,
+                          match=r'orbital 1 \(.*orbital 8 \('
+                          r".*orbital 9 \(.*continuation_margin"
+                          r".*mode='casida'") as rec:
+            # this close to the poles the two Pade fits disagree as well
+            warnings.simplefilter('ignore', rpa.SigmaContinuationWarning)
+            g, _, en = build_effective_hamiltonian(low, near, sigma=sigma)
+        text = str([w.message for w in rec
+                    if w.category is rpa.SigmaNearPoleWarning][0])
+        assert 'orbital 4 ' not in text
+        assert np.all(np.isfinite(g[1]))
+        assert {'flag': 'sigma_near_pole',
+                'message': text} in en.numerical_flags
     part = partition(a, low.eps)
     with pytest.raises(NotImplementedError,
                        match="mode='imagfrequency' or mode='space-time'"):

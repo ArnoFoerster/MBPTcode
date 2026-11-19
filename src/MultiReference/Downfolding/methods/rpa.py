@@ -40,7 +40,7 @@ energy's own tau -> omega transform.
 Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
 between the active and the environment orbitals (`screened_residues`) and
 the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
-by mode A at eta = 0 (Eq. 12, 'mode_a', refused near the poles,
+by mode A at eta = 0 (Eq. 12, 'mode_a', which warns near the poles,
 `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
 both spin channels with the Hartree-only double counting (dc='hartree'), and
 records the 'sigma_poles' diagnostic.
@@ -51,7 +51,7 @@ restricted to the environment (`sigma_env_imag_axis`, W cached on the first
 request), is continued by one Pade fit per element, and each element is
 evaluated at its own point (`continued_self_energy`): Eq. 42, Re S^E_tu(z_tu),
 for 'srg' (s = inf; srg_s enters the pole check alone), the real axis for
-'mode_a'. Both refuse near the poles and point to casida; Omega_min of the
+'mode_a'. Both warn near the poles and point to casida; Omega_min of the
 window is the lowest root of the same Casida problem (`lowest_excitation`).
 The 'sigma_continuation' diagnostic is the spread of two Pade fits on the
 even and the odd nodes. Space-time samples S^E the same way, on its own
@@ -764,14 +764,16 @@ def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
                  = 1/2 [S_tu(eps_t) + S_tu(eps_u)],
 
     S the pole sum of iG(W - v) over the internal orbitals r, arguments as
-    in `srg_self_energy`. Undamped: a D_tr near zero makes it diverge, which
-    `embedding_self_energy` refuses before calling it. Its temporaries are
-    the size of w (one denominator per t, r), so unlike Eq. 44 it needs no
-    blocks.
+    in `srg_self_energy`. Undamped: a D_tr near zero makes it grow without
+    bound, of which `embedding_self_energy` warns; with a D_tr exactly zero
+    the element is not finite (inf or nan, without a numpy warning), which
+    `embedding_self_energy` refuses. Its temporaries are the size of w (one
+    denominator per t, r), so unlike Eq. 44 it needs no blocks.
     """
     d = _denominators(eps_t, eps_r, occupied_r, omega)
-    half = np.einsum('ntr,nur,ntr->tu', w, w, 1.0 / d)
-    return 0.5 * (half + half.T)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        half = np.einsum('ntr,nur,ntr->tu', w, w, 1.0 / d)
+        return 0.5 * (half + half.T)
 
 
 def lowest_excitation(low, solver=None):
@@ -892,21 +894,32 @@ def pole_window(low, part):
     return float(lo), float(hi)
 
 
-def _refuse_near_poles(low, part, settings, sigma):
-    """Refuse (ValueError) an active orbital whose energy is within the
-    margin of an edge of `pole_window`, or outside it (spec §3.6): on casida
-    pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when srg_s is None,
-    guarding sigma='mode_a' alone and pointing to 'srg'; on imagfrequency
-    and space-time the larger of that and continuation_margin (ruling R22:
-    the Pade continuation loses accuracy towards the poles), guarding both
-    forms and pointing to casida."""
+class SigmaNearPoleWarning(RuntimeWarning):
+    """An active orbital energy lies within the margin of an edge of the
+    pole-free window of the environment self-energy, or outside the window:
+    Sigma_bar^E is computed all the same, undamped ('mode_a' on casida) or
+    continued from the imaginary axis (imagfrequency, space-time), and is
+    unreliable on that orbital."""
+
+
+def _warn_near_poles(low, part, settings, sigma, stacklevel):
+    """Warn (SigmaNearPoleWarning, the named flag 'sigma_near_pole') of an
+    active orbital whose energy is within the margin of an edge of
+    `pole_window`, or outside it; Sigma_bar is computed all the same. The
+    margin: on casida pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when
+    srg_s is None, for sigma='mode_a' alone, pointing to 'srg'; on
+    imagfrequency and space-time the larger of that and continuation_margin
+    (the Pade continuation loses accuracy towards the poles), for both
+    forms, pointing to casida. stacklevel: as for `flag`, counted from this
+    function."""
     s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
     margin = settings.pole_margin / np.sqrt(2.0 * s)
     why = (f"pole_margin {settings.pole_margin:g} / sqrt(2 s), s = {s:g}")
     if low.mode != 'casida' and settings.continuation_margin > margin:
         margin = settings.continuation_margin
-        why = (f"continuation_margin {margin:g} Ha, where the Pade "
-               f"continuation from the imaginary axis is accurate")
+        why = (f"continuation_margin {margin:g} Ha, the distance beyond "
+               f"which the Pade continuation from the imaginary axis is "
+               f"accurate")
     lo, hi = pole_window(low, part)
     eps = low.eps[part.act]
     dist = np.minimum(eps - lo, hi - eps)
@@ -916,20 +929,45 @@ def _refuse_near_poles(low, part, settings, sigma):
                           for p, e, x in zip(part.act[bad], eps[bad],
                                              dist[bad]))
         if low.mode == 'casida':
-            advice = ("Use sigma='srg', which is finite everywhere, or move "
-                      "these orbitals out of the active space.")
+            what = ("'mode_a' is undamped and grows without bound towards a "
+                    "pole, so its elements on these orbitals are dominated by "
+                    "that pole; sigma='srg' is finite everywhere.")
         else:
-            advice = (f"On mode={low.mode!r} sigma={sigma!r} is continued "
-                      f"from the imaginary axis without damping (s = inf); "
-                      f"use mode='casida', where sigma='srg' is finite "
-                      f"everywhere, or move these orbitals out of the active "
-                      f"space.")
-        raise ValueError(
-            f"sigma={sigma!r} diverges at the poles of the environment "
-            f"self-energy: the active {named} are within the margin "
+            what = (f"On mode={low.mode!r} it is continued from the imaginary "
+                    f"axis without damping (s = inf) and loses accuracy "
+                    f"towards the poles: its elements on these orbitals have "
+                    f"been measured off by 1e-4 Ha at 0.16 Ha from the edge "
+                    f"and by 7e-4 Ha at 0.09 Ha (water), an error the "
+                    f"'sigma_continuation' check does not show. Where that "
+                    f"matters use mode='casida' with sigma='srg', finite "
+                    f"everywhere.")
+        flag(
+            'sigma_near_pole',
+            f"sigma={sigma!r}: active orbitals near a pole of the "
+            f"environment self-energy, {named}, within the margin "
             f"{margin:.6f} Ha ({why}) of the pole-free window "
             f"({lo:.6f}, {hi:.6f}) or outside it (a negative distance). "
-            + advice)
+            f"Sigma_bar^E is computed all the same. " + what,
+            SigmaNearPoleWarning, stacklevel=stacklevel)
+
+
+def _require_finite(sigma_bar, part, sigma):
+    """Refuse (FloatingPointError) a Sigma_bar with an element that is not
+    finite, naming the orbital pairs: an active orbital energy on a pole.
+    Near a pole Sigma_bar is kept with a warning (`_warn_near_poles`); this
+    one cannot go into H_eff."""
+    bad = np.argwhere(~np.isfinite(sigma_bar))
+    if len(bad):
+        act = part.act
+        named = ', '.join(f'({act[t]}, {act[u]})' for t, u in bad[:8])
+        more = f' and {len(bad) - 8} more' if len(bad) > 8 else ''
+        raise FloatingPointError(
+            f"sigma={sigma!r}: Sigma_bar^E is not finite at the elements "
+            f"{named}{more} (orbital pairs): an active orbital energy "
+            f"coincides with a pole of the environment self-energy, and "
+            f"such a Sigma_bar cannot go into H_eff. Use sigma='srg' on "
+            f"mode='casida', which is finite everywhere, or move the orbital "
+            f"out of the active space.")
 
 
 def embedding_self_energy(low, part, sigma):
@@ -939,24 +977,43 @@ def embedding_self_energy(low, part, sigma):
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
     sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
-        finite everywhere; 'mode_a', Eq. 12 at eta = 0, refused (naming the
-        orbitals) when an active energy is within pole_margin/sqrt(2 s) of
-        the pole-free window's edge or outside it (`pole_window`).
+        finite everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
+        (SigmaNearPoleWarning, naming the orbitals) when an active energy
+        is within pole_margin/sqrt(2 s) of the pole-free window's edge or
+        outside it (`pole_window`), and is computed all the same.
     imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
         continued once and evaluated per element (`continued_self_energy`):
         'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
         (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
-        + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
-        on casida, within the larger of pole_margin/sqrt(2 s) and
-        numerics.downfolding.continuation_margin, pointing to mode='casida'.
+        + S^E_tu(eps_u)]. Both warn near the poles as 'mode_a' does on
+        casida, within the larger of pole_margin/sqrt(2 s) and
+        numerics.downfolding.continuation_margin, pointing to mode='casida';
+        the continuation is inaccurate there (constants.py,
+        DOWNFOLDING_CONTINUATION_MARGIN).
     space-time: the same, with S^E(mu + i w) sampled as on imagfrequency
         on the route's own ISDF factors (`sigma_env_imag_axis`).
-    Zero when the environment is empty.
+    Zero when the environment is empty. A Sigma_bar that is not finite (an
+    active energy on a pole) is refused, FloatingPointError.
     """
     return _embedding(low, part, sigma)[0]
 
 
-def _embedding(low, part, sigma, infinite=False):
+def _embedding(low, part, sigma, infinite=False, stacklevel=3):
+    """`_embedding_unchecked` after the pole warning and with the result
+    required finite. stacklevel: where the pole warning points, counted
+    from this function as for warnings.warn (3: the caller of this
+    function's caller)."""
+    sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    settings = numerics_or_default(low.numerics).downfolding
+    if sigma == 'mode_a' or low.mode != 'casida':
+        _warn_near_poles(low, part, settings, sigma, stacklevel + 1)
+    sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
+                                           infinite)
+    _require_finite(sigma_bar, part, sigma)
+    return sigma_bar, kept
+
+
+def _embedding_unchecked(low, part, sigma, settings, infinite):
     """(Sigma_bar, kept) of `embedding_self_energy`, kept what the
     diagnostics read without building it again: on casida 'args' = (w, eps_t,
     eps_r, occupied_r, omega) of the environment, 'srg_s', the s applied
@@ -965,10 +1022,6 @@ def _embedding(low, part, sigma, infinite=False):
     reference); on imagfrequency and space-time 'z' and 'samples', the Pade
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
-    sigma = choice(sigma, SIGMAS[1:], 'sigma')
-    settings = numerics_or_default(low.numerics).downfolding
-    if sigma == 'mode_a' or low.mode != 'casida':
-        _refuse_near_poles(low, part, settings, sigma)
     if low.mode != 'casida':
         return _embedding_imag_axis(low, part, sigma)
     env = part.env
@@ -1285,8 +1338,10 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         §3.7). Allowed with every screening; the third term of the
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
-        space-time 'srg' is s = inf (Eq. 42) and both forms are refused
-        near the poles, pointing to casida (`embedding_self_energy`). The
+        space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
+        computed with a SigmaNearPoleWarning ('mode_a' on casida; both
+        forms on the other routes, pointing to casida), and refused only
+        when it is not finite (`embedding_self_energy`). The
         names in any case and with '-' or '_' ('SRG', 'mode-a'), as
         screening; anything but None and those is refused.
     diagnostics: the DIAGNOSTICS to record in energies.diagnostics (None:
@@ -1331,7 +1386,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        s_bar, kept = _embedding(low, part, sigma, infinite=True)
+        s_bar, kept = _embedding(low, part, sigma, infinite=True,
+                                 stacklevel=4)
         sigma_bar, dc = (s_bar,), 'hartree'
         # the two checks of Sigma_bar always run and warn; `diagnostics`
         # only decides whether their numbers are kept

@@ -289,11 +289,18 @@ off-diagonal h_eff differs.
 
 **The pole check** (always on with `sigma`). Every pole of S lies outside the
 window (max over inactive i of eps_i - Omega_min, min over environment
-virtuals a of eps_a + Omega_min). `'mode_a'` is refused, with the orbitals
+virtuals a of eps_a + Omega_min). `'mode_a'` warns
+(`SigmaNearPoleWarning`, named flag `'sigma_near_pole'`), with the orbitals
 named, when an active orbital energy is within `numerics.downfolding.
 pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
-or outside the window. `'srg'` is never refused on the Casida route; near a
-pole its damping matters, which the `'sigma_poles'` diagnostic reports.
+or outside the window. Sigma_bar is computed and H_eff built all the same;
+the elements on those orbitals are then dominated by the nearest pole.
+`'srg'` never warns of the poles on the Casida route; near a pole its
+damping matters, which the `'sigma_poles'` diagnostic reports.
+
+Nothing is refused near a pole. Only a Sigma_bar that is not finite, an
+active orbital energy exactly on a pole with `'mode_a'`, is
+(`FloatingPointError`).
 
 `srg_s`, `pole_margin` and `continuation_margin` are read from `low.numerics`,
 the `Numerics` given to `run_low_level`: they are fixed with the low-level
@@ -314,12 +321,18 @@ per element, and each element is evaluated at its own point:
   check here, and `'sigma_poles'` records `srg_s` None.
 - `'mode_a'` is 1/2 Re[S_tu(eps_t) + S_tu(eps_u)] on the real axis.
 
-Without damping, both forms are refused near the poles on this route, and
-with a wider margin than on casida: within the larger of pole_margin /
-sqrt(2 s) (s = `srg_s`, or 500 when it is None) and
+Without damping, both forms warn near the poles on this route
+(`SigmaNearPoleWarning`), and with a wider margin than on casida: within the
+larger of pole_margin / sqrt(2 s) (s = `srg_s`, or 500 when it is None) and
 `numerics.downfolding.continuation_margin` (default 0.26 Ha) of the window's
 edge, or outside the window. The message names the orbitals and points to
-`mode='casida'`, where `'srg'` is finite everywhere. Omega_min of the window
+`mode='casida'`, where `'srg'` is finite everywhere. Sigma_bar is continued
+and H_eff built all the same, but **inside the margin the continued value is
+not reliable**: on water its elements on the named orbitals were off by
+1e-4 Eh at 0.16 Ha from the edge, 3.5e-4 at 0.11 Ha and 7.0e-4 at 0.09 Ha,
+and no case closer than that or outside the window was measured. The
+`'sigma_continuation'` spread does not show this error (3.6e-5 at 0.09 Ha),
+so the pole warning is the only sign of it. Omega_min of the window
 is the lowest root of the same Casida problem on the route's own v (dense
 up to 2000 particle-hole pairs, `DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS`, the
 Davidson for one root above that, started from at least 10 unit vectors
@@ -337,7 +350,7 @@ case measured beyond 0.17 Ha met 1e-4 (a few much closer did too), and
 `continuation_margin` is 1.5 times that; the scan is in the comment of
 `DOWNFOLDING_CONTINUATION_MARGIN` in `src/Base/numerics/constants.py`.
 
-**Sigma^E on `mode='space-time'`** is sampled, continued, refused and
+**Sigma^E on `mode='space-time'`** is sampled, continued, warned about and
 diagnosed exactly as on imagfrequency, on the route's own objects: W on the
 same minimax frequency grid (`numerics.imagfreq.nfreq`), from chi0 of the
 ISDF factors (built on the first Sigma^E request and kept), its Lorentzian
@@ -387,10 +400,13 @@ reference E_0 is a well-defined working choice, not a derived one.
   in any case and with `-` or `_` (`'SRG'`, `'mode-a'`, `'CRPA-PH'`); for
   `sigma` only `None` itself means no Sigma^E (the string `'None'` is
   refused).
-- **Sigma^E poles.** `sigma='mode_a'` is refused near a pole of the
-  environment self-energy; on `mode='imagfrequency'` and `'space-time'`
-  both `'srg'` and `'mode_a'` are, within the wider continuation margin
-  (see above).
+- **Sigma^E poles.** `sigma='mode_a'` warns near a pole of the
+  environment self-energy (`SigmaNearPoleWarning`, named flag
+  `'sigma_near_pole'`); on `mode='imagfrequency'` and `'space-time'` both
+  `'srg'` and `'mode_a'` do, within the wider continuation margin (see
+  above). H_eff is built all the same and the flag is in
+  `energies.numerical_flags`; only a Sigma_bar that is not finite is
+  refused.
 - **Sigma^E warnings.** With `sigma` set, two checks of Sigma_bar always
   run, whatever `diagnostics` asks for, because Sigma_bar goes into H_eff
   and E_0 either way: a `SigmaDampingWarning` (casida, `'srg'`) when the
@@ -438,8 +454,8 @@ imagfrequency and space-time all four:
   and the odd-indexed nodes at the element's evaluation point. It is a
   lower-bound-type indicator, not an error bound: near the window's edge
   it falls short of the true error by ten to twenty times (3.6e-5 against
-  7.0e-4 at 0.09 Ha from the edge, a space the continuation margin
-  refuses), so a small spread does not certify Sigma_bar there; far from
+  7.0e-4 at 0.09 Ha from the edge, a space the pole warning names), so a
+  small spread does not certify Sigma_bar there; far from
   the poles it can exceed the error (1.2e-5 against 1.6e-7 on benzene).
   Above `DOWNFOLDING_SIGMA_CONTINUATION_WARN` (1e-4 Ha) a
   `SigmaContinuationWarning` names the elements: use more nodes or
