@@ -399,6 +399,12 @@ reference E_0 is a well-defined working choice, not a derived one.
   disagree by more than 1e-4 Ha. Both are named flags
   (`docs/warnings.md`). The `diagnostics` keyword only decides whether the
   numbers behind them are recorded.
+- **Named flags in the result.** A warning that is a named flag also leaves
+  a `{'flag': name, 'message': text}` entry in the result, so a script can
+  test for it without catching warnings: `low.numerical_flags` holds the
+  flags of `run_low_level`, and `energies.numerical_flags` those plus the
+  ones raised by `build_effective_hamiltonian` for this active space. Both
+  are empty lists for a clean calculation.
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all; `None` is the same as `()`); a name that does

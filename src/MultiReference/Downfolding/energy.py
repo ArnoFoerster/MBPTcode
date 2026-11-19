@@ -116,6 +116,9 @@ class Energies:
     e_sigma_trace: Tr[Sigma_bar gamma^A,0]; E_0 subtracts it; nonzero only
         with a Sigma_bar.
     diagnostics: the low-level method's diagnostics, keyed by name.
+    numerical_flags: the named flags behind this Hamiltonian
+        (src.Base.numerical_flags), each {'flag': name, 'message': text};
+        filled by `build_effective_hamiltonian`, empty for a clean result.
 
     Sums (properties): `eh`, `ex`, `ec` are the Hartree, exchange and
     correlation energies of E_0 with their corrections, so that
@@ -134,6 +137,7 @@ class Energies:
     e_exchange_term: float
     e_sigma_trace: float
     diagnostics: dict = field(default_factory=dict)
+    numerical_flags: list = field(default_factory=list)
 
     @property
     def eh(self):

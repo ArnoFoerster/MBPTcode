@@ -69,7 +69,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
-from src.Base.numerical_flags import flag
+from src.Base.numerical_flags import collecting, flag
 from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
                                          DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
                                          DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
@@ -154,7 +154,11 @@ class RPALowLevel:
         of `_screening_grid`. On space-time `run` puts there 'factors',
         'static_grid', 'p0' and 'energy_grid' (`_space_time`); the first
         Sigma^E request adds 'omega_min' and 'w_grid', the same (points, W)
-        on the ISDF factors.
+        on the ISDF factors. 'flags' holds, per entry added on a request,
+        the named flags raised while building it, which every later active
+        space that uses the entry gets too (`_cached`).
+    numerical_flags: the named flags raised during the run, filled by
+        `run_low_level`.
     """
     mf: object
     mode: str
@@ -169,6 +173,7 @@ class RPALowLevel:
     eri: Optional[np.ndarray]
     cache: dict = field(default_factory=dict)
     method: str = METHOD
+    numerical_flags: list = field(default_factory=list)
 
 
 def _refuse_options(opts, which):
@@ -785,20 +790,39 @@ def lowest_excitation(low, solver=None):
     """
     if low.mode == 'casida':
         return float(low.omega.min()) if low.omega.size else None
-    if solver is None and 'omega_min' in low.cache:
-        return low.cache['omega_min']
-    nocc = low.nocc
-    n_pair = nocc * (len(low.eps) - nocc)
-    om = None
-    if n_pair:
+
+    def solved():
+        nocc = low.nocc
+        n_pair = nocc * (len(low.eps) - nocc)
+        if not n_pair:
+            return None
         rule = ('dense' if n_pair <= DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS
                 else 'davidson')
         how = choice(solver or rule, ('dense', 'davidson'), 'solver')
-        om = (_lowest_dense(low) if how == 'dense'
-              else _lowest_davidson(low))
-    if solver is None:
-        low.cache['omega_min'] = om
-    return om
+        return _lowest_dense(low) if how == 'dense' else _lowest_davidson(low)
+
+    return solved() if solver is not None else _cached(low, 'omega_min',
+                                                       solved)
+
+
+def _cached(low, key, build):
+    """low.cache[key], built by `build()` on the first request.
+
+    One low-level result serves any number of active spaces, and only the
+    first request builds the value. The named flags raised while building it
+    (src.Base.numerical_flags) are therefore kept beside it, in
+    low.cache['flags'][key], and handed to the collecting block of every
+    later request too: each Hamiltonian that uses the value has them in its
+    record. The warning itself is issued once, by the build."""
+    if key not in low.cache:
+        raised = []
+        with collecting(raised):
+            low.cache[key] = build()
+        low.cache.setdefault('flags', {})[key] = raised
+        return low.cache[key]
+    with collecting([]) as again:
+        again.extend(low.cache.get('flags', {}).get(key, ()))
+    return low.cache[key]
 
 
 def _lowest_dense(low):
@@ -969,8 +993,11 @@ def _screening_grid(low):
     space-time: chi0 of the ISDF factors (X, D) on those same points, through
     a minimax tau axis with as many points as the static grid's
     (`chi0_imaginary_frequency`, the mid-gap mu), then the same Dyson step."""
-    if 'w_grid' in low.cache:
-        return low.cache['w_grid']
+    return _cached(low, 'w_grid', lambda: _build_screening_grid(low))
+
+
+def _build_screening_grid(low):
+    """The (points, W) of `_screening_grid`, computed."""
     nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
     e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
     points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
@@ -985,13 +1012,10 @@ def _screening_grid(low):
             tile_memory_gb=layout_tile_gb(low.numerics))
         for k in range(len(w)):
             w[k] = dyson_screening(w[k])
-        low.cache['w_grid'] = (points, w)
-        return low.cache['w_grid']
+        return points, w
     lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
                               spin_mode='restricted')
-    low.cache['w_grid'] = (points, lr.solve_rpa_screening(
-        points, low.nocc, is_imaginary=True))
-    return low.cache['w_grid']
+    return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
 
 
 def sigma_env_imag_axis(low, part, query_freqs):

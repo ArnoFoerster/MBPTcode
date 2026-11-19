@@ -998,3 +998,60 @@ def test_space_time_continuation_margin_near_the_edge(nh3_space_time):
         with pytest.raises(ValueError, match="mode='casida'") as refusal:
             rpa.embedding_self_energy(low, inside, sigma)
         assert 'continuation_margin' in str(refusal.value)
+
+
+def test_sigma_warnings_are_named_flags_in_the_energies(wat, low_exact):
+    """The two Sigma^E warnings reach `energies.numerical_flags`: the SRG
+    damping of the near-pole space on casida ('sigma_srg_damping', its
+    message the warning's), and the Pade spread of a too-coarse node set on
+    imagfrequency ('sigma_continuation_spread'); also with diagnostics=().
+    A space clear of the poles has none."""
+    mf, _, eps, nocc = wat
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always', rpa.SigmaDampingWarning)
+        _, _, en = build_effective_hamiltonian(
+            low_exact, _high_virtual(eps, nocc), sigma='srg', diagnostics=())
+    flags = en.numerical_flags
+    assert [f['flag'] for f in flags] == ['sigma_srg_damping']
+    assert flags[0]['message'] == str(rec[-1].message)
+    _, _, en = build_effective_hamiltonian(
+        low_exact, _contiguous_44(eps, nocc), sigma='srg')
+    assert en.numerical_flags == []
+    coarse = run_low_level(mf, method='rpa', mode='imagfrequency',
+                           numerics=Numerics(quadrature={'npade': 4}))
+    with pytest.warns(rpa.SigmaContinuationWarning):
+        _, _, en = build_effective_hamiltonian(
+            coarse, _contiguous_44(eps, nocc), sigma='srg')
+    assert [f['flag'] for f in en.numerical_flags] == [
+        'sigma_continuation_spread']
+
+
+def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
+    """One low-level result serves several active spaces, and W on the
+    frequency grid is built by the first Sigma^E request alone. A named flag
+    raised while building it is in the energies of every later active space
+    that reuses it, not only of the first; the warning is issued once."""
+    from src.Base.numerical_flags import flag
+    mf, _, eps, nocc = wat
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    grid, built = rpa.minimax_frequency_grid, []
+
+    def flagged(*args):
+        built.append(args)
+        flag('probe_grid', 'raised while building W', RuntimeWarning)
+        return grid(*args)
+
+    monkeypatch.setattr(rpa, 'minimax_frequency_grid', flagged)
+    probe = {'flag': 'probe_grid', 'message': 'raised while building W'}
+    with pytest.warns(RuntimeWarning, match='raised while building W'):
+        _, _, first = build_effective_hamiltonian(
+            low, _contiguous_44(eps, nocc), sigma='srg')
+    assert first.numerical_flags == [probe]
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        _, _, later = build_effective_hamiltonian(
+            low, _contiguous_44(eps, nocc), sigma='mode_a')
+    assert later.numerical_flags == [probe] and len(built) == 1
+    assert low.numerical_flags == []
+    _, _, without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc))
+    assert without.numerical_flags == []

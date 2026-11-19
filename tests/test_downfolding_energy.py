@@ -815,3 +815,53 @@ def test_a_two_channel_method_is_refused_by_the_restricted_driver(monkeypatch):
     with pytest.raises(NotImplementedError, match='unrestricted'):
         build_effective_hamiltonian(SimpleNamespace(mf=mf, method='probe'),
                                     aspace)
+
+
+# --- named flags are collected into the results -------------------------------
+
+def test_named_flags_reach_the_results(monkeypatch):
+    """A named flag raised under `run_low_level` is in low.numerical_flags,
+    and `energies.numerical_flags` holds those plus the ones raised under
+    `build_effective_hamiltonian`, each distinct entry once, sorted, as
+    {'flag': name, 'message': text} (src.Base.numerical_flags). A later
+    build does not inherit an earlier build's flags."""
+    from src.Base.numerical_flags import flag
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    raise_in_terms = [True]
+
+    def run(mf):
+        flag('probe_run', 'raised by run', RuntimeWarning)
+        return SimpleNamespace(mf=mf, method='probe')
+
+    def terms(low, part):
+        if raise_in_terms[0]:
+            flag('probe_terms', 'raised by terms', RuntimeWarning)
+            flag('probe_terms', 'raised by terms', RuntimeWarning)
+        z = np.zeros((part.n_act,) * 4)
+        return DownfoldingTerms(vtilde=(z,), sigma_bar=None, e_c_full=0.0,
+                                e_c_active=0.0, dc='full')
+
+    monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(run=run,
+                                                            terms=terms))
+    with pytest.warns(RuntimeWarning, match='raised by run'):
+        low = run_low_level(mf, method='probe')
+    ran = {'flag': 'probe_run', 'message': 'raised by run'}
+    assert low.numerical_flags == [ran]
+    with pytest.warns(RuntimeWarning, match='raised by terms'):
+        _, _, en = build_effective_hamiltonian(low, aspace)
+    assert en.numerical_flags == [
+        ran, {'flag': 'probe_terms', 'message': 'raised by terms'}]
+    raise_in_terms[0] = False
+    _, _, en = build_effective_hamiltonian(low, aspace)
+    assert en.numerical_flags == [ran]
+    assert low.numerical_flags == [ran]
+
+
+def test_a_clean_run_has_no_flags():
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    for method in ('hf', 'rpa'):
+        low = run_low_level(mf, method=method)
+        assert low.numerical_flags == []
+        assert build_effective_hamiltonian(low, aspace)[2].numerical_flags == []

@@ -7,7 +7,7 @@ zero, which leaves E_0 = E_nuc + E_HF,core + E_HF,ee: the CASCI core energy.
 With a KS reference this is still the HF expression on the KS orbitals, as in
 pyscf's CASCI.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -18,9 +18,11 @@ METHOD = 'hf'
 
 @dataclass
 class HFLowLevel:
-    """The HF low-level result: the mean field and nothing else."""
+    """The HF low-level result: the mean field and nothing else.
+    numerical_flags is filled by `run_low_level`."""
     mf: object
     method: str = METHOD
+    numerical_flags: list = field(default_factory=list)
 
 
 def _no_options(opts):

@@ -33,7 +33,10 @@ inside it, on any thread or MPI rank, into one list of
   with the geometry each flag was first raised at; the dense surfaces' gradients
   also return them in their diagnostics, `diagnostics['numerical_flags']`;
 - a photophysics stage: the stage record's `numerical_flags`, as
-  `{flag: [messages]}`.
+  `{flag: [messages]}`;
+- downfolding: `run_low_level` leaves the flags of the low-level run in
+  `low.numerical_flags`, and `build_effective_hamiltonian` returns those
+  together with its own in `energies.numerical_flags`.
 
 A flag raised outside all of these, by a solver called on its own, is
 warned about and nothing more.

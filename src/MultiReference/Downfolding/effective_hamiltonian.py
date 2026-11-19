@@ -19,8 +19,11 @@ energy.py, h_eff from one_body.py and v_eff from two_body.py; `pack` here
 writes them into the g_eff dictionary the active-space solvers read
 (src/Solvers/active_space.py).
 """
+from dataclasses import replace
+
 import numpy as np
 
+from src.Base.numerical_flags import collecting, gathered
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_gas_phase_ground_state)
 from src.Base.utils.parallel.mpi_grid import grid_comm
@@ -48,6 +51,10 @@ def run_low_level(mf, method='rpa', **method_opts):
     T = 0 mean field is taken, and only serially: on more than one MPI rank
     every rank would repeat the whole calculation. method_opts go to the
     method, which refuses the ones it does not know.
+
+    Every named flag raised during the run (src.Base.numerical_flags) is
+    collected into `low.numerical_flags`, a list of {'flag': name, 'message':
+    text}, empty for a clean run.
     """
     _, _, size = grid_comm()
     if size > 1:
@@ -62,7 +69,11 @@ def run_low_level(mf, method='rpa', **method_opts):
             f'{WHO} is gas phase only; mf carries a solvent model '
             f'({type(mf.with_solvent).__name__}).')
     method = choice(method, tuple(LOW_LEVEL), 'method')
-    return LOW_LEVEL[method].run(mf, **method_opts)
+    flags = []
+    with collecting(flags):
+        low = LOW_LEVEL[method].run(mf, **method_opts)
+    low.numerical_flags = gathered(flags)
+    return low
 
 
 def build_effective_hamiltonian(low, active_space, spin_free=True,
@@ -81,7 +92,23 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     core, v_eff = v + vtilde with v the exact active integrals; the method
     supplies vtilde, Sigma_bar, the correlation-energy pair and the
     double-counting mode. method_opts go to the method's `terms`.
+
+    `energies.numerical_flags` lists every named flag behind this
+    Hamiltonian (src.Base.numerical_flags): those of the low-level run
+    (`low.numerical_flags`) and those raised while building it, each
+    distinct {'flag': name, 'message': text} once; empty for a clean result.
     """
+    flags = []
+    with collecting(flags):
+        g_eff, space, energies = _build(low, active_space, spin_free,
+                                        method_opts)
+    inherited = list(getattr(low, 'numerical_flags', ()))
+    return g_eff, space, replace(
+        energies, numerical_flags=gathered(inherited + flags))
+
+
+def _build(low, active_space, spin_free, method_opts):
+    """`build_effective_hamiltonian` without the collection of the flags."""
     mf = low.mf
     mol = mf.mol
     eps = get_orbital_energies(mf)

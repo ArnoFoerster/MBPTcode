@@ -68,6 +68,8 @@ from tests.gw_density_routes import mean_field as nh3_mean_field
 from tests.gw_density_routes import water as gw_water
 from tests.isdf_test_grid import g1_numerics
 
+# the fields of Energies that are records, not energies
+RECORDS = ('diagnostics', 'numerical_flags')
 REFS = ('hf', 'pbe', 'df_hf')
 ASPACES = ('contiguous', 'non_contiguous', 'no_virtual')
 SCREENINGS_1 = ('bare', 'crpa', 'crpa_ph')
@@ -284,7 +286,7 @@ def test_e0_terms_match_casida(ref, aspace, s):
     g, space, en = build_effective_hamiltonian(low_if, a, screening=s)
     g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
     for f in dataclasses.fields(Energies):
-        if f.name != 'diagnostics':
+        if f.name not in RECORDS:
             assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 1e-6
     assert abs(en.e0 - en_c.e0) < 1e-6
     assert np.abs(g[1] - g_c[1]).max() < 1e-8
@@ -344,9 +346,10 @@ def _same(a, b):
     assert np.abs(g1[1] - g2[1]).max() < 1e-12
     assert np.abs(g1[2] - g2[2]).max() < 1e-12
     for f in dataclasses.fields(Energies):
-        if f.name != 'diagnostics':
+        if f.name not in RECORDS:
             assert abs(getattr(e1, f.name) - getattr(e2, f.name)) < 1e-12
     assert e1.diagnostics.keys() == e2.diagnostics.keys()
+    assert e1.numerical_flags == e2.numerical_flags
 
 
 def test_low_reuse():
@@ -408,7 +411,7 @@ def test_route_agreement_with_sigma(ref, s):
                                                sigma='srg')
     assert abs(en.e_sigma_trace) > 1e-3
     for f in dataclasses.fields(Energies):
-        if f.name != 'diagnostics':
+        if f.name not in RECORDS:
             assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 1e-4
     assert np.abs(g[1] - g_c[1]).max() < 1e-4
     assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-4
@@ -643,7 +646,7 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
     tol = 5e-5 if s == 'crpa' else 1e-5
     for f in dataclasses.fields(Energies):
-        if f.name != 'diagnostics':
+        if f.name not in RECORDS:
             assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < tol
     assert abs(en.e0 - en_c.e0) < tol
     assert np.abs(g[1] - g_c[1]).max() < tol
@@ -775,7 +778,7 @@ def test_space_time_route_agreement_with_sigma(ref, s):
     e_fci = _solve(g, space)
     for g_o, _, en_o in others:
         for f in dataclasses.fields(Energies):
-            if f.name != 'diagnostics':
+            if f.name not in RECORDS:
                 assert abs(getattr(en, f.name) - getattr(en_o, f.name)) < 1e-4
         assert np.abs(g[1] - g_o[1]).max() < 1e-4
         assert abs(e_fci - _solve(g_o, space)) < 1e-5
