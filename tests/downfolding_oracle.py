@@ -617,7 +617,7 @@ def w0_minus_v_so(eri_so, eps_so, occ_so, orbs, keep=None):
     return (-2.0 * (w / omega[None, :]) @ w.T).reshape((m,) * 4)
 
 
-def _active_pairs_so(pairs, act_so):
+def active_pairs_so(pairs, act_so):
     """Bool mask over `pairs`, True where i and a are both active."""
     act = {int(p) for p in act_so}
     return np.array([i in act and a in act for i, a in pairs], dtype=bool)
@@ -635,7 +635,7 @@ def vtilde_crpa_uhf(eri_so, eps_so, occ_so, act_so):
     pairs whose i and a are both active are deleted, for both spins, and the
     rest is solved and pole-summed (`w0_minus_v_so`). Local indices in the
     order of act_so, the alpha active orbitals first."""
-    keep = ~_active_pairs_so(so_pairs(eps_so, occ_so), act_so)
+    keep = ~active_pairs_so(so_pairs(eps_so, occ_so), act_so)
     vt = w0_minus_v_so(eri_so, eps_so, occ_so, list(act_so), keep=keep)
     return spin_blocks(vt, len(act_so) // 2)
 
@@ -653,7 +653,7 @@ def vtilde_mrpa_uhf(eri_so, eps_so, occ_so, act_so):
     active spin orbitals (real orbitals) and is zero on every other element.
     """
     _, _, xpy, pairs = drpa_so(eri_so, eps_so, occ_so)
-    keep = np.flatnonzero(_active_pairs_so(pairs, act_so))
+    keep = np.flatnonzero(active_pairs_so(pairs, act_so))
     m = len(act_so)
     vt = np.zeros((m,) * 4)
     if len(keep) == 0:

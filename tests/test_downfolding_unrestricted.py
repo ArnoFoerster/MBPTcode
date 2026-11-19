@@ -47,7 +47,7 @@ from src.MultiReference.Downfolding.partition import (partition,
 from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
-from tests.downfolding_oracle import (CH2, NH, OH, drpa_so,
+from tests.downfolding_oracle import (CH2, NH, OH, active_pairs_so, drpa_so,
                                       env_residues_uhf, h2_broken,
                                       mo_integrals, reference_energy_uhf,
                                       rpa_energy, sigma_mode_a,
@@ -667,8 +667,6 @@ def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
     with pytest.raises(ValueError, match='one Partition'):
         rpa.screening_correction(low, (one, one), 'crpa')
     assert isinstance(rpa.screening_correction(low, one, 'crpa'), np.ndarray)
-    with pytest.raises(NotImplementedError, match='mrpa'):
-        rpa.screening_correction(oh_low[True], parts, 'mrpa')
 
 
 # --- E_c^A[v_eff] and the static defect ---------------------------------------
@@ -1174,3 +1172,156 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
     assert abs(poles['srg_damping'] - moved) < 1e-9
     _, _, en = build_effective_hamiltonian(low, spaces, diagnostics=None)
     assert en.diagnostics == {}
+
+
+# --- mRPA: the interaction that keeps the zeroth moment ------------------------
+
+MRPA_SPACES = ('asymmetric', 'unequal_cores', 'no_beta_pair')
+
+
+def _mrpa_v_eff(so, parts, vt):
+    """(aa, ab, bb) of the exact active integrals plus the blocks vt."""
+    eri_so, _, _, act_so = so
+    v = spin_blocks(eri_so[np.ix_(act_so, act_so, act_so, act_so)],
+                    parts[0].n_act)
+    return tuple(x + y for x, y in zip(v, vt))
+
+
+@pytest.mark.parametrize('space', MRPA_SPACES)
+@pytest.mark.parametrize('df', [False, True])
+def test_mrpa_against_oracle(oh, oh_low, space, df):
+    """The mRPA correction of an unrestricted reference, on the active
+    particle-hole pairs of both spins stacked,
+    vt = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A] - (ia|jb), against the
+    oracle's own construction; it touches only the elements with a
+    particle-hole pair of each side's spin on both sides. For a
+    spin-polarized reference the same-spin and opposite-spin blocks differ.
+    E_c^A and the static defect of v + vt against the oracle too. Measured
+    over three spaces and both df settings: vt 1.6e-13 (on the alpha
+    HOMO-LUMO pair, where eta0 of the two eigensolvers differs by 2.1e-13),
+    E_c^A 1.8e-15, the defect 5.4e-15; the blocks are up to 0.047 and the
+    aa and ab ones differ by 0.015 to 0.021 (9e-4 with two active pairs)."""
+    low = oh_low[df]
+    parts = _parts(oh, SPACES[space](oh))
+    so = _spin_orbitals(oh, parts)
+    ref = vtilde_mrpa_uhf(*so)
+    blocks = rpa.screening_correction(low, parts, 'mrpa')
+    assert isinstance(blocks, tuple) and len(blocks) == 3
+    masks = (_ph_mask(parts[0], parts[0]), _ph_mask(parts[0], parts[1]),
+             _ph_mask(parts[1], parts[1]))
+    for ours, exact, mask in zip(blocks, ref, masks):
+        assert np.max(np.abs(ours - exact)) < 1e-9
+        assert not ours[~mask].any()
+    assert np.max(np.abs(blocks[0])) > 1e-4
+    if space == 'no_beta_pair':
+        assert not blocks[1].any() and not blocks[2].any()
+    else:
+        assert np.max(np.abs(blocks[0] - blocks[1])) > 1e-3
+    v_eff = _mrpa_v_eff(so, parts, ref)
+    e_ref, defect_ref = _oracle_active_rpa(so, v_eff)
+    assert abs(rpa.active_correlation_energy(low, parts, v_eff) - e_ref) < 1e-9
+    assert abs(rpa.static_defect(low, parts, v_eff) - defect_ref) < 1e-9
+
+
+@pytest.mark.parametrize('space', MRPA_SPACES)
+def test_mrpa_conserves_the_zeroth_moment(oh, oh_low, space):
+    """What defines mRPA: the direct RPA of the active pairs alone with
+    v_eff = v + vt has the zeroth moment eta0 = (X+Y)(X+Y)^T of the full
+    RPA on those pairs. Both RPA problems are solved by the oracle; only vt
+    is the production code's. Measured: 2.0e-13 with mRPA (7, 8 and 2 active
+    pairs) against 2.1e-2, 1.8e-2 and 1.1e-3 with the bare interaction."""
+    parts = _parts(oh, SPACES[space](oh))
+    so = _spin_orbitals(oh, parts)
+    eri_so, eps_so, occ_so, act_so = so
+    vt = rpa.screening_correction(oh_low[True], parts, 'mrpa')
+    _, _, xpy, pairs = drpa_so(eri_so, eps_so, occ_so)
+    keep = np.flatnonzero(active_pairs_so(pairs, act_so))
+    eta0_full = (xpy @ xpy.T)[np.ix_(keep, keep)]
+    occ_act = [x for x, q in enumerate(act_so) if q in occ_so]
+    _, _, xpy_act, pairs_act = drpa_so(
+        _local_so(_mrpa_v_eff(so, parts, vt)), np.asarray(eps_so)[act_so],
+        occ_act)
+    assert [(act_so[i], act_so[a]) for i, a in pairs_act] == [
+        pairs[x] for x in keep]
+    assert np.max(np.abs(xpy_act @ xpy_act.T - eta0_full)) < 1e-10
+    # the bare interaction does not: the test can fail
+    _, _, xpy_bare, _ = drpa_so(
+        _local_so(_mrpa_v_eff(so, parts, [0.0, 0.0, 0.0])),
+        np.asarray(eps_so)[act_so], occ_act)
+    assert np.max(np.abs(xpy_bare @ xpy_bare.T - eta0_full)) > 1e-4
+
+
+@pytest.mark.parametrize('name', ['h2_bs', 'oh_sto3g'])
+def test_mrpa_all_active_is_zero(request, name):
+    """Every orbital active: the moment-conserving interaction is the bare
+    one. It is computed, not short-cut, so this is the identity
+    eta0^-1 delta eta0^-1 = delta + 2K of the full problem. Measured:
+    1.9e-15 (H2), 3.9e-14 (OH/STO-3G)."""
+    mf = (unrestricted(OH, 1, basis='sto-3g') if name == 'oh_sto3g'
+          else request.getfixturevalue(name))
+    parts = _parts(mf, _all_active(mf))
+    for df in (False, True):
+        low = run_low_level(mf, method='rpa', df=df)
+        blocks = rpa.screening_correction(low, parts, 'mrpa')
+        assert len(blocks) == 3
+        assert max(np.max(np.abs(b)) for b in blocks) < 1e-9
+
+
+def test_mrpa_without_an_active_pair_is_zero(oh, oh_low):
+    blocks = rpa.screening_correction(
+        oh_low[True], _parts(oh, _occupied_only(oh)), 'mrpa')
+    assert len(blocks) == 3 and not any(b.any() for b in blocks)
+
+
+@pytest.mark.parametrize('df', [False, True])
+def test_mrpa_closed_shell_limit(closed_shell, df):
+    """On a closed shell the two-channel mRPA gives the restricted one in
+    all three blocks: the triplet part of the direct RPA is non-interacting,
+    so the same-spin and the opposite-spin corrections coincide. Through
+    the driver, with and without Sigma^E, H_eff and every energy term are
+    the restricted ones. Measured: vt 1.8e-13 (blocks up to 6.7e-3), h, the
+    energy terms and the FCI energy 1.1e-13."""
+    rhf, lows = closed_shell
+    low_r, low_u = lows[df]
+    one = ActiveSpace.from_indices(len(rhf.mo_energy), 5, [2, 4], [5, 7])
+    part = partition(one, rhf.mo_energy)
+    ref = rpa.screening_correction(low_r, part, 'mrpa')
+    for block in rpa.screening_correction(low_u, (part, part), 'mrpa'):
+        assert np.max(np.abs(block - ref)) < 1e-9
+    assert np.max(np.abs(ref)) > 1e-3
+    for sigma in SIGMAS_RPA:
+        g_r, _, en_r = _quiet(build_effective_hamiltonian, low_r, one,
+                              screening='mrpa', sigma=sigma)
+        g_u, space, en_u = _quiet(build_effective_hamiltonian, low_u,
+                                  (one, one), screening='mrpa', sigma=sigma)
+        for h in g_u[1]:
+            assert np.max(np.abs(h - g_r[1])) < 1e-9
+        for v in g_u[2]:
+            assert np.max(np.abs(v - g_r[2])) < 1e-9
+        for name in ENERGY_TERMS:
+            assert abs(getattr(en_u, name) - getattr(en_r, name)) < 1e-9, name
+        e_r = solve('pyscf_fci', g_r, 4, 4, spin_free=True)[0]
+        assert abs(_solve(g_u, space)[0] - e_r) < 1e-9
+
+
+@pytest.mark.parametrize('sigma', SIGMAS_RPA)
+@pytest.mark.parametrize('space', sorted(SPACES))
+def test_mrpa_reference_determinant_identity(oh, oh_low, space, sigma):
+    """mRPA through the driver: the reference determinant of H_eff keeps
+    the energy E_UHF + E_c - E_c^A; a particle-hole-only vtilde leaves the
+    mean-field energy of the active space alone (E_HF,ee[vtilde] = 0).
+    Measured: 5.7e-14 over the 12 builds."""
+    g_eff, sp, en = _quiet(build_effective_hamiltonian, oh_low[True],
+                           SPACES[space](oh), screening='mrpa', sigma=sigma)
+    assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
+               - (oh.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
+    assert en.e_hartree_dc == 0.0 and en.e_exchange_dc == 0.0
+    assert en.e_exchange_term == 0.0
+    assert isinstance(en.diagnostics['static_defect'], float)
+
+
+def test_mrpa_is_casida_only_whatever_the_reference(oh):
+    low = run_low_level(water(), method='rpa', mode='imagfrequency')
+    part = partition(ActiveSpace.from_counts(low.eps, 5, 2, 2), low.eps)
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        rpa.screening_correction(low, part, 'mrpa')

@@ -536,8 +536,14 @@ def screening_correction(low, part, screening):
     r, r' over the stacked pairs of both spins that are not active, one
     operator W^r - v between each spin's own active orbitals. 'crpa_ph'
     keeps the elements with a particle-hole pair on both sides, each side
-    in its own spin's partition. What follows is the restricted case, the
-    same formula with the spin weight 2 on one channel.
+    in its own spin's partition. 'mrpa' is Eq. 5 as it stands in spin
+    orbitals, on the active ph pairs of both spins, stacked:
+        (ia|jb)_eff = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A],
+    eta0_A the active block of eta0 = xpy xpy^T of the two-spin RPA. Its
+    same-spin and opposite-spin blocks differ for a spin-polarized
+    reference and coincide for a closed shell. What follows is the
+    restricted case, the same formulas with the spin weight 2 on one
+    channel.
     screening: 'bare' gives zeros; 'crpa' the restricted cRPA correction
         vt_tu,vw = -4 sum_{ia,jb in r} (tu|ia) [(delta + 4K)_rr^-1]_ia,jb (jb|vw),
     r the (i, a) pairs that are not both active: the
@@ -588,11 +594,7 @@ def screening_correction(low, part, screening):
                 f"method={METHOD!r} screening='mrpa' is built on the "
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
-        if low.unrestricted:
-            raise NotImplementedError(
-                f"method={METHOD!r} screening='mrpa' takes a restricted "
-                f"reference only.")
-        return _mrpa_correction(low, part)
+        return _per_block(_mrpa_correction(low, _channels(low, part)))
     chans = _channels(low, part)
     spins = _BLOCKS[len(chans)]
     n = chans[0].part.n_act
@@ -623,27 +625,44 @@ def screening_correction(low, part, screening):
     return _per_block(vt)
 
 
-def _mrpa_correction(low, part):
-    """The 'mrpa' vt of `screening_correction` (casida). (ia|jb) is the v
+def _mrpa_correction(low, chans):
+    """The 'mrpa' vt of `screening_correction` (casida), one block per spin
+    pair. On the active ph pairs of the channels, stacked,
+
+        (ia|jb)_eff = 1/(2g) [eta0_A^-1 delta_A eta0_A^-1 - delta_A],
+
+    eta0_A = xpy_A xpy_A^T the active rows of low.xpy and g the spin weight:
+    1/4 with the singlet eta0_S of the one restricted channel, 1/2 with the
+    eta0 of both spins. (ia|jb) is the v
     of the full RPA (low.factors or low.eri), the v eta0 was solved with, so
     that vt vanishes with every orbital active; it is computed there too,
-    not short-cut. eta0_S is a principal block of a positive definite
-    matrix, so one Cholesky factor serves both solves."""
-    n, k = part.n_act, part.n_act_occ
-    vt = np.zeros((n,) * 4)
-    if k == 0 or k == n:
+    not short-cut. eta0_A is a principal block of a positive definite
+    matrix, so one Cholesky factor serves both solves. Zero when no channel
+    has an active ph pair."""
+    n = chans[0].part.n_act
+    occ = [c.part.n_act_occ for c in chans]
+    spins = _BLOCKS[len(chans)]
+    vt = [np.zeros((n,) * 4) for _ in spins]
+    if not any(0 < k < n for k in occ):
         return vt
-    xpy_a = low.xpy[active_pair_mask(part)]
-    chans = _channels(low, part)
+    xpy_a = low.xpy[_join([active_pair_mask(c.part) for c in chans])]
     delta, k_ph, _ = _active_ph(chans, _active_v(low, chans))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
-    k_eff = 0.25 * (0.5 * (k_eff + k_eff.T) - np.diag(delta))
-    ph = (k_eff - k_ph).reshape(k, n - k, k, n - k)
-    vt[:k, k:, :k, k:] = ph
-    vt[k:, :k, :k, k:] = ph.transpose(1, 0, 2, 3)
-    vt[:k, k:, k:, :k] = ph.transpose(0, 1, 3, 2)
-    vt[k:, :k, k:, :k] = ph.transpose(1, 0, 3, 2)
+    k_eff = (1.0 / (2.0 * _spin_weight(chans))) * (
+        0.5 * (k_eff + k_eff.T) - np.diag(delta))
+    correction = k_eff - k_ph
+    # the stacked pairs of each channel: k occupied times n - k virtual
+    sizes = [k * (n - k) for k in occ]
+    first = np.concatenate([[0], np.cumsum(sizes)])
+    for block, (s, t) in zip(vt, spins):
+        k_s, k_t = occ[s], occ[t]
+        ph = correction[first[s]:first[s + 1], first[t]:first[t + 1]].reshape(
+            k_s, n - k_s, k_t, n - k_t)
+        block[:k_s, k_s:, :k_t, k_t:] = ph
+        block[k_s:, :k_s, :k_t, k_t:] = ph.transpose(1, 0, 2, 3)
+        block[:k_s, k_s:, k_t:, :k_t] = ph.transpose(0, 1, 3, 2)
+        block[k_s:, :k_s, k_t:, :k_t] = ph.transpose(1, 0, 3, 2)
     return vt
 
 
