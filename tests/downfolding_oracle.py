@@ -33,7 +33,7 @@ Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
 """
 import numpy as np
-from pyscf import dft, gto, scf
+from pyscf import df, dft, gto, lib, scf
 
 
 def water():
@@ -89,6 +89,29 @@ def h2_broken(basis='6-31g'):
     mf.kernel(dm0=dm)
     assert mf.converged and mf.spin_square()[0] > 0.5
     return mf
+
+
+def fitted_spin_orbital_integrals(mf):
+    """eri_so over the 2n spin orbitals (alpha first), as
+    `spin_orbital_integrals` gives it, but of the density-fitted interaction
+    of the mean field `mf`: (pq|rs) = sum_Q L_Q,pq L_Q,rs with L the
+    Cholesky-decomposed three-index integrals of mf's auxiliary basis,
+    computed here by pyscf from the auxiliary molecule, in each spin's
+    orbitals."""
+    mol = mf.mol
+    l_ao = lib.unpack_tril(df.incore.cholesky_eri(mol,
+                                                  auxmol=mf.with_df.auxmol))
+    l_mo = [np.einsum('Qmn,mp,nq->Qpq', l_ao, c, c, optimize=True)
+            for c in mf.mo_coeff]
+    n = l_mo[0].shape[1]
+    eri_so = np.zeros((2 * n,) * 4)
+    for s in (0, 1):
+        bs = slice(s * n, (s + 1) * n)
+        for r in (0, 1):
+            br = slice(r * n, (r + 1) * n)
+            eri_so[bs, bs, br, br] = np.einsum('Qpq,Qrs->pqrs', l_mo[s],
+                                               l_mo[r], optimize=True)
+    return eri_so
 
 
 def _transform(mol, c1, c2, c3, c4):

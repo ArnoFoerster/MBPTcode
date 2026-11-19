@@ -48,7 +48,9 @@ from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
 from tests.downfolding_oracle import (CH2, NH, OH, active_pairs_so, drpa_so,
-                                      env_residues_uhf, h2_broken,
+                                      env_residues_uhf,
+                                      fitted_spin_orbital_integrals,
+                                      h2_broken,
                                       mo_integrals, reference_energy_uhf,
                                       rpa_energy, sigma_mode_a,
                                       sigma_mode_a_uhf, sigma_srg,
@@ -564,8 +566,11 @@ def test_unrestricted_numerical_routes_point_to_casida(oh):
 
 @pytest.fixture(scope='module')
 def oh_low(oh):
-    """The casida low-level results of OH on exact (df=False) and on fitted
-    (df=True, here the eigendecomposition of the exact) integrals."""
+    """The casida low-level results of OH on the exact four-index blocks
+    (df=False) and on three-index factors (df=True). This UHF has no density
+    fit, so those factors are the eigendecomposition of the exact integrals:
+    the same v in another form, without a fitting error. A density-fitted
+    UHF is `test_density_fitted_uhf_through_the_driver`."""
     return {df: run_low_level(oh, method='rpa', df=df) for df in (False, True)}
 
 
@@ -945,7 +950,9 @@ def _quiet(function, *args, **kwargs):
 @pytest.fixture(scope='module')
 def closed_shell():
     """Water/6-31G as RHF and as the same determinant in a UHF object, with
-    the casida low-level results of both on exact and on fitted integrals."""
+    the casida low-level results of both on the exact four-index integrals
+    (df=False) and on their exact three-index factors (df=True; the mean
+    field has no density fit)."""
     rhf = water()
     uhf = rhf.to_uhf()
     lows = {df: (run_low_level(rhf, method='rpa', df=df),
@@ -1325,3 +1332,105 @@ def test_mrpa_is_casida_only_whatever_the_reference(oh):
     part = partition(ActiveSpace.from_counts(low.eps, 5, 2, 2), low.eps)
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         rpa.screening_correction(low, part, 'mrpa')
+
+
+# --- a density-fitted mean field -----------------------------------------------
+
+def test_density_fitted_uhf_through_the_driver():
+    """OH on a density-fitted UHF: the RPA then runs on the mean field's own
+    fit, a v that differs from the exact one (elsewhere in this file
+    df=True is the exact v in three-index form). Every RPA quantity is
+    compared with the oracle fed with that fitted v, built here by pyscf
+    from the auxiliary basis: E_c, vtilde for crpa, crpa_ph and mrpa, E_c^A,
+    the static defect (zero for crpa) and Sigma_bar^E in both forms. The
+    bare v of H_eff and the core Fock operator stay exact: v_eff is the
+    exact active integrals plus the fitted vtilde, h_eff has the exact f,
+    and the reference determinant has the energy of the exact HF expression
+    on these orbitals plus E_c - E_c^A, not the density-fitted SCF energy.
+
+    Measured (93 auxiliary functions): the fit moves v by up to 1.2e-3, E_c
+    by 3.1e-5, the SCF energy by 3.6e-7 and Sigma_bar by 1.1e-5. Against the
+    oracle on the fitted v: E_c 5.7e-14, vtilde 1.2e-15 (crpa), 5.4e-16
+    (crpa_ph), 8.8e-14 (mrpa), E_c^A 8.9e-16, the defect 3.2e-15 (9.4e-16
+    for crpa; 6.5e-4 if v_eff is put on the exact v), Sigma_bar 3.7e-15
+    ('srg') and 7.3e-14 ('mode_a'), the reference-determinant identity
+    5.7e-14 (3.6e-7 off with the density-fitted SCF energy). Tried against
+    three wrong codes, each of which fails it: the spin weight 2 on two
+    channels, the active v scaled by 1 + 1e-6, the beta pairs left out of
+    the stacked factors."""
+    mf = unrestricted(OH, 1, density_fit=True)
+    low = run_low_level(mf, method='rpa')
+    assert low.factors is not None and low.eri is None
+    spaces = _asymmetric(mf)
+    parts = _parts(mf, spaces)
+    nmo, n = mf.mo_coeff.shape[-1], parts[0].n_act
+    eri_exact, eps_so, occ_so, act_so = _spin_orbitals(mf, parts)
+    eri_fit = fitted_spin_orbital_integrals(mf)
+    so = (eri_fit, eps_so, occ_so, act_so)
+    active = np.ix_(act_so, act_so, act_so, act_so)
+    e_hf = scf.UHF(mf.mol).energy_tot(dm=mf.make_rdm1())
+    masks = (_ph_mask(parts[0], parts[0]), _ph_mask(parts[0], parts[1]),
+             _ph_mask(parts[1], parts[1]))
+
+    # the fit is a real one: v, E_c and the SCF energy carry its error
+    assert 1e-6 < np.max(np.abs(eri_fit - eri_exact)) < 1e-2
+    assert abs(low.e_c_full - drpa_so(eri_fit, eps_so, occ_so)[0]) < 1e-9
+    assert abs(low.e_c_full - drpa_so(eri_exact, eps_so, occ_so)[0]) > 1e-7
+    assert abs(e_hf - mf.e_tot) > 1e-7
+
+    crpa = vtilde_crpa_uhf(*so)
+    corrections = {'crpa': crpa,
+                   'crpa_ph': tuple(x * m for x, m in zip(crpa, masks)),
+                   'mrpa': vtilde_mrpa_uhf(*so)}
+    v_fit = spin_blocks(eri_fit[active], n)
+    v_exact = spin_blocks(eri_exact[active], n)
+    for screening, vt in corrections.items():
+        ours = rpa.screening_correction(low, parts, screening)
+        for block, ref in zip(ours, vt):
+            assert np.max(np.abs(block - ref)) < 1e-9
+        # E_c^A and the defect are on the fitted v, the v of the full RPA
+        e_ref, defect_ref = _oracle_active_rpa(
+            so, tuple(x + y for x, y in zip(v_fit, vt)))
+        g_eff, sp, en = build_effective_hamiltonian(low, spaces,
+                                                    screening=screening)
+        assert abs(en.e_c_active - e_ref) < 1e-9
+        assert abs(en.diagnostics['static_defect'] - defect_ref) < 1e-9
+        # H_eff carries the exact bare v
+        for block, bare, corr in zip(g_eff[2], v_exact, vt):
+            assert np.max(np.abs(block.transpose(0, 2, 1, 3) - bare
+                                 - corr)) < 1e-9
+        assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
+                   - (e_hf + en.e_c_full - en.e_c_active)) < 1e-9
+        if screening == 'crpa':
+            assert en.diagnostics['static_defect'] < 1e-10
+            # on the exact v instead, the crpa defect is the fitting error
+            mixed = tuple(x + y for x, y in zip(v_exact, vt))
+            assert rpa.static_defect(low, parts, mixed) > 1e-7
+
+    exact_so = (eri_exact, eps_so, occ_so, act_so)
+    for ours, ref, other in zip(
+            rpa.embedding_self_energy(low, parts, 'srg'),
+            sigma_srg_uhf(*so, DOWNFOLDING_SRG_S),
+            sigma_srg_uhf(*exact_so, DOWNFOLDING_SRG_S)):
+        assert np.max(np.abs(ours - ref)) < 1e-9
+        assert np.max(np.abs(ours - other)) > 1e-8
+    mode_a = _quiet(rpa.embedding_self_energy, low, parts, 'mode_a')
+    for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
+        assert np.max(np.abs(ours - ref)) < 1e-9
+
+    # h_eff with Sigma^E: the exact f, the Hartree double counting of the
+    # fitted vtilde, and Sigma_bar on the fitted W
+    g_eff, sp, en = _quiet(build_effective_hamiltonian, low, spaces,
+                           screening='crpa', sigma='srg')
+    h_so, _ = spin_orbital_integrals(mf.mol, *mf.mo_coeff)
+    occ_env = list(spaces[0].env_occ) + list(nmo + spaces[1].env_occ)
+    occ_act = list(range(sp['n_elec_active'][0])) + [
+        n + k for k in range(sp['n_elec_active'][1])]
+    f, t_dc = spin_orbital_one_body(h_so, eri_exact, occ_env, act_so,
+                                    _local_so(crpa), occ_act, 'hartree')
+    sigma_bar = sigma_srg_uhf(*so, DOWNFOLDING_SRG_S)
+    for spin, block in enumerate((slice(0, n), slice(n, 2 * n))):
+        assert np.max(np.abs(g_eff[1][spin] - (f - t_dc)[block, block]
+                             - sigma_bar[spin])) < 1e-9
+    assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
+               - (e_hf + en.e_c_full - en.e_c_active)) < 1e-9
