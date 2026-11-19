@@ -396,13 +396,23 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
             f"method={METHOD!r} mode={mode!r} is {how}; df=False (the exact "
             f"4-centre screening) is mode='casida' only.")
     if isinstance(mf, scf.uhf.UHF):
+        eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
+        nocc = tuple(closed_shell_nocc(occ) for occ in mf.mo_occ)
         if mode != 'casida':
+            for spin, eps_s, nocc_s in zip(SPINS, eps, nocc):
+                if not 0 < nocc_s < len(eps_s):
+                    raise NotImplementedError(
+                        f"method={METHOD!r} mode={mode!r} needs occupied "
+                        f"and virtual orbitals in both spins: the {spin} "
+                        f"channel has {nocc_s} occupied of {len(eps_s)} "
+                        f"orbitals, so no transition and no mid-gap, which "
+                        f"the frequency grids and the self-energy of this "
+                        f"route are built on. Use mode='casida'.")
+        if mode == 'space-time':
             raise NotImplementedError(
                 f"method={METHOD!r} mode={mode!r} takes a restricted "
                 f"reference only; for an unrestricted one (UHF/UKS) use "
                 f"mode='casida'.")
-        eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
-        nocc = tuple(closed_shell_nocc(occ) for occ in mf.mo_occ)
     else:
         eps = np.asarray(get_orbital_energies(mf))
         nocc = closed_shell_nocc(mf.mo_occ)
@@ -432,13 +442,16 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
 
 
 def _imaginary_axis(eps, nocc, factors, numerics):
-    """(E_c, cache) of the restricted direct RPA on the imaginary axis:
+    """(E_c, cache) of the direct RPA on the imaginary axis:
     E_c by `rpa_correlation_energy_imaginary_axis` (minimax grid), and the
     cache with 'grid', the points and weights that energy integrates on
     (`imaginary_axis_energy_grid`, the function it calls), and 'p0',
     P(0) = 1 - W(0)^-1 in the normalized fitting basis. The active E_c^A is
-    integrated on this grid so that the E_c pair is one quadrature."""
-    lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode='restricted')
+    integrated on this grid so that the E_c pair is one quadrature. For two
+    spin channels (eps, nocc and factors pairs) the response is the sum of
+    the two spins' and the grid covers the transitions of both."""
+    spin_mode = 'unrestricted' if isinstance(nocc, tuple) else 'restricted'
+    lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode=spin_mode)
     e_c = rpa_correlation_energy_imaginary_axis(lr, nocc, numerics)
     grid = imaginary_axis_energy_grid(eps, nocc, numerics)
     p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]

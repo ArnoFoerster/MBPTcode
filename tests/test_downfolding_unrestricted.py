@@ -554,12 +554,9 @@ def test_a_restricted_run_is_one_channel():
     assert isinstance(low.nocc, int) and low.eps.ndim == 1
 
 
-def test_unrestricted_numerical_routes_point_to_casida(oh):
-    """The imaginary-frequency and space-time routes do not take an
-    unrestricted reference yet."""
-    for mode in ('imagfrequency', 'space-time'):
-        with pytest.raises(NotImplementedError, match="mode='casida'"):
-            run_low_level(oh, method='rpa', mode=mode)
+def test_space_time_does_not_take_an_unrestricted_reference_yet(oh):
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        run_low_level(oh, method='rpa', mode='space-time')
 
 
 # --- the screening correction of an active space ------------------------------
