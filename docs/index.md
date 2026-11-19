@@ -41,7 +41,8 @@
 - [Downfolding](methods/downfolding.md) — static effective Hamiltonians of an
   active space from HF (CASCI) and RPA (bare, cRPA, cRPA_ph, mRPA) low-level
   methods on the casida, imaginary-frequency and space-time routes, optionally
-  with the static environment self-energy Sigma^E, with the constant E_0
+  with the static environment self-energy Sigma^E, with the constant E_0;
+  restricted and unrestricted (UHF/UKS) references
 - [Finite temperature](methods/finite-temperature.md) — Matsubara-axis grids
 - [Periodic systems](methods/periodic.md) — k-point RPA, BSE and GW for
   crystals, metals and slabs

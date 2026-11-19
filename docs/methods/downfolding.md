@@ -19,6 +19,9 @@ Available now:
   optionally (every route) `sigma='srg'` or `'mode_a'`: the static
   environment self-energy Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
+- Restricted closed-shell (RHF/RKS) and unrestricted (UHF/UKS) references,
+  on every route. An unrestricted one gives an H_eff with different alpha
+  and beta blocks; see [Unrestricted references](#unrestricted-references).
 
 ## Calling it
 
@@ -133,6 +136,9 @@ names `e_hf_core`, `e_hf_ee` (= `e_hartree + e_exchange`) and
 A restricted reference is one spin channel throughout: the general layer
 builds the exact J and K of the environment once and transforms the active
 integrals once, and the result goes to the restricted (spin-free) solver.
+An unrestricted reference is two channels, alpha and beta, through the same
+code; a restricted calculation computes nothing twice and gives the numbers
+it gave before the second channel existed.
 
 ## What is built
 
@@ -197,6 +203,143 @@ orbitals, `Delta` the orbital-energy differences:
 | E_RPA,corr | 1/2 sum Omega - 1/2 sum_ia (Delta_ia + 2 K_ia,ia); Omega from Delta^1/2 (Delta + 4K) Delta^1/2, singlet modes only |
 | cRPA v~_tu,vw | -4 (tu\|ia) [(Delta + 4K)_rr^-1]_ia,jb (jb\|vw), "rr" the residual pairs |
 | mRPA (ia\|jb)_eff | 1/4 [eta0_S^-1 Delta_A eta0_S^-1 - Delta_A]; spin orbitals: 1/2 [eta0_A^-1 Delta_A eta0_A^-1 - Delta_A] |
+
+## Unrestricted references
+
+A `scf.UHF` or `dft.UKS` mean field runs through the same two calls. The
+mean-field object alone decides: RHF/RKS is the restricted path, UHF/UKS the
+unrestricted one, also when its alpha and beta orbitals coincide (nothing is
+collapsed). The alpha and beta orbitals, orbital energies and occupied counts
+differ, each spin has its own active space, and H_eff has different alpha and
+beta blocks.
+
+```python
+from pyscf import gto, scf
+
+from src.MultiReference.Downfolding import (build_effective_hamiltonian,
+                                            run_low_level)
+from src.SingleReference.common.active_space import unrestricted_from_counts
+from src.Solvers.active_space import solve
+
+mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1)   # OH
+mf = scf.UHF(mol).run()
+nocc = tuple(int((occ > 0).sum()) for occ in mf.mo_occ)            # (5, 4)
+active = unrestricted_from_counts(mf.mo_energy, nocc, 4, (3, 2))
+
+low = run_low_level(mf, method='rpa', mode='casida')
+g_eff, space, energies = build_effective_hamiltonian(
+    low, active, screening='crpa', sigma='srg')
+out = {}
+roots = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
+              spin_free=space['spin_free'], nroots=2, out=out,
+              spin_overlap=space['spin_overlap'])
+print(roots, out['spin_square'])
+```
+
+**The active space is a pair** `(space_alpha, space_beta)` of `ActiveSpace`
+objects, each built from that spin's orbital count and occupied count, with
+independent orbital indices and the same number of active orbitals. The
+number of active electrons is `(N_alpha, N_beta)`, the active occupied counts
+of the two spins. `unrestricted_from_counts(eps, nocc, n_act, nelec_active)`
+builds the contiguous pair (per spin the highest occupied and the lowest
+virtual orbitals, pyscf UCASCI's convention). Any other choice is two
+`ActiveSpace.from_indices(norb, nocc_spin, occ, virt)`, made in the calling
+script; no selection by character or by overlap between the spins is
+provided. One `ActiveSpace` with an unrestricted reference, a pair with a
+restricted one, two spaces of different size, and a space built with the
+other spin's counts are refused. Both selections may be empty.
+
+**What comes back.** With `spin_free=True` (the default)
+
+    g_eff = {0: E_0, 1: (h_alpha, h_beta), 2: (aa, ab, bb)}
+
+each two-body block in the physicist order of the restricted `g_eff[2]`,
+`block[p,q,r,s] = <pq|rs>`, the opposite-spin one
+`<p_alpha q_beta | r_alpha s_beta>`. With `spin_free=False` it is the same
+2 n_act interleaved spin orbitals as for a restricted reference (alpha at
+2p, beta at 2p+1), built from those blocks. In `space`, `n_elec_active` is
+`(N_alpha, N_beta)`, `act_idx`, `act_occ_idx`, `act_vir_idx` and
+`active_space` are pairs (alpha, beta), and `spin_overlap` holds the
+alpha-beta overlaps of the orbitals that `solve` needs for <S^2>. Every term
+of `energies` is the total over both spins. Diagnostics that belong to one
+spin are pairs (the pole-free window, the pole distances, Z, the
+continuation spread); a summary of the whole stays one number (the static
+defect, the largest over the three blocks; the SRG damping, the largest over
+both spins). Messages that name an orbital name its spin
+("beta orbital 6").
+
+**The solver.** `'pyscf_fci'` solves the per-spin blocks with
+`fci.direct_uhf` at the given `(N_alpha, N_beta)`. In spin-polarized
+orbitals H_eff conserves S_z only, so the roots are the lowest states of
+that S_z of any spin, and are not spin eigenfunctions in general.
+`solve(..., out=out, spin_overlap=space['spin_overlap'])` puts <S^2> of each
+root in `out['spin_square']`: that of the whole molecule's state, the active
+CI vector with the inactive core determinant, from the true alpha-beta
+overlaps. (pyscf's own `spin_square` assumes alpha orbital p and beta
+orbital p are one function: for the triplet root of a broken-symmetry H2
+it gives 0 instead of 2.) `'openfermion'` takes the spin-orbital form with
+N_alpha = N_beta only; the DMRG and coupled-cluster backends refuse a
+spin-resolved H_eff and name `'pyscf_fci'`.
+
+**The formulas** are those of the restricted case written over the
+particle-hole pairs of both spins, stacked (the alpha pairs, then the beta
+ones); the code is one implementation with the spin weight g, the number of
+electrons an occupied orbital of one channel holds: 2 for the one channel
+of a restricted reference, 1 for each of two.
+
+| quantity | with g | restricted (g = 2) | unrestricted (g = 1) |
+|---|---|---|---|
+| RPA problem | A + B = Delta + 2g K | Delta + 4K, singlet | Delta + 2K on the stacked pairs, K_(ia s),(jb s') = (i_s a_s\|j_s' b_s') |
+| W(0) - v, cRPA v~ | -2g V (Delta + 2gK)_rr^-1 V^T | -4 | -2, between each spin's own active orbitals: three blocks |
+| residues of W | sqrt(g) sum (tr\|ia)(X+Y) | sqrt(2) | 1, the sum over both spins' pairs |
+| chi0(0) | -2g sum B_ia B_ia^T / Delta_ia | -4 | -2 per spin, summed |
+| mRPA (ia\|jb)_eff | 1/(2g) [eta0_A^-1 Delta_A eta0_A^-1 - Delta_A] | 1/4, singlet eta0 | 1/2, eta0 of both spins |
+| active RPA | Delta_A + 2g K^A | Delta_A + 4 K^A | Delta_A + 2 K^A on the active pairs of both spins |
+
+W is one spin-independent operator, so the three blocks of v~ are the same
+W^r - v evaluated between alpha and alpha, alpha and beta, beta and beta
+orbitals. For a spin-polarized reference the same-spin and opposite-spin
+blocks of the mRPA correction differ; for a closed shell they coincide.
+v~ for `crpa_ph` and `mrpa`, E_c^A and the correction of the static defect
+vanish only when neither spin has an active particle-hole pair; a spin
+without one (a triplet with N^A = (2, 0), say) is fine.
+
+**Sigma^E** is built per spin, with that spin's residues (or, on the
+numerical routes, that spin's factors and its own mid-gap), its orbital
+energies and the excitation energies of the two-spin RPA, which both spins
+share; one `sigma` and one `srg_s` serve both. The pole-free window is per
+spin. Its Omega_min is the lowest excitation of the two-spin problem, which
+includes the spin-density modes: for a closed shell these carry no weight in
+W, so the window of a UHF run on a closed shell is slightly narrower than
+that of the RHF run (water/6-31G: 0.705 against 0.728 Ha). That is on the
+safe side: the near-pole warning can come too often, never too rarely.
+
+**The routes.** `'casida'` takes every unrestricted reference.
+`'imagfrequency'` and `'space-time'` need occupied and virtual orbitals in
+both spins and refuse a reference without them (triplet H2 has no occupied
+beta orbital), pointing to casida. On `'space-time'` the ISDF factors hold
+one collocation per spin on a shared Coulomb factor; the `'rows'`
+realization of the fit builds one collocation and is refused for an
+unrestricted reference (`numerics.isdf.fit='replicated'`, the default,
+works). On the numerical routes Omega_min is the lowest root of the dense
+two-spin problem up to 2000 pairs, both spins counted. Above that there is
+no solver for the one root, and it is replaced by its exact lower bound, the
+smallest orbital-energy gap of the two spins, with a `SigmaNearPoleWarning`
+and the named flag `'sigma_pole_window_bound'`; the windows are then
+narrower still. `'mrpa'` is casida only, as for a restricted reference.
+
+**Not supported.** An open shell run restricted (ROHF/ROKS) is refused: its
+orbitals are not canonical for the alpha and beta Fock operators; run it as
+UHF/UKS. A UHF solution whose occupied orbitals are not the lowest of their
+spin (a symmetry-constrained or MOM solution) is refused, naming the spin.
+
+**A symmetry-broken reference stays visible in H_eff.** H_eff is built on
+the UHF determinant, and its states inherit what that determinant breaks.
+For the OH radical, whose 2-Pi ground state is doubly degenerate, the two
+lowest states of the (5,4) H_eff are the two components, and they are split
+by 0.97 eV with `method='hf'`, 0.90 eV with `crpa_ph` and `mrpa`, 3.6 eV
+with `crpa`, and 0.02 eV with `crpa` and `sigma='srg'` (cc-pVDZ; the
+example below prints them).
 
 ## Where the code differs from the printed paper
 
@@ -379,8 +522,8 @@ NH3 and 8.5e-5 on benzene (G1 grid). The FCI energy of H_eff with
 
 ## Kohn-Sham references
 
-A restricted KS mean field (GGA or hybrid) runs, with the KS orbitals and
-energies. f and t^DC are still built from h^(0) and the bare v, never from the
+A restricted or unrestricted KS mean field (GGA or hybrid) runs, with the KS
+orbitals and energies. f and t^DC are still built from h^(0) and the bare v, never from the
 KS Fock matrix, and E_HF,core and E_HF,ee are the HF energy expression on the
 KS orbitals, without any XC energy. The RPA uses the KS orbital energies.
 This is what the paper's SI data for H2/PBE show. The paper's Appendix A
@@ -395,8 +538,9 @@ reference E_0 is a well-defined working choice, not a derived one.
   energies on both sides: include or exclude the whole set (`from_irreps`,
   `from_population`). Arbitrary rotations inside a degenerate set would
   otherwise change single elements of H_eff.
-- **Mean field.** Restricted closed-shell, gas phase, T = 0 only. UHF,
-  open-shell ROHF and solvent models are refused.
+- **Mean field.** Gas phase, T = 0 only; restricted closed-shell or
+  unrestricted with the lowest orbitals of each spin occupied. Open-shell
+  ROHF and solvent models are refused.
 - **Serial only.** More than one MPI rank is refused (every rank would repeat
   the whole calculation).
 - **Option validation.** An unknown or not-yet-available mode, screening,
@@ -496,6 +640,24 @@ imagfrequency and space-time all four:
   the real Sigma_bar and with Sigma_bar forced to 0); every orbital active
   still gives FCI; along a scan through a pole crossing `'srg'` stays smooth.
 
+- Unrestricted references (no published numbers exist): the same
+  determinant handed over as RHF and as a UHF object gives the same H_eff
+  and energy terms on every route (1e-13 on casida); with every orbital of
+  both spins active the screening vanishes, the E_c pair cancels and H_eff
+  gives the FCI energy of the molecule; with none active E_0 is E_UHF + E_c;
+  the reference determinant of H_eff has the energy
+  E_UHF + E_c - E_c^A for every screening, with and without Sigma^E.
+  Independently of the code: the oracle written in spin orbitals without
+  any spin adaptation, for E_c, v~ (cRPA, mRPA), the residues and both
+  Sigma^E forms, on spaces with different orbitals per spin,
+  N_alpha != N_beta and unequal cores (agreement 2e-13); pyscf's UCASCI for
+  `method='hf'` and its URPA for E_c on the same density fit; mRPA
+  reproduces the full RPA's zeroth moment on the active pairs. The
+  numerical routes against casida on the same factors: the mean field's own
+  density fit on imagfrequency, the route's own ISDF factors on space-time
+  (the FCI energy of H_eff to 3e-8 Eh, Sigma_bar to 1e-6 Eh). Molecules:
+  the OH radical, triplet CH2, broken-symmetry H2, and OH with PBE0.
+
 Use spherical basis functions (`cart=False`, the PySCF default) when comparing
 with the paper: Cartesian ones are far further from its numbers.
 
@@ -506,10 +668,15 @@ with the paper: Cartesian ones are far further from its numbers.
 - omega other than 0, and other ways of making W^r static.
 - Self-consistent energies in Sigma^E; the term iG^A(W - W^A[v_eff]) for
   `bare`, `crpa_ph` and `mrpa`.
-- Unrestricted references (the internals are per spin channel, the
-  interfaces are not yet).
+- For unrestricted references: ROHF/ROKS; spin-adapted states (H_eff
+  conserves S_z only); the DMRG and coupled-cluster backends on a
+  spin-resolved H_eff; selecting the two active spaces by character or by
+  alpha-beta overlap; a Davidson for Omega_min of the two-spin problem
+  above 2000 pairs (a lower bound is used).
 - Further low-level methods (MP2, TDHF/BSE, CC polarizability), a MACIS
   backend and MPI-parallel downfolding.
 
-Example: [`examples/22_rpa_downfolding.py`](../../examples/22_rpa_downfolding.py)
-(ethylene and benzene pi spaces).
+Examples: [`examples/22_rpa_downfolding.py`](../../examples/22_rpa_downfolding.py)
+(ethylene and benzene pi spaces) and
+[`examples/23_unrestricted_downfolding.py`](../../examples/23_unrestricted_downfolding.py)
+(the OH radical on a UHF reference, all three routes, <S^2>).
