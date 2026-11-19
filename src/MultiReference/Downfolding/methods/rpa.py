@@ -237,8 +237,18 @@ def _channels(low, part):
         raise ValueError(
             'an unrestricted (UHF/UKS) low-level result takes a pair of '
             'Partitions, (alpha, beta), one per spin; got one.')
+    return tuple(replace(chan, part=p)
+                 for chan, p in zip(_reference_channels(low), parts))
+
+
+def _reference_channels(low):
+    """The spin channels of `low` itself, without an active space (their
+    `part` is None): one for a restricted result, (alpha, beta) for an
+    unrestricted one."""
+    if not low.unrestricted:
+        return (_Channel(low.eps, low.nocc, low.factors, None, None),)
     factors = (None, None) if low.factors is None else low.factors
-    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], parts[s],
+    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], None,
                           SPINS[s]) for s in (0, 1))
 
 
@@ -1153,17 +1163,29 @@ def lowest_excitation(low, solver=None):
     own RPA. Cached in low.cache['omega_min'] on the first request.
     solver: 'dense' or 'davidson' forces that solver and bypasses the cache
     (for tests).
+
+    An unrestricted result: the lowest root of the two-spin problem on the
+    stacked pairs (A = delta + K, B = K), by the dense solve up to the same
+    number of pairs, both spins counted. Above it there is no two-spin
+    Davidson, and Omega_min is replaced by its exact lower bound, the
+    smallest orbital-energy gap of the two spins (`_gap_bound`), with a
+    SigmaNearPoleWarning and the named flag 'sigma_pole_window_bound'.
+    solver: 'dense' or 'bound' there.
     """
     if low.mode == 'casida':
         return float(low.omega.min()) if low.omega.size else None
 
     def solved():
-        nocc = low.nocc
-        n_pair = nocc * (len(low.eps) - nocc)
+        chans = _reference_channels(low)
+        n_pair = sum(c.nocc * (len(c.eps) - c.nocc) for c in chans)
         if not n_pair:
             return None
-        rule = ('dense' if n_pair <= DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS
-                else 'davidson')
+        dense = n_pair <= DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS
+        if low.unrestricted:
+            how = choice(solver or ('dense' if dense else 'bound'),
+                         ('dense', 'bound'), 'solver')
+            return _lowest_dense(low) if how == 'dense' else _gap_bound(low)
+        rule = 'dense' if dense else 'davidson'
         how = choice(solver or rule, ('dense', 'davidson'), 'solver')
         return _lowest_dense(low) if how == 'dense' else _lowest_davidson(low)
 
@@ -1192,23 +1214,48 @@ def _cached(low, key, build):
 
 
 def _lowest_dense(low):
-    """The lowest root of the dense restricted singlet Casida problem on the
-    occupied-virtual factors of the route: K = B_ov^T B_ov, B_ov from
-    low.factors or, on space-time, sum_P D_PQ X_Pi X_Pa."""
-    nocc, eps = low.nocc, low.eps
+    """The lowest root of the dense Casida problem on the occupied-virtual
+    factors of the route, A = delta + g K, B = g K with K = B_ov^T B_ov: the
+    restricted singlet one (g = 2), or the two-spin one on the stacked pairs
+    (g = 1). B_ov from low.factors or, on space-time, sum_P D_PQ X_Pi
+    X_Pa."""
+    chans = _reference_channels(low)
+    g = _spin_weight(chans)
     if low.mode == 'space-time':
+        nocc = low.nocc
         x, d = low.cache['factors']
         pairs = x[:, :nocc, None] * x[:, None, nocc:]
         b_ov = d.T @ pairs.reshape(len(x), -1)
     else:
-        b = low.factors
-        b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
+        b_ov = _join([_ov_factors(c) for c in chans], axis=1)
     k = b_ov.T @ b_ov
-    a = 2.0 * k
-    a[np.diag_indices_from(a)] += (eps[nocc:][None, :]
-                                   - eps[:nocc][:, None]).ravel()
-    return float(np.min(CasidaSolver(a, 2.0 * k).solve(
+    a = g * k
+    a[np.diag_indices_from(a)] += _join([_delta(c) for c in chans])
+    return float(np.min(CasidaSolver(a, g * k).solve(
         numerics=low.numerics)[0]))
+
+
+def _gap_bound(low):
+    """The smallest orbital-energy gap eps_a - eps_i over the spin channels:
+    a lower bound of Omega_min, used where the two-spin problem is too large
+    for the dense solve. In the direct RPA Omega^2 are the eigenvalues of
+    delta^1/2 (delta + 2K) delta^1/2 with K positive semidefinite, which is
+    delta^2 or more, so every Omega is at least the smallest delta. Raises
+    the named flag 'sigma_pole_window_bound' (SigmaNearPoleWarning)."""
+    gap = min(float(_delta(c).min()) for c in _reference_channels(low)
+              if 0 < c.nocc < len(c.eps))
+    flag('sigma_pole_window_bound',
+         f"Omega_min, the lowest RPA excitation that bounds the pole-free "
+         f"window of the environment self-energy, is replaced by its lower "
+         f"bound {gap:.6f} Ha, the smallest orbital-energy gap of the two "
+         f"spins: an unrestricted reference with more than "
+         f"{DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS} particle-hole pairs has no "
+         f"solver for the one root on mode={low.mode!r}. The pole-free "
+         f"windows are then narrower than the true ones, so a "
+         f"SigmaNearPoleWarning can come for an orbital that is not near a "
+         f"pole, never the other way. Sigma_bar^E and H_eff do not depend "
+         f"on it.", SigmaNearPoleWarning, stacklevel=2)
+    return gap
 
 
 def _lowest_davidson(low):
@@ -1274,21 +1321,26 @@ def pole_window(low, part):
     the one Omega_min of the two-spin problem. That Omega_min includes the
     spin-density modes, which carry no weight in W for a closed shell, so
     the windows are conservative: narrower than needed, never wider."""
-    return _per_channel([_window(low, c) for c in _channels(low, part)])
+    return _per_channel(_windows(low, _channels(low, part)))
 
 
-def _window(low, chan):
-    """`pole_window` of one spin channel."""
-    part = chan.part
-    if not len(part.inactive) and not len(part.env_virt):
-        return -np.inf, np.inf
-    om = lowest_excitation(low)
-    if om is None:
-        return -np.inf, np.inf
-    eps = chan.eps
-    lo = eps[part.inactive].max() - om if len(part.inactive) else -np.inf
-    hi = eps[part.env_virt].min() + om if len(part.env_virt) else np.inf
-    return float(lo), float(hi)
+def _windows(low, chans):
+    """`pole_window` of each spin channel, as a list. Omega_min is asked for
+    once for all of them, and not at all when no channel has an environment
+    orbital."""
+    om = None
+    if any(len(c.part.inactive) or len(c.part.env_virt) for c in chans):
+        om = lowest_excitation(low)
+    windows = []
+    for chan in chans:
+        part, eps = chan.part, chan.eps
+        lo, hi = -np.inf, np.inf
+        if om is not None and len(part.inactive):
+            lo = float(eps[part.inactive].max() - om)
+        if om is not None and len(part.env_virt):
+            hi = float(eps[part.env_virt].min() + om)
+        windows.append((lo, hi))
+    return windows
 
 
 class SigmaNearPoleWarning(RuntimeWarning):
@@ -1318,10 +1370,8 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
         why = (f"continuation_margin {margin:g} Ha, the distance beyond "
                f"which the Pade continuation from the imaginary axis is "
                f"accurate")
-    named, windows = [], []
-    for chan in chans:
-        lo, hi = _window(low, chan)
-        windows.append((lo, hi))
+    named, windows = [], _windows(low, chans)
+    for chan, (lo, hi) in zip(chans, windows):
         act = chan.part.act
         eps = chan.eps[act]
         dist = np.minimum(eps - lo, hi - eps)
@@ -1647,14 +1697,13 @@ def _sigma_poles(low, chans, sigma, sigma_bar, kept):
     srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
         finite s is applied.
     """
-    windows, distances, weights, named = [], [], [], []
+    windows, distances, weights, named = _windows(low, chans), [], [], []
     applied, damping = None, 0.0
-    for chan, s_bar, kept_s in zip(chans, sigma_bar, kept):
-        lo, hi = _window(low, chan)
+    for chan, (lo, hi), s_bar, kept_s in zip(chans, windows, sigma_bar,
+                                             kept):
         act = chan.part.act
         eps = chan.eps[act]
         dist = np.minimum(eps - lo, hi - eps)
-        windows.append((lo, hi))
         distances.append(dist)
         if low.mode != 'casida':
             weights.append(_continued_pole_weights(kept_s['fit'], eps))

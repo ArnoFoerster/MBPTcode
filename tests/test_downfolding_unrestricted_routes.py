@@ -25,11 +25,13 @@ quadrature error is visible. Through the driver every energy term, H_eff
 and the FCI energy follow casida.
 """
 import dataclasses
+import warnings
 from functools import cache
 
 import numpy as np
 import pytest
 
+from src.Base.numerical_flags import collecting
 from src.Base.numerics.numerics import Numerics
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
@@ -322,6 +324,68 @@ def test_ec_active_casida_diagnostic(ref, screening):
         screening=screening)
     assert en.diagnostics['ec_active_casida'] == {'casida': 0.0,
                                                   'difference': 0.0}
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_lowest_excitation_of_two_spins(ref):
+    """Omega_min of the pole-free window on imagfrequency, which
+    diagonalizes nothing: the lowest root of the dense two-spin Casida
+    problem on the route's factors, i.e. the casida route's lowest Omega;
+    the windows of both spins follow. Measured: 0 difference (0.662550 Ha
+    for OH with 58 pairs, 0.674525 for CH2 with 70)."""
+    low, cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
+    om = rpa.lowest_excitation(low)
+    assert abs(om - cas.omega.min()) < 1e-9
+    assert low.cache['omega_min'] == om
+    assert rpa.lowest_excitation(low, solver='dense') == om
+    parts = _parts(ref, 'unequal_cores')
+    for ours, casida in zip(rpa.pole_window(low, parts),
+                            rpa.pole_window(cas, parts)):
+        assert np.abs(np.subtract(ours, casida)).max() < 1e-9
+    with pytest.raises(ValueError, match="'dense', 'bound'"):
+        rpa.lowest_excitation(low, solver='davidson')
+
+
+def test_gap_bound_above_the_dense_limit(monkeypatch):
+    """Above the dense limit there is no two-spin Davidson, and Omega_min is
+    replaced by the exact lower bound of the direct RPA, the smallest
+    orbital-energy gap over both spins. The window is then narrower than the
+    true one, so the near-pole warning can come too often, never too rarely.
+    A SigmaNearPoleWarning says so once, and the named flag
+    'sigma_pole_window_bound' is with every later use of the cached value.
+    Measured for OH: the bound is the beta gap, 0.6295 Ha, 0.033 below the
+    true Omega_min (CH2: the alpha gap, 0.015 below)."""
+    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 10)
+    mf = _mean_field('oh')
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    gap = min(eps[nocc] - eps[nocc - 1]
+              for eps, nocc in zip(mf.mo_energy, low.nocc))
+    true = _low('oh', 'casida').omega.min()
+    parts = _parts('oh', 'unequal_cores')
+    raised = []
+    with collecting(raised), pytest.warns(
+            rpa.SigmaNearPoleWarning,
+            match='smallest orbital-energy gap') as rec:
+        windows = rpa.pole_window(low, parts)
+    assert len(rec) == 1
+    assert [entry['flag'] for entry in raised] == ['sigma_pole_window_bound']
+    om = rpa.lowest_excitation(low)
+    assert om == gap and 1e-3 < true - om < 0.1
+    for (lo, hi), part, eps in zip(windows, parts, mf.mo_energy):
+        assert lo == eps[part.inactive].max() - gap
+        assert hi == eps[part.env_virt].min() + gap
+    again = []
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        with collecting(again):
+            assert rpa.pole_window(low, parts) == windows
+    assert again == raised
+    # the bound, asked for by name, whatever the size
+    assert rpa.lowest_excitation(_low('oh', 'imagfrequency'),
+                                 solver='dense') > om
+    with pytest.warns(rpa.SigmaNearPoleWarning):
+        assert rpa.lowest_excitation(_low('oh', 'imagfrequency'),
+                                     solver='bound') == gap
 
 
 def test_numerical_routes_refuse_a_spin_without_occupied_or_virtual_orbitals():
