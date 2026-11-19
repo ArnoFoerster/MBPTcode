@@ -118,7 +118,7 @@ from src.SingleReference.LinearResponse.space_time import (
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     static_screening_grid)
 
-from ..partition import active_pair_mask, ph_element_mask
+from ..partition import active_pair_mask, channels_of, ph_element_mask
 from ..terms import DownfoldingTerms, choice
 
 METHOD = 'rpa'
@@ -127,6 +127,10 @@ SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
                'sigma_continuation')
+SPINS = ('alpha', 'beta')
+# The spin channels (first pair, second pair) of the two-body blocks: the one
+# block of a restricted reference, or (aa, ab, bb).
+_BLOCKS = {1: ((0, 0),), 2: ((0, 0), (0, 1), (1, 1))}
 
 
 @dataclass(eq=False)
@@ -202,6 +206,118 @@ def _refuse_options(opts, which):
     if opts:
         raise TypeError(f"method={METHOD!r} {which} does not take "
                         + ', '.join(sorted(opts)) + '.')
+
+
+@dataclass(frozen=True)
+class _Channel:
+    """One spin channel of an active-space request: the orbital energies,
+    the occupied count and the three-index factors (None without) of that
+    spin, its Partition, and its name, 'alpha' or 'beta' (None for the one
+    channel of a restricted reference)."""
+    eps: np.ndarray
+    nocc: int
+    factors: Optional[np.ndarray]
+    part: object
+    spin: Optional[str]
+
+
+def _channels(low, part):
+    """The spin channels of `low` with the partitions of `part`: one, for a
+    restricted result and one Partition; two, for an unrestricted result and
+    the pair (alpha, beta). Anything else is refused."""
+    parts = channels_of(part)
+    if not low.unrestricted:
+        if len(parts) != 1:
+            raise ValueError(
+                f'a restricted low-level result takes one Partition; got '
+                f'{len(parts)}. A pair (alpha, beta) goes with an '
+                f'unrestricted (UHF/UKS) one.')
+        return (_Channel(low.eps, low.nocc, low.factors, parts[0], None),)
+    if len(parts) != 2:
+        raise ValueError(
+            'an unrestricted (UHF/UKS) low-level result takes a pair of '
+            'Partitions, (alpha, beta), one per spin; got one.')
+    factors = (None, None) if low.factors is None else low.factors
+    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], parts[s],
+                          SPINS[s]) for s in (0, 1))
+
+
+def _spin_weight(chans):
+    """g, the electrons an occupied orbital of one channel holds: 2.0 for
+    the one channel of a restricted reference, 1.0 for each of two."""
+    return 2.0 if len(chans) == 1 else 1.0
+
+
+def _join(arrays, axis=0):
+    """The arrays of the spin channels one after the other along `axis`; the
+    array of one channel as it is, not a copy."""
+    return arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=axis)
+
+
+def _square(rows):
+    """The matrix of the blocks rows[s][t] over the spin channels; the one
+    block of one channel as it is."""
+    return rows[0][0] if len(rows) == 1 else np.block(rows)
+
+
+def _per_block(blocks):
+    """What a public function returns for the two-body blocks: the one array
+    of a restricted reference, the tuple (aa, ab, bb) of an unrestricted
+    one."""
+    return blocks[0] if len(blocks) == 1 else tuple(blocks)
+
+
+def _delta(chan, mask=None):
+    """eps_a - eps_i of the (i, a) pairs of one channel in C order, those of
+    the bool mask when given."""
+    delta = (chan.eps[chan.nocc:][None, :]
+             - chan.eps[:chan.nocc][:, None]).ravel()
+    return delta if mask is None else delta[mask]
+
+
+def _ov_factors(chan):
+    """B_Q,ia (naux, n_pair) of one channel, the (i, a) pairs in C order."""
+    b = chan.factors
+    return b[:, :chan.nocc, chan.nocc:].reshape(b.shape[0], -1)
+
+
+def _act_factors(chan):
+    """B_Q,tu (naux, n_act^2) of the active orbitals of one channel."""
+    b, act = chan.factors, chan.part.act
+    return b[:, act][:, :, act].reshape(b.shape[0], len(act) ** 2)
+
+
+def _eri_block(low, s, t):
+    """The exact chemist (p q|r s) of low.eri with p, q in spin channel s
+    and r, s in channel t."""
+    if not low.unrestricted:
+        return low.eri
+    aa, ab, bb = low.eri
+    return ((aa, ab), (ab.transpose(2, 3, 0, 1), bb))[s][t]
+
+
+def _residual_integrals(low, chans, res):
+    """(K, V) on the stacked pairs of `res`, one bool mask over the (i, a)
+    pairs per channel: K_ia,jb = (ia|jb) between them, and V, one array per
+    channel t, V[t][ia, tu] = (ia|tu) with t, u the active orbitals of that
+    channel. From the integrals of the full RPA, low.factors or low.eri."""
+    n = chans[0].part.n_act
+    if low.factors is not None:
+        b_res = _join([_ov_factors(c)[:, r] for c, r in zip(chans, res)],
+                      axis=1)
+        return b_res.T @ b_res, [b_res.T @ _act_factors(c) for c in chans]
+    k_rows, v_cols = [], [[] for _ in chans]
+    for s, (chan_s, res_s) in enumerate(zip(chans, res)):
+        k_rows.append([])
+        for t, (chan_t, res_t) in enumerate(zip(chans, res)):
+            eri = _eri_block(low, s, t)
+            ov = eri[:chan_s.nocc, chan_s.nocc:].reshape(
+                res_s.size, *eri.shape[2:])[res_s]
+            k_rows[s].append(ov[:, :chan_t.nocc, chan_t.nocc:].reshape(
+                len(ov), -1)[:, res_t])
+            act = chan_t.part.act
+            v_cols[t].append(ov[:, act][:, :, act].reshape(len(ov), n * n))
+    return _square(k_rows), [_join(col) for col in v_cols]
 
 
 def run(mf, mode='casida', df=True, numerics=None, **opts):
@@ -368,6 +484,15 @@ def screening_correction(low, part, screening):
     """The static screening correction vt = W^r(0) - v on the active orbitals.
 
     Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
+    For an unrestricted result `part` is the pair of Partitions (alpha, beta)
+    and the three blocks (aa, ab, bb) are returned, ab[t,u,v,w] =
+    (t_a u_a | v_b w_b), on the casida route:
+        vt^{ss'}_tu,vw = -2 sum_{r,r'} (t_s u_s|r) [(delta + 2K)_rr^-1]_rr' (r'|v_s' w_s'),
+    r, r' over the stacked pairs of both spins that are not active, one
+    operator W^r - v between each spin's own active orbitals. 'crpa_ph'
+    keeps the elements with a particle-hole pair on both sides, each side
+    in its own spin's partition. What follows is the restricted case, the
+    same formula with the spin weight 2 on one channel.
     screening: 'bare' gives zeros; 'crpa' the restricted cRPA correction
         vt_tu,vw = -4 sum_{ia,jb in r} (tu|ia) [(delta + 4K)_rr^-1]_ia,jb (jb|vw),
     r the (i, a) pairs that are not both active: the
@@ -418,12 +543,17 @@ def screening_correction(low, part, screening):
                 f"method={METHOD!r} screening='mrpa' is built on the "
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
+        if low.unrestricted:
+            raise NotImplementedError(
+                f"method={METHOD!r} screening='mrpa' takes a restricted "
+                f"reference only.")
         return _mrpa_correction(low, part)
-    n = part.n_act
-    vt = np.zeros((n,) * 4)
-    res = ~active_pair_mask(part)
-    if screening == 'bare' or n == 0 or not res.any():
-        return vt
+    chans = _channels(low, part)
+    spins = _BLOCKS[len(chans)]
+    n = chans[0].part.n_act
+    res = [~active_pair_mask(c.part) for c in chans]
+    if screening == 'bare' or n == 0 or not any(r.any() for r in res):
+        return _per_block([np.zeros((n,) * 4) for _ in spins])
     if low.mode != 'casida':
         b_act = active_pair_factors(low, part).reshape(-1, n * n)
         w_r = dyson_screening(
@@ -433,25 +563,19 @@ def screening_correction(low, part, screening):
         if screening == 'crpa_ph':
             vt *= ph_element_mask(part)
         return vt
-    nocc, act = low.nocc, part.act
-    if low.factors is not None:
-        b = low.factors
-        b_res = b[:, :nocc, nocc:].reshape(b.shape[0], -1)[:, res]
-        k_rr = b_res.T @ b_res
-        v_rt = b_res.T @ b[:, act][:, :, act].reshape(b.shape[0], n * n)
-    else:
-        eri = low.eri
-        ov = eri[:nocc, nocc:].reshape(res.size, *eri.shape[2:])[res]
-        k_rr = ov[:, :nocc, nocc:].reshape(len(ov), -1)[:, res]
-        v_rt = ov[:, act][:, :, act].reshape(len(ov), n * n)
-    eps = low.eps
-    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[res]
-    apb = 4.0 * k_rr
-    apb[np.diag_indices_from(apb)] += delta
-    vt = (-4.0 * v_rt.T @ cho_solve(cho_factor(apb), v_rt)).reshape((n,) * 4)
+    g = _spin_weight(chans)
+    k_rr, v_rt = _residual_integrals(low, chans, res)
+    apb = (2.0 * g) * k_rr
+    apb[np.diag_indices_from(apb)] += _join(
+        [_delta(c, r) for c, r in zip(chans, res)])
+    factor = cho_factor(apb)
+    solved = [cho_solve(factor, v) for v in v_rt]
+    vt = [((-2.0 * g) * v_rt[s].T @ solved[t]).reshape((n,) * 4)
+          for s, t in spins]
     if screening == 'crpa_ph':
-        vt *= ph_element_mask(part)
-    return vt
+        for (s, t), block in zip(spins, vt):
+            block *= ph_element_mask(chans[s].part, chans[t].part)
+    return _per_block(vt)
 
 
 def _mrpa_correction(low, part):
@@ -465,7 +589,8 @@ def _mrpa_correction(low, part):
     if k == 0 or k == n:
         return vt
     xpy_a = low.xpy[active_pair_mask(part)]
-    delta, k_ph, _ = _active_ph(low, part, _active_v(low, part.act))
+    delta, k_ph, _ = _active_ph(low, part,
+                                _active_v(low, _channels(low, part))[0])
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
     k_eff = 0.25 * (0.5 * (k_eff + k_eff.T) - np.diag(delta))
@@ -531,40 +656,55 @@ def active_polarizability_static(low, part):
     return chi0_aux([(c_a, frequency_factor(delta, 0.0, True))], 2.0)
 
 
-def _active_v(low, act):
-    """The (n,)*4 chemist (pq|rs) of the full RPA's v on the orbitals `act`:
-    from low.factors or low.eri, and on space-time the ISDF v of
+def _active_v(low, chans):
+    """The chemist (pq|rs) of the full RPA's v on the active orbitals of the
+    channels, one (n_act,)*4 block per spin pair, (v,) or (aa, ab, bb): from
+    low.factors or low.eri, and on space-time the ISDF v of
     `active_pair_factors`.
 
     Not the exact v of H_eff (`two_body.active_eri`): E_c^A, W^A and the
     static defect take the integrals the full RPA was solved with,
     so that the double counting cancels against E_c and W."""
-    n = len(act)
+    n = chans[0].part.n_act
     if low.mode == 'space-time':
-        b_act = _pair_factors(low, act).reshape(-1, n * n)
-        return (b_act.T @ b_act).reshape((n,) * 4)
+        b_act = _pair_factors(low, chans[0].part.act).reshape(-1, n * n)
+        return ((b_act.T @ b_act).reshape((n,) * 4),)
+    spins = _BLOCKS[len(chans)]
     if low.factors is not None:
-        b = low.factors
-        b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
-        return (b_act.T @ b_act).reshape((n,) * 4)
-    return low.eri[np.ix_(act, act)][:, :, act][:, :, :, act]
+        b_act = [_act_factors(c) for c in chans]
+        return tuple((b_act[s].T @ b_act[t]).reshape((n,) * 4)
+                     for s, t in spins)
+    blocks = []
+    for s, t in spins:
+        first, second = chans[s].part.act, chans[t].part.act
+        blocks.append(_eri_block(low, s, t)[np.ix_(first, first)]
+                      [:, :, second][:, :, :, second])
+    return tuple(blocks)
 
 
-def _active_ov(low, act):
-    """The (n*n, n_pair) (pq|ia) of the full RPA's v, p, q over the orbitals
-    `act` and (i, a) over every particle-hole pair in C order, from
-    low.factors or low.eri (casida). Its cost, n^2 naux n_pair with the
+def _active_ov(low, chans):
+    """The (pq|ia) of the full RPA's v, one (n*n, n_pair) array per channel:
+    p, q over the active orbitals of that channel and (i, a) over every
+    particle-hole pair in C order, of both spins stacked for two channels;
+    from low.factors or low.eri (casida). Its cost, n^2 naux n_pair with the
     factors, is that of the whole pair space, so it is built only where it
     is read: the casida W(0) of `static_defect`."""
-    n, nocc = len(act), low.nocc
+    n = chans[0].part.n_act
     if low.factors is not None:
-        b = low.factors
-        b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
-        b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
-        return b_act.T @ b_ov
-    n_pair = nocc * (low.eri.shape[0] - nocc)  # spelt out: n may be 0
-    return low.eri[np.ix_(act, act)][:, :, :nocc, nocc:].reshape(n * n,
-                                                                 n_pair)
+        b_ov = _join([_ov_factors(c) for c in chans], axis=1)
+        return [_act_factors(c).T @ b_ov for c in chans]
+    out = []
+    for s, chan_s in enumerate(chans):
+        act, cols = chan_s.part.act, []
+        for t, chan_t in enumerate(chans):
+            eri = _eri_block(low, s, t)
+            # spelt out: n may be 0
+            n_pair = chan_t.nocc * (eri.shape[2] - chan_t.nocc)
+            cols.append(eri[np.ix_(act, act)][:, :, :chan_t.nocc,
+                                              chan_t.nocc:].reshape(n * n,
+                                                                    n_pair))
+        out.append(_join(cols, axis=1))
+    return out
 
 
 def _active_ph(low, part, v_eff):
@@ -674,8 +814,9 @@ def static_defect(low, part, v_eff):
         w_full = (b_act.T @ dyson_screening(low.cache['p0'])
                   @ b_act).reshape((n,) * 4)
     else:
-        v_act = _active_v(low, part.act)
-        r = _active_ov(low, part.act) @ low.xpy
+        chans = _channels(low, part)
+        v_act = _active_v(low, chans)[0]
+        r = _active_ov(low, chans)[0] @ low.xpy
         w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
     w_act = v_eff.copy()
     delta, k_ph, v_ph = _active_ph(low, part, v_eff)
@@ -1452,7 +1593,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     screening = choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
     vt = screening_correction(low, part, screening)
-    v_eff = _active_v(low, part.act) + vt
+    v_eff = _active_v(low, _channels(low, part))[0] + vt
     found = {}
     if 'static_defect' in names:
         found['static_defect'] = static_defect(low, part, v_eff)

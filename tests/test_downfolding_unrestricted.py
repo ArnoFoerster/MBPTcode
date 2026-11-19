@@ -41,7 +41,9 @@ from pyscf.gw import urpa
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
-from src.MultiReference.Downfolding.partition import partition
+from src.MultiReference.Downfolding.methods import rpa
+from src.MultiReference.Downfolding.partition import (partition,
+                                                      ph_element_mask)
 from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
@@ -49,7 +51,8 @@ from tests.downfolding_oracle import (CH2, NH, OH, drpa_so, h2_broken,
                                       mo_integrals, reference_energy_uhf,
                                       rpa_energy, sigma_mode_a,
                                       sigma_mode_a_uhf, sigma_srg,
-                                      sigma_srg_uhf, spin_orbital_energies,
+                                      sigma_srg_uhf, spin_blocks,
+                                      spin_orbital_energies,
                                       spin_orbital_integrals,
                                       spin_orbital_one_body, unrestricted,
                                       vtilde_crpa, vtilde_crpa_uhf,
@@ -110,6 +113,31 @@ def _unequal_cores(mf):
     nmo = mf.mo_coeff.shape[-1]
     return (ActiveSpace.from_indices(nmo, 5, [3, 4], [5, 6]),
             ActiveSpace.from_indices(nmo, 4, [2, 3], [4, 5]))
+
+
+def _no_beta_pair(mf):
+    """OH/6-31G: N^A = (2, 0) in 3 orbitals. The beta channel has no active
+    occupied orbital, so no active particle-hole pair."""
+    nmo = mf.mo_coeff.shape[-1]
+    return (ActiveSpace.from_indices(nmo, 5, [3, 4], [5]),
+            ActiveSpace.from_indices(nmo, 4, [], [4, 5, 6]))
+
+
+def _occupied_only(mf):
+    """OH/6-31G: two occupied orbitals per spin and no virtual one, so no
+    active particle-hole pair in either channel; cores (3, 2)."""
+    nmo = mf.mo_coeff.shape[-1]
+    return (ActiveSpace.from_indices(nmo, 5, [3, 4], []),
+            ActiveSpace.from_indices(nmo, 4, [2, 3], []))
+
+
+SPACES = {'asymmetric': _asymmetric, 'unequal_cores': _unequal_cores,
+          'no_beta_pair': _no_beta_pair, 'occupied_only': _occupied_only}
+
+
+def _parts(mf, spaces):
+    return tuple(partition(space, eps)
+                 for space, eps in zip(spaces, mf.mo_energy))
 
 
 def _spin_orbital(g_eff):
@@ -529,3 +557,114 @@ def test_unrestricted_numerical_routes_point_to_casida(oh):
     for mode in ('imagfrequency', 'space-time'):
         with pytest.raises(NotImplementedError, match="mode='casida'"):
             run_low_level(oh, method='rpa', mode=mode)
+
+
+# --- the screening correction of an active space ------------------------------
+
+@pytest.fixture(scope='module')
+def oh_low(oh):
+    """The casida low-level results of OH on exact (df=False) and on fitted
+    (df=True, here the eigendecomposition of the exact) integrals."""
+    return {df: run_low_level(oh, method='rpa', df=df) for df in (False, True)}
+
+
+def _ph_mask(first, second):
+    """True on (tu|vw) where t, u are one occupied and one virtual active
+    orbital of the first partition and v, w of the second, written out."""
+    n = first.n_act
+    mask = np.zeros((n,) * 4, dtype=bool)
+    for t in range(n):
+        for u in range(n):
+            for v in range(n):
+                for w in range(n):
+                    mask[t, u, v, w] = (
+                        (t < first.n_act_occ) != (u < first.n_act_occ)
+                        and (v < second.n_act_occ) != (w < second.n_act_occ))
+    return mask
+
+
+@pytest.mark.parametrize('space', sorted(SPACES))
+@pytest.mark.parametrize('df', [False, True])
+def test_vtilde_against_oracle(oh, oh_low, space, df):
+    """The cRPA correction of an unrestricted reference, three blocks
+    (aa, ab, bb): the active pairs of both spins deleted from the stacked
+    delta + 2K and one Cholesky solve, against the oracle's pole sum of the
+    deleted problem in spin orbitals. crpa_ph keeps the elements with a
+    particle-hole pair of each side's own spin on both sides; 'bare' is
+    zero. The spaces have different orbitals per spin, N^A_alpha !=
+    N^A_beta, unequal cores, a channel without an active pair, and no
+    active pair at all (nothing deleted: the fully screened W(0) - v).
+    Measured: at most 5.3e-15 over the four spaces and both df settings,
+    on blocks of size 0.09 to 0.16 whose aa and bb differ by 0.05 to 0.14."""
+    low = oh_low[df]
+    parts = _parts(oh, SPACES[space](oh))
+    n = parts[0].n_act
+    so = _spin_orbitals(oh, parts)
+    ref = vtilde_crpa_uhf(*so)
+    blocks = rpa.screening_correction(low, parts, 'crpa')
+    assert isinstance(blocks, tuple) and len(blocks) == 3
+    for ours, exact in zip(blocks, ref):
+        assert ours.shape == (n,) * 4
+        assert np.max(np.abs(ours - exact)) < 1e-9
+        assert np.max(np.abs(ours - ours.transpose(1, 0, 2, 3))) < 1e-10
+    for same in (blocks[0], blocks[2]):
+        assert np.max(np.abs(same - same.transpose(2, 3, 0, 1))) < 1e-10
+    assert np.max(np.abs(blocks[0] - blocks[2])) > 1e-3
+
+    masks = (_ph_mask(parts[0], parts[0]), _ph_mask(parts[0], parts[1]),
+             _ph_mask(parts[1], parts[1]))
+    assert np.array_equal(ph_element_mask(parts[0], parts[1]), masks[1])
+    ph = rpa.screening_correction(low, parts, 'crpa_ph')
+    for ours, exact, mask in zip(ph, ref, masks):
+        assert np.max(np.abs(ours - exact * mask)) < 1e-9
+        assert not ours[~mask].any()
+    bare = rpa.screening_correction(low, parts, 'bare')
+    assert len(bare) == 3 and not any(b.any() for b in bare)
+
+    if space == 'occupied_only':
+        full = spin_blocks(w0_minus_v_so(*so[:3], so[3]), n)
+        for ours, exact in zip(blocks, full):
+            assert np.max(np.abs(ours - exact)) < 1e-9
+        assert not any(b.any() for b in ph)
+    if space == 'no_beta_pair':
+        assert np.max(np.abs(ph[0])) > 1e-3
+        assert not ph[1].any() and not ph[2].any()
+
+
+def test_vtilde_triplet_ch2(ch2):
+    """Triplet CH2 on its density-fit-free factors: N^A = (2, 1) in 3
+    orbitals, cores (3, 2). Measured: 2.3e-15."""
+    nmo = ch2.mo_coeff.shape[-1]
+    spaces = (ActiveSpace.from_indices(nmo, 5, [3, 4], [5]),
+              ActiveSpace.from_indices(nmo, 3, [2], [3, 4]))
+    parts = _parts(ch2, spaces)
+    low = run_low_level(ch2, method='rpa')
+    ref = vtilde_crpa_uhf(*_spin_orbitals(ch2, parts))
+    for ours, exact in zip(rpa.screening_correction(low, parts, 'crpa'), ref):
+        assert np.max(np.abs(ours - exact)) < 1e-9
+
+
+def test_all_active_vtilde_is_zero(h2_bs):
+    """Every orbital of both spins active: no pair is left to screen."""
+    parts = _parts(h2_bs, _all_active(h2_bs))
+    low = run_low_level(h2_bs, method='rpa')
+    for screening in ('crpa', 'crpa_ph', 'bare'):
+        blocks = rpa.screening_correction(low, parts, screening)
+        assert len(blocks) == 3 and not any(b.any() for b in blocks)
+
+
+def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
+    """The functions of the RPA method take one Partition with a restricted
+    result and the pair (alpha, beta) with an unrestricted one."""
+    parts = _parts(oh, _asymmetric(oh))
+    with pytest.raises(ValueError, match='pair'):
+        rpa.screening_correction(oh_low[True], parts[0], 'crpa')
+    rhf = water()
+    one = partition(ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2),
+                    rhf.mo_energy)
+    low = run_low_level(rhf, method='rpa')
+    with pytest.raises(ValueError, match='one Partition'):
+        rpa.screening_correction(low, (one, one), 'crpa')
+    assert isinstance(rpa.screening_correction(low, one, 'crpa'), np.ndarray)
+    with pytest.raises(NotImplementedError, match='mrpa'):
+        rpa.screening_correction(oh_low[True], parts, 'mrpa')

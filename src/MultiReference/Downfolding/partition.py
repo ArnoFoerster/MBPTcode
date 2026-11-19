@@ -101,14 +101,20 @@ def active_pair_mask(part):
     return np.outer(occ, virt).ravel()
 
 
-def ph_element_mask(part):
+def ph_element_mask(part, second=None):
     """Boolean (n_act,)*4 mask over chemist elements (tu|vw), True where both pairs are particle-hole.
 
     t, u, v, w are local indices into `part.act` (occupied first). A pair is
     particle-hole when it holds one active occupied and one active virtual
     index, in either order, so all of (ia|jb), (ai|jb), (ia|bj) and (ai|bj)
-    are covered.
+    are covered. `second`: the Partition of the spin channel of the second
+    pair, v and w, for the opposite-spin block of an unrestricted reference
+    (default: both pairs in the channel of `part`).
     """
-    is_occ = np.arange(part.n_act) < part.n_act_occ
-    pair = is_occ[:, None] ^ is_occ[None, :]
-    return pair[:, :, None, None] & pair[None, None, :, :]
+    def pair(p):
+        is_occ = np.arange(p.n_act) < p.n_act_occ
+        return is_occ[:, None] ^ is_occ[None, :]
+
+    first = pair(part)
+    last = first if second is None else pair(second)
+    return first[:, :, None, None] & last[None, None, :, :]
