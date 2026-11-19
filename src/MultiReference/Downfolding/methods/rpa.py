@@ -90,7 +90,7 @@ from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
                                          DOWNFOLDING_SRG_S,
                                          GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
-from src.Base.orbital_spaces import particle_hole_window
+from src.Base.orbital_spaces import particle_hole_window, transition_range
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
@@ -116,7 +116,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
-    static_screening_grid)
+    spin_summed, static_screening_grid)
 
 from ..partition import active_pair_mask, channels_of, ph_element_mask
 from ..terms import DownfoldingTerms, choice
@@ -418,11 +418,6 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
                         f"orbitals, so no transition and no mid-gap, which "
                         f"the frequency grids and the self-energy of this "
                         f"route are built on. Use mode='casida'.")
-        if mode == 'space-time':
-            raise NotImplementedError(
-                f"method={METHOD!r} mode={mode!r} takes a restricted "
-                f"reference only; for an unrestricted one (UHF/UKS) use "
-                f"mode='casida'.")
     else:
         eps = np.asarray(get_orbital_energies(mf))
         nocc = closed_shell_nocc(mf.mo_occ)
@@ -491,7 +486,14 @@ def _space_time(mf, eps, nocc, numerics):
 
     E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
     E_c^A are built on these same grids and transforms, so the active part
-    cancels to rounding with every orbital active."""
+    cancels to rounding with every orbital active.
+
+    For an unrestricted reference (eps and nocc pairs) X is (2, M, nmo), one
+    collocation per spin X_s = X_ao C_s on the one D; the grids cover the
+    transitions of both spins (the smallest gap and the largest span), P(0)
+    is chi0_alpha(0) + chi0_beta(0) (`spin_summed`), and E_c the two-spin
+    energy. The 'rows' realization of the fit builds one collocation and is
+    refused there."""
     num = numerics_or_default(numerics)
     if not num.isdf.grid_named():
         raise ValueError(
@@ -499,19 +501,33 @@ def _space_time(mf, eps, nocc, numerics):
             f"factors on the grid numerics.isdf names, and this run's names "
             f"none: pass numerics with numerics.isdf.level (e.g. 'G1') or "
             f"counts.")
+    two_spin = isinstance(nocc, tuple)
+    if two_spin and num.isdf.fit == 'rows':
+        raise NotImplementedError(
+            f"method={METHOD!r} mode='space-time' on an unrestricted "
+            f"reference needs one collocation per spin, which the 'rows' "
+            f"realization of the ISDF fit does not build: use "
+            f"numerics.isdf.fit='replicated' (the default).")
     x, d = unpack_factors(separable_factors(mf, mf.mol, numerics=numerics,
                                             comm=None))[:2]
     q = num.quadrature
     static_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
                                         tau_target=q.tau_target)
     tile_gb = layout_tile_gb(numerics)
-    p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
-                                  tile_memory_gb=tile_gb)[0]
     ntau, nfreq = rpa_quadrature(num)
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    if two_spin:
+        p0 = spin_summed(chi0_imaginary_frequency, x, d, eps, nocc,
+                         static_grid, tile_memory_gb=tile_gb)[0]
+        e_min, e_max = transition_range(eps, nocc)
+        w0 = gap_scaled_w0(gap=e_min)
+    else:
+        p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
+                                      tile_memory_gb=tile_gb)[0]
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
+        w0 = gap_scaled_w0(eps, nocc)
     if ntau is None:
         ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
-    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(eps, nocc))
+    nu, wt = gauss_legendre_grid(nfreq, w0)
     grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
                                            with_sine=False,
                                            with_inverse=False)

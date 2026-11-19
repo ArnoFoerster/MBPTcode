@@ -32,6 +32,14 @@ srg_s = None to far below the 1e-4 target, for spaces whose active
 orbitals lie inside both pole-free windows by more than the continuation
 margin. Omega_min of the windows is the lowest root of the two-spin
 problem, or above the dense limit its lower bound, the smallest gap.
+
+mode='space-time' does the same on separable (ISDF) factors in imaginary
+time: one collocation per spin, X_s = X_ao C_s, and one Coulomb factor D.
+The mean fields there are density-fitted UHF calculations of OH and of
+triplet CH2 in cc-pVDZ (6-31G has no validated ISDF grid), on the G1 grid.
+The reference is the casida route on the SAME ISDF factors, built here as
+the three-index objects B^s_Q,pq = sum_P D_PQ X^s_Pp X^s_Pq, so the two
+differ by the route's quadratures alone and not by a fit.
 """
 import dataclasses
 import re
@@ -40,11 +48,15 @@ from functools import cache
 
 import numpy as np
 import pytest
+from pyscf import gto, scf
 
+from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting
-from src.Base.numerics.numerics import Numerics, numerics_or_default
-from src.Base.orbital_spaces import particle_hole_window
+from src.Base.numerics.numerics import (Numerics, numerics_or_default,
+                                        rpa_quadrature)
+from src.Base.orbital_spaces import particle_hole_window, transition_range
 from src.Base.utils.grids.analytic_continuation import pade_nodes
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.MultiReference.Downfolding.energy import Energies
@@ -52,15 +64,20 @@ from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import (active_pair_mask,
                                                       partition)
 from src.SingleReference.common.active_space import ActiveSpace
+from src.SingleReference.GW.space_time import separable_factors
+from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import (
     imaginary_axis_energy_grid, rpa_correlation_energy_imaginary_axis)
+from src.SingleReference.LinearResponse.space_time import (
+    rpa_correlation_energy_space_time, static_screening_grid)
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import (CH2, OH, drpa_so,
                                       fitted_spin_orbital_integrals,
                                       sigma_env_uhf, spin_orbital_integrals,
                                       unrestricted, water)
+from tests.isdf_test_grid import g1_numerics
 
 REFS = ('oh', 'ch2')
 SCREENINGS = ('bare', 'crpa', 'crpa_ph')
@@ -647,3 +664,147 @@ def test_numerical_routes_refuse_a_spin_without_occupied_or_virtual_orbitals():
                            match="beta channel has 0 occupied of 4.*"
                                  "mode='casida'"):
             run_low_level(mf, method='rpa', mode=mode)
+
+
+# --- mode='space-time': separable (ISDF) factors, imaginary time ---------------
+
+@cache
+def _st_mean_field(ref):
+    """A density-fitted UHF (cc-pvdz-ri) of OH or of triplet CH2 in cc-pVDZ."""
+    atom, spin = MOLECULES[ref]
+    mol = gto.M(atom=atom, basis='cc-pvdz', spin=spin, cart=False, verbose=0)
+    mf = scf.UHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol = 1e-12
+    mf.verbose = 0
+    mf.kernel()
+    assert mf.converged
+    return mf
+
+
+@cache
+def _st_low(ref, quadrature=()):
+    """The space-time low-level result of `ref` on the G1 grid, with the
+    quadrature settings `quadrature` (pairs) and srg_s = None."""
+    mf = _st_mean_field(ref)
+    numerics = g1_numerics(mf, Numerics(quadrature=dict(quadrature),
+                                        downfolding={'srg_s': None}))
+    return run_low_level(mf, method='rpa', mode='space-time',
+                         numerics=numerics)
+
+
+def _isdf_three_index(low):
+    """(B_alpha, B_beta), B^s_Q,pq = sum_P D_PQ X^s_Pp X^s_Pq over every
+    orbital pair: the fitted v of the space-time result as three-index
+    objects."""
+    x, d = low.cache['factors']
+    nmo = x.shape[-1]
+    return tuple(
+        (d.T @ (x_s[:, :, None] * x_s[:, None, :]).reshape(len(x_s), -1)
+         ).reshape(d.shape[1], nmo, nmo) for x_s in x)
+
+
+@cache
+def _st_casida(ref):
+    """A casida low-level result on the space-time result's own ISDF
+    factors, solved here as the two-spin Casida problem: the same fitted v
+    with explicit poles, at srg_s = None."""
+    low = _st_low(ref)
+    factors = _isdf_three_index(low)
+    lr = LinearResponseSolver(low.eps, coeff_df=factors,
+                              spin_mode='unrestricted')
+    a, b = lr.build_casida_matrices(low.nocc, lBSE=False)
+    trace = np.trace(a)
+    omega, x_amp, y_amp = CasidaSolver(a, b).solve()
+    return rpa.RPALowLevel(
+        mf=low.mf, mode='casida', df=True, eps=low.eps, nocc=low.nocc,
+        e_c_full=float(0.5 * (omega.sum() - trace)), omega=omega,
+        xpy=x_amp + y_amp, factors=factors, eri=None,
+        numerics=Numerics(downfolding={'srg_s': None}))
+
+
+@pytest.fixture(scope='module', autouse=True)
+def _release_space_time_caches():
+    yield
+    for cached in (_st_casida, _st_low, _st_mean_field):
+        cached.cache_clear()
+
+
+def _st_spaces(ref, which):
+    """SPACES[ref][which] on the cc-pVDZ mean field (the same occupied
+    counts as in 6-31G)."""
+    mf = _st_mean_field(ref)
+    nmo = mf.mo_coeff.shape[-1]
+    nocc = [int(np.count_nonzero(occ)) for occ in mf.mo_occ]
+    return tuple(ActiveSpace.from_indices(nmo, n, occ, virt)
+                 for n, (occ, virt) in zip(nocc, SPACES[ref][which]))
+
+
+def _st_parts(ref, which):
+    return tuple(partition(space, eps) for space, eps in zip(
+        _st_spaces(ref, which), _st_mean_field(ref).mo_energy))
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_full_rpa(ref):
+    """run(mode='space-time') on a UHF mean field keeps the ISDF factors of
+    `separable_factors`, X (2, M, nmo) one collocation per spin and D
+    (M, naux) shared; the static tau grid over the transitions of both
+    spins with P(0) = chi0_alpha(0) + chi0_beta(0) on it, each spin's pairs
+    with the grid's transform of -exp(-delta tau); and the energy's grid,
+    minimax tau to Gauss-Legendre frequencies scaled to the smallest gap of
+    the two spins. e_c_full is the two-spin space-time energy on it, and
+    the plasmon value of the casida problem on the same factors to the
+    quadrature error. Measured: OH 400 points, 70 auxiliary functions, 130
+    pairs, grids 14 and 14 x 40; CH2 600, 84, 158, 12 and 12 x 40; P(0)
+    2.2e-16; E_c against casida 1.0e-8 (OH), 1.0e-9 (CH2)."""
+    low, cas = _st_low(ref), _st_casida(ref)
+    mf = low.mf
+    assert low.unrestricted and low.mode == 'space-time' and low.df is True
+    assert low.omega is None and low.xpy is None
+    assert low.factors is None and low.eri is None
+    x, d = low.cache['factors']
+    want = unpack_factors(separable_factors(mf, mf.mol, numerics=low.numerics,
+                                            comm=None))
+    assert x.shape == (2, d.shape[0], mf.mo_coeff.shape[-1])
+    assert np.array_equal(x, want[0]) and np.array_equal(d, want[1])
+    eps, nocc = low.eps, low.nocc
+    e_min, e_max = transition_range(eps, nocc)
+    q = low.numerics.quadrature
+    static = low.cache['static_grid']
+    ref_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
+                                     tau_target=q.tau_target)
+    assert np.array_equal(static.tau_points, ref_grid.tau_points)
+    assert np.array_equal(static.cosft_wt, ref_grid.cosft_wt)
+    p0 = np.zeros((d.shape[1],) * 2)
+    for x_s, eps_s, n in zip(x, eps, nocc):
+        pairs = (x_s[:, :n, None] * x_s[:, None, n:]).reshape(len(x_s), -1)
+        b_ov = d.T @ pairs
+        delta = (eps_s[n:][None, :] - eps_s[:n][:, None]).ravel()
+        pi0 = -np.exp(-np.outer(delta, static.tau_points)) @ static.cosft_wt[0]
+        p0 += (b_ov * pi0) @ b_ov.T
+    assert np.abs(low.cache['p0'] - p0).max() < 1e-12
+    grid = low.cache['energy_grid']
+    ntau, nfreq = rpa_quadrature(low.numerics)
+    assert ntau is None and grid.ntau == static.ntau
+    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(gap=e_min))
+    assert np.array_equal(grid.omega_points, nu)
+    assert np.array_equal(grid.omega_weights, wt)
+    assert low.e_c_full == rpa_correlation_energy_space_time(
+        x, d, eps, nocc, grid, comm=None)
+    assert abs(low.e_c_full - cas.e_c_full) < 1e-6
+
+
+def test_space_time_refusals_of_the_run():
+    """The row-fit realization of the ISDF fit builds one collocation and
+    cannot take an unrestricted reference: refused, naming the one that
+    can. Without an ISDF grid in numerics, and with df=False, run refuses as
+    for a restricted reference."""
+    mf = _st_mean_field('oh')
+    rows = g1_numerics(mf).derive('the row fit', isdf={'fit': 'rows'})
+    with pytest.raises(NotImplementedError, match="fit='replicated'"):
+        run_low_level(mf, method='rpa', mode='space-time', numerics=rows)
+    with pytest.raises(ValueError, match='numerics.isdf'):
+        run_low_level(mf, method='rpa', mode='space-time')
+    with pytest.raises(ValueError, match="df=False.*mode='casida'"):
+        run_low_level(mf, method='rpa', mode='space-time', df=False,
+                      numerics=g1_numerics(mf))
