@@ -13,14 +13,19 @@ RESTRICTED_TOL = 1e-12
 
 
 def active_eri(mol, mo_act):
-    """(aa, ab, bb), each (n_act,)*4: the exact chemist integrals (tu|vw) of the
-    active orbitals, with ab[t,u,v,w] = (t_a u_a | v_b w_b).
+    """The exact chemist integrals (tu|vw) of the active orbitals, each block
+    (n_act,)*4: (v,) for the one channel of a restricted reference, from one
+    integral transformation, or (aa, ab, bb) for two channels, with
+    ab[t,u,v,w] = (t_a u_a | v_b w_b).
 
-    mo_act = (C_Aa, C_Ab) are the active orbital coefficients of the two spin
-    channels. The integrals are the exact 4-centre ones of `mol`, never from a
-    density-fitted object, because the bare v must not carry a fitting error.
-    An empty active space gives zero-size blocks without a transformation.
+    mo_act = (C_A,) or (C_Aa, C_Ab) are the active orbital coefficients of the
+    spin channels. The integrals are the exact 4-centre ones of `mol`, never
+    from a density-fitted object, because the bare v must not carry a fitting
+    error. An empty active space gives zero-size blocks without a
+    transformation.
     """
+    if len(mo_act) == 1:
+        return (_block(mol, mo_act[0], mo_act[0]),)
     ca, cb = mo_act
     return (_block(mol, ca, ca), _block(mol, ca, cb), _block(mol, cb, cb))
 
@@ -45,24 +50,31 @@ def _same(x, y):
 def pack(h_eff, v_eff, e0, spin_free):
     """The g_eff dictionary {0: e0, 1: one-body, 2: two-body} of the solvers.
 
-    h_eff = (h_a, h_b), v_eff = (aa, ab, bb) are the chemist active
-    interaction (bare plus vtilde). Spin-free, g_eff[1] is the spatial
-    one-body and g_eff[2] the spatial physicist <pq|rs> = (pr|qs); otherwise
-    both go through spatial_to_spin_orbitals and key 0 is added here.
+    h_eff and v_eff hold the one-body term and the chemist active interaction
+    (bare plus vtilde) per spin channel: (h,) and (v,) for the one channel of
+    a restricted reference, or (h_a, h_b) and (aa, ab, bb). Spin-free,
+    g_eff[1] is the spatial one-body and g_eff[2] the spatial physicist
+    <pq|rs> = (pr|qs); otherwise both go through spatial_to_spin_orbitals and
+    key 0 is added here.
 
-    Only a restricted Hamiltonian is packed: the two spin channels of h_eff
-    and the three blocks of v_eff must agree to 1e-12 (relative to max(1, max
-    element)). The arrays of g_eff are copies, never views of the inputs; an
-    empty active space packs zero-size arrays. A spin-resolved g_eff for the
-    unrestricted case, solved by fci.direct_uhf, is deferred.
+    Only a restricted Hamiltonian is packed: one channel as it is, and two
+    channels only where they agree, h_a with h_b and the three blocks of
+    v_eff, to 1e-12 (relative to max(1, max element)). The arrays of g_eff
+    are copies, never views of the inputs; an empty active space packs
+    zero-size arrays. A spin-resolved g_eff for the unrestricted case, solved
+    by fci.direct_uhf, is deferred.
     """
-    h_a, h_b = h_eff
-    aa, ab, bb = v_eff
-    if not (_same(h_a, h_b) and _same(aa, ab) and _same(aa, bb)):
-        raise NotImplementedError(
-            "pack takes a restricted Hamiltonian only (equal alpha and beta "
-            "channels); the unrestricted extension, a spin-resolved g_eff "
-            "solved with fci.direct_uhf, is deferred.")
+    if len(h_eff) == 1:
+        (h_a,), (aa,) = h_eff, v_eff
+    else:
+        h_a, h_b = h_eff
+        aa, ab, bb = v_eff
+        if not (_same(h_a, h_b) and _same(aa, ab) and _same(aa, bb)):
+            raise NotImplementedError(
+                "pack takes a restricted Hamiltonian only (one spin channel, "
+                "or equal alpha and beta channels); the unrestricted "
+                "extension, a spin-resolved g_eff solved with fci.direct_uhf, "
+                "is deferred.")
     spatial = {1: np.array(h_a), 2: np.array(aa.transpose(0, 2, 1, 3))}
     if spin_free:
         return {0: e0, **spatial}

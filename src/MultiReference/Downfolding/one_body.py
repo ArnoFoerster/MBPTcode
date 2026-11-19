@@ -2,10 +2,17 @@
 
 h_eff^sigma = f^sigma - t^DC,sigma (+ Sigma_bar^sigma): the Fock operator of
 the frozen inactive core on the active orbitals, minus the double counting of
-the effective interaction vtilde with the active reference density. Every
-channel quantity is a tuple (alpha, beta); a restricted reference passes two
-identical channels. Active indices are local to `Partition.act` (occupied
-first), so the active occupied orbitals of a channel are its first n_act_occ.
+the effective interaction vtilde with the active reference density.
+
+Every channel quantity is a tuple over the spin channels that are computed:
+ONE channel for a restricted reference, whose orbitals each hold two
+electrons, so nothing is computed twice; or two, (alpha, beta), for an
+unrestricted one. vtilde is then (v,), one spin-independent block, or
+(aa, ab, bb). `spin_weight` is the number of electrons an occupied orbital of
+a channel holds, 2 or 1, and the one-channel formulas are the two-channel
+ones with both channels equal. Active indices are local to `Partition.act`
+(occupied first), so the active occupied orbitals of a channel are its first
+n_act_occ.
 """
 import numpy as np
 from pyscf.scf.hf import get_jk
@@ -15,48 +22,69 @@ from .terms import choice
 DC_MODES = ('full', 'hartree')
 
 
+def spin_weight(channels):
+    """The electrons an occupied orbital of one channel holds: 2 for the one
+    channel of a restricted reference, 1 for each of (alpha, beta)."""
+    if len(channels) not in (1, 2):
+        raise ValueError(f'{len(channels)} spin channels; a restricted '
+                         f'reference has one, an unrestricted one two.')
+    return 2 if len(channels) == 1 else 1
+
+
 def inactive_jk(mol, mo, parts):
-    """(dms, j, k): the inactive densities D_I^sigma = C_I C_I^T of the two
-    spin channels as one (2, nao, nao) array, the Coulomb matrix
-    J[D_I^a + D_I^b] of the whole core, and the exchange matrices
-    (K[D_I^a], K[D_I^b]).
+    """(dms, j, k): the inactive densities D_I^sigma = C_I C_I^T of the spin
+    channels, one electron per spin orbital, as one (nchannel, nao, nao)
+    array; the Coulomb matrix J[D_I] of the whole core, D_I = D_I^a + D_I^b
+    (2 D_I^sigma of the one restricted channel); and the exchange matrices
+    K[D_I^sigma], one per channel.
 
     J and K are the exact 4-centre ones of `mol`: the bare v of the effective
-    Hamiltonian is never density fitted. mo = (C_a, C_b), parts = (part_a,
-    part_b).
+    Hamiltonian is never density fitted. One build serves both `core_fock`
+    and the environment energy, which take it as `jk`; with no inactive
+    orbital nothing is built. mo = (C,) or (C_a, C_b), parts likewise.
     """
+    weight = spin_weight(mo)
     dms = np.array([c[:, p.inactive] @ c[:, p.inactive].T
                     for c, p in zip(mo, parts)])
+    if not any(len(p.inactive) for p in parts):
+        return dms, np.zeros_like(dms[0]), tuple(np.zeros_like(d) for d in dms)
     vj, vk = get_jk(mol, dms)
-    return dms, vj[0] + vj[1], (vk[0], vk[1])
+    return dms, weight * sum(vj), tuple(vk)
 
 
-def core_fock(mol, hcore_ao, mo, parts):
-    """(f_a, f_b), each (n_act, n_act): the Fock operator of the inactive core
-    on the active orbitals of each spin channel.
+def core_fock(mol, hcore_ao, mo, parts, jk=None):
+    """One (n_act, n_act) array per spin channel: the Fock operator of the
+    inactive core on the active orbitals.
 
-    f^sigma = h + J[D_I^a + D_I^b] - K[D_I^sigma] with D_I^sigma = C_I C_I^T
-    the inactive density of one spin (one electron per spin orbital), so a
-    restricted reference gives h_tu + sum_{i in I} [2(tu|ii) - (ti|iu)].
-    J and K are the exact ones of `inactive_jk`. mo = (C_a, C_b), parts =
-    (part_a, part_b); hcore_ao is the AO core Hamiltonian.
+    f^sigma = h + J[D_I] - K[D_I^sigma] with D_I^sigma = C_I C_I^T the
+    inactive density of one spin (one electron per spin orbital) and D_I the
+    whole core's, so a restricted reference gives
+    h_tu + sum_{i in I} [2(tu|ii) - (ti|iu)]. J and K are the exact ones of
+    `inactive_jk`, built here unless handed in as `jk`. mo = (C,) or
+    (C_a, C_b), parts likewise; hcore_ao is the AO core Hamiltonian.
     """
-    _, j, vk = inactive_jk(mol, mo, parts)
+    _, j, vk = inactive_jk(mol, mo, parts) if jk is None else jk
     return tuple(c[:, p.act].T @ (hcore_ao + j - k) @ c[:, p.act]
                  for c, p, k in zip(mo, parts, vk))
 
 
 def double_counting(vtilde, n_act_occ):
-    """(hartree, exchange), each (a, b) of (n_act, n_act): the Hartree and
-    exchange parts of the double counting of vtilde with the active
-    reference density.
+    """(hartree, exchange), each one (n_act, n_act) array per spin channel:
+    the Hartree and exchange parts of the double counting of vtilde with the
+    active reference density.
 
     hartree^s_tu  = sum_{k in A_o^s} vt^{ss}_tu,kk + sum_{k in A_o^s'} vt^{ss'}_tu,kk
     exchange^s_tu = sum_{k in A_o^s} vt^{ss}_tk,ku
-    so t^DC = hartree - exchange. vtilde = (aa, ab, bb) with
-    ab[t,u,v,w] = (t_a u_a | v_b w_b); the beta channel reads the
-    opposite-spin block as ab.transpose(2, 3, 0, 1). n_act_occ = (n_a, n_b).
+    so t^DC = hartree - exchange. Two channels: vtilde = (aa, ab, bb) with
+    ab[t,u,v,w] = (t_a u_a | v_b w_b), the beta channel reading the
+    opposite-spin block as ab.transpose(2, 3, 0, 1), and n_act_occ =
+    (n_a, n_b). One restricted channel: vtilde = (v,), n_act_occ = (n,), and
+    the opposite spin sees the same block, hartree_tu = 2 sum_k vt_tu,kk.
     """
+    if spin_weight(n_act_occ) == 2:
+        (v,), (n,) = vtilde, n_act_occ
+        return ((2 * np.einsum('tukk->tu', v[:, :, :n, :n]),),
+                (np.einsum('tkku->tu', v[:, :n, :n, :]),))
     aa, ab, bb = vtilde
     n_a, n_b = n_act_occ
     channels = ((aa, ab, n_a, n_b), (bb, ab.transpose(2, 3, 0, 1), n_b, n_a))
@@ -69,16 +97,16 @@ def double_counting(vtilde, n_act_occ):
 
 
 def effective_one_body(f, hartree, exchange, dc, sigma_bar=None):
-    """(h_a, h_b): the one-body part of H_eff in each spin channel.
+    """The one-body part of H_eff, one array per spin channel.
 
     dc='full' subtracts the whole double counting, f - hartree + exchange;
     dc='hartree' subtracts the Hartree part only, f - hartree, the convention
     that goes with the static self-energy Sigma_bar (which then carries the
-    exchange). sigma_bar, when given as (a, b), is added.
+    exchange). sigma_bar, one array per channel when given, is added.
     """
     dc = choice(dc, DC_MODES, 'dc')
     h = []
-    for s in (0, 1):
+    for s in range(len(f)):
         h_s = f[s] - hartree[s]
         if dc == 'full':
             h_s = h_s + exchange[s]

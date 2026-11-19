@@ -1260,7 +1260,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         (`screening_correction`), the same in every spin block (restricted).
     sigma: None, the paper's scheme: full double counting, no Sigma_bar.
         'srg' or 'mode_a': the static environment self-energy
-        (`embedding_self_energy`) in both spin channels with dc='hartree',
+        (`embedding_self_energy`), one block for the restricted reference,
+        with dc='hartree',
         the Hartree-only double counting that goes with it; E_0 then gains
         the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
         §3.7). Allowed with every screening; the third term of the
@@ -1310,12 +1311,12 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if sigma is not None:
         s_bar, kept = _embedding(low, part, sigma,
                                  infinite='sigma_poles' in names)
-        sigma_bar, dc = (s_bar, s_bar), 'hartree'
+        sigma_bar, dc = (s_bar,), 'hartree'
         if 'sigma_poles' in names:
             found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar, kept)
         if 'sigma_continuation' in names and low.mode != 'casida':
             found['sigma_continuation'] = _sigma_continuation(low, part,
                                                               sigma, kept)
     return DownfoldingTerms(
-        vtilde=(vt, vt, vt), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
+        vtilde=(vt,), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=found)

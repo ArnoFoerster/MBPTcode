@@ -9,9 +9,10 @@ genuinely different channels. Measured agreement: at most 1.2e-14 against both
 (tolerance 1e-10).
 """
 import numpy as np
+import pytest
 
 from src.MultiReference.Downfolding.one_body import (
-    core_fock, double_counting, effective_one_body)
+    core_fock, double_counting, effective_one_body, inactive_jk, spin_weight)
 from src.MultiReference.Downfolding.partition import partition, ph_element_mask
 from src.SingleReference.common.active_space import ActiveSpace
 from tests.downfolding_oracle import (
@@ -141,3 +142,43 @@ def test_ph_only_vtilde_has_no_hartree_dc():
         assert np.all(hartree[s] == 0.0)
         assert np.all(exchange[s][~np.outer(virt, virt)] == 0.0)
         assert np.abs(exchange[s][np.outer(virt, virt)]).min() > 0
+
+
+def test_one_restricted_channel_is_two_identical_channels():
+    """A restricted reference goes in as ONE spin channel, computed once: its
+    core Fock operator, double counting and one-body term are those of each
+    of two identical channels (measured 0.0 to 4e-15, tolerance 1e-12), and a
+    J/K build handed in as `jk` is used instead of a second one."""
+    mf = water()
+    part = _water_part(mf, [2, 4], [5, 6])
+    c, hcore = mf.mo_coeff, mf.get_hcore()
+    n, k = part.n_act, part.n_act_occ
+    rng = np.random.default_rng(4)
+    vt = _random_vtilde(rng, n)[0]
+    sig = rng.standard_normal((n, n))
+
+    f_one = core_fock(mf.mol, hcore, (c,), (part,))
+    f_two = core_fock(mf.mol, hcore, (c, c), (part, part))
+    h_one, x_one = double_counting((vt,), (k,))
+    h_two, x_two = double_counting((vt, vt, vt), (k, k))
+    assert len(f_one) == len(h_one) == len(x_one) == 1
+    for one, two in ((f_one, f_two), (h_one, h_two), (x_one, x_two)):
+        assert np.abs(one[0] - two[0]).max() < 1e-12
+        assert np.abs(one[0] - two[1]).max() < 1e-12
+    for dc in ('full', 'hartree'):
+        one = effective_one_body(f_one, h_one, x_one, dc, (sig,))
+        two = effective_one_body(f_two, h_two, x_two, dc, (sig, sig))
+        assert len(one) == 1 and np.abs(one[0] - two[0]).max() < 1e-12
+
+    jk = inactive_jk(mf.mol, (c,), (part,))
+    assert jk[0].shape[0] == 1 and len(jk[2]) == 1
+    marked = (jk[0], jk[1] + 1.0, jk[2])          # a J no fresh build would give
+    shifted = core_fock(mf.mol, hcore, (c,), (part,), jk=marked)[0]
+    s_act = c[:, part.act].T @ np.ones_like(hcore) @ c[:, part.act]
+    assert np.abs(shifted - f_one[0] - s_act).max() < 1e-12
+
+
+def test_three_spin_channels_are_refused():
+    with pytest.raises(ValueError, match='spin channels'):
+        spin_weight((0, 1, 2))
+    assert (spin_weight((0,)), spin_weight((0, 1))) == (2, 1)

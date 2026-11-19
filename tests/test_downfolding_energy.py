@@ -718,3 +718,81 @@ def test_sigma_with_hf_is_refused():
     for sigma in SIGMAS_1:
         with pytest.raises(TypeError, match="method='hf'.*sigma"):
             _hf_heff(mf, aspace, sigma=sigma)
+
+
+# --- one restricted spin channel: nothing computed twice ---------------------
+
+def test_one_restricted_channel_of_the_energy_terms():
+    """The E_0 terms of ONE restricted channel are those of two identical
+    channels (tolerance 1e-11): the environment HF energy, E_HF,ee[vtilde]
+    and its two halves, the exchange energy term and the Sigma_bar trace."""
+    mf = water()
+    part = _water_part(mf, [2, 4], [5, 6])
+    c, hcore = mf.mo_coeff, mf.get_hcore()
+    n, k = part.n_act, part.n_act_occ
+    rng = np.random.default_rng(6)
+    vt = _random_vtilde(rng, n)[0]
+    sig = _symmetric(rng, n)
+    one = environment_hf_energy(mf.mol, hcore, (c,), (part,))
+    two = environment_hf_energy(mf.mol, hcore, (c, c), (part, part))
+    assert np.allclose(one, two, rtol=0, atol=1e-11)
+    assert np.allclose(active_hf_energy((vt,), (k,)),
+                       active_hf_energy((vt, vt, vt), (k, k)),
+                       rtol=0, atol=1e-12)
+    assert abs(exchange_energy_term((vt,), (k,))
+               - exchange_energy_term((vt, vt, vt), (k, k))) < 1e-12
+    assert abs(sigma_trace((sig,), (k,))
+               - sigma_trace((sig, sig), (k, k))) < 1e-12
+    for dc in ('full', 'hartree'):
+        en = [assemble_energies(
+            1.0, *env, DownfoldingTerms(vtilde=v, sigma_bar=s, e_c_full=-0.3,
+                                        e_c_active=-0.1, dc=dc), occ).e0
+              for env, v, s, occ in ((one, (vt,), (sig,), (k,)),
+                                     (two, (vt, vt, vt), (sig, sig), (k, k)))]
+        assert abs(en[0] - en[1]) < 1e-11
+
+
+@pytest.mark.parametrize('method', ['hf', 'rpa'])
+def test_the_driver_builds_each_integral_once(monkeypatch, method):
+    """One restricted channel end to end: `build_effective_hamiltonian` does
+    ONE exact J/K build (shared by the core Fock operator and the environment
+    energy) and ONE integral transformation of the active block, and the
+    method hands back one vtilde."""
+    from src.MultiReference.Downfolding import one_body, two_body
+    mf = water()
+    low = run_low_level(mf, method=method)
+    calls = {'jk': 0, 'ao2mo': 0}
+    real_jk, real_general = one_body.get_jk, two_body.ao2mo.general
+
+    def counted_jk(*args, **kwargs):
+        calls['jk'] += 1
+        return real_jk(*args, **kwargs)
+
+    def counted_general(*args, **kwargs):
+        calls['ao2mo'] += 1
+        return real_general(*args, **kwargs)
+
+    monkeypatch.setattr(one_body, 'get_jk', counted_jk)
+    monkeypatch.setattr(two_body.ao2mo, 'general', counted_general)
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    part = partition(aspace, mf.mo_energy)
+    assert len(LOW_LEVEL[method].terms(low, part).vtilde) == 1
+    build_effective_hamiltonian(low, aspace)
+    assert calls == {'jk': 1, 'ao2mo': 1}
+
+
+def test_a_two_channel_method_is_refused_by_the_restricted_driver(monkeypatch):
+    """The driver runs a restricted reference: a method that hands back the
+    three spin blocks of an unrestricted vtilde is refused by name."""
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+
+    def terms(low, part):
+        z = np.zeros((part.n_act,) * 4)
+        return DownfoldingTerms(vtilde=(z, z, z), sigma_bar=None, e_c_full=0.0,
+                                e_c_active=0.0, dc='full')
+
+    monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(terms=terms))
+    with pytest.raises(NotImplementedError, match='unrestricted'):
+        build_effective_hamiltonian(SimpleNamespace(mf=mf, method='probe'),
+                                    aspace)

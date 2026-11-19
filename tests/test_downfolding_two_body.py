@@ -569,3 +569,28 @@ def test_sigma_with_mrpa(wat_df, sigma):
     assert en.e_exchange_term == 0.0 and abs(en.e_sigma_trace) > 1e-3
     assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
     assert np.array_equal(g[2], g_plain[2])
+
+
+def test_one_restricted_channel_of_the_two_body_term():
+    """A restricted reference passes one channel: `active_eri` returns one
+    block from one integral transformation, and `pack` of the one channel
+    is `pack` of two identical channels, spin free and in spin orbitals."""
+    mf = water()
+    idx = [2, 4, 5, 6]
+    act = mf.mo_coeff[:, idx]
+    one = active_eri(mf.mol, (act,))
+    assert len(one) == 1
+    assert np.array_equal(one[0], active_eri(mf.mol, (act, act))[0])
+    rng = np.random.default_rng(5)
+    h = rng.normal(size=(4, 4))
+    h = h + h.T
+    for spin_free in (True, False):
+        g_one = pack((h,), one, 1.5, spin_free=spin_free)
+        g_two = pack((h, h), one * 3, 1.5, spin_free=spin_free)
+        assert g_one.keys() == g_two.keys() and g_one[0] == 1.5
+        assert all(np.array_equal(g_one[k], g_two[k]) for k in (1, 2))
+    g = pack((h,), one, 0.0, spin_free=True)
+    g[1][0, 0] = 5.0
+    assert h[0, 0] != 5.0
+    empty = active_eri(mf.mol, (mf.mo_coeff[:, []],))
+    assert [b.shape for b in empty] == [(0, 0, 0, 0)]

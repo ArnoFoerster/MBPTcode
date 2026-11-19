@@ -38,10 +38,10 @@ def run(mf, **opts):
 
 def terms(low, part, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
-    `part`, no static self-energy, both correlation energies zero, and the
-    full double counting (of a zero vtilde). HF takes no options."""
+    `part` (one block, the reference being restricted), no static
+    self-energy, both correlation energies zero, and the full double counting
+    (of a zero vtilde). HF takes no options."""
     _no_options(opts)
-    shape = (part.n_act,) * 4
     return DownfoldingTerms(
-        vtilde=tuple(np.zeros(shape) for _ in range(3)), sigma_bar=None,
+        vtilde=(np.zeros((part.n_act,) * 4),), sigma_bar=None,
         e_c_full=0.0, e_c_active=0.0, dc='full')

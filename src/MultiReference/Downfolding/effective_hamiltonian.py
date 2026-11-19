@@ -9,8 +9,10 @@ from it.
 
 The driver knows no method: it reaches them through `LOW_LEVEL` and reads
 only the `DownfoldingTerms` a method hands back. The reference is restricted,
-so both spin channels of the general layer get the same orbitals and the same
-`Partition`.
+so the general layer gets ONE spin channel (the orbitals, the `Partition`,
+one vtilde) and computes everything once: one exact J/K build of the inactive
+core, shared by the core Fock operator and the environment energy, and one
+integral transformation of the active block.
 """
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_gas_phase_ground_state)
@@ -19,7 +21,8 @@ from src.SingleReference.common.active_space import closed_shell_nocc
 
 from .energy import assemble_energies, environment_hf_energy
 from .methods import LOW_LEVEL
-from .one_body import DC_MODES, core_fock, double_counting, effective_one_body
+from .one_body import (DC_MODES, core_fock, double_counting,
+                       effective_one_body, inactive_jk)
 from .partition import partition
 from .terms import choice
 from .two_body import active_eri, pack
@@ -88,17 +91,29 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
             f"method={method!r} returned a static self-energy with dc='full'; "
             f"Sigma_bar carries the exchange, so it comes with dc='hartree', "
             f"which also sets the double counting and E_0 to match.")
+    channels = [len(terms.vtilde)]
+    if terms.sigma_bar is not None:
+        channels.append(len(terms.sigma_bar))
+    if channels != [1] * len(channels):
+        raise NotImplementedError(
+            f"method={method!r} returned {len(terms.vtilde)} vtilde blocks"
+            + (f" and {len(terms.sigma_bar)} Sigma_bar blocks"
+               if terms.sigma_bar is not None else "")
+            + "; this driver runs a restricted reference, which is one spin "
+              "channel: vtilde = (v,), sigma_bar = (s,). The unrestricted "
+              "form, (aa, ab, bb) and (a, b), is deferred.")
 
     c = mf.mo_coeff
-    mo, parts = (c, c), (part, part)
-    n_act_occ = (part.n_act_occ, part.n_act_occ)
+    mo, parts = (c,), (part,)
+    n_act_occ = (part.n_act_occ,)
     hcore = mf.get_hcore()
-    f = core_fock(mol, hcore, mo, parts)
+    jk = inactive_jk(mol, mo, parts)
+    f = core_fock(mol, hcore, mo, parts, jk=jk)
     hartree, exchange = double_counting(terms.vtilde, n_act_occ)
     h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
-    v_bare = active_eri(mol, (c[:, part.act], c[:, part.act]))
+    v_bare = active_eri(mol, (c[:, part.act],))
     v_eff = tuple(v + vt for v, vt in zip(v_bare, terms.vtilde))
-    e_core, e_ee = environment_hf_energy(mol, hcore, mo, parts)
+    e_core, e_ee = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
     energies = assemble_energies(mf.energy_nuc(), e_core, e_ee, terms,
                                  n_act_occ)
     g_eff = pack(h_eff, v_eff, energies.e0, spin_free)

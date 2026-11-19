@@ -6,27 +6,32 @@ The HF terms of the environment are those of the inactive core alone (the
 active-environment cross terms are in the core Fock operator), and
 E_HF,ee[vtilde] enters with a plus sign so that the reference determinant of
 H_eff keeps the energy E_HF + E_c[v] - E_c^A. Every quantity is per spin
-channel, as in one_body.py: channel tuples (alpha, beta), vtilde = (aa, ab,
-bb) with ab[t,u,v,w] = (t_a u_a | v_b w_b), active indices occupied first.
+channel, as in one_body.py: one channel for a restricted reference, with
+vtilde = (v,), or the two (alpha, beta), with vtilde = (aa, ab, bb) and
+ab[t,u,v,w] = (t_a u_a | v_b w_b); active indices occupied first.
 """
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from .one_body import DC_MODES, inactive_jk
+from .one_body import DC_MODES, inactive_jk, spin_weight
 from .terms import choice
 
 
-def environment_hf_energy(mol, hcore_ao, mo, parts):
+def environment_hf_energy(mol, hcore_ao, mo, parts, jk=None):
     """(e_core, e_ee): the one- and two-electron HF energy of the inactive core.
 
     e_core = sum_s Tr[h D_I^s], e_ee = 1/2 sum_s Tr[(J[D_I] - K[D_I^s]) D_I^s]
-    with D_I = D_I^a + D_I^b, on the exact J and K of `inactive_jk`; with every
-    occupied orbital inactive, E_nuc + e_core + e_ee is the HF energy.
+    with D_I the whole core's density, the sum over both spins (twice the one
+    restricted channel), on the exact J and K of `inactive_jk`, built here
+    unless handed in as `jk`; with every occupied orbital inactive,
+    E_nuc + e_core + e_ee is the HF energy.
     """
-    dms, j, vk = inactive_jk(mol, mo, parts)
-    e_core = sum(np.einsum('ij,ji->', hcore_ao, d) for d in dms)
-    e_ee = 0.5 * sum(np.einsum('ij,ji->', j - k, d) for d, k in zip(dms, vk))
+    weight = spin_weight(mo)
+    dms, j, vk = inactive_jk(mol, mo, parts) if jk is None else jk
+    e_core = weight * sum(np.einsum('ij,ji->', hcore_ao, d) for d in dms)
+    e_ee = 0.5 * weight * sum(np.einsum('ij,ji->', j - k, d)
+                              for d, k in zip(dms, vk))
     return float(e_core), float(e_ee)
 
 
@@ -38,9 +43,15 @@ def active_hf_energy(vtilde, n_act_occ):
                spin orbitals, both spin blocks and the opposite-spin pair twice;
     exchange = -1/2 sum_{tu} vt_tu,ut rho_tt rho_uu, same spin only (negative
                for a positive-definite vtilde).
-    Restricted: hartree = 2 sum_kl vt_kk,ll, exchange = -sum_kl vt_kl,lk.
-    n_act_occ = (n_a, n_b).
+    One restricted channel, vtilde = (v,) and n_act_occ = (n,):
+    hartree = 2 sum_kl vt_kk,ll, exchange = -sum_kl vt_kl,lk. Two channels:
+    vtilde = (aa, ab, bb), n_act_occ = (n_a, n_b).
     """
+    if spin_weight(n_act_occ) == 2:
+        (v,), (n,) = vtilde, n_act_occ
+        occ = v[:n, :n, :n, :n]
+        return (float(2 * np.einsum('kkll->', occ)),
+                float(-np.einsum('kllk->', occ)))
     aa, ab, bb = vtilde
     n_a, n_b = n_act_occ
     hartree = 0.5 * (np.einsum('kkll->', aa[:n_a, :n_a, :n_a, :n_a])
@@ -67,8 +78,10 @@ def exchange_energy_term(vtilde, n_act_occ):
 def sigma_trace(sigma_bar, n_act_occ):
     """Tr[Sigma_bar gamma^A,0] = sum_s sum_{k in A_o^s} Sigma_bar^s_kk
     (restricted: 2 sum_k Sigma_bar_kk), the energy the static self-energy adds
-    to the reference determinant; E_0 subtracts it. sigma_bar = (a, b)."""
-    return float(sum(np.trace(s[:n, :n]) for s, n in zip(sigma_bar, n_act_occ)))
+    to the reference determinant; E_0 subtracts it. sigma_bar holds one array
+    per spin channel, (s,) restricted or (a, b)."""
+    return float(spin_weight(sigma_bar)
+                 * sum(np.trace(s[:n, :n]) for s, n in zip(sigma_bar, n_act_occ)))
 
 
 @dataclass(frozen=True)
@@ -108,7 +121,8 @@ def assemble_energies(e_nuc, e_core, e_ee, terms, n_act_occ):
 
     The exchange energy term and Tr[Sigma_bar gamma^A,0] belong to the
     Hartree-only double counting (dc='hartree') and are zero with dc='full';
-    the trace is zero too when no sigma_bar is given. n_act_occ = (n_a, n_b).
+    the trace is zero too when no sigma_bar is given. n_act_occ holds the
+    active occupied count of each spin channel, (n,) or (n_a, n_b).
     """
     dc = choice(terms.dc, DC_MODES, 'dc')
     hartree, exchange = active_hf_energy(terms.vtilde, n_act_occ)
