@@ -808,3 +808,156 @@ def test_space_time_refusals_of_the_run():
     with pytest.raises(ValueError, match="df=False.*mode='casida'"):
         run_low_level(mf, method='rpa', mode='space-time', df=False,
                       numerics=g1_numerics(mf))
+
+
+def _st_all_active(ref):
+    mf = _st_mean_field(ref)
+    nmo = mf.mo_coeff.shape[-1]
+    return tuple(partition(
+        ActiveSpace.from_indices(nmo, n, range(n), range(n, nmo)), eps)
+        for n, eps in zip((int(np.count_nonzero(occ)) for occ in mf.mo_occ),
+                          mf.mo_energy))
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_active_part_cancels(ref):
+    """Every orbital of both spins active: P^A, built per spin on the stored
+    static grid with the active columns of each spin's X and summed as
+    P(0) was, is P(0) itself, so P - P^A leaves nothing to screen and
+    vtilde is zero; E_c^A, with exp(-delta tau) of both spins' pairs pushed
+    through the energy's own transform, is E_c[v]. Measured: |P - P^A| and
+    vtilde exactly 0, the E_c pair 2.0e-13 (OH) and 2.6e-14 (CH2), the
+    static defect 2.7e-15."""
+    low = _st_low(ref)
+    every = _st_all_active(ref)
+    p_a = rpa.active_polarizability_static(low, every)
+    assert np.abs(low.cache['p0'] - p_a).max() < 1e-12
+    for screening in SCREENINGS:
+        terms = rpa.terms(low, every, screening)
+        assert len(terms.vtilde) == 3
+        assert max(np.abs(block).max() for block in terms.vtilde) < 1e-10
+        assert abs(terms.e_c_full - terms.e_c_active) < 1e-10
+        assert terms.diagnostics['static_defect'] < 1e-8
+
+
+@pytest.mark.parametrize('screening', SCREENINGS)
+def test_space_time_all_active_cancels_on_a_coarse_grid(screening):
+    """The same on 10 tau points and 6 Gauss-Legendre frequencies, where
+    E_c[v] is visibly off its value on the default grid: the pair still
+    cancels, which needs the energy's own points, weights and transform on
+    both sides. Measured: E_c moves by 3.3e-3, the pair cancels to 2.3e-14.
+    With the restricted spin factor in the quadrature the all-active test
+    and the E_0 test fail (tried)."""
+    low = _st_low('oh', (('ntau_rpa', 10), ('nfreq_rpa', 6)))
+    grid = low.cache['energy_grid']
+    assert grid.ntau == 10 and grid.nfreq == 6
+    assert abs(low.e_c_full - _st_low('oh').e_c_full) > 1e-7
+    terms = rpa.terms(low, _st_all_active('oh'), screening)
+    assert abs(terms.e_c_full - terms.e_c_active) < 1e-10
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_active_pair_factors_and_polarizability(ref):
+    """The factors of every active pair of each spin are D^T (X^s_t X^s_u),
+    the slice of that spin's three-index object; P^A(0) is the static
+    grid's transform of -sum_ia B_ia B_ia^T exp(-delta_ia tau) over the
+    active pairs of each spin: the other spin's alone when a channel has
+    none, zero when neither has one."""
+    low = _st_low(ref)
+    three = _isdf_three_index(low)
+    naux = three[0].shape[0]
+    static = low.cache['static_grid']
+
+    def response(parts):
+        out = np.zeros((naux, naux))
+        for b, eps, nocc, part in zip(three, low.eps, low.nocc, parts):
+            mask = active_pair_mask(part)
+            b_a = b[:, :nocc, nocc:].reshape(naux, -1)[:, mask]
+            delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[mask]
+            pi0 = -np.exp(-np.outer(delta, static.tau_points)) \
+                @ static.cosft_wt[0]
+            out += (b_a * pi0) @ b_a.T
+        return out
+
+    parts = _st_parts(ref, 'asymmetric')
+    b_act = rpa.active_pair_factors(low, parts)
+    assert isinstance(b_act, tuple) and len(b_act) == 2
+    for ours, b, part in zip(b_act, three, parts):
+        assert np.abs(ours - b[:, part.act][:, :, part.act]).max() < 1e-12
+    for which in ('asymmetric', 'unequal_cores', 'no_beta_pair'):
+        parts = _st_parts(ref, which)
+        p_a = rpa.active_polarizability_static(low, parts)
+        assert np.abs(p_a - response(parts)).max() < 1e-12
+        assert np.abs(p_a).max() > 1e-3
+    none = rpa.active_polarizability_static(low,
+                                            _st_parts(ref, 'occupied_only'))
+    assert none.shape == (naux, naux) and not none.any()
+
+
+@pytest.mark.parametrize('which', sorted(SPACES['oh']))
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_vtilde_matches_casida(ref, which):
+    """vtilde in the three blocks against casida on the same ISDF factors.
+    The two differ only by the static grid's transform of the pairs'
+    response, -sum_tau w exp(-delta tau) in place of the exact -2/delta.
+    Measured over four spaces: 5.9e-8 (OH), 3.9e-8 (CH2)."""
+    low, cas = _st_low(ref), _st_casida(ref)
+    parts = _st_parts(ref, which)
+    for screening in ('crpa', 'crpa_ph'):
+        vt = rpa.screening_correction(low, parts, screening)
+        want = rpa.screening_correction(cas, parts, screening)
+        assert isinstance(vt, tuple) and len(vt) == 3
+        for ours, casida in zip(vt, want):
+            assert np.abs(ours - casida).max() < 1e-6
+        if screening == 'crpa':
+            assert min(np.abs(block).max() for block in want) > 1e-2
+    bare = rpa.screening_correction(low, parts, 'bare')
+    assert len(bare) == 3 and not any(block.any() for block in bare)
+
+
+@pytest.mark.parametrize('screening', SCREENINGS)
+@pytest.mark.parametrize('which', sorted(SPACES['oh']))
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_e0_terms_match_casida(ref, which, screening):
+    """Every Energies field, E_0, h_eff of both spins, the three blocks of
+    v_eff and the FCI energy of H_eff agree between space-time and casida
+    on the same ISDF factors to the route's quadratures; the dense-Casida
+    E_c^A on the same v_eff is the quadrature's value. Measured over four
+    spaces and three screenings, OH and CH2: every field 4.2e-7 and 1.8e-7
+    (E_c[v] 1.0e-8 and 1.0e-9, E_c^A 7.9e-11 and 7.7e-10), h_eff 1.7e-7
+    and 9.3e-8, v_eff 5.9e-8 and 3.9e-8, FCI 1.0e-8 and 1.1e-9, the
+    quadrature against the dense E_c^A 3.7e-13, the crpa static defect
+    7.8e-16, the other defects against casida 6.0e-8."""
+    spaces = _st_spaces(ref, which)
+    g, space, en = build_effective_hamiltonian(_st_low(ref), spaces,
+                                               screening=screening)
+    g_c, _, en_c = build_effective_hamiltonian(_st_casida(ref), spaces,
+                                               screening=screening)
+    for field in dataclasses.fields(Energies):
+        if field.name not in RECORDS:
+            assert abs(getattr(en, field.name)
+                       - getattr(en_c, field.name)) < 5e-6, field.name
+    for ours, casida in zip(g[1] + g[2], g_c[1] + g_c[2]):
+        assert np.abs(ours - casida).max(initial=0.0) < 5e-6
+    assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-6
+    assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-10
+    if screening == 'crpa':
+        assert en.diagnostics['static_defect'] < 1e-10
+    else:
+        assert abs(en.diagnostics['static_defect']
+                   - en_c.diagnostics['static_defect']) < 1e-6
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_lowest_excitation(ref):
+    """Omega_min on space-time: the lowest root of the dense two-spin Casida
+    problem on the ISDF factors, the lowest Omega of the casida reference on
+    those factors. Measured: 0 difference (0.667597 Ha for OH, 0.615249 for
+    CH2)."""
+    low, cas = _st_low(ref), _st_casida(ref)
+    om = rpa.lowest_excitation(low, solver='dense')
+    assert abs(om - cas.omega.min()) < 1e-9
+    parts = _st_parts(ref, 'unequal_cores')
+    for ours, casida in zip(rpa.pole_window(low, parts),
+                            rpa.pole_window(cas, parts)):
+        assert np.abs(np.subtract(ours, casida)).max() < 1e-9

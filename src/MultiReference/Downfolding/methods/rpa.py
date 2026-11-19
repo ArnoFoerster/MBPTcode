@@ -212,13 +212,15 @@ def _refuse_options(opts, which):
 class _Channel:
     """One spin channel of an active-space request: the orbital energies,
     the occupied count and the three-index factors (None without) of that
-    spin, its Partition, and its name, 'alpha' or 'beta' (None for the one
-    channel of a restricted reference)."""
+    spin, its Partition, its name, 'alpha' or 'beta' (None for the one
+    channel of a restricted reference), and on space-time its collocation
+    X (M, nmo) in the MO basis (None on the other routes)."""
     eps: np.ndarray
     nocc: int
     factors: Optional[np.ndarray]
     part: object
     spin: Optional[str]
+    collocation: Optional[np.ndarray] = None
 
 
 def _channels(low, part):
@@ -232,7 +234,7 @@ def _channels(low, part):
                 f'a restricted low-level result takes one Partition; got '
                 f'{len(parts)}. A pair (alpha, beta) goes with an '
                 f'unrestricted (UHF/UKS) one.')
-        return (_Channel(low.eps, low.nocc, low.factors, parts[0], None),)
+        return (replace(_reference_channels(low)[0], part=parts[0]),)
     if len(parts) != 2:
         raise ValueError(
             'an unrestricted (UHF/UKS) low-level result takes a pair of '
@@ -245,11 +247,12 @@ def _reference_channels(low):
     """The spin channels of `low` itself, without an active space (their
     `part` is None): one for a restricted result, (alpha, beta) for an
     unrestricted one."""
+    x = low.cache['factors'][0] if low.mode == 'space-time' else None
     if not low.unrestricted:
-        return (_Channel(low.eps, low.nocc, low.factors, None, None),)
+        return (_Channel(low.eps, low.nocc, low.factors, None, None, x),)
     factors = (None, None) if low.factors is None else low.factors
-    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], None,
-                          SPINS[s]) for s in (0, 1))
+    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], None, SPINS[s],
+                          None if x is None else x[s]) for s in (0, 1))
 
 
 def _spin_weight(chans):
@@ -728,7 +731,7 @@ def _pair_factors(low, chan):
     """`active_pair_factors` of one spin channel."""
     act = chan.part.act
     if low.mode == 'space-time':
-        x, d = low.cache['factors']
+        x, d = chan.collocation, low.cache['factors'][1]
         n, x_act = len(act), x[:, act]
         pairs = (x_act[:, :, None] * x_act[:, None, :]).reshape(len(x), n * n)
         return (d.T @ pairs).reshape(d.shape[1], n, n)
@@ -756,15 +759,26 @@ def active_polarizability_static(low, part):
     energies: the -4 above is -2g of the one restricted channel."""
     chans = _channels(low, part)
     if low.mode == 'space-time':
-        x, d = low.cache['factors']
-        k = part.n_act_occ
-        if k == 0 or k == part.n_act:
+        # per spin, on the grid and with the mid-gap P(0) was built with;
+        # the kernel carries the closed-shell factor 2, so the two spins'
+        # terms are summed and halved, the arithmetic of `spin_summed`
+        d = low.cache['factors'][1]
+        out = None
+        for chan in chans:
+            k, act = chan.part.n_act_occ, chan.part.act
+            if k == 0 or k == chan.part.n_act:
+                continue
+            mu = particle_hole_window(chan.eps, chan.nocc)[2]
+            term = chi0_imaginary_frequency(
+                chan.collocation[:, act], d, chan.eps[act], k,
+                low.cache['static_grid'], mu=mu,
+                tile_memory_gb=layout_tile_gb(low.numerics))[0]
+            out = term if out is None else out + term
+        if out is None:
             return np.zeros((d.shape[1],) * 2)
-        act = part.act
-        mu = particle_hole_window(low.eps, low.nocc)[2]
-        return chi0_imaginary_frequency(
-            x[:, act], d, low.eps[act], k, low.cache['static_grid'], mu=mu,
-            tile_memory_gb=layout_tile_gb(low.numerics))[0]
+        if len(chans) == 2:
+            out *= 0.5
+        return out
     blocks = []
     for chan in chans:
         mask = active_pair_mask(chan.part)
@@ -783,12 +797,12 @@ def _active_v(low, chans):
     static defect take the integrals the full RPA was solved with,
     so that the double counting cancels against E_c and W."""
     n = chans[0].part.n_act
-    if low.mode == 'space-time':
-        b_act = _pair_factors(low, chans[0]).reshape(-1, n * n)
-        return ((b_act.T @ b_act).reshape((n,) * 4),)
     spins = _BLOCKS[len(chans)]
-    if low.factors is not None:
-        b_act = [_act_factors(c) for c in chans]
+    if low.mode == 'space-time' or low.factors is not None:
+        if low.mode == 'space-time':
+            b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
+        else:
+            b_act = [_act_factors(c) for c in chans]
         return tuple((b_act[s].T @ b_act[t]).reshape((n,) * 4)
                      for s, t in spins)
     blocks = []
@@ -880,7 +894,8 @@ def active_correlation_energy(low, part, v_eff):
     cosft_wt[k, tau] exp(-delta tau): exp(-delta tau) pushed through the
     energy's own tau -> omega transform, as the full chi0 was
     (`rpa_correlation_energy_space_time`), not the exact Lorentzian, so the
-    pair again cancels to rounding with every orbital active.
+    pair again cancels to rounding with every orbital active. For two spin
+    channels the factor is -1 per spin, -g with the spin weight g.
 
     For an unrestricted result `part` is the pair (alpha, beta) and v_eff
     the three blocks (aa, ab, bb): the direct RPA on the active ph pairs of
@@ -913,13 +928,13 @@ def _active_ec_quadrature(low, chans, v_eff):
     warning and flag for a non-positive det(1 - Pi^A U))."""
     delta, k_ph, _ = _active_ph(chans, v_eff)
     eye = np.eye(delta.size)
+    g = _spin_weight(chans)
     if low.mode == 'space-time':
         grid = low.cache['energy_grid']
         weights = grid.omega_weights
-        pi = -2.0 * grid.cosft_wt @ np.exp(-np.outer(grid.tau_points, delta))
+        pi = -g * grid.cosft_wt @ np.exp(-np.outer(grid.tau_points, delta))
     else:
         points, weights = low.cache['grid']
-        g = _spin_weight(chans)
         pi = [g * frequency_factor(delta, w, True) for w in points]
     e_c = 0.0
     for k, (pi_k, wt) in enumerate(zip(pi, weights)):
@@ -1242,10 +1257,13 @@ def _lowest_dense(low):
     chans = _reference_channels(low)
     g = _spin_weight(chans)
     if low.mode == 'space-time':
-        nocc = low.nocc
-        x, d = low.cache['factors']
-        pairs = x[:, :nocc, None] * x[:, None, nocc:]
-        b_ov = d.T @ pairs.reshape(len(x), -1)
+        d = low.cache['factors'][1]
+        b_ov = []
+        for chan in chans:
+            x, nocc = chan.collocation, chan.nocc
+            pairs = x[:, :nocc, None] * x[:, None, nocc:]
+            b_ov.append(d.T @ pairs.reshape(len(x), -1))
+        b_ov = _join(b_ov, axis=1)
     else:
         b_ov = _join([_ov_factors(c) for c in chans], axis=1)
     k = b_ov.T @ b_ov
