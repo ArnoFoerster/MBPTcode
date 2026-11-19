@@ -130,6 +130,25 @@ def fitted_self_energy_matrix_imaginary_axis(df_coeff, eps_mu, freq_points, W_gr
     return sigma
 
 
+def screening_fit_grid(eps, nocc, nfreq):
+    """(points, weights, poles) of the Lorentzian fit of W on the imaginary
+    axis: the nfreq minimax frequency points over the particle-hole window
+    (gap, span) of eps, on which W(i w) is sampled, with their minimax
+    weights (which a TimeFrequencyGrid on these points carries; the fit
+    itself does not use them), and as many fit poles log-spaced over
+    [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span].
+
+    The one recipe of `self_energy_matrix_imaginary_axis` and of the RPA
+    downfolding's environment self-energy
+    (`MultiReference.Downfolding.methods.rpa.sigma_env_imag_axis`), whose
+    samples go to `fitted_self_energy_matrix_imaginary_axis`."""
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
+    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
+                         GW_DENSITY_W_FIT_HIGH * e_max, len(points))
+    return points, weights, poles
+
+
 def self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
     """(Sigma_c,pq(mu + i*query_freqs), mu) of a restricted gas-phase mean
     field at T = 0. The three-index object of all orbitals (the mean field's
@@ -147,11 +166,9 @@ def self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
     df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted',
                               eta=DEFAULT_BROADENING_ETA)
-    e_min, e_max, mu = particle_hole_window(eps, nocc)
-    freq_points, _ = minimax_frequency_grid(nfreq, e_min, e_max)
+    mu = particle_hole_window(eps, nocc)[2]
+    freq_points, _, poles = screening_fit_grid(eps, nocc, nfreq)
     W_grid = lr.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
-    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min, GW_DENSITY_W_FIT_HIGH * e_max,
-                         len(freq_points))
     sigma = fitted_self_energy_matrix_imaginary_axis(df_coeff, eps - mu, freq_points, W_grid,
                                                      query_freqs, poles,
                                                      GW_DENSITY_W_FIT_TIKHONOV)

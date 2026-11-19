@@ -77,8 +77,6 @@ from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
                                          DOWNFOLDING_SIGMA_TILE_GB,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
-                                         GW_DENSITY_W_FIT_HIGH,
-                                         GW_DENSITY_W_FIT_LOW,
                                          GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
 from src.Base.orbital_spaces import particle_hole_window
@@ -88,13 +86,11 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
                                                         pade_fit_elementwise,
                                                         pade_nodes)
-from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
-                                        minimax_frequency_grid)
-from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
-                                                 minimax_points_for_accuracy)
+from src.Base.utils.grids.grids import minimax_frequency_grid
+from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
 from src.SingleReference.common.active_space import closed_shell_nocc
-from src.SingleReference.GW.imaginary_axis import \
-    fitted_self_energy_matrix_imaginary_axis
+from src.SingleReference.GW.imaginary_axis import (
+    fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
@@ -107,7 +103,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
-    static_screening_grid)
+    rpa_energy_grid, static_screening_grid)
 
 from ..partition import active_pair_mask, ph_element_mask
 from ..terms import DownfoldingTerms, choice
@@ -267,11 +263,12 @@ def _space_time(mf, eps, nocc, numerics):
         screening (`static_screening_grid` at quadrature.ntau_w, as the BSE's
         W), and 'p0' P(0) = chi0(0) on it (`chi0_imaginary_frequency`), the
         chi0 `static_screening_matrix` inverts: 1 - W(0)^-1, built directly.
-    'energy_grid': the TimeFrequencyGrid of E_c, the grid of the RPA
-        ground-state chain: minimax tau (quadrature.ntau_rpa, else ntau_w,
-        else the minimax count of the window at tau_target) transformed onto
-        a Gauss-Legendre frequency axis (quadrature.nfreq_rpa, else
-        RPA_ENERGY_NFREQ; `rpa_quadrature`) scaled to the gap.
+    'energy_grid': the TimeFrequencyGrid of E_c, `rpa_energy_grid`, shared
+        with the RPA ground-state chain: minimax tau (quadrature.ntau_rpa,
+        else ntau_w, else the minimax count of the window at tau_target)
+        transformed onto a Gauss-Legendre frequency axis
+        (quadrature.nfreq_rpa, else RPA_ENERGY_NFREQ; `rpa_quadrature`)
+        scaled to the gap.
 
     E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
     E_c^A are built on these same grids and transforms, so the active part
@@ -292,13 +289,7 @@ def _space_time(mf, eps, nocc, numerics):
     p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
                                   tile_memory_gb=tile_gb)[0]
     ntau, nfreq = rpa_quadrature(num)
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
-    if ntau is None:
-        ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
-    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(eps, nocc))
-    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
-                                           with_sine=False,
-                                           with_inverse=False)
+    grid = rpa_energy_grid(eps, nocc, ntau, nfreq, q.tau_target)
     e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid,
                                             tile_gb=tile_gb, comm=None)
     return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
@@ -1038,9 +1029,10 @@ def _embedding_unchecked(low, part, sigma, settings, infinite):
 def _screening_grid(low):
     """(points, W): the full RPA's screened interaction W(i w) =
     [1 - chi0(i w)]^-1 in the normalized fitting basis, on the minimax grid of
-    numerics.imagfreq.nfreq points over the particle-hole window (the W grid
-    of the GW density's `self_energy_matrix_imaginary_axis`), built on the
-    first request and kept in low.cache['w_grid'].
+    numerics.imagfreq.nfreq points over the particle-hole window
+    (`screening_fit_grid`, shared with the GW density's
+    `self_energy_matrix_imaginary_axis`), built on the first request and
+    kept in low.cache['w_grid'].
 
     imagfrequency: chi0 from the three-index factors, exact at each point.
     space-time: chi0 of the ISDF factors (X, D) on those same points, through
@@ -1053,7 +1045,7 @@ def _build_screening_grid(low):
     """The (points, W) of `_screening_grid`, computed."""
     nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
     e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
-    points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
+    points, weights, _ = screening_fit_grid(low.eps, low.nocc, nfreq)
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         ntau = len(low.cache['static_grid'].tau_points)
@@ -1081,7 +1073,8 @@ def sigma_env_imag_axis(low, part, query_freqs):
     Both routes: the GW density's `fitted_self_energy_matrix_imaginary_axis`
     on the fitting factors B[Q, t, r] (t active, r environment) and the
     environment's eps_r - mu: the Lorentzian fit of W - 1 on
-    `_screening_grid` with its poles and regularization (GW_DENSITY_W_FIT_*),
+    `_screening_grid` with the poles of `screening_fit_grid` and the GW
+    regularization (GW_DENSITY_W_FIT_TIKHONOV),
     whose one-pole convolution with G_r is exact; the full system's mu and
     fit range, so only the internal sum changes. The samples are an exact
     rational function of the frequency, which is what lets the Pade
@@ -1103,10 +1096,9 @@ def sigma_env_imag_axis(low, part, query_freqs):
     query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
     if n == 0 or len(env) == 0:
         return np.zeros((len(query_freqs), n, n), dtype=complex)
-    e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+    mu = particle_hole_window(low.eps, low.nocc)[2]
     points, w_grid = _screening_grid(low)
-    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
-                         GW_DENSITY_W_FIT_HIGH * e_max, len(points))
+    poles = screening_fit_grid(low.eps, low.nocc, len(points))[2]
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         x_act, x_env = x[:, part.act], x[:, env]

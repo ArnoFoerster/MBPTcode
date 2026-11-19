@@ -59,7 +59,7 @@ from src.SingleReference.LinearResponse.linear_response import \
 from src.SingleReference.LinearResponse.rpa_energy import (
     rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
-    rpa_correlation_energy_space_time, static_screening_grid,
+    rpa_correlation_energy_space_time, rpa_energy_grid, static_screening_grid,
     static_screening_matrix)
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import h2, water
@@ -797,3 +797,56 @@ def test_space_time_route_agreement_with_sigma(ref, s):
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
     assert np.allclose(poles['window'], ref_poles['window'], atol=1e-5,
                        rtol=0)
+
+
+# --- the grids shared with GW and the RPA ground-state chain ------------------
+
+def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
+    """S^E on imagfrequency samples W on the points of `screening_fit_grid`
+    and fits it with its poles, and so does the GW density's
+    `self_energy_matrix_imaginary_axis`: one recipe, which both call, not a
+    copy of it."""
+    from src.SingleReference.GW import imaginary_axis
+    mf = water()
+    part = partition(ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2),
+                     mf.mo_energy)
+    shared = imaginary_axis.screening_fit_grid
+    calls, fitted = [], []
+
+    def counted(eps, nocc, nfreq):
+        calls.append(nfreq)
+        return shared(eps, nocc, nfreq)
+
+    fit = rpa.fitted_self_energy_matrix_imaginary_axis
+
+    def spy(b, eps_mu, freq_points, w_grid, query, poles, tikhonov):
+        fitted.append((freq_points, poles))
+        return fit(b, eps_mu, freq_points, w_grid, query, poles, tikhonov)
+
+    monkeypatch.setattr(rpa, 'screening_fit_grid', counted)
+    monkeypatch.setattr(imaginary_axis, 'screening_fit_grid', counted)
+    monkeypatch.setattr(rpa, 'fitted_self_energy_matrix_imaginary_axis', spy)
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    rpa.sigma_env_imag_axis(low, part, [0.5])
+    nfreq = Numerics().imagfreq.nfreq
+    assert calls == [nfreq, nfreq]   # W's points, then the fit's poles
+    points, _, poles = shared(low.eps, low.nocc, nfreq)
+    assert np.array_equal(low.cache['w_grid'][0], points)
+    assert np.array_equal(fitted[0][0], points)
+    assert np.array_equal(fitted[0][1], poles)
+    imaginary_axis.self_energy_matrix_imaginary_axis(
+        mf, mf.mol, low.nocc, np.array([0.5]), Numerics())
+    assert calls == [nfreq] * 3
+
+
+def test_space_time_energy_grid_is_the_rpa_chain_grid():
+    """The space-time E_c integrates on `rpa_energy_grid`, the grid of the
+    RPA ground-state chain, at the run's quadrature counts and tau_target:
+    one recipe, not a copy."""
+    low = _st_low('HF', 'space-time')
+    q = low.numerics.quadrature
+    ntau, nfreq = rpa_quadrature(low.numerics)
+    want = rpa_energy_grid(low.eps, low.nocc, ntau, nfreq, q.tau_target)
+    got = low.cache['energy_grid']
+    for name in ('tau_points', 'omega_points', 'omega_weights', 'cosft_wt'):
+        assert np.array_equal(getattr(got, name), getattr(want, name))

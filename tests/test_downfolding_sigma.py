@@ -1108,14 +1108,14 @@ def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
     from src.Base.numerical_flags import flag
     mf, _, eps, nocc = wat
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
-    grid, built = rpa.minimax_frequency_grid, []
+    build, built = rpa._build_screening_grid, []
 
     def flagged(*args):
         built.append(args)
         flag('probe_grid', 'raised while building W', RuntimeWarning)
-        return grid(*args)
+        return build(*args)
 
-    monkeypatch.setattr(rpa, 'minimax_frequency_grid', flagged)
+    monkeypatch.setattr(rpa, '_build_screening_grid', flagged)
     probe = {'flag': 'probe_grid', 'message': 'raised while building W'}
     with pytest.warns(RuntimeWarning, match='raised while building W'):
         _, _, first = build_effective_hamiltonian(

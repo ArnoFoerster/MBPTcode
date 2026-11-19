@@ -30,11 +30,9 @@ import numpy as np
 from src.gradients.rpa.chain_settings import CarriedGrids, chain_setting, rpa_counts
 from src.Base.declaration import SurfacePhysics
 from src.environments.environment import environment_label
-from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
-from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
-                                                 minimax_points_for_accuracy)
 from src.SingleReference.GW.imaginary_time import DEFAULT_TAU_TARGET
-from src.Base.orbital_spaces import get_occ_virt_indices
+from src.Base.orbital_spaces import particle_hole_window
+from src.SingleReference.LinearResponse.space_time import rpa_energy_grid
 from src.SingleReference.LinearResponse.rpa_energy import (
     declared_ground_state, ground_state_energy)
 from src.SingleReference.LinearResponse.solvated_rpa_energy import fold_terms
@@ -92,18 +90,13 @@ class RPAGroundStateChain(FactorChain, PotentialEnergySurface):
         ntau, nfreq = rpa_counts(self.settings, carried)
         refuse_dispersion_under_rpa(self.mf0, type(self).__name__)
         eps = np.asarray(self.mf0.mo_energy, float)
-        occ, virt = get_occ_virt_indices(eps, self.nocc)
-        self.gap = eps[virt].min() - eps[occ].max()
-        e_max = eps[virt].max() - eps[occ].min()
-        # the tau count follows the Laplace test error of the reference range
-        self.ntau = (minimax_points_for_accuracy(self.gap, e_max,
-                                                 target=DEFAULT_TAU_TARGET)[0]
-                     if ntau is None else int(ntau))
-        # the frequency axis is the quadrature of the energy integral itself
-        nu, wt = gauss_legendre_grid(nfreq, w0=gap_scaled_w0(eps, self.nocc))
-        self.grid = TimeFrequencyGrid.minimax_split(
-            self.ntau, self.gap, e_max, nu, wt, with_sine=False,
-            with_inverse=False)
+        # the tau count, where not given, follows the Laplace test error of
+        # the reference range; the frequency axis is the quadrature of the
+        # energy integral itself (`rpa_energy_grid`)
+        self.grid = rpa_energy_grid(eps, self.nocc, ntau, nfreq,
+                                    DEFAULT_TAU_TARGET)
+        self.gap = particle_hole_window(eps, self.nocc)[0]
+        self.ntau = self.grid.ntau
 
     def _tile_kw(self):
         return {} if self.tile_gb is None else {'tile_gb': self.tile_gb}
