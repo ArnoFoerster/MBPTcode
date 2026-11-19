@@ -858,28 +858,49 @@ def _lowest_davidson(low):
     one root (`solve_casida_davidson`, the run's other Davidson settings):
     the DF block action on low.factors, the ISDF one on (X, D).
 
-    Ruling R25: the one root starts from as many unit vectors as the run's
-    own Davidson would seed for its nroots (guess_factor each), never fewer
-    than DOWNFOLDING_OMEGA_DAVIDSON_GUESS, and an unconverged root is
-    refused (DavidsonNotConverged): a root above Omega_min, unconverged or
-    from a guess that missed its irrep, widens the pole-free window in the
-    unsafe direction."""
+    The one root starts from as many unit vectors as the run's own Davidson
+    would seed for its nroots (guess_factor each), never fewer than
+    DOWNFOLDING_OMEGA_DAVIDSON_GUESS: a root from a guess that missed the
+    irrep of the lowest one lies above Omega_min and widens the pole-free
+    window in the unsafe direction.
+
+    An unconverged root does not stop the build: Omega_min decides only
+    whether the near-pole warning is raised, no number of H_eff. Its last
+    estimate is kept, with the Davidson's own named flag
+    ('davidson_not_converged' or 'davidson_unconfirmed') and a
+    SigmaNearPoleWarning, the flag 'sigma_pole_window_unconverged': the
+    estimate can lie above Omega_min, so the window may be too wide and an
+    orbital near a pole may go without its warning."""
     num = numerics_or_default(low.numerics)
     bse = num.bse
     guesses = max(bse.guess_factor * (bse.nroots or BSE_DAVIDSON_NROOTS),
                   DOWNFOLDING_OMEGA_DAVIDSON_GUESS)
     num = replace(num, bse=replace(bse, nroots=1, guess_factor=guesses))
-    if low.mode == 'space-time':
-        lr = LinearResponseSolver(low.eps, spin_mode='restricted')
-        omega = solve_casida_davidson(lr, low.nocc, numerics=num,
-                                      isdf_factors=low.cache['factors'],
-                                      refuse_unconverged=True)[0]
-    else:
-        lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                                  spin_mode='restricted')
-        omega = solve_casida_davidson(lr, low.nocc, numerics=num,
-                                      refuse_unconverged=True)[0]
-    return float(np.min(omega))
+    raised = []
+    with collecting(raised):
+        if low.mode == 'space-time':
+            lr = LinearResponseSolver(low.eps, spin_mode='restricted')
+            omega = solve_casida_davidson(lr, low.nocc, numerics=num,
+                                          isdf_factors=low.cache['factors'],
+                                          refuse_unconverged=False)[0]
+        else:
+            lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                                      spin_mode='restricted')
+            omega = solve_casida_davidson(lr, low.nocc, numerics=num,
+                                          refuse_unconverged=False)[0]
+    om = float(np.min(omega))
+    if raised:
+        names = ', '.join(sorted({e['flag'] for e in raised}))
+        flag('sigma_pole_window_unconverged',
+             f"Omega_min = {om:.6f} Ha, the lowest RPA excitation that bounds "
+             f"the pole-free window of the environment self-energy, comes "
+             f"from a Davidson that did not finish ({names}): it can lie "
+             f"above the true Omega_min, so the pole-free window may be too "
+             f"wide and an active orbital near a pole may go without its "
+             f"SigmaNearPoleWarning. Sigma_bar^E and H_eff do not depend on "
+             f"it. More cycles (numerics.bse.max_cycle) settle it.",
+             SigmaNearPoleWarning, stacklevel=2)
+    return om
 
 
 def pole_window(low, part):

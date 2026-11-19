@@ -59,7 +59,6 @@ from src.Base.numerics.constants import (DOWNFOLDING_CONTINUATION_MARGIN,
 from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
                                         numerics_or_default)
 from src.Base.orbital_spaces import particle_hole_window
-from src.Base.step_failed import DavidsonNotConverged
 from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
@@ -971,14 +970,20 @@ def test_space_time_samples_the_fitted_self_energy(nh3_space_time):
 
 
 def test_lowest_excitation_davidson_is_hardened(wat, monkeypatch):
-    """Ruling R25: the Davidson for Omega_min solves one root from at least
+    """The Davidson for Omega_min solves one root from at least
     DOWNFOLDING_OMEGA_DAVIDSON_GUESS (10) unit vectors -- the count the
     run's own Davidson (BSE_DAVIDSON_NROOTS roots, guess_factor each) seeds,
-    more when the run asks for more -- and refuses an unconverged root
-    (DavidsonNotConverged, here forced by max_cycle = 1): an unconverged
-    root, or one whose irrep the guess missed, lies above Omega_min and
-    widens the pole-free window in the unsafe direction. Its root is still
-    the dense one (water/6-31G, measured 1.8e-15; bar 1e-8)."""
+    more when the run asks for more: a guess that misses the irrep of the
+    lowest root gives a root above Omega_min, which widens the pole-free
+    window in the unsafe direction. Its root is the dense one (water/6-31G,
+    measured 1.8e-15; bar 1e-8).
+
+    An unconverged root (here forced by max_cycle = 1) does not stop the
+    build, since Omega_min decides only the near-pole warning: its estimate
+    is kept with the Davidson's own named flag and a SigmaNearPoleWarning,
+    the flag 'sigma_pole_window_unconverged', which says that the window
+    may be too wide; the flags reach the energies of every build on that
+    result. Sigma_bar is unchanged by it."""
     mf = wat[0]
     seen = []
     solve = rpa.solve_casida_davidson
@@ -994,7 +999,7 @@ def test_lowest_excitation_davidson_is_hardened(wat, monkeypatch):
     bse = seen[-1]['numerics'].bse
     assert bse.nroots == 1
     assert bse.guess_factor == DOWNFOLDING_OMEGA_DAVIDSON_GUESS == 10
-    assert seen[-1]['refuse_unconverged'] is True
+    assert seen[-1]['refuse_unconverged'] is False
     wide = run_low_level(mf, method='rpa', mode='imagfrequency',
                          numerics=Numerics(bse={'nroots': 6,
                                                 'guess_factor': 3}))
@@ -1002,8 +1007,30 @@ def test_lowest_excitation_davidson_is_hardened(wat, monkeypatch):
     assert seen[-1]['numerics'].bse.guess_factor == 18
     starved = run_low_level(mf, method='rpa', mode='imagfrequency',
                             numerics=Numerics(bse={'max_cycle': 1}))
-    with pytest.raises(DavidsonNotConverged):
-        rpa.lowest_excitation(starved, solver='davidson')
+    with pytest.warns(RuntimeWarning) as rec:
+        rough = rpa.lowest_excitation(starved, solver='davidson')
+    near = [str(w.message) for w in rec
+            if w.category is rpa.SigmaNearPoleWarning]
+    assert len(near) == 1 and 'pole-free window may be too wide' in near[0]
+    assert any('unconverged' in str(w.message) for w in rec
+               if w.category is RuntimeWarning)
+    assert np.isfinite(rough) and rough >= davidson - 1e-8
+
+    # through the build, with the dense rule bypassed: H_eff is built, the
+    # flags are in its energies and in those of a later build on the cache
+    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 0)
+    starved = run_low_level(mf, method='rpa', mode='imagfrequency',
+                            numerics=Numerics(bse={'max_cycle': 1}))
+    space = _contiguous_44(*wat[2:])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        g, _, en = build_effective_hamiltonian(starved, space, sigma='srg')
+        _, _, again = build_effective_hamiltonian(starved, space,
+                                                  sigma='srg')
+    names = {f['flag'] for f in en.numerical_flags}
+    assert {'davidson_not_converged', 'sigma_pole_window_unconverged'} <= names
+    assert {f['flag'] for f in again.numerical_flags} == names
+    assert np.all(np.isfinite(g[1]))
 
 
 def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):

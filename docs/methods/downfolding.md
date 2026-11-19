@@ -335,9 +335,13 @@ and no case closer than that or outside the window was measured. The
 so the pole warning is the only sign of it. Omega_min of the window
 is the lowest root of the same Casida problem on the route's own v (dense
 up to 2000 particle-hole pairs, `DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS`, the
-Davidson for one root above that, started from at least 10 unit vectors
-and refused with `DavidsonNotConverged` if it does not converge, since a
-root above Omega_min would widen the window), computed once and kept.
+Davidson for one root above that, started from at least 10 unit vectors),
+computed once and kept. Omega_min changes no number of H_eff, only where
+the pole warning starts, so a Davidson that does not converge does not stop
+the build: its estimate is kept with the Davidson's own named flag and a
+`SigmaNearPoleWarning` (named flag `'sigma_pole_window_unconverged'`). That
+estimate can lie above Omega_min, so the window may be too wide and an
+orbital near a pole may then go without its warning.
 
 The measured accuracy: the exact Casida S^E fed through the continuation
 alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on
