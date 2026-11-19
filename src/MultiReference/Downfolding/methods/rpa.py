@@ -260,6 +260,28 @@ def _square(rows):
     return rows[0][0] if len(rows) == 1 else np.block(rows)
 
 
+def _per_channel(values):
+    """What a public function returns for a quantity of each spin channel:
+    the one value of a restricted reference, the pair (alpha, beta) of an
+    unrestricted one."""
+    return values[0] if len(values) == 1 else tuple(values)
+
+
+def _orbital(chan):
+    """How a message names an orbital of the channel: 'orbital', or
+    'alpha orbital' / 'beta orbital' for an unrestricted reference."""
+    return 'orbital' if chan.spin is None else f'{chan.spin} orbital'
+
+
+def _window_text(chans, windows):
+    """'window (lo, hi)' or, for two channels, 'windows alpha (lo, hi) and
+    beta (lo, hi)', for the messages."""
+    if len(chans) == 1:
+        return 'window ({:.6f}, {:.6f})'.format(*windows[0])
+    return 'windows ' + ' and '.join(
+        f'{c.spin} ({lo:.6f}, {hi:.6f})' for c, (lo, hi) in zip(chans, windows))
+
+
 def _per_block(blocks):
     """What a public function returns for the two-body blocks: the one array
     of a restricted reference, the tuple (aa, ab, bb) of an unrestricted
@@ -915,22 +937,57 @@ def screened_residues(low, part, orbitals=None):
     pins the factor there. (tr|ia) is built from the integrals of the full
     RPA, low.factors or low.eri. Casida only: the other routes keep no
     eigenvectors, and refuse (NotImplementedError).
+
+    For an unrestricted result `part` is the pair (alpha, beta), `orbitals`
+    a pair of index arrays when given, and the pair (w_alpha, w_beta) is
+    returned, each between that spin's active orbitals and its `orbitals`:
+
+        w^s[n, t, r] = sum_{ia s'} (t_s r_s|i_s' a_s') xpy_{ia s', n},
+
+    the sum over the stacked pairs of both spins and no further factor: the
+    modes are those of the two-spin problem, normalized over both spins.
+    The sqrt(2) above is sqrt(g) of the one restricted channel.
     """
     if low.mode != 'casida':
         raise NotImplementedError(
             f"screened_residues needs the Casida eigenvectors X+Y, which "
             f"mode={low.mode!r} does not keep: use mode='casida'.")
-    act = part.act
-    orbs = part.env if orbitals is None else np.asarray(orbitals, dtype=int)
-    n, m, nocc = len(act), len(orbs), low.nocc
-    if low.factors is not None:
-        b = low.factors
-        rho = b[:, :nocc, nocc:].reshape(b.shape[0], -1) @ low.xpy
-        w = rho.T @ b[:, act][:, :, orbs].reshape(b.shape[0], n * m)
+    chans = _channels(low, part)
+    if orbitals is None:
+        orbs = [c.part.env for c in chans]
+    elif len(chans) == 1:
+        orbs = [np.asarray(orbitals, dtype=int)]
     else:
-        v = low.eri[np.ix_(act, orbs)][:, :, :nocc, nocc:]
-        w = low.xpy.T @ v.reshape(n * m, low.xpy.shape[0]).T
-    return np.sqrt(2.0) * w.reshape(len(low.omega), n, m)
+        orbs = [np.asarray(o, dtype=int) for o in orbitals]
+    return _per_channel(_residues(low, chans, orbs))
+
+
+def _residues(low, chans, orbs):
+    """`screened_residues` per channel: one (nexc, n_act, n_r) array for
+    each, between its active orbitals and its index array of `orbs`."""
+    scale, nexc = np.sqrt(_spin_weight(chans)), len(low.omega)
+    out = []
+    if low.factors is not None:
+        rho = _join([_ov_factors(c) for c in chans], axis=1) @ low.xpy
+        for chan, r in zip(chans, orbs):
+            b, act = chan.factors, chan.part.act
+            n, m = len(act), len(r)
+            w = rho.T @ b[:, act][:, :, r].reshape(b.shape[0], n * m)
+            out.append(scale * w.reshape(nexc, n, m))
+        return out
+    for s, (chan_s, r) in enumerate(zip(chans, orbs)):
+        act = chan_s.part.act
+        n, m = len(act), len(r)
+        cols = []
+        for t, chan_t in enumerate(chans):
+            eri = _eri_block(low, s, t)
+            n_pair = chan_t.nocc * (eri.shape[2] - chan_t.nocc)
+            cols.append(eri[np.ix_(act, r)][:, :, :chan_t.nocc,
+                                            chan_t.nocc:].reshape(n * m,
+                                                                  n_pair))
+        w = low.xpy.T @ _join(cols, axis=1).T
+        out.append(scale * w.reshape(nexc, n, m))
+    return out
 
 
 def _denominators(eps_t, eps_r, occupied_r, omega):
@@ -1165,13 +1222,25 @@ def pole_window(low, part):
     `lowest_excitation`. Every pole of S^E lies at eps_i - Omega_n <= lo
     (inactive i) or eps_a + Omega_n >= hi (environment virtual a), so between
     them every D_tr is non-zero. A side without orbitals (or no excitation at
-    all) is -inf or +inf; with neither side Omega_min is not computed."""
+    all) is -inf or +inf; with neither side Omega_min is not computed.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and the pair
+    of windows is returned, each with its own spin's orbital energies and
+    the one Omega_min of the two-spin problem. That Omega_min includes the
+    spin-density modes, which carry no weight in W for a closed shell, so
+    the windows are conservative: narrower than needed, never wider."""
+    return _per_channel([_window(low, c) for c in _channels(low, part)])
+
+
+def _window(low, chan):
+    """`pole_window` of one spin channel."""
+    part = chan.part
     if not len(part.inactive) and not len(part.env_virt):
         return -np.inf, np.inf
     om = lowest_excitation(low)
     if om is None:
         return -np.inf, np.inf
-    eps = low.eps
+    eps = chan.eps
     lo = eps[part.inactive].max() - om if len(part.inactive) else -np.inf
     hi = eps[part.env_virt].min() + om if len(part.env_virt) else np.inf
     return float(lo), float(hi)
@@ -1185,10 +1254,11 @@ class SigmaNearPoleWarning(RuntimeWarning):
     unreliable on that orbital."""
 
 
-def _warn_near_poles(low, part, settings, sigma, stacklevel):
+def _warn_near_poles(low, chans, settings, sigma, stacklevel):
     """Warn (SigmaNearPoleWarning, the named flag 'sigma_near_pole') of an
     active orbital whose energy is within the margin of an edge of
-    `pole_window`, or outside it; Sigma_bar is computed all the same. The
+    `pole_window`, or outside it, in any spin channel (one warning, naming
+    the spin of each orbital); Sigma_bar is computed all the same. The
     margin: on casida pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when
     srg_s is None, for sigma='mode_a' alone, pointing to 'srg'; on
     imagfrequency and space-time the larger of that and continuation_margin
@@ -1203,14 +1273,18 @@ def _warn_near_poles(low, part, settings, sigma, stacklevel):
         why = (f"continuation_margin {margin:g} Ha, the distance beyond "
                f"which the Pade continuation from the imaginary axis is "
                f"accurate")
-    lo, hi = pole_window(low, part)
-    eps = low.eps[part.act]
-    dist = np.minimum(eps - lo, hi - eps)
-    bad = dist <= margin
-    if bad.any():
-        named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance {x:.6f})'
-                          for p, e, x in zip(part.act[bad], eps[bad],
-                                             dist[bad]))
+    named, windows = [], []
+    for chan in chans:
+        lo, hi = _window(low, chan)
+        windows.append((lo, hi))
+        act = chan.part.act
+        eps = chan.eps[act]
+        dist = np.minimum(eps - lo, hi - eps)
+        bad = dist <= margin
+        named += [f'{_orbital(chan)} {p} (eps = {e:.6f}, distance {x:.6f})'
+                  for p, e, x in zip(act[bad], eps[bad], dist[bad])]
+    if named:
+        named = ', '.join(named)
         if low.mode == 'casida':
             what = ("'mode_a' is undamped and grows without bound towards a "
                     "pole, so its elements on these orbitals are dominated by "
@@ -1228,25 +1302,25 @@ def _warn_near_poles(low, part, settings, sigma, stacklevel):
             'sigma_near_pole',
             f"sigma={sigma!r}: active orbitals near a pole of the "
             f"environment self-energy, {named}, within the margin "
-            f"{margin:.6f} Ha ({why}) of the pole-free window "
-            f"({lo:.6f}, {hi:.6f}) or outside it (a negative distance). "
-            f"Sigma_bar^E is computed all the same. " + what,
+            f"{margin:.6f} Ha ({why}) of the pole-free "
+            f"{_window_text(chans, windows)} or outside it (a negative "
+            f"distance). Sigma_bar^E is computed all the same. " + what,
             SigmaNearPoleWarning, stacklevel=stacklevel)
 
 
-def _require_finite(sigma_bar, part, sigma):
-    """Refuse (FloatingPointError) a Sigma_bar with an element that is not
-    finite, naming the orbital pairs: an active orbital energy on a pole.
-    Near a pole Sigma_bar is kept with a warning (`_warn_near_poles`); this
-    one cannot go into H_eff."""
+def _require_finite(sigma_bar, chan, sigma):
+    """Refuse (FloatingPointError) a Sigma_bar of one spin channel with an
+    element that is not finite, naming the orbital pairs (and their spin):
+    an active orbital energy on a pole. Near a pole Sigma_bar is kept with a
+    warning (`_warn_near_poles`); this one cannot go into H_eff."""
     bad = np.argwhere(~np.isfinite(sigma_bar))
     if len(bad):
-        act = part.act
+        act = chan.part.act
         named = ', '.join(f'({act[t]}, {act[u]})' for t, u in bad[:8])
         more = f' and {len(bad) - 8} more' if len(bad) > 8 else ''
         raise FloatingPointError(
             f"sigma={sigma!r}: Sigma_bar^E is not finite at the elements "
-            f"{named}{more} (orbital pairs): an active orbital energy "
+            f"{named}{more} ({_orbital(chan)} pairs): an active orbital energy "
             f"coincides with a pole of the environment self-energy, and "
             f"such a Sigma_bar cannot go into H_eff. Use sigma='srg' on "
             f"mode='casida', which is finite everywhere, or move the orbital "
@@ -1277,45 +1351,64 @@ def embedding_self_energy(low, part, sigma):
         on the route's own ISDF factors (`sigma_env_imag_axis`).
     Zero when the environment is empty. A Sigma_bar that is not finite (an
     active energy on a pole) is refused, FloatingPointError.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and the pair
+    (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
+    spin, with the residues between that spin's active and environment
+    orbitals, that spin's orbital energies, and the Omega_n of the two-spin
+    RPA, which both spins share. One sigma and one srg_s serve both.
     """
-    return _embedding(low, part, sigma)[0]
+    return _per_channel(_embedding(low, part, sigma)[0])
 
 
 def _embedding(low, part, sigma, infinite=False, stacklevel=3):
     """`_embedding_unchecked` after the pole warning and with the result
-    required finite. stacklevel: where the pole warning points, counted
-    from this function as for warnings.warn (3: the caller of this
-    function's caller)."""
+    required finite: (Sigma_bar, kept), each a list over the spin channels
+    of `part`. stacklevel: where the pole warning points, counted from this
+    function as for warnings.warn (3: the caller of this function's
+    caller)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
+    chans = _channels(low, part)
     if sigma == 'mode_a' or low.mode != 'casida':
-        _warn_near_poles(low, part, settings, sigma, stacklevel + 1)
+        _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
     sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
                                            infinite)
-    _require_finite(sigma_bar, part, sigma)
+    for chan, s_bar in zip(chans, sigma_bar):
+        _require_finite(s_bar, chan, sigma)
     return sigma_bar, kept
 
 
 def _embedding_unchecked(low, part, sigma, settings, infinite):
-    """(Sigma_bar, kept) of `embedding_self_energy`, kept what the
-    diagnostics read without building it again: on casida 'args' = (w, eps_t,
-    eps_r, occupied_r, omega) of the environment, 'srg_s', the s applied
+    """(Sigma_bar, kept) of `embedding_self_energy`, each a list over the
+    spin channels; kept is what the diagnostics read without building it
+    again: on casida 'args' = (w, eps_t, eps_r, occupied_r, omega) of the
+    environment, 'srg_s', the s applied
     by 'srg', and, with infinite and sigma 'srg', 'srg_inf', Sigma_bar at
     s = inf from the same block loop (`_srg_pair`; the damping diagnostic's
     reference); on imagfrequency and space-time 'z' and 'samples', the Pade
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
     if low.mode != 'casida':
-        return _embedding_imag_axis(low, part, sigma)
-    env = part.env
-    args = (screened_residues(low, part), low.eps[part.act], low.eps[env],
-            env < low.nocc, low.omega)
-    kept = {'args': args, 'srg_s': settings.srg_s}
-    if sigma == 'srg':
-        s_bar, kept['srg_inf'] = _srg_pair(
-            *args, settings.srg_s, _sigma_tile_gb(low.numerics), infinite)
-        return s_bar, kept
-    return mode_a_self_energy(*args), kept
+        s_bar, kept = _embedding_imag_axis(low, part, sigma)
+        return [s_bar], [kept]
+    chans = _channels(low, part)
+    residues = screened_residues(low, part)
+    residues = [residues] if len(chans) == 1 else list(residues)
+    sigma_bar, kepts = [], []
+    for chan, w in zip(chans, residues):
+        env = chan.part.env
+        args = (w, chan.eps[chan.part.act], chan.eps[env], env < chan.nocc,
+                low.omega)
+        kept = {'args': args, 'srg_s': settings.srg_s}
+        if sigma == 'srg':
+            s_bar, kept['srg_inf'] = _srg_pair(
+                *args, settings.srg_s, _sigma_tile_gb(low.numerics), infinite)
+        else:
+            s_bar = mode_a_self_energy(*args)
+        sigma_bar.append(s_bar)
+        kepts.append(kept)
+    return sigma_bar, kepts
 
 
 def _screening_grid(low):
@@ -1491,10 +1584,13 @@ def _continued_pole_weights(fit, eps_act):
     return 1.0 / (1.0 - np.einsum('ttt->t', step))
 
 
-def _sigma_poles(low, part, sigma, sigma_bar, kept):
+def _sigma_poles(low, chans, sigma, sigma_bar, kept):
     """The 'sigma_poles' record, and a SigmaDampingWarning (the
     named flag 'sigma_srg_damping') naming the active orbitals whose row of
     Sigma_bar the SRG damping moves by more than DOWNFOLDING_SRG_DAMPING_WARN.
+    sigma_bar and kept are the lists over the spin channels of `_embedding`.
+    For two channels window, pole_distance and z are pairs (alpha, beta);
+    srg_s is the one s of both and srg_damping the largest over both.
 
     window: `pole_window`. pole_distance: per active orbital, the distance
         of eps_t to the nearer edge of the window, negative outside it.
@@ -1506,34 +1602,40 @@ def _sigma_poles(low, part, sigma, sigma_bar, kept):
     srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
         finite s is applied.
     """
-    lo, hi = pole_window(low, part)
-    eps = low.eps[part.act]
-    dist = np.minimum(eps - lo, hi - eps)
-    if low.mode != 'casida':
-        return {'window': (lo, hi), 'pole_distance': dist,
-                'z': _continued_pole_weights(kept['fit'], eps),
-                'srg_s': None, 'srg_damping': 0.0}
-    args, srg_s = kept['args'], kept['srg_s']
-    applied = srg_s if sigma == 'srg' else None
-    damping = 0.0
-    if applied is not None and sigma_bar.size:
-        moved = np.abs(sigma_bar - kept['srg_inf'])
-        damping = float(moved.max())
-        rows = moved.max(axis=1) > DOWNFOLDING_SRG_DAMPING_WARN
-        if rows.any():
-            named = ', '.join(f'orbital {p} (eps = {e:.6f}, distance to the '
-                              f'window {x:.6f})' for p, e, x in
-                              zip(part.act[rows], eps[rows], dist[rows]))
-            flag(
-                'sigma_srg_damping',
-                f"sigma='srg': the SRG damping (s = {applied:g}) changes "
-                f"Sigma_bar^E by up to {damping:.2e} Ha on the active {named}"
-                f", within a few 1/sqrt(2 s) = {1 / np.sqrt(2 * applied):.4f}"
-                f" Ha of a pole of the environment self-energy (pole-free "
-                f"window ({lo:.6f}, {hi:.6f})); Sigma_bar depends on srg_s "
-                f"there.", SigmaDampingWarning, stacklevel=4)
-    return {'window': (lo, hi), 'pole_distance': dist,
-            'z': _pole_weights(*args), 'srg_s': applied,
+    windows, distances, weights, named = [], [], [], []
+    applied, damping = None, 0.0
+    for chan, s_bar, kept_s in zip(chans, sigma_bar, kept):
+        lo, hi = _window(low, chan)
+        act = chan.part.act
+        eps = chan.eps[act]
+        dist = np.minimum(eps - lo, hi - eps)
+        windows.append((lo, hi))
+        distances.append(dist)
+        if low.mode != 'casida':
+            weights.append(_continued_pole_weights(kept_s['fit'], eps))
+            continue
+        weights.append(_pole_weights(*kept_s['args']))
+        applied = kept_s['srg_s'] if sigma == 'srg' else None
+        if applied is not None and s_bar.size:
+            moved = np.abs(s_bar - kept_s['srg_inf'])
+            damping = max(damping, float(moved.max()))
+            rows = moved.max(axis=1) > DOWNFOLDING_SRG_DAMPING_WARN
+            named += [f'{_orbital(chan)} {p} (eps = {e:.6f}, distance to the '
+                      f'window {x:.6f})'
+                      for p, e, x in zip(act[rows], eps[rows], dist[rows])]
+    if named:
+        named = ', '.join(named)
+        flag(
+            'sigma_srg_damping',
+            f"sigma='srg': the SRG damping (s = {applied:g}) changes "
+            f"Sigma_bar^E by up to {damping:.2e} Ha on the active {named}"
+            f", within a few 1/sqrt(2 s) = {1 / np.sqrt(2 * applied):.4f}"
+            f" Ha of a pole of the environment self-energy (pole-free "
+            f"{_window_text(chans, windows)}); Sigma_bar depends on srg_s "
+            f"there.", SigmaDampingWarning, stacklevel=4)
+    return {'window': _per_channel(windows),
+            'pole_distance': _per_channel(distances),
+            'z': _per_channel(weights), 'srg_s': applied,
             'srg_damping': damping}
 
 
@@ -1669,15 +1771,16 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        s_bar, kept = _embedding(low, part, sigma, infinite=True,
-                                 stacklevel=4)
-        sigma_bar, dc = (s_bar,), 'hartree'
+        s_bars, kepts = _embedding(low, part, sigma, infinite=True,
+                                   stacklevel=4)
+        sigma_bar, dc = tuple(s_bars), 'hartree'
         # the two checks of Sigma_bar always run and warn; `diagnostics`
         # only decides whether their numbers are kept
-        checks = {'sigma_poles': _sigma_poles(low, part, sigma, s_bar, kept)}
+        checks = {'sigma_poles': _sigma_poles(low, _channels(low, part),
+                                              sigma, s_bars, kepts)}
         if low.mode != 'casida':
             checks['sigma_continuation'] = _sigma_continuation(
-                low, part, sigma, kept)
+                low, part, sigma, kepts[0])
         found.update({name: value for name, value in checks.items()
                       if name in names})
     return DownfoldingTerms(

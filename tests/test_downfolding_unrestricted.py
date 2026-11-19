@@ -47,7 +47,8 @@ from src.MultiReference.Downfolding.partition import (partition,
 from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
-from tests.downfolding_oracle import (CH2, NH, OH, drpa_so, h2_broken,
+from tests.downfolding_oracle import (CH2, NH, OH, drpa_so,
+                                      env_residues_uhf, h2_broken,
                                       mo_integrals, reference_energy_uhf,
                                       rpa_energy, sigma_mode_a,
                                       sigma_mode_a_uhf, sigma_srg,
@@ -778,3 +779,149 @@ def test_two_body_blocks_must_fit_the_reference(oh, oh_low):
             function(oh_low[True], parts, v_eff[0])
         with pytest.raises(ValueError, match='three blocks'):
             function(oh_low[True], parts, v_eff[:2])
+
+
+# --- the environment self-energy Sigma_bar^E, per spin -------------------------
+
+def _no_core(mf):
+    """OH/6-31G: every occupied orbital of both spins active, so no inactive
+    orbital; N^A = (5, 4) in 6 orbitals."""
+    nmo = mf.mo_coeff.shape[-1]
+    return (ActiveSpace.from_indices(nmo, 5, range(5), [5]),
+            ActiveSpace.from_indices(nmo, 4, range(4), [4, 5]))
+
+
+@pytest.mark.parametrize('space', ['asymmetric', 'unequal_cores',
+                                   'no_beta_pair'])
+@pytest.mark.parametrize('df', [False, True])
+def test_residues_against_oracle(oh, oh_low, space, df):
+    """The residues of W between the active and the environment orbitals of
+    each spin, w^s[n, t, r] = sum over the pairs of BOTH spins of
+    (t_s r_s|i a) (X+Y)_ia,n, with no spin factor (g = 1). The modes of two
+    eigensolvers can differ by sign and by rotations among degenerate ones,
+    so the comparison is on sum_n w[n,t,r] w[n,u,s] / Omega_n, between the
+    same spin and between the two spins, against the oracle's. Measured:
+    5.4e-15 over three spaces and both df settings."""
+    low = oh_low[df]
+    parts = _parts(oh, SPACES[space](oh))
+    nmo = oh.mo_coeff.shape[-1]
+    so = _spin_orbitals(oh, parts)
+    omega, w_ref, _, env = env_residues_uhf(*so)
+    ours = rpa.screened_residues(low, parts)
+    assert isinstance(ours, tuple) and len(ours) == 2
+    n = parts[0].n_act
+    cols = [[x for x, r in enumerate(env) if (r >= nmo) == bool(spin)]
+            for spin in (0, 1)]
+    for spin, part in enumerate(parts):
+        assert ours[spin].shape == (len(low.omega), n, len(part.env))
+        assert [env[x] - spin * nmo for x in cols[spin]] == list(part.env)
+    rows = [slice(0, n), slice(n, 2 * n)]
+    for first in (0, 1):
+        for second in (0, 1):
+            got = np.einsum('ntr,nus->trus', ours[first] / low.omega[:, None, None],
+                            ours[second])
+            ref = np.einsum('ntr,nus->trus',
+                            w_ref[:, rows[first]][:, :, cols[first]]
+                            / omega[:, None, None],
+                            w_ref[:, rows[second]][:, :, cols[second]])
+            assert np.max(np.abs(got - ref)) < 1e-9
+            assert np.max(np.abs(ref)) > 1e-3
+    # any orbitals per spin, here every orbital
+    every = rpa.screened_residues(low, parts,
+                                  orbitals=(np.arange(nmo), np.arange(nmo)))
+    for spin, part in enumerate(parts):
+        assert every[spin].shape == (len(low.omega), n, nmo)
+        assert np.max(np.abs(every[spin][:, :, part.env] - ours[spin])) < 1e-12
+
+
+@pytest.mark.parametrize('space', ['asymmetric', 'unequal_cores',
+                                   'no_beta_pair'])
+@pytest.mark.parametrize('df', [False, True])
+def test_sigma_against_oracle(oh, oh_low, space, df):
+    """Sigma_bar^E of each spin, with that spin's orbital energies and the
+    Omega_n both spins share: the SRG form (Marie and Loos Eq. 44) and mode
+    A (Eq. 12 at eta = 0) against the oracle's pole sums in spin orbitals.
+    Measured over three spaces and both df settings: 'srg' 4.9e-15, 'mode_a'
+    1.9e-13, on elements up to 0.02 Ha whose alpha and beta blocks differ by
+    0.01 to 0.03 Ha."""
+    low = oh_low[df]
+    parts = _parts(oh, SPACES[space](oh))
+    so = _spin_orbitals(oh, parts)
+    srg = rpa.embedding_self_energy(low, parts, 'srg')
+    assert isinstance(srg, tuple) and len(srg) == 2
+    for ours, ref in zip(srg, sigma_srg_uhf(*so, DOWNFOLDING_SRG_S)):
+        assert ours.shape == (parts[0].n_act,) * 2
+        assert np.max(np.abs(ours - ref)) < 1e-9
+        assert np.max(np.abs(ours - ours.T)) < 1e-12
+    if space != 'no_beta_pair':
+        assert np.max(np.abs(srg[0] - srg[1])) > 1e-3
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', rpa.SigmaNearPoleWarning)
+        mode_a = rpa.embedding_self_energy(low, parts, 'mode_a')
+    for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
+        assert np.max(np.abs(ours - ref)) < 1e-9
+
+
+def test_pole_window_per_spin(oh, oh_low):
+    """The pole-free window of each spin, (max eps_I - Omega_min,
+    min eps_Ev + Omega_min) with that spin's energies and the one Omega_min
+    of the two-spin problem; a side without orbitals is open."""
+    low = oh_low[True]
+    om = drpa_so(*_molecule_so(oh))[1].min()
+    assert abs(rpa.lowest_excitation(low) - om) < 1e-9
+    for make in (_asymmetric, _no_core):
+        parts = _parts(oh, make(oh))
+        windows = rpa.pole_window(low, parts)
+        assert len(windows) == 2
+        for (lo, hi), part, eps in zip(windows, parts, oh.mo_energy):
+            if len(part.inactive):
+                assert abs(lo - (eps[part.inactive].max() - om)) < 1e-9
+            else:
+                assert lo == -np.inf
+            assert abs(hi - (eps[part.env_virt].min() + om)) < 1e-9
+    assert windows[0][1] != windows[1][1]
+    assert rpa.pole_window(low, _parts(oh, _all_active(oh))) == (
+        (-np.inf, np.inf), (-np.inf, np.inf))
+
+
+def test_near_pole_warning_names_the_spin(oh, oh_low):
+    """'mode_a' warns of the active orbitals near a pole, naming their spin.
+    In the asymmetric space the beta orbitals 6 and 7 lie above the beta
+    window (distances -0.20 and -0.27 Ha) and every alpha orbital is at
+    least 0.64 Ha inside the alpha one. 'srg' is finite everywhere and does
+    not warn; with no orbital near a pole neither does 'mode_a'."""
+    low = oh_low[True]
+    parts = _parts(oh, _asymmetric(oh))
+    with pytest.warns(rpa.SigmaNearPoleWarning,
+                      match=r'beta orbital 6 \(.*beta orbital 7 \(') as rec:
+        rpa.embedding_self_energy(low, parts, 'mode_a')
+    assert rec[0].filename == __file__
+    text = str(rec[0].message)
+    assert 'alpha orbital' not in text
+    assert 'windows alpha (' in text and ' and beta (' in text
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        rpa.embedding_self_energy(low, parts, 'srg')
+        rpa.embedding_self_energy(low, _parts(oh, _unequal_cores(oh)),
+                                  'mode_a')
+
+
+def test_a_sigma_that_is_not_finite_names_the_spin(oh, oh_low, monkeypatch):
+    """A Sigma_bar with an element that is not finite is refused, naming
+    the spin of the orbital pair."""
+    parts = _parts(oh, _unequal_cores(oh))
+    exact, calls = rpa.mode_a_self_energy, []
+
+    def with_a_pole(*args):
+        out = exact(*args)
+        calls.append(1)
+        if len(calls) == 2:                      # the beta channel
+            out[-1, -1] = np.inf
+        return out
+
+    monkeypatch.setattr(rpa, 'mode_a_self_energy', with_a_pole)
+    act = parts[1].act
+    with pytest.raises(FloatingPointError,
+                       match=rf"\({act[-1]}, {act[-1]}\) \(beta orbital "
+                             rf"pairs\).*sigma='srg'"):
+        rpa.embedding_self_energy(oh_low[True], parts, 'mode_a')
