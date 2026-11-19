@@ -1564,15 +1564,23 @@ def _build_screening_grid(low):
     - chi0_beta]^-1, on the grid over the transitions of both."""
     points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
     if low.mode == 'space-time':
-        e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
         x, d = low.cache['factors']
         ntau = len(low.cache['static_grid'].tau_points)
-        grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, points,
-                                               weights, with_sine=False,
-                                               with_inverse=False)
-        w = chi0_imaginary_frequency(
-            x, d, low.eps, low.nocc, grid, mu=mu,
-            tile_memory_gb=layout_tile_gb(low.numerics))
+        tile_gb = layout_tile_gb(low.numerics)
+        if low.unrestricted:
+            e_min, e_max = transition_range(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = spin_summed(chi0_imaginary_frequency, x, d, low.eps,
+                            low.nocc, grid, tile_memory_gb=tile_gb)
+        else:
+            e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = chi0_imaginary_frequency(x, d, low.eps, low.nocc, grid,
+                                         mu=mu, tile_memory_gb=tile_gb)
         for k in range(len(w)):
             w[k] = dyson_screening(w[k])
         return points, w
@@ -1633,7 +1641,7 @@ def sigma_env_imag_axis(low, part, query_freqs):
             continue
         mu = particle_hole_window(chan.eps, chan.nocc)[2]
         if low.mode == 'space-time':
-            x, d = low.cache['factors']
+            x, d = chan.collocation, low.cache['factors'][1]
             x_act, x_env = x[:, chan.part.act], x[:, env]
             pairs = (x_act[:, :, None]
                      * x_env[:, None, :]).reshape(len(x), -1)

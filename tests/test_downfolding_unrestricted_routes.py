@@ -77,6 +77,8 @@ from tests.downfolding_oracle import (CH2, OH, drpa_so,
                                       fitted_spin_orbital_integrals,
                                       sigma_env_uhf, spin_orbital_integrals,
                                       unrestricted, water)
+from tests.gw_density_routes import fitted
+from tests.gw_density_routes import water as gw_water
 from tests.isdf_test_grid import g1_numerics
 
 REFS = ('oh', 'ch2')
@@ -961,3 +963,164 @@ def test_space_time_lowest_excitation(ref):
     for ours, casida in zip(rpa.pole_window(low, parts),
                             rpa.pole_window(cas, parts)):
         assert np.abs(np.subtract(ours, casida)).max() < 1e-9
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_sigma_env_samples_against_the_pole_sum(ref):
+    """S^E of each spin on the Pade nodes, sampled on space-time from the
+    fit of the route's own W (chi0 of both spins on the ISDF factors) with
+    B^s_Q,tr = sum_P D_PQ X^s_Pt X^s_Pr, against the oracle's exact pole sum
+    in spin orbitals on the same ISDF v, on each spin's own mid-gap line.
+    Measured at the first, middle and last node: 2.9e-8 (OH), 1.0e-8
+    (CH2)."""
+    mf = _st_mean_field(ref)
+    low = run_low_level(mf, method='rpa', mode='space-time',
+                        numerics=g1_numerics(mf))
+    parts = _st_parts(ref, 'unequal_cores')
+    nmo, n = mf.mo_coeff.shape[-1], parts[0].n_act
+    nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
+    mus = [particle_hole_window(eps, nocc)[2]
+           for eps, nocc in zip(low.eps, low.nocc)]
+    assert 'w_grid' not in low.cache
+    got = rpa.sigma_env_imag_axis(low, parts, nodes)
+    assert isinstance(got, tuple) and len(got) == 2
+    three = _isdf_three_index(low)
+    eri_so = np.zeros((2 * nmo,) * 4)
+    for s in (0, 1):
+        for t in (0, 1):
+            eri_so[s * nmo:(s + 1) * nmo, s * nmo:(s + 1) * nmo,
+                   t * nmo:(t + 1) * nmo, t * nmo:(t + 1) * nmo] = np.einsum(
+                'Qpq,Qrs->pqrs', three[s], three[t], optimize=True)
+    eps_so = np.concatenate(low.eps)
+    occ_so = list(range(low.nocc[0])) + [nmo + i for i in range(low.nocc[1])]
+    act_so = list(parts[0].act) + [nmo + q for q in parts[1].act]
+    blocks = (slice(0, n), slice(n, 2 * n))
+    for spin in (0, 1):
+        assert got[spin].shape == (len(nodes), n, n)
+        for k in (0, len(nodes) // 2, len(nodes) - 1):
+            exact = sigma_env_uhf(mus[spin] + 1j * nodes[k], eri_so, eps_so,
+                                  occ_so, act_so)[blocks[spin], blocks[spin]]
+            assert np.abs(exact).max() > 1e-4
+            assert np.abs(got[spin][k] - exact).max() < 1e-6
+    w_grid = low.cache['w_grid']
+    rpa.sigma_env_imag_axis(low, parts, nodes)
+    assert low.cache['w_grid'] is w_grid
+
+
+@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('which', INSIDE)
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_sigma_bar_matches_casida(ref, which, sigma):
+    """Sigma_bar^E of both spins on space-time against casida on the same
+    ISDF factors at srg_s = None. No near-pole warning: the active orbitals
+    are at least 0.67 Ha inside both windows. Measured: 5.9e-8 (OH), 1.9e-8
+    (CH2), the same for 'srg' and 'mode_a'."""
+    low, cas = _st_low(ref), _st_casida(ref)
+    parts = _st_parts(ref, which)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
+        got = rpa.embedding_self_energy(low, parts, sigma)
+    want = rpa.embedding_self_energy(cas, parts, sigma)
+    assert isinstance(got, tuple) and len(got) == 2
+    for ours, casida in zip(got, want):
+        assert np.abs(casida).max() > 1e-3
+        assert np.abs(ours - casida).max() < 1e-6
+    assert np.abs(got[0] - got[1]).max() > 1e-3
+
+
+@pytest.mark.parametrize('screening', SCREENINGS)
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_route_agreement_with_sigma(ref, screening):
+    """With sigma='srg' every Energies field, h_eff of both spins and the
+    FCI energy agree between space-time and casida on the same ISDF
+    factors; the records are pairs where they belong to a spin. Measured,
+    OH and CH2: every field 4.2e-7 and 1.7e-7, h_eff 2.2e-7 and 1.2e-7,
+    FCI 2.2e-8 and 1.0e-9; the continuation spread is at most 1.3e-5."""
+    spaces = _st_spaces(ref, 'unequal_cores')
+    g, space, en = build_effective_hamiltonian(
+        _st_low(ref), spaces, screening=screening, sigma='srg')
+    g_c, _, en_c = build_effective_hamiltonian(
+        _st_casida(ref), spaces, screening=screening, sigma='srg')
+    assert abs(en.e_sigma_trace) > 1e-3
+    for field in dataclasses.fields(Energies):
+        if field.name not in RECORDS:
+            assert abs(getattr(en, field.name)
+                       - getattr(en_c, field.name)) < 5e-6, field.name
+    for ours, casida in zip(g[1], g_c[1]):
+        assert np.abs(ours - casida).max() < 5e-6
+    assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-6
+    assert en.numerical_flags == []
+    poles = en.diagnostics['sigma_poles']
+    spread = en.diagnostics['sigma_continuation']
+    assert len(poles['window']) == len(poles['z']) == len(spread) == 2
+    assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
+    assert max(s.max() for s in spread) < 1e-4
+
+
+def test_space_time_near_pole_warning_names_the_spin():
+    """In the asymmetric OH space the beta orbitals 6 and 7 are within the
+    continuation margin of the beta window's upper edge or above it (0.06
+    Ha inside and 0.31 Ha outside): both forms warn on space-time, naming
+    the spin and pointing to casida, and Sigma_bar is computed all the
+    same. The continuation check warns as well, of the elements (7, 7) of
+    both spins (1.5e-4 and 2.6e-4 Ha)."""
+    low = _st_low('oh')
+    spaces = _st_spaces('oh', 'asymmetric')
+    for sigma in ('srg', 'mode_a'):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            g, _, en = build_effective_hamiltonian(low, spaces, sigma=sigma)
+        near = [w for w in rec if w.category is rpa.SigmaNearPoleWarning]
+        assert len(near) == 1 and near[0].filename == __file__
+        assert all(w.category in (rpa.SigmaNearPoleWarning,
+                                  rpa.SigmaContinuationWarning) for w in rec)
+        text = str(near[0].message)
+        assert re.search(r'beta orbital 6 \(.*beta orbital 7 \(', text)
+        assert "mode='casida'" in text and 'alpha orbital' not in text
+        assert all(np.all(np.isfinite(h)) for h in g[1])
+        assert {'flag': 'sigma_near_pole',
+                'message': text} in en.numerical_flags
+
+
+@pytest.mark.parametrize('sigma', (None, 'srg'))
+def test_space_time_closed_shell_limit(sigma):
+    """A closed shell (water/cc-pVDZ, density fitted, G1 grid) as RHF and
+    as the same determinant in a UHF object: on space-time the two-channel
+    code gives the restricted H_eff, energy terms and FCI energy. The two
+    spins' collocations are the restricted one, and the grids are the
+    restricted grids. Measured: the factors and E_c identical, h_eff
+    4.4e-16, v_eff 0, the energy terms 2.4e-14, FCI 1.4e-14."""
+    rhf = fitted(scf.RHF(gw_water()))
+    uhf = rhf.to_uhf()
+    numerics = g1_numerics(rhf)
+    low_r = run_low_level(rhf, method='rpa', mode='space-time',
+                          numerics=numerics)
+    low_u = run_low_level(uhf, method='rpa', mode='space-time',
+                          numerics=numerics)
+    x_r, d_r = low_r.cache['factors']
+    x_u, d_u = low_u.cache['factors']
+    assert np.abs(d_u - d_r).max() < 1e-10
+    assert all(np.abs(x_s - x_r).max() < 1e-10 for x_s in x_u)
+    assert abs(low_u.e_c_full - low_r.e_c_full) < 1e-10
+    one = ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2)
+    for screening in SCREENINGS:
+        g_r, _, en_r = build_effective_hamiltonian(
+            low_r, one, screening=screening, sigma=sigma)
+        g_u, space, en_u = build_effective_hamiltonian(
+            low_u, (one, one), screening=screening, sigma=sigma)
+        for h in g_u[1]:
+            assert np.abs(h - g_r[1]).max() < 1e-8
+        for v in g_u[2]:
+            assert np.abs(v - g_r[2]).max() < 1e-10
+        for field in dataclasses.fields(Energies):
+            if field.name not in RECORDS:
+                assert abs(getattr(en_u, field.name)
+                           - getattr(en_r, field.name)) < 1e-8, field.name
+        e_r = solve('pyscf_fci', g_r, 4, 4, spin_free=True)[0]
+        assert abs(_solve(g_u, space) - e_r) < 1e-8
+
+
+def test_mrpa_stays_casida_only_on_space_time():
+    with pytest.raises(NotImplementedError, match="mode='casida'"):
+        rpa.screening_correction(_st_low('oh'),
+                                 _st_parts('oh', 'unequal_cores'), 'mrpa')
