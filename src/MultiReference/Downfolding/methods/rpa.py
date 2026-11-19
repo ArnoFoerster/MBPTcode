@@ -1485,8 +1485,7 @@ def _embedding_unchecked(low, part, sigma, settings, infinite):
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
     if low.mode != 'casida':
-        s_bar, kept = _embedding_imag_axis(low, part, sigma)
-        return [s_bar], [kept]
+        return _embedding_imag_axis(low, part, sigma)
     chans = _channels(low, part)
     residues = screened_residues(low, part)
     residues = [residues] if len(chans) == 1 else list(residues)
@@ -1522,10 +1521,12 @@ def _screening_grid(low):
 
 
 def _build_screening_grid(low):
-    """The (points, W) of `_screening_grid`, computed."""
-    e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+    """The (points, W) of `_screening_grid`, computed. For an unrestricted
+    result W is the one screened interaction of both spins, [1 - chi0_alpha
+    - chi0_beta]^-1, on the grid over the transitions of both."""
     points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
     if low.mode == 'space-time':
+        e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
         x, d = low.cache['factors']
         ntau = len(low.cache['static_grid'].tau_points)
         grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, points,
@@ -1537,8 +1538,9 @@ def _build_screening_grid(low):
         for k in range(len(w)):
             w[k] = dyson_screening(w[k])
         return points, w
+    spin_mode = 'unrestricted' if low.unrestricted else 'restricted'
     lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                              spin_mode='restricted')
+                              spin_mode=spin_mode)
     return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
 
 
@@ -1563,6 +1565,11 @@ def sigma_env_imag_axis(low, part, query_freqs):
     it from the ISDF factors, B_Q,tr = sum_P D_PQ X_Pt X_Pr, for the active
     and environment columns alone (N^3 times the active orbitals), and uses
     the W of its own chi0.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and the pair
+    of each spin's samples is returned: S^{E,s}(mu_s + i w) with that spin's
+    factors between its active and environment orbitals, its orbital
+    energies and its own mid-gap mu_s, on the one W of both spins.
     """
     if low.mode == 'casida':
         raise NotImplementedError(
@@ -1571,23 +1578,34 @@ def sigma_env_imag_axis(low, part, query_freqs):
             f"is mode='casida' (its self-energy is `embedding_self_energy`, "
             f"from the residues of W): use mode='imagfrequency' or "
             f"mode='space-time'.")
-    n, env = part.n_act, part.env
+    chans = _channels(low, part)
     query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
-    if n == 0 or len(env) == 0:
-        return np.zeros((len(query_freqs), n, n), dtype=complex)
-    mu = particle_hole_window(low.eps, low.nocc)[2]
-    points, w_grid = _screening_grid(low)
-    poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
-    if low.mode == 'space-time':
-        x, d = low.cache['factors']
-        x_act, x_env = x[:, part.act], x[:, env]
-        pairs = (x_act[:, :, None] * x_env[:, None, :]).reshape(len(x), -1)
-        b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
-    else:
-        b = low.factors[:, part.act][:, :, env]
-    return fitted_self_energy_matrix_imaginary_axis(
-        b, low.eps[env] - mu, points, w_grid, query_freqs, poles,
-        GW_DENSITY_W_FIT_TIKHONOV)
+    # W and the fit's poles are fetched once, and only when a channel has
+    # active and environment orbitals
+    fit = None
+    if any(c.part.n_act and len(c.part.env) for c in chans):
+        points, w_grid = _screening_grid(low)
+        poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
+        fit = (points, w_grid, poles)
+    out = []
+    for chan in chans:
+        n, env = chan.part.n_act, chan.part.env
+        if n == 0 or len(env) == 0:
+            out.append(np.zeros((len(query_freqs), n, n), dtype=complex))
+            continue
+        mu = particle_hole_window(chan.eps, chan.nocc)[2]
+        if low.mode == 'space-time':
+            x, d = low.cache['factors']
+            x_act, x_env = x[:, chan.part.act], x[:, env]
+            pairs = (x_act[:, :, None]
+                     * x_env[:, None, :]).reshape(len(x), -1)
+            b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
+        else:
+            b = chan.factors[:, chan.part.act][:, :, env]
+        out.append(fitted_self_energy_matrix_imaginary_axis(
+            b, chan.eps[env] - mu, fit[0], fit[1], query_freqs, fit[2],
+            GW_DENSITY_W_FIT_TIKHONOV))
+    return _per_channel(out)
 
 
 def _evaluate_continued(fit, eps_act, sigma):
@@ -1620,18 +1638,28 @@ def continued_self_energy(z, samples, eps_act, sigma):
 
 
 def _embedding_imag_axis(low, part, sigma):
-    """`_embedding` on imagfrequency and space-time: S^E on the Pade nodes
-    of the run's numerics (`pade_nodes`, on the line mu + i w), fitted
-    once."""
+    """`_embedding_unchecked` on imagfrequency and space-time, a list over
+    the spin channels each: S^E on the Pade nodes of the run's numerics
+    (`pade_nodes`, on the line mu + i w, mu the channel's own mid-gap),
+    fitted once per channel."""
     nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
-    z = particle_hole_window(low.eps, low.nocc)[2] + 1j * nodes
+    chans = _channels(low, part)
     samples = sigma_env_imag_axis(low, part, nodes)
-    kept = {'z': z, 'samples': samples, 'fit': None}
-    n = part.n_act
-    if n == 0 or len(part.env) == 0:
-        return np.zeros((n, n)), kept
-    kept['fit'] = pade_fit_elementwise(z, samples, symmetric=True)
-    return _evaluate_continued(kept['fit'], low.eps[part.act], sigma), kept
+    samples = [samples] if len(chans) == 1 else list(samples)
+    sigma_bar, kepts = [], []
+    for chan, sampled in zip(chans, samples):
+        z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
+        kept = {'z': z, 'samples': sampled, 'fit': None}
+        n = chan.part.n_act
+        if n == 0 or len(chan.part.env) == 0:
+            s_bar = np.zeros((n, n))
+        else:
+            kept['fit'] = pade_fit_elementwise(z, sampled, symmetric=True)
+            s_bar = _evaluate_continued(kept['fit'],
+                                        chan.eps[chan.part.act], sigma)
+        sigma_bar.append(s_bar)
+        kepts.append(kept)
+    return sigma_bar, kepts
 
 
 class SigmaDampingWarning(RuntimeWarning):
@@ -1747,22 +1775,29 @@ def continuation_spread(z, samples, eps_act, sigma):
     return np.abs(even - odd)
 
 
-def _sigma_continuation(low, part, sigma, kept):
+def _sigma_continuation(low, chans, sigma, kept):
     """The 'sigma_continuation' record: `continuation_spread` on
     the nodes Sigma_bar was continued from, and a SigmaContinuationWarning
     (the named flag 'sigma_continuation_spread') naming the elements (as
     orbital pairs) above DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without
-    an environment."""
-    n = part.n_act
-    if kept['fit'] is None:
-        return np.zeros((n, n))
-    spread = continuation_spread(kept['z'], kept['samples'],
-                                 low.eps[part.act], sigma)
-    bad = np.argwhere(np.triu(spread > DOWNFOLDING_SIGMA_CONTINUATION_WARN))
-    if len(bad):
-        act = part.act
-        named = ', '.join(f'({act[t]}, {act[u]}) {spread[t, u]:.2e}'
-                          for t, u in bad)
+    an environment. kept is the list over the spin channels of
+    `_embedding`; for two channels the record is the pair (alpha, beta) and
+    the warning names the spin of each element."""
+    spreads, named = [], []
+    for chan, kept_s in zip(chans, kept):
+        n, act = chan.part.n_act, chan.part.act
+        if kept_s['fit'] is None:
+            spreads.append(np.zeros((n, n)))
+            continue
+        spread = continuation_spread(kept_s['z'], kept_s['samples'],
+                                     chan.eps[act], sigma)
+        spreads.append(spread)
+        spin = '' if chan.spin is None else f'{chan.spin} '
+        named += [f'{spin}({act[t]}, {act[u]}) {spread[t, u]:.2e}'
+                  for t, u in np.argwhere(np.triu(
+                      spread > DOWNFOLDING_SIGMA_CONTINUATION_WARN))]
+    if named:
+        named = ', '.join(named)
         flag(
             'sigma_continuation_spread',
             f"sigma={sigma!r} on mode={low.mode!r}: two Pade fits of the "
@@ -1772,7 +1807,7 @@ def _sigma_continuation(low, part, sigma, kept):
             f"there is uncertain. More nodes (numerics.quadrature.npade) or "
             f"mode='casida' avoid the continuation.",
             SigmaContinuationWarning, stacklevel=4)
-    return spread
+    return _per_channel(spreads)
 
 
 def _sigma_name(sigma):
@@ -1882,7 +1917,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                               kepts)}
         if low.mode != 'casida':
             checks['sigma_continuation'] = _sigma_continuation(
-                low, part, sigma, kepts[0])
+                low, chans, sigma, kepts)
         found.update({name: value for name, value in checks.items()
                       if name in names})
     return DownfoldingTerms(
