@@ -19,6 +19,16 @@ The environment self-energy has its own residues of the full W
 Eq. 12 at eta = 0 (`sigma_mode_a`) and Eq. 44 (`sigma_srg`)
 (tests/test_downfolding_sigma.py).
 
+The two-spin functions at the end (`drpa_so`, `w0_minus_v_so`,
+`vtilde_crpa_uhf`, `vtilde_mrpa_uhf`, `env_residues_uhf`, `sigma_env_uhf`,
+`sigma_mode_a_uhf`, `sigma_srg_uhf`, `reference_energy_uhf`) are the same
+formulas for an unrestricted reference, where the alpha and beta orbitals,
+orbital energies, occupied counts and active sets differ. They work on the
+spin-orbital integrals of `spin_orbital_integrals`, the spin-orbital
+energies, the list of occupied spin orbitals and the list of active spin
+orbitals (alpha active orbitals, then beta), with no spin adaptation
+anywhere (tests/test_downfolding_unrestricted.py).
+
 Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
 """
@@ -540,3 +550,214 @@ def sigma_srg(eri, eps, nocc, part, s):
             out[t, u] = np.sum((d_t + d_u) / lam * w[:, t, :] * w[:, u, :]
                                * damp)
     return out
+
+
+# --- two spins: an unrestricted reference, everything in spin orbitals --------
+
+def so_pairs(eps_so, occ_so):
+    """The same-spin particle-hole pairs (i, a) of the spin orbitals, stacked:
+    the alpha pairs in C order over (i, a), then the beta pairs. Spin-flip
+    pairs have no Coulomb coupling and are left out."""
+    n = len(eps_so) // 2
+    occ = {int(i) for i in occ_so}
+    pairs = []
+    for s in (0, 1):
+        spin = range(s * n, (s + 1) * n)
+        pairs += [(i, a) for i in spin if i in occ
+                  for a in spin if a not in occ]
+    return pairs
+
+
+def drpa_so(eri_so, eps_so, occ_so, keep=None):
+    """(e_c, omega, xpy, pairs): the direct RPA in spin orbitals.
+
+    A = delta + K and B = K on the pairs of `so_pairs`, K_ia,jb = (ia|jb)
+    for any two spins, so A - B = delta and A + B = delta + 2K:
+    M = delta^1/2 (delta + 2K) delta^1/2 = Z omega^2 Z^T,
+    X+Y = delta^1/2 Z omega^-1/2 (X^T X - Y^T Y = 1), one mode per column,
+    and e_c = 1/2 (sum_n omega_n - Tr A). keep: a bool mask over the pairs;
+    the problem is then solved on the kept pairs alone, which `pairs` lists
+    and the rows of xpy follow.
+    """
+    pairs = so_pairs(eps_so, occ_so)
+    if keep is not None:
+        pairs = [pair for pair, kept in zip(pairs, keep) if kept]
+    m = len(pairs)
+    delta = np.array([eps_so[a] - eps_so[i] for i, a in pairs])
+    k = np.zeros((m, m))
+    for x, (i, a) in enumerate(pairs):
+        for y, (j, b) in enumerate(pairs):
+            k[x, y] = eri_so[i, a, j, b]
+    root = np.sqrt(delta)
+    omega2, z = np.linalg.eigh(root[:, None] * (np.diag(delta) + 2.0 * k)
+                               * root[None, :])
+    omega = np.sqrt(omega2)
+    xpy = root[:, None] * z / np.sqrt(omega)[None, :]
+    e_c = 0.5 * omega.sum() - 0.5 * np.sum(delta + np.diag(k))
+    return e_c, omega, xpy, pairs
+
+
+def w0_minus_v_so(eri_so, eps_so, occ_so, orbs, keep=None):
+    """W(0) - v between the spin orbitals `orbs`, chemist (len(orbs),)*4, of
+    the direct RPA of `drpa_so` (on the pairs `keep`, None: all), by the pole
+    sum of the paper's Eq. 2.12:
+
+        W(0) - v = -2 sum_n w_n w_n^T / omega_n,
+        w_n,pq = sum_ia (pq|ia) (X+Y)_ia,n.
+    """
+    _, omega, xpy, pairs = drpa_so(eri_so, eps_so, occ_so, keep=keep)
+    m = len(orbs)
+    v = np.zeros((m * m, len(pairs)))
+    for x, (p, q) in enumerate((p, q) for p in orbs for q in orbs):
+        for y, (i, a) in enumerate(pairs):
+            v[x, y] = eri_so[p, q, i, a]
+    w = v @ xpy
+    return (-2.0 * (w / omega[None, :]) @ w.T).reshape((m,) * 4)
+
+
+def _active_pairs_so(pairs, act_so):
+    """Bool mask over `pairs`, True where i and a are both active."""
+    act = {int(p) for p in act_so}
+    return np.array([i in act and a in act for i, a in pairs], dtype=bool)
+
+
+def spin_blocks(x, n):
+    """(aa, ab, bb) of a chemist array over 2n local spin orbitals, alpha
+    first: both pairs alpha; the first pair alpha and the second beta; both
+    beta."""
+    return x[:n, :n, :n, :n], x[:n, :n, n:, n:], x[n:, n:, n:, n:]
+
+
+def vtilde_crpa_uhf(eri_so, eps_so, occ_so, act_so):
+    """(aa, ab, bb): the cRPA correction on the active spin orbitals. The
+    pairs whose i and a are both active are deleted, for both spins, and the
+    rest is solved and pole-summed (`w0_minus_v_so`). Local indices in the
+    order of act_so, the alpha active orbitals first."""
+    keep = ~_active_pairs_so(so_pairs(eps_so, occ_so), act_so)
+    vt = w0_minus_v_so(eri_so, eps_so, occ_so, list(act_so), keep=keep)
+    return spin_blocks(vt, len(act_so) // 2)
+
+
+def vtilde_mrpa_uhf(eri_so, eps_so, occ_so, act_so):
+    """(aa, ab, bb): the mRPA correction on the active spin orbitals.
+
+    Scott and Booth, PRL 132, 076401 (2024), Eq. 5, with the full direct RPA
+    of `drpa_so`: eta0 = (X+Y)(X+Y)^T and eta1 = A - B = delta are projected
+    on the pairs whose i and a are both active, of both spins, and
+
+        v_eff = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A],  vt = v_eff - K
+
+    on that block. vt is set on (ia|jb), (ai|jb), (ia|bj) and (ai|bj) of the
+    active spin orbitals (real orbitals) and is zero on every other element.
+    """
+    _, _, xpy, pairs = drpa_so(eri_so, eps_so, occ_so)
+    keep = np.flatnonzero(_active_pairs_so(pairs, act_so))
+    m = len(act_so)
+    vt = np.zeros((m,) * 4)
+    if len(keep) == 0:
+        return spin_blocks(vt, m // 2)
+    d_a = np.diag([eps_so[pairs[x][1]] - eps_so[pairs[x][0]] for x in keep])
+    inv = np.linalg.inv((xpy @ xpy.T)[np.ix_(keep, keep)])
+    v_eff = 0.5 * (inv @ d_a @ inv - d_a)
+    local = {int(p): x for x, p in enumerate(act_so)}
+    for x, px in enumerate(keep):
+        i_so, a_so = pairs[px]
+        for y, py in enumerate(keep):
+            j_so, b_so = pairs[py]
+            value = v_eff[x, y] - eri_so[i_so, a_so, j_so, b_so]
+            i, a, j, b = (local[q] for q in (i_so, a_so, j_so, b_so))
+            for t, u in ((i, a), (a, i)):
+                for v, w in ((j, b), (b, j)):
+                    vt[t, u, v, w] = value
+    return spin_blocks(vt, m // 2)
+
+
+def env_residues_uhf(eri_so, eps_so, occ_so, act_so):
+    """(omega, w, c, env) of the full direct RPA of `drpa_so` for the
+    environment self-energy of the active spin orbitals.
+
+    w[n, t, r] = sum_ia (t r|i a) (X+Y)_ia,n, the sum over the pairs of both
+    spins, t over act_so and r over `env`, every spin orbital outside act_so
+    in ascending order; it is zero unless r has the spin of t.
+    c[n, r] = eps_r - omega_n for an occupied r and eps_r + omega_n for an
+    empty one, the pole of S^E.
+    """
+    _, omega, xpy, pairs = drpa_so(eri_so, eps_so, occ_so)
+    act = [int(p) for p in act_so]
+    occ = {int(i) for i in occ_so}
+    env = [r for r in range(len(eps_so)) if r not in set(act)]
+    v = np.zeros((len(act), len(env), len(pairs)))
+    for x, t in enumerate(act):
+        for y, r in enumerate(env):
+            for z, (i, a) in enumerate(pairs):
+                v[x, y, z] = eri_so[t, r, i, a]
+    w = np.einsum('trP,Pn->ntr', v, xpy)
+    sign = np.array([-1.0 if r in occ else 1.0 for r in env])
+    c = np.asarray(eps_so)[env][None, :] + sign[None, :] * omega[:, None]
+    return omega, w, c, env
+
+
+def _sigma_env_from(z, w, c):
+    """S^E_tu(z) = sum_rn w_tr w_ur / (z - c) from the residues and poles of
+    `env_residues_uhf`."""
+    n = w.shape[1]
+    out = np.zeros((n, n), dtype=complex)
+    for t in range(n):
+        for u in range(n):
+            out[t, u] = np.sum(w[:, t, :] * w[:, u, :] / (z - c))
+    return out
+
+
+def sigma_env_uhf(z, eri_so, eps_so, occ_so, act_so):
+    """S^E_tu(z) = sum_{r in E} sum_n w_tr w_ur / (z - eps_r -+ omega_n) on
+    the active spin orbitals (local indices, alpha first), at the complex
+    frequency z; its alpha-beta blocks are zero."""
+    _, w, c, _ = env_residues_uhf(eri_so, eps_so, occ_so, act_so)
+    return _sigma_env_from(z, w, c)
+
+
+def _spin_diagonal(sigma, n):
+    """(alpha, beta) blocks of a one-body array over 2n local spin orbitals,
+    whose alpha-beta blocks must vanish."""
+    assert np.abs(sigma[:n, n:]).max(initial=0.0) < 1e-12
+    assert np.abs(sigma[n:, :n]).max(initial=0.0) < 1e-12
+    return sigma[:n, :n], sigma[n:, n:]
+
+
+def sigma_mode_a_uhf(eri_so, eps_so, occ_so, act_so):
+    """(alpha, beta): Eq. 12 of Marie and Loos at eta = 0 per spin,
+    1/2 [S^E_tu(eps_t) + S^E_tu(eps_u)], with each spin orbital's own
+    energy."""
+    _, w, c, _ = env_residues_uhf(eri_so, eps_so, occ_so, act_so)
+    act = [int(p) for p in act_so]
+    m = len(act)
+    out = np.zeros((m, m))
+    for t in range(m):
+        at_t = _sigma_env_from(eps_so[act[t]], w, c)
+        for u in range(m):
+            at_u = _sigma_env_from(eps_so[act[u]], w, c)
+            out[t, u] = 0.5 * (at_t[t, u] + at_u[t, u]).real
+    return _spin_diagonal(out, m // 2)
+
+
+def sigma_srg_uhf(eri_so, eps_so, occ_so, act_so, s):
+    """(alpha, beta): Eq. 44 of Marie and Loos per spin, on the environment
+    spin orbitals r,
+
+        Sigma_tu = sum_rn (D_tr + D_ur) / (D_tr^2 + D_ur^2) w_tr w_ur
+                   [1 - exp(-(D_tr^2 + D_ur^2) s)],
+
+    D_tr = eps_t - c_rn with the poles c of `env_residues_uhf`; s = None is
+    s = inf (Eq. 42), the bracket 1."""
+    _, w, c, _ = env_residues_uhf(eri_so, eps_so, occ_so, act_so)
+    act = [int(p) for p in act_so]
+    m = len(act)
+    out = np.zeros((m, m))
+    for t in range(m):
+        for u in range(m):
+            d_t, d_u = eps_so[act[t]] - c, eps_so[act[u]] - c
+            lam = d_t**2 + d_u**2
+            damp = 1.0 if s is None else 1.0 - np.exp(-lam * s)
+            out[t, u] = np.sum((d_t + d_u) / lam * w[:, t, :] * w[:, u, :]
+                               * damp)
+    return _spin_diagonal(out, m // 2)

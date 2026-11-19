@@ -24,6 +24,11 @@ determinant in its own orbitals. It is checked against
 The forms of the active space that do not fit the reference, and the
 references that are not supported, are refused with a message that names the
 spin.
+
+The RPA formulas for two spins are checked against the oracle's spin-orbital
+functions, which use no spin adaptation; on a closed shell those reduce to
+the oracle's restricted functions (the first test below the method='hf'
+ones).
 """
 import copy
 import warnings
@@ -32,17 +37,23 @@ import numpy as np
 import pytest
 from pyscf import fci, mcscf, scf
 
+from src.Base.numerics.constants import DOWNFOLDING_SRG_S
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
+from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
-from tests.downfolding_oracle import (CH2, NH, OH, h2_broken,
-                                      reference_energy_uhf,
-                                      spin_orbital_energies,
+from tests.downfolding_oracle import (CH2, NH, OH, drpa_so, h2_broken,
+                                      mo_integrals, reference_energy_uhf,
+                                      rpa_energy, sigma_mode_a,
+                                      sigma_mode_a_uhf, sigma_srg,
+                                      sigma_srg_uhf, spin_orbital_energies,
                                       spin_orbital_integrals,
                                       spin_orbital_one_body, unrestricted,
-                                      water)
+                                      vtilde_crpa, vtilde_crpa_uhf,
+                                      vtilde_mrpa, vtilde_mrpa_uhf,
+                                      w0_minus_v, w0_minus_v_so, water)
 
 
 @pytest.fixture(scope='module')
@@ -379,3 +390,68 @@ def test_spin_overlap_in_space(oh):
         e = _solve(g_eff, space, out=out, spin_overlap=space['spin_overlap'])
     assert abs(e[0] - oh.e_tot) < 1e-9
     assert abs(out['spin_square'][0] - oh.spin_square()[0]) < 1e-10
+
+
+# --- the two-spin oracle itself ------------------------------------------------
+
+def _spin_orbitals(mf, parts):
+    """(eri_so, eps_so, occ_so, act_so) for the oracle's two-spin functions:
+    alpha spin orbitals first, the active ones in the order of each
+    partition (occupied first)."""
+    mo = mf.mo_coeff if np.ndim(mf.mo_coeff) == 3 else (mf.mo_coeff,) * 2
+    eps = mf.mo_energy if np.ndim(mf.mo_energy) == 2 else (mf.mo_energy,) * 2
+    nmo = mo[0].shape[1]
+    _, eri_so = spin_orbital_integrals(mf.mol, mo[0], mo[1])
+    occ_so = (list(range(parts[0].nocc))
+              + [nmo + i for i in range(parts[1].nocc)])
+    act_so = list(parts[0].act) + [nmo + p for p in parts[1].act]
+    return eri_so, np.concatenate(eps), occ_so, act_so
+
+
+def test_oracle_reduces_to_the_restricted_one():
+    """On a closed shell, with the same orbitals for both spins, the
+    spin-orbital functions give the restricted ones: the direct RPA energy
+    (the triplet modes add 1/2 (Omega - delta) = 0 each), W(0) - v, the cRPA
+    and mRPA corrections in all three blocks, and the static environment
+    self-energy of both spins in both forms. Measured: E_c 1.4e-13, W - v
+    1.0e-15, cRPA 1.6e-15, mRPA 3.7e-14, Sigma 5.7e-16 (srg) and 1.6e-15
+    (mode_a). A wrong factor in the two-spin functions shows at 6e-3 or
+    more (delta + 4K, a pole-sum factor -4, mRPA with 1/4, swapped pole
+    signs, Tr A with 2K; each tried)."""
+    mf = water()
+    eps, nocc, nmo = mf.mo_energy, 5, len(mf.mo_energy)
+    _, eri = mo_integrals(mf)
+    part = partition(ActiveSpace.from_indices(nmo, nocc, [2, 4], [5, 7]), eps)
+    so = _spin_orbitals(mf, (part, part))
+    n = part.n_act
+
+    e_c, omega, xpy, pairs = drpa_so(*so[:3])
+    assert len(pairs) == 2 * nocc * (nmo - nocc) == len(omega)
+    assert pairs[0] == (0, nocc) and pairs[len(pairs) // 2] == (nmo, nmo + nocc)
+    assert abs(e_c - rpa_energy(eri, eps, nocc)) < 1e-10
+
+    full = w0_minus_v_so(*so[:3], so[3])
+    ref = w0_minus_v(eri, eps, nocc, part.act)
+    for block in (full[:n, :n, :n, :n], full[:n, :n, n:, n:],
+                  full[n:, n:, n:, n:]):
+        assert np.max(np.abs(block - ref)) < 1e-10
+    assert not full[:n, n:].any() and not full[:, :, :n, n:].any()
+
+    ref = vtilde_crpa(eri, eps, nocc, part)
+    for block in vtilde_crpa_uhf(*so):
+        assert np.max(np.abs(block - ref)) < 1e-10
+
+    ref_aa, ref_ab = vtilde_mrpa(eri, eps, nocc, part)
+    aa, ab, bb = vtilde_mrpa_uhf(*so)
+    assert np.max(np.abs(aa - ref_aa)) < 1e-10
+    assert np.max(np.abs(ab - ref_ab)) < 1e-10
+    assert np.max(np.abs(bb - ref_aa)) < 1e-10
+    assert np.max(np.abs(aa)) > 1e-3
+
+    for s in (DOWNFOLDING_SRG_S, None):
+        ref = sigma_srg(eri, eps, nocc, part, s)
+        for block in sigma_srg_uhf(*so, s):
+            assert np.max(np.abs(block - ref)) < 1e-10
+    ref = sigma_mode_a(eri, eps, nocc, part)
+    for block in sigma_mode_a_uhf(*so):
+        assert np.max(np.abs(block - ref)) < 1e-10
