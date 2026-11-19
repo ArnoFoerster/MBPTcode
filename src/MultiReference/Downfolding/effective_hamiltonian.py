@@ -113,8 +113,8 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
     v_bare = active_eri(mol, (c[:, part.act],))
     v_eff = tuple(v + vt for v, vt in zip(v_bare, terms.vtilde))
-    e_core, e_ee = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
-    energies = assemble_energies(mf.energy_nuc(), e_core, e_ee, terms,
+    environment = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
+    energies = assemble_energies(mf.energy_nuc(), *environment, terms,
                                  n_act_occ)
     g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
 

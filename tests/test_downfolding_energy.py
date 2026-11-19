@@ -96,9 +96,15 @@ def test_environment_energy_all_environment_is_hf():
     part = _water_part(mf, [], [])
     assert len(part.inactive) == mf.mol.nelectron // 2 and part.n_act == 0
     c = mf.mo_coeff
-    e_core, e_ee = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c),
-                                         (part, part))
-    assert abs(mf.energy_nuc() + e_core + e_ee - mf.e_tot) < 1e-9
+    e_core, e_h, e_x = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c),
+                                             (part, part))
+    assert abs(mf.energy_nuc() + e_core + e_h + e_x - mf.e_tot) < 1e-9
+    # the Hartree and exchange halves, against pyscf's own J and K
+    dm = mf.make_rdm1()
+    vj, vk = mf.get_jk(mf.mol, dm)
+    assert abs(e_h - 0.5 * np.einsum('ij,ji->', vj, dm)) < 1e-9
+    assert abs(e_x + 0.25 * np.einsum('ij,ji->', vk, dm)) < 1e-9
+    assert e_h > 0 > e_x
 
 
 def test_per_spin_energy_terms():
@@ -121,8 +127,8 @@ def test_per_spin_energy_terms():
     aa, ab, bb = _random_vtilde(rng, n)
     sigma_bar = (_symmetric(rng, n), _symmetric(rng, n))
 
-    e_core, e_ee = environment_hf_energy(mf.mol, mf.get_hcore(), (c_a, c_b),
-                                         (part_a, part_b))
+    e_core, e_h, e_x = environment_hf_energy(
+        mf.mol, mf.get_hcore(), (c_a, c_b), (part_a, part_b))
     hartree, exchange = active_hf_energy((aa, ab, bb), n_occ)
 
     h_so, eri_so = spin_orbital_integrals(mf.mol, c_a, c_b)
@@ -140,7 +146,9 @@ def test_per_spin_energy_terms():
                                 sigma_so)
 
     assert abs(e_core - ref['e_core']) < TOL
-    assert abs(e_ee - ref['e_ee']) < TOL
+    assert abs(e_h - ref['e_hartree']) < TOL
+    assert abs(e_x - ref['e_exchange']) < TOL
+    assert abs(e_h + e_x - ref['e_ee']) < TOL
     assert abs(hartree - ref['hartree']) < TOL
     assert abs(exchange - ref['exchange']) < TOL
     assert abs(exchange_energy_term((aa, ab, bb), n_occ)
@@ -156,7 +164,7 @@ def test_e0_assembly_and_dc_modes():
     n, n_occ = 4, (2, 2)
     vtilde = _random_vtilde(rng, n)
     sigma_bar = (_symmetric(rng, n), _symmetric(rng, n))
-    e_nuc, e_core, e_ee = 9.1, -120.3, 37.7
+    e_nuc, e_core, e_h, e_x = 9.1, -120.3, 60.2, -22.5
     hartree, exchange = active_hf_energy(vtilde, n_occ)
     k_term = exchange_energy_term(vtilde, n_occ)
     s_term = sigma_trace(sigma_bar, n_occ)
@@ -168,14 +176,26 @@ def test_e0_assembly_and_dc_modes():
         terms = DownfoldingTerms(vtilde=vtilde, sigma_bar=sigma_bar,
                                  e_c_full=-0.31, e_c_active=-0.12, dc=dc,
                                  diagnostics={'probe': dc})
-        en = assemble_energies(e_nuc, e_core, e_ee, terms, n_occ)
+        en = assemble_energies(e_nuc, e_core, e_h, e_x, terms, n_occ)
         assert isinstance(en, Energies)
         assert en.diagnostics == {'probe': dc}
-        assert (en.e_nuc, en.e_hf_core, en.e_hf_ee) == (e_nuc, e_core, e_ee)
-        assert abs(en.e_hf_ee_vtilde - (hartree + exchange)) < TOL
+        # every term on its own: nuclear, core, and the Hartree and exchange
+        # energies of the environment and of the double counting
+        assert (en.e_nuc, en.e_core, en.e_hartree, en.e_exchange) == (
+            e_nuc, e_core, e_h, e_x)
+        assert abs(en.e_hartree_dc - hartree) < TOL
+        assert abs(en.e_exchange_dc - exchange) < TOL
         assert (en.e_c_full, en.e_c_active) == (-0.31, -0.12)
-        assert abs(en.e0 - (e_nuc + e_core + e_ee + hartree + exchange - 0.31
-                            + 0.12 + en.e_exchange_term
+        # the sums: AMS's Eh, Ex, Ec columns and the earlier field names
+        assert abs(en.eh - (e_h + hartree)) < TOL
+        assert abs(en.ex - (e_x + exchange + en.e_exchange_term)) < TOL
+        assert abs(en.ec - (-0.31 + 0.12)) < TOL
+        assert en.e_hf_core == e_core and en.e_hf_ee == e_h + e_x
+        assert abs(en.e_hf_ee_vtilde - (hartree + exchange)) < TOL
+        assert abs(en.e0 - (en.e_nuc + en.e_core + en.eh + en.ex + en.ec
+                            - en.e_sigma_trace)) < TOL
+        assert abs(en.e0 - (e_nuc + e_core + e_h + e_x + hartree + exchange
+                            - 0.31 + 0.12 + en.e_exchange_term
                             - en.e_sigma_trace)) < TOL
         energies[dc] = en
     # dc='full': neither Sigma^E term, whatever vtilde and sigma_bar are
@@ -188,7 +208,7 @@ def test_e0_assembly_and_dc_modes():
     # dc='hartree' without a Sigma_bar keeps the exchange term only
     bare = DownfoldingTerms(vtilde=vtilde, sigma_bar=None, e_c_full=0.0,
                             e_c_active=0.0, dc='hartree')
-    en = assemble_energies(e_nuc, e_core, e_ee, bare, n_occ)
+    en = assemble_energies(e_nuc, e_core, e_h, e_x, bare, n_occ)
     assert en.e_sigma_trace == 0.0
     assert abs(en.e_exchange_term - k_term) < TOL
 
@@ -212,8 +232,7 @@ def test_reference_determinant_energy_is_hf_plus_correlation_pair():
     a = part.act
     v_act = eri[np.ix_(a, a, a, a)]
 
-    e_core, e_ee = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c),
-                                         (part, part))
+    env = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c), (part, part))
     f = core_fock(mf.mol, mf.get_hcore(), (c, c), (part, part))
     hartree, exchange = double_counting(vtilde, (k, k))
     expected = mf.e_tot - 0.31 + 0.12
@@ -221,7 +240,7 @@ def test_reference_determinant_energy_is_hf_plus_correlation_pair():
                           ('hartree', (sig, sig))):
         terms = DownfoldingTerms(vtilde=vtilde, sigma_bar=sigma_bar,
                                  e_c_full=-0.31, e_c_active=-0.12, dc=dc)
-        en = assemble_energies(mf.energy_nuc(), e_core, e_ee, terms, (k, k))
+        en = assemble_energies(mf.energy_nuc(), *env, terms, (k, k))
         h_eff = effective_one_body(f, hartree, exchange, dc, sigma_bar)
         g_eff = {0: en.e0, 1: h_eff[0],
                  2: (v_act + vt).transpose(0, 2, 1, 3)}

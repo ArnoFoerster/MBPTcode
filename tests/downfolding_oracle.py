@@ -132,7 +132,9 @@ def spin_orbital_energies(h_so, eri_so, occ_env, vtilde_so, occ_act,
     """The E_0 terms of spec §3.3's spin-orbital column, as a dict.
 
     e_core        = sum_{i in E} h_ii rho_ii
-    e_ee          = 1/2 sum_{ij in E} (v_ii,jj - v_ij,ji) rho_ii rho_jj
+    e_hartree     = 1/2 sum_{ij in E} v_ii,jj rho_ii rho_jj
+    e_exchange    = -1/2 sum_{ij in E} v_ij,ji rho_ii rho_jj
+    e_ee          = e_hartree + e_exchange
     hartree       = 1/2 sum_{tu in A} vt_tt,uu rho_tt rho_uu
     exchange      = -1/2 sum_{tu in A} vt_tu,ut rho_tt rho_uu
                     (hartree + exchange = E_HF,ee[vt])
@@ -143,10 +145,11 @@ def spin_orbital_energies(h_so, eri_so, occ_env, vtilde_so, occ_act,
     self-energy on the active spin orbitals (local indices), or None for 0.
     """
     e_core = sum(h_so[i, i] for i in occ_env)
-    e_ee = 0.0
+    e_hartree = e_exchange = 0.0
     for i in occ_env:
         for j in occ_env:
-            e_ee += 0.5 * (eri_so[i, i, j, j] - eri_so[i, j, j, i])
+            e_hartree += 0.5 * eri_so[i, i, j, j]
+            e_exchange -= 0.5 * eri_so[i, j, j, i]
     hartree = exchange = exchange_term = 0.0
     for t in occ_act:
         for u in occ_act:
@@ -156,9 +159,10 @@ def spin_orbital_energies(h_so, eri_so, occ_env, vtilde_so, occ_act,
     trace = 0.0
     if sigma_bar_so is not None:
         trace = sum(sigma_bar_so[t, t] for t in occ_act)
-    return {'e_core': e_core, 'e_ee': e_ee, 'hartree': hartree,
-            'exchange': exchange, 'exchange_term': exchange_term,
-            'sigma_trace': trace}
+    return {'e_core': e_core, 'e_hartree': e_hartree,
+            'e_exchange': e_exchange, 'e_ee': e_hartree + e_exchange,
+            'hartree': hartree, 'exchange': exchange,
+            'exchange_term': exchange_term, 'sigma_trace': trace}
 
 
 def reference_energy(g_eff, n_act_occ):

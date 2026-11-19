@@ -3,8 +3,12 @@ benzene (6,6) in cc-pVDZ, downfolded from HF (CASCI) and from the RPA with bare,
 cRPA, cRPA_ph and mRPA (moment-conserving, Casida only) screening, and with
 cRPA, cRPA_ph and mRPA plus the static environment self-energy Sigma^E
 (sigma='srg'; see docs/methods/downfolding.md).
-The Sigma^E column is the pair of E_0 terms that comes with it, the exchange
-energy term minus Tr[Sigma_bar gamma^A,0]. The rows marked 'if' are the
+The columns E_core, E_h, E_x and E_c are the terms of E_0 beside the nuclear
+repulsion: the one-electron energy of the environment, and the Hartree,
+exchange and correlation energies with their double-counting corrections
+(`energies.eh`, `.ex`, `.ec`; each part is a field of its own, e.g.
+`e_hartree` and `e_hartree_dc`). -TrSig is -Tr[Sigma_bar gamma^A,0], the last
+term of E_0, present with Sigma^E only. The rows marked 'if' are the
 density-fitted imaginary-frequency route (mode='imagfrequency'), where 'srg'
 is s = infinity, continued by Pade from the imaginary axis; they match the
 Casida rows above them to the density fit. The rows marked 'st' are the
@@ -90,13 +94,12 @@ for name, atoms, n_pi in MOLECULES:
             'rpa_st': run_low_level(mf.density_fit(), method='rpa',
                                     mode='space-time',
                                     numerics=Numerics(isdf={'level': 'G1'}))}
-    print(f'{"method":<13}{"E_HF terms":>12}{"E_c - E_c^A":>13}{"Sigma^E":>10}'
-          f'{"E_0":>12}{"E(S0)":>12}{"S1 (eV)":>9}{"T1 (eV)":>9}')
+    print(f'E_nuc = {mf.energy_nuc():.6f}')
+    print(f'{"method":<13}{"E_core":>12}{"E_h":>12}{"E_x":>11}{"E_c":>10}'
+          f'{"-TrSig":>10}{"E_0":>12}{"E(S0)":>12}{"S1 (eV)":>9}{"T1 (eV)":>9}')
     for label, method, opts in METHODS:
         g_eff, space, en = build_effective_hamiltonian(lows[method], active, **opts)
         e_s0, s1, t1 = excitations(g_eff, space)
-        e_hf = en.e_hf_core + en.e_hf_ee + en.e_hf_ee_vtilde
-        e_sigma = en.e_exchange_term - en.e_sigma_trace
-        print(f'{label:<13}{e_hf:12.6f}{en.e_c_full - en.e_c_active:13.6f}'
-              f'{e_sigma:10.6f}{en.e0:12.6f}{e_s0:12.6f}'
-              f'{s1 * HARTREE_TO_EV:9.3f}{t1 * HARTREE_TO_EV:9.3f}')
+        print(f'{label:<13}{en.e_core:12.6f}{en.eh:12.6f}{en.ex:11.6f}'
+              f'{en.ec:10.6f}{0.0 - en.e_sigma_trace:10.6f}{en.e0:12.6f}'
+              f'{e_s0:12.6f}{s1 * HARTREE_TO_EV:9.3f}{t1 * HARTREE_TO_EV:9.3f}')

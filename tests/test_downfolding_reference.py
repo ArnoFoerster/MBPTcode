@@ -14,12 +14,15 @@ What the SI columns are, determined from the rows:
   SI row, Etot = Enuc + Ecore + Eh + Ex + Ec + Eact to the 8 printed digits
   (checked here on every row of the JSON). For (0,0) no solver runs and
   Etot = E_0.
-- Ecore = e_hf_core, Tr[h D] of the inactive core (0 when no orbital is
+- Ecore = e_core, Tr[h D] of the inactive core (0 when no orbital is
   inactive, as in every H2 (1,1) row).
-- Eh, Ex: the Hartree and exchange halves of e_hf_ee + e_hf_ee_vtilde, i.e.
-  1/2 Tr[J D] and -1/4 Tr[K D] of the inactive core plus the Hartree
-  2 sum_kl vt_kk,ll and exchange -sum_kl vt_kl,lk of vtilde on the active
-  occupied orbitals. Evidence: the H2 cRPA (1,1) rows have no core but
+- Eh, Ex = the record's `eh` and `ex`: the Hartree and exchange energies of
+  the inactive core plus their double-counting corrections (e_hartree +
+  e_hartree_dc, e_exchange + e_exchange_dc), i.e. 1/2 Tr[J D] and
+  -1/4 Tr[K D] of the inactive core plus the Hartree 2 sum_kl vt_kk,ll and
+  exchange -sum_kl vt_kl,lk of vtilde on the active occupied orbitals. The
+  test recomputes those four from pyscf's own J and K and from the vtilde
+  read off g_eff, and holds the record's fields to them at 1e-10. Evidence: the H2 cRPA (1,1) rows have no core but
   Eh = -0.19178962, Ex = +0.09589481 at r = 0.5, which are 2 vt_00,00 and
   -vt_00,00 of our cRPA vtilde to 1.9e-6; BARE and cRPA_ph rows have the
   vtilde part zero (cRPA_ph keeps no (kk|ll) element); the N2 (3,3) cRPA
@@ -175,12 +178,17 @@ def _ours(case):
     c_core = mf.mo_coeff[:, aspace.env_occ]
     dm = 2 * c_core @ c_core.T
     vj, vk = mf.get_jk(mf.mol, dm)
-    e_h = 0.5 * np.einsum('ij,ji->', vj, dm) + 2 * np.einsum('kkll->', vt)
-    e_x = -0.25 * np.einsum('ij,ji->', vk, dm) - np.einsum('kllk->', vt)
+    # the record's four Hartree/exchange terms, held to an independent
+    # evaluation: pyscf's J and K of the core, vtilde read off g_eff
+    split = {'e_hartree': 0.5 * np.einsum('ij,ji->', vj, dm),
+             'e_exchange': -0.25 * np.einsum('ij,ji->', vk, dm),
+             'e_hartree_dc': 2 * np.einsum('kkll->', vt),
+             'e_exchange_dc': -np.einsum('kllk->', vt)}
+    for name, value in split.items():
+        assert abs(getattr(en, name) - value) < 1e-10, (name, case)
     ours = {'trV': np.einsum('pqpq->', v), 'trW': np.einsum('pqpq->', v_eff),
-            'Enuc': en.e_nuc, 'Ecore': en.e_hf_core, 'Eh': e_h, 'Ex': e_x,
-            'Ec': en.e_c_full - en.e_c_active, 'Eact': e_tot - en.e0,
-            'Etot': e_tot}
+            'Enuc': en.e_nuc, 'Ecore': en.e_core, 'Eh': en.eh, 'Ex': en.ex,
+            'Ec': en.ec, 'Eact': e_tot - en.e0, 'Etot': e_tot}
     ours['dTr'] = ours['trW'] - ours['trV']
     return ours, en
 

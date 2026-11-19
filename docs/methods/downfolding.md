@@ -108,10 +108,31 @@ Options of the RPA:
 `ActiveSpace` is the user's choice (`from_indices`, `from_counts`,
 `from_irreps`, `from_population`); nothing here selects orbitals.
 
-`energies` is a frozen record holding every term of E_0 separately (`e_nuc`,
-`e_hf_core`, `e_hf_ee`, `e_hf_ee_vtilde`, `e_c_full`, `e_c_active`, and the
-Sigma^E terms `e_exchange_term`, `e_sigma_trace`, zero without `sigma`), `e0`
-for their sum, and `diagnostics`.
+`energies` is a frozen record holding every term of E_0 on its own, `e0` for
+their sum, and `diagnostics`:
+
+| field | term | sign in E_0 |
+|---|---|---|
+| `e_nuc` | nuclear repulsion | + |
+| `e_core` | one-electron energy of the environment (the inactive occupied orbitals) | + |
+| `e_hartree`, `e_exchange` | Hartree and exchange energy of the environment | + |
+| `e_hartree_dc`, `e_exchange_dc` | Hartree and exchange halves of E_HF,ee[v~]: the double-counting correction of the mean-field energy. Zero unless v~ has occupied-occupied elements, so nonzero for `crpa` only | + |
+| `e_c_full` | correlation energy of the whole system, E_c[v] | + |
+| `e_c_active` | correlation energy of the active space, E_c^A[v_eff]: the double-counting correction of the correlation energy | - |
+| `e_exchange_term` | the exchange term that comes with Sigma^E (-2 `e_exchange_dc`); zero without `sigma` | + |
+| `e_sigma_trace` | Tr[Sigma_bar gamma^A,0]; zero without `sigma` | - |
+
+Three properties give the sums per kind, `eh = e_hartree + e_hartree_dc`,
+`ex = e_exchange + e_exchange_dc + e_exchange_term` and
+`ec = e_c_full - e_c_active`, so that
+`e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace`. These are the `Enuc`,
+`Ecore`, `Eh`, `Ex`, `Ec` columns of the paper's supporting data. The earlier
+names `e_hf_core`, `e_hf_ee` (= `e_hartree + e_exchange`) and
+`e_hf_ee_vtilde` (= `e_hartree_dc + e_exchange_dc`) remain as properties.
+
+A restricted reference is one spin channel throughout: the general layer
+builds the exact J and K of the environment once and transforms the active
+integrals once, and the result goes to the restricted (spin-free) solver.
 
 ## What is built
 
