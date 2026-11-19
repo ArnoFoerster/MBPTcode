@@ -925,8 +925,8 @@ def embedding_self_energy(low, part, sigma):
         + S^E_tu(eps_u)]. Both are refused near the poles as 'mode_a' is
         on casida, within the larger of pole_margin/sqrt(2 s) and
         numerics.downfolding.continuation_margin, pointing to mode='casida'.
-    space-time: the same, with S^E(mu + i w) from the space-time GW kernel
-        (`sigma_env_imag_axis`).
+    space-time: the same, with S^E(mu + i w) sampled as on imagfrequency
+        on the route's own ISDF factors (`sigma_env_imag_axis`).
     Zero when the environment is empty.
     """
     return _embedding(low, part, sigma)[0]

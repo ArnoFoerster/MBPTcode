@@ -350,13 +350,15 @@ self-energy does not work here: it leaves about 1e-7 of noise on the
 continuation's nodes, which the continuation amplifies to 1e-4 and more for
 an active orbital far from the gap (2.2e-4 on an NH3 space with virtuals
 1.2 Ha above the mid-gap). The fit's samples are an exact rational function
-and continue cleanly. Measured against the Casida problem on the same ISDF
-factors: 2.8e-8 on the nodes and at most 9.3e-7 Eh per element of
-Sigma_bar^E beyond the 0.26 Ha margin (water, NH3 and benzene in cc-pVDZ).
-Against casida on the mean field's RI factors the difference is the ISDF
-fit of the integrals: up to 4.2e-5 Eh on water, 8.2e-6 on NH3 and 8.5e-5 on
-benzene (G1 grid); the FCI energy of H_eff with `sigma='srg'` agrees to
-1.2e-6 Eh on NH3.
+and continue cleanly. Against the Casida problem on the same ISDF factors,
+which isolates the continuation, this was checked on 5 cases (three active
+spaces of benzene and two of NH3, cc-pVDZ): 2.8e-8 on the nodes (the NH3
+cases) and at most 9.3e-7 Eh per element of Sigma_bar^E. The scan over 160
+active spaces of water, NH3 and benzene compares with casida on the mean
+field's RI factors, where the difference also holds the ISDF fit of the
+integrals: beyond the 0.26 Ha margin up to 4.2e-5 Eh on water, 8.2e-6 on
+NH3 and 8.5e-5 on benzene (G1 grid). The FCI energy of H_eff with
+`sigma='srg'` agrees to 1.2e-6 Eh on NH3.
 
 ## Kohn-Sham references
 

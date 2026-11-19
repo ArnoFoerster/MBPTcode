@@ -965,10 +965,12 @@ def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):
 def test_space_time_continuation_margin_near_the_edge(nh3_space_time):
     """The continuation margin on space-time is imagfrequency's, 0.26 Ha,
     because the two routes now sample S^E the same way (the scan repeated on
-    space-time: water, NH3 and benzene in cc-pVDZ, G1 grid; beyond the margin
-    the worst continuation error against casida on the same ISDF factors is
-    9.3e-7, and against the RI casida 4.2e-5 on water, 8.2e-6 on NH3 and
-    8.5e-5 on benzene, the last being the ISDF fit of the integrals alone).
+    space-time: water, NH3 and benzene in cc-pVDZ, G1 grid, 160 spaces,
+    against the RI casida; beyond the margin the worst difference is 4.2e-5
+    on water, 8.2e-6 on NH3 and 8.5e-5 on benzene, which holds the ISDF fit
+    of the integrals. Against casida on the same ISDF factors, checked on 5
+    spaces, three of benzene and two of NH3, the continuation error
+    is at most 9.3e-7).
 
     NH3 with default numerics: occupied 4 and virtuals 5, 6, 7, 12, 13,
     0.280 Ha from the edge with two virtuals 1.19 Ha above the mid-gap, is
