@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, mcscf, scf
 
-from src.Solvers.active_space import solve
+from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
 from src.Solvers.active_space_solver import (ExactDiagonalizationSolver,
                                              PyscfFCISolver)
 
@@ -148,3 +148,23 @@ def test_an_unknown_backend_is_refused_by_name(name):
 
 if __name__ == '__main__':
     sys.exit(0 if run() else 1)
+
+
+@pytest.mark.parametrize('spin_free', [True, False])
+@pytest.mark.parametrize('name', ['openfermion', 'pyscf_fci', 'dmrg', 'ccsdt', 'ccsdtq'])
+def test_an_empty_active_space_returns_the_constant(name, spin_free):
+    """An empty active space (no orbitals, no electrons) has one state, of
+    energy E_act = 0: every backend returns the constant g_eff[0] alone (a
+    downfolded E_0, so the root is the total energy) and warns, with the named
+    flag 'empty_active_space', that there was nothing to diagonalize."""
+    g_eff = {0: -1.25, 1: np.zeros((0, 0)), 2: np.zeros((0, 0, 0, 0))}
+    with pytest.warns(EmptyActiveSpaceWarning, match='empty'):
+        roots = solve(name, g_eff, 0, 0, spin_free=spin_free, nroots=3)
+    assert np.array_equal(roots, [-1.25])
+
+
+def test_an_empty_active_space_with_electrons_is_refused():
+    """No orbitals cannot hold electrons: refused, not answered."""
+    g_eff = {0: 0.0, 1: np.zeros((0, 0)), 2: np.zeros((0, 0, 0, 0))}
+    with pytest.raises(ValueError, match='no active orbitals'):
+        solve('pyscf_fci', g_eff, 0, 2, spin_free=True)

@@ -51,6 +51,16 @@ active spaces and screenings, so a comparison loop pays for the RPA once.
 `method='hf'` takes no options: `run_low_level(mf, method='hf')`, and
 `build_effective_hamiltonian(low_hf, active)` is CASCI.
 
+**The two limits.** A (0,0) active space,
+`ActiveSpace.from_indices(norb, nocc, [], [])`, leaves everything in the
+environment: `energies.e0` is then the total energy, E_HF for `method='hf'`
+and E_HF + E_RPA,corr for `method='rpa'` (the paper's all-environment rows).
+`solve` accepts it too: it returns `[g_eff[0]]` (E_act = 0) and warns with
+`EmptyActiveSpaceWarning`, named flag `'empty_active_space'`. Every orbital
+active, `ActiveSpace.from_indices(norb, nocc, range(nocc), range(nocc, norb))`,
+is FCI with either method: the screening correction vanishes and the two RPA
+correlation energies cancel exactly.
+
 **The routes.** `'casida'` diagonalizes the full Casida problem once and
 keeps every excitation energy and amplitude. `'imagfrequency'` diagonalizes
 nothing: it keeps the full RPA energy of the existing imaginary-axis code,

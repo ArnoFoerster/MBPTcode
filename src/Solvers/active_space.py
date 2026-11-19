@@ -30,6 +30,7 @@ from typing import Optional
 
 import numpy as np
 
+from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL, DMRG_BOND_DIM,
                                          DMRG_N_SWEEPS)
 from src.Solvers.active_space_solver import (Block2DMRGSolver,
@@ -40,6 +41,11 @@ from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
 #: The coupled-cluster backends and their excitation order.
 CC_ORDERS = {'ccsdt': 3, 'ccsdtq': 4}
+
+
+class EmptyActiveSpaceWarning(UserWarning):
+    """`solve` was given no active orbitals: there was nothing to diagonalize,
+    and the one state's energy is the constant g_eff[0] (E_act = 0)."""
 
 
 def _spatial_active_hamiltonian(g_eff, n_spin_orbs, n_elec_active, spin_free,
@@ -195,10 +201,28 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     design.
     dmrg_bond_dim, dmrg_n_sweeps: Block2DMRGSolver knobs, used only when
     solver='dmrg'.
+
+    An empty active space (n_spin_orbs = 0, as a downfolding with a (0,0)
+    active space produces) has one state, of active energy 0: every backend
+    returns [g_eff[0]] alone, whatever nroots asks, and warns
+    (EmptyActiveSpaceWarning, named flag 'empty_active_space'). Electrons in
+    no orbitals are refused.
     """
     if solver not in SOLVERS:
         raise ValueError(f"solver={solver!r} is not a backend of this driver; "
                          f"choose one of {tuple(SOLVERS)}.")
+    if n_spin_orbs == 0:
+        if n_elec_active:
+            raise ValueError(f"n_elec_active={n_elec_active} electrons with no "
+                             f"active orbitals (n_spin_orbs=0): there are no "
+                             f"active orbitals to hold them.")
+        constant = float(np.real(g_eff.get(0, 0.0)))
+        flag('empty_active_space',
+             f"the active space is empty: there is nothing to diagonalize, so "
+             f"E_act = 0 and the one root returned is the constant g_eff[0] = "
+             f"{constant:.10f} (for a downfolded Hamiltonian, E_0).",
+             EmptyActiveSpaceWarning)
+        return np.array([constant])
     return SOLVERS[solver](_Request(g_eff, n_spin_orbs, n_elec_active,
                                     spin_free, symmetrize, nroots,
                                     dmrg_bond_dim, dmrg_n_sweeps))
