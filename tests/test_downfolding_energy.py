@@ -347,8 +347,6 @@ def test_reference_determinant_is_the_scf_energy():
 
 def test_unsupported_mean_fields_are_refused():
     mol = water().mol
-    with pytest.raises(NotImplementedError, match='restricted'):
-        run_low_level(scf.UHF(mol), method='hf')
     cation = gto.M(atom=mol.atom, basis='6-31g', charge=1, spin=1,
                    cart=False, verbose=0)
     with pytest.raises(NotImplementedError, match='closed-shell'):
@@ -800,21 +798,41 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
     assert calls == {'jk': 1, 'ao2mo': 1}
 
 
-def test_a_two_channel_method_is_refused_by_the_restricted_driver(monkeypatch):
-    """The driver runs a restricted reference: a method that hands back the
-    three spin blocks of an unrestricted vtilde is refused by name."""
+def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
+    """A restricted reference is one spin channel, vtilde = (v,) and
+    sigma_bar = (s,); an unrestricted one is two, (aa, ab, bb) and (a, b),
+    whose `terms` gets the pair of partitions. A method that hands back the
+    blocks of the other kind is refused by name."""
     mf = water()
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    seen = []
 
-    def terms(low, part):
-        z = np.zeros((part.n_act,) * 4)
-        return DownfoldingTerms(vtilde=(z, z, z), sigma_bar=None, e_c_full=0.0,
-                                e_c_active=0.0, dc='full')
+    def terms(low, part, nblocks=1, nsigma=None):
+        seen.append(part)
+        z = np.zeros((aspace.n_act,) * 4)
+        sigma = None if nsigma is None else (np.zeros((4, 4)),) * nsigma
+        return DownfoldingTerms(
+            vtilde=(z,) * nblocks, sigma_bar=sigma, e_c_full=0.0,
+            e_c_active=0.0, dc='full' if nsigma is None else 'hartree')
 
     monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(terms=terms))
-    with pytest.raises(NotImplementedError, match='unrestricted'):
-        build_effective_hamiltonian(SimpleNamespace(mf=mf, method='probe'),
-                                    aspace)
+    low = SimpleNamespace(mf=mf, method='probe')
+    build_effective_hamiltonian(low, aspace)
+    assert seen[-1].n_act == 4                    # one Partition, not a tuple
+    with pytest.raises(ValueError, match='3 vtilde blocks.*restricted'):
+        build_effective_hamiltonian(low, aspace, nblocks=3)
+    with pytest.raises(ValueError, match='2 Sigma_bar blocks.*restricted'):
+        build_effective_hamiltonian(low, aspace, nsigma=2)
+
+    low = SimpleNamespace(mf=mf.to_uhf(), method='probe')
+    g_eff, _, _ = build_effective_hamiltonian(low, (aspace, aspace), nblocks=3,
+                                              nsigma=2)
+    assert isinstance(seen[-1], tuple) and len(seen[-1]) == 2
+    assert len(g_eff[1]) == 2 and len(g_eff[2]) == 3
+    with pytest.raises(ValueError, match='1 vtilde blocks.*unrestricted'):
+        build_effective_hamiltonian(low, (aspace, aspace), nblocks=1)
+    with pytest.raises(ValueError, match='1 Sigma_bar blocks.*unrestricted'):
+        build_effective_hamiltonian(low, (aspace, aspace), nblocks=3, nsigma=1)
 
 
 # --- named flags are collected into the results -------------------------------

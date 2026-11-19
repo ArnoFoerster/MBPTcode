@@ -254,6 +254,35 @@ class ActiveSpace:
                 f'{"contiguous" if self.is_contiguous else "character-selected"}>')
 
 
+def unrestricted_from_counts(eps, nocc, n_act, nelec_active):
+    """(space_alpha, space_beta): the contiguous active spaces of an
+    unrestricted reference with n_act orbitals per spin and nelec_active =
+    (N_alpha, N_beta) active electrons.
+
+    Per spin, the N highest occupied and the n_act - N lowest virtual
+    orbitals of that spin (pyscf UCASCI's convention), from eps = (eps_alpha,
+    eps_beta) and nocc = (nocc_alpha, nocc_beta): `ActiveSpace.from_counts`
+    once per spin. Any other choice is two `ActiveSpace.from_indices`, one
+    per spin."""
+    if not (len(eps) == 2 and np.ndim(eps[0]) == 1
+            and np.ndim(nocc) == np.ndim(nelec_active) == 1
+            and len(nocc) == len(nelec_active) == 2):
+        raise ValueError('eps, nocc and nelec_active hold one entry per spin, '
+                         '(alpha, beta).')
+    spaces = []
+    for spin, eps_s, nocc_s, nelec in zip(('alpha', 'beta'), eps, nocc,
+                                          nelec_active):
+        if not 0 <= nelec <= n_act:
+            raise ValueError(f'{spin}: {nelec} active electrons in {n_act} '
+                             f'active orbitals.')
+        try:
+            spaces.append(ActiveSpace.from_counts(eps_s, nocc_s, nelec,
+                                                  n_act - nelec))
+        except ValueError as err:
+            raise ValueError(f'{spin}: {err}') from None
+    return tuple(spaces)
+
+
 def _index_array(idx, lo, hi, name):
     """A strictly increasing int index array inside [lo, hi); raises otherwise."""
     out = np.asarray(idx, dtype=int).ravel()

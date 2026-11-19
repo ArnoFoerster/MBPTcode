@@ -1,5 +1,7 @@
 """HF as the low-level method: no screening and no correlation, so the
-downfolded Hamiltonian is the CASCI Hamiltonian of the reference orbitals.
+downfolded Hamiltonian is the CASCI Hamiltonian of the reference orbitals
+(of the UHF/UKS determinant in its own alpha and beta orbitals for an
+unrestricted reference, pyscf's UCASCI).
 
 The bare v is the whole interaction (vtilde = 0), the double counting is the
 full one of a zero vtilde (so nothing), and both correlation energies are
@@ -11,6 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..partition import channels_of
 from ..terms import DownfoldingTerms
 
 METHOD = 'hf'
@@ -40,10 +43,14 @@ def run(mf, **opts):
 
 def terms(low, part, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
-    `part` (one block, the reference being restricted), no static
+    `part`, one block for the Partition of a restricted reference and the
+    three (aa, ab, bb) for the pair of an unrestricted one; no static
     self-energy, both correlation energies zero, and the full double counting
     (of a zero vtilde). HF takes no options."""
     _no_options(opts)
+    parts = channels_of(part)
+    n_act = parts[0].n_act
+    blocks = 1 if len(parts) == 1 else 3
     return DownfoldingTerms(
-        vtilde=(np.zeros((part.n_act,) * 4),), sigma_bar=None,
-        e_c_full=0.0, e_c_active=0.0, dc='full')
+        vtilde=tuple(np.zeros((n_act,) * 4) for _ in range(blocks)),
+        sigma_bar=None, e_c_full=0.0, e_c_active=0.0, dc='full')

@@ -6,7 +6,9 @@ of the oracle and effective_interaction adds the method's vtilde to it;
 assembled terms. Packed spin-free and spin-orbital, the same restricted Hamiltonian of
 H2/6-31G (all four spatial orbitals active, two electrons) gives the same
 ground state energy from the openfermion and the pyscf_fci backends, and both
-equal pyscf's FCI energy when the constant is the nuclear repulsion. An
+equal pyscf's FCI energy when the constant is the nuclear repulsion. Two
+spin channels pack as the per-spin blocks (h_a, h_b) and (aa, ab, bb), or as
+their interleaved spin-orbital form, also when the two are equal. An
 empty active space gives zero-size blocks and a g_eff of the constant alone,
 and the spin-free g_eff never aliases its inputs.
 
@@ -93,7 +95,7 @@ def test_pack_spin_free_contract():
     h = rng.normal(size=(3, 3))
     h = h + h.T
     v = rng.normal(size=(3,) * 4)
-    g = pack((h, h), (v, v, v), 1.5, spin_free=True)
+    g = pack((h,), (v,), 1.5, spin_free=True)
     assert g[0] == 1.5
     assert np.array_equal(g[1], h)
     assert np.array_equal(g[2], v.transpose(0, 2, 1, 3))
@@ -105,7 +107,7 @@ def test_pack_spin_orbital_solves_the_same():
     h, eri = mo_integrals(mf)
     n = h.shape[0]
     e0 = mf.energy_nuc()
-    args = ((h, h), (eri, eri, eri), e0)
+    args = ((h,), (eri,), e0)
     g_so = pack(*args, spin_free=False)
     g_sf = pack(*args, spin_free=True)
     assert g_so[0] == e0
@@ -114,18 +116,46 @@ def test_pack_spin_orbital_solves_the_same():
     e_fci = fci.FCI(mf).kernel()[0]
     assert abs(e_so - e_sf) < 1e-9
     assert abs(e_sf - e_fci) < 1e-9
+    # the same Hamiltonian as two channels: the per-spin blocks, solved at
+    # (N_alpha, N_beta) = (1, 1)
+    g_two = pack((h, h), (eri, eri, eri), e0, spin_free=True)
+    assert abs(solve('pyscf_fci', g_two, n, (1, 1), spin_free=True)[0]
+               - e_fci) < 1e-9
 
 
-def test_pack_refuses_different_channels():
+def test_pack_two_channels_is_spin_resolved():
+    """Two channels pack as the per-spin blocks, g[1] = (h_a, h_b) and
+    g[2] = (aa, ab, bb), each two-body block physicist like the spin-free
+    one, or as the interleaved spin orbitals with the antisymmetrized
+    two-body term. The number of channels alone decides: two equal channels
+    pack the same way, never collapsed to the restricted form."""
     rng = np.random.default_rng(1)
-    h = np.eye(2)
-    v = rng.normal(size=(2,) * 4)
-    with pytest.raises(NotImplementedError, match='unrestricted'):
-        pack((h, h + 0.1), (v, v, v), 0.0, spin_free=True)
-    with pytest.raises(NotImplementedError, match='unrestricted'):
-        pack((h, h), (v, v + 0.1, v), 0.0, spin_free=False)
-    with pytest.raises(NotImplementedError, match='unrestricted'):
-        pack((h, h), (v, v, v + 0.1), 0.0, spin_free=False)
+    h_a, h_b = rng.normal(size=(2, 2, 2))
+    aa, ab, bb = rng.normal(size=(3,) + (2,) * 4)
+    g = pack((h_a, h_b), (aa, ab, bb), 1.5, spin_free=True)
+    assert g[0] == 1.5 and sorted(g) == [0, 1, 2]
+    assert isinstance(g[1], tuple) and isinstance(g[2], tuple)
+    assert np.array_equal(g[1][0], h_a) and np.array_equal(g[1][1], h_b)
+    for block, chem in zip(g[2], (aa, ab, bb)):
+        assert np.array_equal(block, chem.transpose(0, 2, 1, 3))
+    # <p_a q_b | r_a s_b> = (p_a r_a | q_b s_b)
+    assert g[2][1][0, 1, 1, 0] == ab[0, 1, 1, 0]
+    assert g[2][1][0, 1, 0, 1] == ab[0, 0, 1, 1]
+
+    so = pack((h_a, h_b), (aa, ab, bb), 1.5, spin_free=False)
+    assert so[0] == 1.5 and so[1].shape == (4, 4) and so[2].shape == (4,) * 4
+    assert np.array_equal(so[1][0::2, 0::2], h_a)
+    assert np.array_equal(so[1][1::2, 1::2], h_b)
+    assert not so[1][0::2, 1::2].any() and not so[1][1::2, 0::2].any()
+    phys = np.zeros((4,) * 4)
+    phys[0::2, 0::2, 0::2, 0::2] = aa.transpose(0, 2, 1, 3)
+    phys[1::2, 1::2, 1::2, 1::2] = bb.transpose(0, 2, 1, 3)
+    phys[0::2, 1::2, 0::2, 1::2] = ab.transpose(0, 2, 1, 3)
+    phys[1::2, 0::2, 1::2, 0::2] = ab.transpose(2, 0, 3, 1)
+    assert np.array_equal(so[2], phys - phys.transpose(0, 1, 3, 2))
+
+    same = pack((h_a, h_a), (aa, aa, aa), 0.0, spin_free=True)
+    assert isinstance(same[1], tuple) and len(same[2]) == 3
 
 
 def test_empty_active_space():
@@ -137,17 +167,30 @@ def test_empty_active_space():
     assert [b.shape for b in blocks] == [(0, 0, 0, 0)] * 3
     h = np.zeros((0, 0))
     for spin_free in (True, False):
-        g = pack((h, h), blocks, -76.0, spin_free=spin_free)
+        g = pack((h,), blocks[:1], -76.0, spin_free=spin_free)
         assert g[0] == -76.0
         assert g[1].shape == (0, 0) and g[2].shape == (0, 0, 0, 0)
+    g = pack((h, h), blocks, -76.0, spin_free=True)
+    assert g[0] == -76.0
+    assert [x.shape for x in g[1]] == [(0, 0)] * 2
+    assert [x.shape for x in g[2]] == [(0, 0, 0, 0)] * 3
+    g = pack((h, h), blocks, -76.0, spin_free=False)
+    assert g[0] == -76.0
+    assert g[1].shape == (0, 0) and g[2].shape == (0, 0, 0, 0)
 
 
 def test_pack_spin_free_does_not_alias():
     h = np.eye(2)
     v = np.ones((2,) * 4)
-    g = pack((h, h), (v, v, v), 0.0, spin_free=True)
+    g = pack((h,), (v,), 0.0, spin_free=True)
     g[1][0, 0] = 5.0
     g[2][0, 0, 0, 0] = 5.0
+    assert h[0, 0] == 1.0 and v[0, 0, 0, 0] == 1.0
+    g = pack((h, h), (v, v, v), 0.0, spin_free=True)
+    for one_body in g[1]:
+        one_body[0, 0] = 5.0
+    for two_body in g[2]:
+        two_body[0, 0, 0, 0] = 5.0
     assert h[0, 0] == 1.0 and v[0, 0, 0, 0] == 1.0
 
 
@@ -577,8 +620,13 @@ def test_sigma_with_mrpa(wat_df, sigma):
 
 def test_one_restricted_channel_of_the_two_body_term():
     """A restricted reference passes one channel: `active_eri` returns one
-    block from one integral transformation, and `pack` of the one channel
-    is `pack` of two identical channels, spin free and in spin orbitals."""
+    block from one integral transformation. `pack` of the one channel holds
+    the numbers of `pack` of two identical channels: the same spin-orbital
+    arrays, and spin free the one block that the two-channel form repeats
+    per spin. The spin-orbital two-body arrays agree to rounding and not bit
+    for bit: the two-channel form reads the beta-alpha elements as
+    (rs|pq) of the block, the one-channel form as (pq|rs), and the integral
+    transformation gives the two equal to 6.1e-16 here (measured)."""
     mf = water()
     idx = [2, 4, 5, 6]
     act = mf.mo_coeff[:, idx]
@@ -588,11 +636,16 @@ def test_one_restricted_channel_of_the_two_body_term():
     rng = np.random.default_rng(5)
     h = rng.normal(size=(4, 4))
     h = h + h.T
-    for spin_free in (True, False):
-        g_one = pack((h,), one, 1.5, spin_free=spin_free)
-        g_two = pack((h, h), one * 3, 1.5, spin_free=spin_free)
-        assert g_one.keys() == g_two.keys() and g_one[0] == 1.5
-        assert all(np.array_equal(g_one[k], g_two[k]) for k in (1, 2))
+    g_one = pack((h,), one, 1.5, spin_free=False)
+    g_two = pack((h, h), one * 3, 1.5, spin_free=False)
+    assert g_one.keys() == g_two.keys() and g_one[0] == g_two[0] == 1.5
+    assert np.array_equal(g_one[1], g_two[1])
+    assert np.max(np.abs(g_one[2] - g_two[2])) < 1e-14
+    g_one = pack((h,), one, 1.5, spin_free=True)
+    g_two = pack((h, h), one * 3, 1.5, spin_free=True)
+    assert g_one.keys() == g_two.keys() and g_one[0] == g_two[0] == 1.5
+    assert all(np.array_equal(g_one[1], x) for x in g_two[1])
+    assert all(np.array_equal(g_one[2], x) for x in g_two[2])
     g = pack((h,), one, 0.0, spin_free=True)
     g[1][0, 0] = 5.0
     assert h[0, 0] != 5.0

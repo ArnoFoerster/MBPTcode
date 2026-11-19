@@ -14,12 +14,14 @@ from src.Base.numerics.constants import QP_DEGENERACY_TOL
 
 @dataclass(frozen=True)
 class Partition:
-    """Active and environment orbitals of a closed-shell reference.
+    """Active and environment orbitals of one spin channel: the one channel
+    of a closed-shell reference, or the alpha or the beta orbitals of an
+    unrestricted one.
 
     inactive: the occupied orbitals outside the active space.
     act_occ, act_virt: the active occupied and virtual orbitals.
     env_virt: the virtual orbitals outside the active space.
-    nocc, norb: the occupied count and the orbital count of the reference.
+    nocc, norb: the occupied count and the orbital count of the channel.
     """
     inactive: np.ndarray
     act_occ: np.ndarray
@@ -47,23 +49,33 @@ class Partition:
         return np.concatenate([self.inactive, self.env_virt])
 
 
-def partition(active_space, eps):
+def channels_of(part):
+    """The spin channels of `part` as a tuple: (part,) for one Partition, the
+    one channel of a restricted reference, or the pair (alpha, beta) of an
+    unrestricted one."""
+    return (part,) if isinstance(part, Partition) else tuple(part)
+
+
+def partition(active_space, eps, spin=None):
     """The Partition of `active_space`, refusing a boundary that cuts a degenerate pair.
 
     An active and an environment orbital of the same kind (both occupied or
     both virtual) closer than QP_DEGENERACY_TOL would make the energy
     denominators between the two sets vanish, so the active space has to take
     the whole degenerate set or none of it. An occupied orbital close to a
-    virtual one is not a cut and is never compared.
+    virtual one is not a cut and is never compared. `eps` are the orbital
+    energies of the channel the active space belongs to; `spin` ('alpha' or
+    'beta') names that channel in the message for an unrestricted reference.
     """
     eps = np.asarray(eps)
+    which = 'the active space' if spin is None else f'the {spin} active space'
     for act, env in ((active_space.occ_active, active_space.env_occ),
                      (active_space.virt_active, active_space.env_virt)):
         for a in act:
             for e in env:
                 if abs(eps[a] - eps[e]) < QP_DEGENERACY_TOL:
                     raise ValueError(
-                        f"the active space cuts a degenerate pair: active "
+                        f"{which} cuts a degenerate pair: active "
                         f"orbital {a} (eps = {eps[a]:.8f}) and environment "
                         f"orbital {e} (eps = {eps[e]:.8f}) differ by less "
                         f"than {QP_DEGENERACY_TOL:g}. Take the whole set, "

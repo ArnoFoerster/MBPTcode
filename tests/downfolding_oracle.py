@@ -23,7 +23,7 @@ Spin orbitals are numbered alpha first, then beta: with n spatial orbitals,
 spin orbital p < n is alpha orbital p and spin orbital n + p is beta orbital p.
 """
 import numpy as np
-from pyscf import gto, scf
+from pyscf import dft, gto, scf
 
 
 def water():
@@ -44,6 +44,39 @@ def h2():
     mf.conv_tol = 1e-11
     mf.verbose = 0
     return mf.run()
+
+
+OH = 'O 0 0 0; H 0 0 0.97'
+CH2 = 'C 0 0 0; H 0 0.9931 0.4226; H 0 -0.9931 0.4226'
+NH = 'N 0 0 0; H 0 0 1.04'
+
+
+def unrestricted(atom, spin, basis='6-31g', xc=None):
+    """Converged UHF (UKS with the functional `xc`) of `atom` with
+    `spin` = N_alpha - N_beta, spherical basis."""
+    mol = gto.M(atom=atom, basis=basis, spin=spin, cart=False, verbose=0)
+    mf = scf.UHF(mol) if xc is None else dft.UKS(mol, xc=xc)
+    mf.conv_tol = 1e-12
+    mf.verbose = 0
+    mf.kernel()
+    assert mf.converged
+    return mf
+
+
+def h2_broken(basis='6-31g'):
+    """Converged broken-symmetry UHF of H2 at 2.5 Angstrom: one electron on
+    each atom, N_alpha = N_beta, the alpha and beta orbitals different."""
+    mol = gto.M(atom='H 0 0 0; H 0 0 2.5', basis=basis, cart=False, verbose=0)
+    mf = scf.UHF(mol)
+    mf.conv_tol = 1e-12
+    mf.verbose = 0
+    dm = mf.init_guess_by_atom()
+    first = mol.aoslice_by_atom()[0]
+    dm[0][first[2]:first[3]] = dm[0][:, first[2]:first[3]] = 0.0  # alpha on atom 2
+    dm[1][first[3]:] = dm[1][:, first[3]:] = 0.0                  # beta on atom 1
+    mf.kernel(dm0=dm)
+    assert mf.converged and mf.spin_square()[0] > 0.5
+    return mf
 
 
 def _transform(mol, c1, c2, c3, c4):
@@ -179,6 +212,28 @@ def reference_energy(g_eff, n_act_occ):
         e += 2 * h[k, k]
         for l in range(n_act_occ):
             e += 2 * eri[k, k, l, l] - eri[k, l, l, k]
+    return e
+
+
+def reference_energy_uhf(g_eff, n_act_occ):
+    """The energy of the reference determinant of a spin-resolved g_eff,
+    g_eff[1] = (h_a, h_b) and g_eff[2] = (aa, ab, bb) physicist, with the
+    first n_act_occ[s] active orbitals of spin s occupied:
+
+    E = g_eff[0] + sum_s sum_k h^s_kk
+        + 1/2 sum_s sum_kl [(kk|ll)^ss - (kl|lk)^ss] + sum_{k in a, l in b} (kk|ll)^ab.
+    """
+    h = g_eff[1]
+    aa, ab, bb = (x.transpose(0, 2, 1, 3) for x in g_eff[2])
+    e = g_eff[0]
+    for s, same in enumerate((aa, bb)):
+        for k in range(n_act_occ[s]):
+            e += h[s][k, k]
+            for l in range(n_act_occ[s]):
+                e += 0.5 * (same[k, k, l, l] - same[k, l, l, k])
+    for k in range(n_act_occ[0]):
+        for l in range(n_act_occ[1]):
+            e += ab[k, k, l, l]
     return e
 
 

@@ -85,6 +85,7 @@ pytest test_downfolding_reference.py
 pytest test_downfolding_routes.py
 pytest test_downfolding_sigma.py
 pytest test_downfolding_two_body.py
+pytest test_downfolding_unrestricted.py
 pytest test_ee_adc_davidson_max_memory.py
 pytest test_ee_adc_driver.py
 pytest test_ee_adc_en.py
