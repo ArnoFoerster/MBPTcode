@@ -14,26 +14,46 @@ the mean field's own. The energy is compared with the plasmon formula
 1/2 (sum Omega - Tr A) of the Casida problem on the same factors, which has
 no quadrature, and with pyscf's URPA on the same density-fitting object; on
 a closed shell given as two equal channels it is the restricted energy.
+
+The same energy in imaginary time, on separable (ISDF) factors with one
+collocation per spin and one Coulomb factor D: chi0 is the sum of the two
+spins' responses on a minimax time grid over the transitions of both. It is
+compared with the plasmon formula of the Casida problem on the same ISDF
+factors (OH/cc-pVDZ, density-fitted UHF, G1 grid), and with the restricted
+function on a closed shell given as two equal channels. The static
+(omega = 0) grid of two spins spans the same range.
 """
 import numpy as np
 import pytest
+from pyscf import gto, scf
 from pyscf.gw import urpa
 
+from src.Base.factorization.sliced_factors import unpack_factors
+from src.Base.numerics.constants import DEFAULT_TAU_TARGET
 from src.Base.numerics.numerics import Numerics, rpa_quadrature
 from src.Base.orbital_spaces import (particle_hole_window, response_range,
                                      transition_range)
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies)
-from src.Base.utils.grids.grids import (gauss_legendre_grid,
+from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
                                         minimax_frequency_grid)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
+                                                 minimax_points_for_accuracy)
 from src.SingleReference.GW.imaginary_axis import screening_fit_grid
+from src.SingleReference.GW.space_time import separable_factors
+from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import (
     imaginary_axis_energy_grid, rpa_correlation_energy_casida,
     rpa_correlation_energy_imaginary_axis,
     solve_polarizability_imaginary_axis)
+from src.SingleReference.LinearResponse.space_time import (
+    rpa_correlation_energy_space_time, static_screening_grid)
 from tests.downfolding_oracle import CH2, OH, unrestricted, water
+from tests.gw_density_routes import fitted
+from tests.gw_density_routes import water as gw_water
+from tests.isdf_test_grid import g1_numerics
 
 
 def _two_spin(atom, spin):
@@ -168,3 +188,108 @@ def test_two_spin_grids(oh):
     assert abs(poles[0] / e_min - screening_fit_grid(
         eps[0], nocc[0], coarse)[2][0] / gaps[0][0]) < 1e-12
     assert np.all(np.diff(poles) > 0)
+
+
+# --- imaginary time, separable (ISDF) factors ----------------------------------
+
+@pytest.fixture(scope='module')
+def oh_isdf():
+    """(x, d, eps, nocc) of OH/cc-pVDZ on a density-fitted UHF (cc-pvdz-ri):
+    the separable factors on the G1 grid, x (2, M, nmo) one collocation per
+    spin and d (M, naux) shared, so that the fitted v between spins s and t
+    is B^s B^t with B^s_Q,pq = sum_P d_PQ x^s_Pp x^s_Pq."""
+    mol = gto.M(atom=OH, basis='cc-pvdz', spin=1, cart=False, verbose=0)
+    mf = scf.UHF(mol).density_fit(auxbasis='cc-pvdz-ri')
+    mf.conv_tol = 1e-12
+    mf.verbose = 0
+    mf.kernel()
+    assert mf.converged
+    x, d = unpack_factors(separable_factors(mf, mol, numerics=g1_numerics(mf),
+                                            comm=None))[:2]
+    eps = tuple(np.asarray(e) for e in mf.mo_energy)
+    nocc = tuple(int(np.count_nonzero(occ)) for occ in mf.mo_occ)
+    return x, d, eps, nocc
+
+
+def _energy_grid(eps, nocc, nfreq):
+    """A minimax time grid over the transitions of `eps` (one spectrum or
+    the pair) with a Gauss-Legendre frequency axis scaled to the smallest
+    gap, as the space-time energy takes it."""
+    e_min, e_max = response_range(eps, nocc)
+    ntau = minimax_points_for_accuracy(e_min, e_max, DEFAULT_TAU_TARGET)[0]
+    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(gap=e_min))
+    return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
+                                           with_sine=False,
+                                           with_inverse=False)
+
+
+def test_two_spin_space_time_energy_matches_the_plasmon_formula(oh_isdf):
+    """chi0_alpha + chi0_beta in imaginary time against the plasmon formula
+    1/2 (sum Omega - Tr A) of the two-spin Casida problem built here on the
+    same ISDF factors (A = delta + K, B = K, K = B_ov^T B_ov over the
+    stacked pairs), with 40 and with 80 frequency points. Measured (400
+    grid points, 70 auxiliary functions, 130 pairs, 14 time points; E_c =
+    -0.1845): 1.0e-8 with 40 frequencies, 1.1e-12 with 80."""
+    x, d, eps, nocc = oh_isdf
+    assert x.shape[0] == 2 and x.shape[1] == d.shape[0]
+    b_ov, delta = [], []
+    for x_s, eps_s, n in zip(x, eps, nocc):
+        pairs = (x_s[:, :n, None] * x_s[:, None, n:]).reshape(len(x_s), -1)
+        b_ov.append(d.T @ pairs)
+        delta.append((eps_s[n:][None, :] - eps_s[:n][:, None]).ravel())
+    b_ov = np.concatenate(b_ov, axis=1)
+    k = b_ov.T @ b_ov
+    a = k + np.diag(np.concatenate(delta))
+    plasmon = 0.5 * (CasidaSolver(a, k.copy()).solve()[0].sum() - np.trace(a))
+    assert plasmon < -0.1
+    coarse = rpa_correlation_energy_space_time(
+        x, d, eps, nocc, _energy_grid(eps, nocc, 40), comm=None)
+    assert abs(coarse - plasmon) < 1e-6
+    fine = rpa_correlation_energy_space_time(
+        x, d, eps, nocc, _energy_grid(eps, nocc, 80), comm=None)
+    assert abs(fine - plasmon) < 1e-9
+
+
+def test_closed_shell_two_spin_space_time_energy_is_the_restricted_one():
+    """A closed shell (water/cc-pVDZ, density fitted, G1 grid) given as two
+    equal channels: the restricted function's energy on the same grid
+    (measured difference 0), and no mu is taken for two channels."""
+    mf = fitted(scf.RHF(gw_water()))
+    x, d = unpack_factors(separable_factors(mf, mf.mol,
+                                            numerics=g1_numerics(mf),
+                                            comm=None))[:2]
+    eps, nocc = np.asarray(mf.mo_energy), mf.mol.nelectron // 2
+    grid = _energy_grid(eps, nocc, 40)
+    one = rpa_correlation_energy_space_time(x, d, eps, nocc, grid, comm=None)
+    flags = {}
+    both = rpa_correlation_energy_space_time(
+        (x, x), d, (eps, eps), (nocc, nocc), grid, comm=None, flags=flags)
+    assert one < -0.1 and abs(both - one) < 1e-10
+    assert flags == {}
+    with pytest.raises(ValueError, match='mid-gap'):
+        rpa_correlation_energy_space_time(
+            (x, x), d, (eps, eps), (nocc, nocc), grid, mu=0.0, comm=None)
+
+
+def test_two_spin_static_grid(oh_isdf):
+    """The one-point (omega = 0) minimax grid of a static screening for two
+    spin channels: over the smallest gap and the largest span of the two
+    spectra, with the time points asked for or, by default, the minimax
+    count of that range at the tau target. For two equal spectra it is the
+    restricted grid."""
+    _, _, eps, nocc = oh_isdf
+    e_min, e_max = transition_range(eps, nocc)
+    grid = static_screening_grid(eps, nocc)
+    assert grid.nfreq == 1 and grid.omega_points[0] == 0.0
+    ntau = minimax_points_for_accuracy(e_min, e_max, DEFAULT_TAU_TARGET)[0]
+    assert grid.ntau == ntau
+    ref = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
+                                          with_sine=False, with_inverse=False)
+    assert np.array_equal(grid.tau_points, ref.tau_points)
+    assert np.array_equal(grid.cosft_wt, ref.cosft_wt)
+    assert static_screening_grid(eps, nocc, ntau=10).ntau == 10
+    one = static_screening_grid(eps[0], nocc[0])
+    same = static_screening_grid((eps[0], eps[0]), (nocc[0], nocc[0]))
+    assert np.array_equal(same.tau_points, one.tau_points)
+    assert np.array_equal(same.cosft_wt, one.cosft_wt)
+    assert not np.array_equal(grid.tau_points, one.tau_points)
