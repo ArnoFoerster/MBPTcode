@@ -27,7 +27,7 @@ from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
 from src.Base.factorization.isdf_jk import interpolated_exchange
 from src.Base.utils.grids.grids import gauss_legendre_grid, gap_scaled_w0, minimax_frequency_grid
 from src.Base.utils.parallel.mpi_grid import lockstep
-from src.Base.orbital_spaces import get_occ_virt_indices, particle_hole_window
+from src.Base.orbital_spaces import response_range, transition_range
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.space_time import \
     dielectric_log_determinant
@@ -63,8 +63,10 @@ def rpa_correlation_energy_casida(lr_solver, nocc):
 def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):
     """Z(i*omega_k) = P^(0)(i*omega_k).v in the whitened DF/RI-V basis (eq 27, Spadetto et al., JCTC 2023, 19, 1499).
 
-    Restricted spin, DF only. Recovered as Z = I - W^-1 from the already-computed
-    screened interaction W(iw), rather than rebuilding chi0 from scratch.
+    DF only; for an unrestricted solver (nocc the pair of occupied counts) Z
+    is the sum of the two spins' responses. Recovered as Z = I - W^-1 from
+    the already-computed screened interaction W(iw), rather than rebuilding
+    chi0 from scratch.
     """
     W_grid = lr_solver.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
     naux = W_grid.shape[-1]
@@ -78,16 +80,24 @@ def imaginary_axis_energy_grid(eps, nocc, numerics=None, grid='minimax'):
     'minimax' over the particle-hole window of eps, 'gauss_legendre' scaled
     to the gap (`gap_scaled_w0`).
 
+    eps and nocc are one spectrum and its occupied count, or the pairs
+    (eps_alpha, eps_beta) and (nocc_alpha, nocc_beta) of an unrestricted
+    reference, whose grid covers the transitions of both spins: the smallest
+    gap and the largest span over the two (`response_range`).
+
     The one recipe of `rpa_correlation_energy_imaginary_axis` and of the RPA
     downfolding's imagfrequency route
     (`MultiReference.Downfolding.methods.rpa`), which integrates the active
     correlation energy on the same points so that the pair cancels."""
     nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
     if grid == 'minimax':
-        e_min, e_max, _ = particle_hole_window(eps, nocc)
+        e_min, e_max = response_range(eps, nocc)
         return minimax_frequency_grid(nfreq, e_min, e_max)
     if grid == 'gauss_legendre':
-        return gauss_legendre_grid(nfreq, w0=gap_scaled_w0(eps, nocc))
+        if np.ndim(nocc) == 0:
+            return gauss_legendre_grid(nfreq, w0=gap_scaled_w0(eps, nocc))
+        gap = transition_range(eps, nocc)[0]
+        return gauss_legendre_grid(nfreq, w0=gap_scaled_w0(gap=gap))
     raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
 
 
@@ -98,15 +108,22 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='
     E_c = (1/2pi) int dw Tr{log(1-Z(iw)) + Z(iw)} = sum_k w_k Tr{log(1-Z(i*wk)) + Z(i*wk)},
     with Tr[log(1-Z)] from `space_time.dielectric_log_determinant`, which
     warns about a frequency whose det(1 - Z) is not positive and names it in
-    flags['nonpositive_det'] when `flags` is a dict. Restricted spin, DF
-    only. Should agree with rpa_correlation_energy_casida to grid precision.
+    flags['nonpositive_det'] when `flags` is a dict. DF only. Should agree
+    with rpa_correlation_energy_casida to grid precision.
+
+    A restricted solver takes its occupied count. An unrestricted one takes
+    the pair (nocc_alpha, nocc_beta): Z is then the sum of the two spins'
+    responses and the grid that of both spectra
+    (`imaginary_axis_energy_grid`).
 
     grid: 'minimax' (default) or 'gauss_legendre' (uses w0, default gap_scaled_w0).
     numerics: the run's `Numerics`; the frequency count is `rpa_quadrature`'s
     for `grid`, the one every dRPA energy of the run reads.
     """
-    eps = lr_solver.eps
-    occ, virt = get_occ_virt_indices(eps, nocc)
+    if np.ndim(nocc) == 0:
+        eps = lr_solver.eps
+    else:
+        eps = (lr_solver.eps_a, lr_solver.eps_b)
 
     if grid == 'gauss_legendre' and w0 is not None:
         nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]

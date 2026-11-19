@@ -226,6 +226,7 @@ pytest test_df_jk_block_rows.py
 pytest test_xc_block_cap.py
 pytest test_row_fit_frozen_layout.py
 script test_rpa_correlation_energy.py
+pytest test_rpa_energy_unrestricted.py
 pytest test_rpa_qp_surface.py
 pytest test_run_tadf_resume.py
 pytest test_runtime_radii.py

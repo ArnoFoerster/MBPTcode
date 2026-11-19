@@ -29,7 +29,8 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      require_gas_phase_ground_state, spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.Base.orbital_spaces import (get_occ_virt_indices,
-                                     particle_hole_window, transition_range)
+                                     particle_hole_window, response_range,
+                                     transition_range)
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift, shift_after_solve)
 from src.SingleReference.GW.qp_solve import (finish_qp,
@@ -137,14 +138,17 @@ def screening_fit_grid(eps, nocc, numerics=None):
     with their minimax
     weights (which a TimeFrequencyGrid on these points carries; the fit
     itself does not use them), and as many fit poles log-spaced over
-    [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span].
+    [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span]. For an
+    unrestricted reference eps and nocc are the pairs of both spins, and
+    gap and span the smallest gap and the largest span over the two
+    (`response_range`): W is one object, built from both.
 
     The one recipe of `self_energy_matrix_imaginary_axis` and of the RPA
     downfolding's environment self-energy
     (`MultiReference.Downfolding.methods.rpa.sigma_env_imag_axis`), whose
     samples go to `fitted_self_energy_matrix_imaginary_axis`."""
     nfreq = numerics_or_default(numerics).imagfreq.nfreq
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    e_min, e_max = response_range(eps, nocc)
     points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
     poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
                          GW_DENSITY_W_FIT_HIGH * e_max, len(points))

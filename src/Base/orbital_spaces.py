@@ -28,6 +28,17 @@ def transition_range(spectra, noccs):
     return min(w[0] for w in windows), max(w[1] for w in windows)
 
 
+def response_range(eps, nocc):
+    """(smallest, largest) particle-hole energy of a reference: of the one
+    spectrum of a restricted one (eps an array, nocc its occupied count), or
+    over both spin channels of an unrestricted one (eps and nocc pairs,
+    `transition_range`). The range a frequency or time grid of the
+    reference's response has to cover."""
+    if np.ndim(nocc) == 0:
+        return particle_hole_window(eps, nocc)[:2]
+    return transition_range(eps, nocc)
+
+
 def ov_energies(eps, nocc):
     """d_(i,a) = eps_a - eps_i on the flattened pair index of C_ov."""
     occ, virt = get_occ_virt_indices(eps, nocc)
