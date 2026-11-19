@@ -2,6 +2,7 @@ pytest test_ac_quasiparticle_shifts.py
 pytest test_active_space.py
 pytest test_active_space_cc.py
 pytest test_active_space_solver.py
+pytest test_active_space_solver_unrestricted.py
 pytest test_adaptive_partition_carried.py
 pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
