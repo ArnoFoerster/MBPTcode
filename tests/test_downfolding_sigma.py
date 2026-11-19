@@ -439,8 +439,9 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
     Sigma_bar(inf)|. On the contiguous (4,4) the damping is exactly 0 and
     nothing warns; on the near-pole space it is 1.5e-4 and a
     SigmaDampingWarning names orbital 7 alone. 'mode_a' applies no s:
-    srg_s None, damping 0. With diagnostics=() there is no record and no
-    warning."""
+    srg_s None, damping 0. The warning does not depend on the record:
+    with diagnostics=() nothing is stored and the near-pole space still
+    warns, since a damped Sigma_bar goes into H_eff either way."""
     _, eri, eps, nocc = wat
     aspace = space(eps, nocc)
     part = partition(aspace, eps)
@@ -481,11 +482,15 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
                       / (2 * h) for t, x in enumerate(e)])
     assert np.abs(poles['z'] - 1.0 / (1.0 - slope)).max() < 1e-7
     assert np.all((poles['z'] > 0) & (poles['z'] <= 1))
-    with warnings.catch_warnings():
-        warnings.simplefilter('error', RuntimeWarning)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always', RuntimeWarning)
         _, _, en = build_effective_hamiltonian(low_exact, aspace,
                                                sigma='srg', diagnostics=())
     assert en.diagnostics == {}
+    damped = [r for r in rec if r.category is rpa.SigmaDampingWarning]
+    assert len(damped) == (1 if near else 0)
+    assert not [r for r in rec if issubclass(r.category, RuntimeWarning)
+                and r.category is not rpa.SigmaDampingWarning]
 
 
 def _stretched_water(r_oh):
@@ -712,7 +717,8 @@ def test_continuation_diagnostic_present(wat):
     With every orbital active (no environment) Sigma_bar and the spread are
     zero. With npade = 4 the two halves are 2-point fits, the spread exceeds the
     level (measured 1.1e-3) and a SigmaContinuationWarning names the
-    elements."""
+    elements, also with diagnostics=(), which stores nothing: the warning
+    does not depend on the record."""
     mf, _, eps, nocc = wat
     a = _contiguous_44(eps, nocc)
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
@@ -740,6 +746,10 @@ def test_continuation_diagnostic_present(wat):
     with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
         _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg')
     assert en.diagnostics['sigma_continuation'].max() > 1e-4
+    with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
+        _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg',
+                                               diagnostics=())
+    assert en.diagnostics == {}
 
 
 def _scaled_water(scale):

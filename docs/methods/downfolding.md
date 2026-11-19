@@ -389,6 +389,14 @@ reference E_0 is a well-defined working choice, not a derived one.
   environment self-energy; on `mode='imagfrequency'` and `'space-time'`
   both `'srg'` and `'mode_a'` are, within the wider continuation margin
   (see above).
+- **Sigma^E warnings.** With `sigma` set, two checks of Sigma_bar always
+  run, whatever `diagnostics` asks for, because Sigma_bar goes into H_eff
+  and E_0 either way: a `SigmaDampingWarning` (casida, `'srg'`) when the
+  SRG damping moves an element by more than 1e-6 Ha, and a
+  `SigmaContinuationWarning` (imagfrequency, space-time) when two Pade fits
+  disagree by more than 1e-4 Ha. Both are named flags
+  (`docs/warnings.md`). The `diagnostics` keyword only decides whether the
+  numbers behind them are recorded.
 
 Diagnostics are informational and do not change a number. `diagnostics=` takes
 a tuple of names (default: all; `None` is the same as `()`); a name that does

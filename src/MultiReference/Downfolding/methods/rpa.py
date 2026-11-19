@@ -1181,8 +1181,10 @@ def continuation_spread(z, samples, eps_act, sigma):
     """(n_act, n_act): per element, |Sigma_bar from the even-indexed z -
     Sigma_bar from the odd-indexed z|, each by `continued_self_energy` at
     the element's own evaluation point. Two fits on disjoint halves of the
-    nodes: an estimate of the continuation's error that, with half the
-    nodes each, overstates that of the full fit."""
+    nodes: an indicator of the continuation's error, not a bound on it. Far
+    from the poles it can exceed the error of the full fit; near the edge of
+    the pole-free window it falls short of it by ten to twenty times, which
+    is why the margin, not this spread, guards the edge."""
     z, samples = np.asarray(z), np.asarray(samples)
     even, odd = (continued_self_energy(z[k::2], samples[k::2], eps_act,
                                        sigma) for k in (0, 1))
@@ -1269,11 +1271,15 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         'sigma_continuation' without sigma) is skipped and absent, an
         unknown name refused. One that applies is recorded even when it is
         exactly zero (an empty space, no environment, no ph pair: 0.0).
-        'sigma_poles' (`_sigma_poles`) warns (SigmaDampingWarning) when the
-        SRG damping is not negligible (casida). 'sigma_continuation'
-        (imagfrequency, space-time, `_sigma_continuation`): per element the
-        spread of two Pade fits on the even and the odd nodes, warning
-        (SigmaContinuationWarning) above DOWNFOLDING_SIGMA_CONTINUATION_WARN.
+        'sigma_poles' (`_sigma_poles`): the window, pole distances, Z and
+        the SRG damping. 'sigma_continuation' (imagfrequency, space-time,
+        `_sigma_continuation`): per element the spread of two Pade fits on
+        the even and the odd nodes. Their two warnings do not depend on
+        this keyword: with sigma set, a SigmaDampingWarning (casida, the
+        SRG damping not negligible) and a SigmaContinuationWarning (the
+        spread above DOWNFOLDING_SIGMA_CONTINUATION_WARN) are always
+        checked and raised, since Sigma_bar goes into H_eff either way;
+        the keyword only decides whether the numbers are recorded.
         'ec_active_casida' (imagfrequency, space-time): {'casida': the
         dense-Casida E_c^A on the same v_eff, 'difference': the route's
         quadrature value minus it}.
@@ -1301,14 +1307,16 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        s_bar, kept = _embedding(low, part, sigma,
-                                 infinite='sigma_poles' in names)
+        s_bar, kept = _embedding(low, part, sigma, infinite=True)
         sigma_bar, dc = (s_bar,), 'hartree'
-        if 'sigma_poles' in names:
-            found['sigma_poles'] = _sigma_poles(low, part, sigma, s_bar, kept)
-        if 'sigma_continuation' in names and low.mode != 'casida':
-            found['sigma_continuation'] = _sigma_continuation(low, part,
-                                                              sigma, kept)
+        # the two checks of Sigma_bar always run and warn; `diagnostics`
+        # only decides whether their numbers are kept
+        checks = {'sigma_poles': _sigma_poles(low, part, sigma, s_bar, kept)}
+        if low.mode != 'casida':
+            checks['sigma_continuation'] = _sigma_continuation(
+                low, part, sigma, kept)
+        found.update({name: value for name, value in checks.items()
+                      if name in names})
     return DownfoldingTerms(
         vtilde=(vt,), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=found)
