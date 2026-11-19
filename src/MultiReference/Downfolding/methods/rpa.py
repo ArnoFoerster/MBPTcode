@@ -1711,6 +1711,14 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
           **opts):
     """The DownfoldingTerms of the RPA on the active space `part`.
 
+    `part` is one Partition for a restricted low-level result, and the terms
+    are those of one spin channel: vtilde = (v,), sigma_bar = (s,). For an
+    unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab, bb),
+    sigma_bar = (alpha, beta); the correlation energies and the static
+    defect are those of both spins together, and in the diagnostics what
+    belongs to one spin (the pole-free window, the pole distances, Z) is a
+    pair.
+
     screening: 'bare' | 'crpa' | 'crpa_ph' | 'mrpa' (casida only, refused
         on imagfrequency and space-time); vtilde is its static correction
         (`screening_correction`), the same in every spin block (restricted).
@@ -1757,16 +1765,16 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     names = _diagnostic_names(diagnostics)
     screening = choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
-    vt = screening_correction(low, part, screening)
-    v_eff = _active_v(low, _channels(low, part))[0] + vt
+    chans = _channels(low, part)
+    vt = _two_body_blocks(screening_correction(low, part, screening), chans)
+    v_eff = tuple(v + t for v, t in zip(_active_v(low, chans), vt))
     found = {}
     if 'static_defect' in names:
         found['static_defect'] = static_defect(low, part, v_eff)
     e_c_active = active_correlation_energy(low, part, v_eff)
     if 'ec_active_casida' in names and low.mode != 'casida':
-        k = part.n_act_occ
-        dense = (0.0 if k in (0, part.n_act)
-                 else _active_ec_casida(low, _channels(low, part), (v_eff,)))
+        pairs = any(0 < c.part.n_act_occ < c.part.n_act for c in chans)
+        dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
         found['ec_active_casida'] = {'casida': dense,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
@@ -1776,13 +1784,13 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         sigma_bar, dc = tuple(s_bars), 'hartree'
         # the two checks of Sigma_bar always run and warn; `diagnostics`
         # only decides whether their numbers are kept
-        checks = {'sigma_poles': _sigma_poles(low, _channels(low, part),
-                                              sigma, s_bars, kepts)}
+        checks = {'sigma_poles': _sigma_poles(low, chans, sigma, s_bars,
+                                              kepts)}
         if low.mode != 'casida':
             checks['sigma_continuation'] = _sigma_continuation(
                 low, part, sigma, kepts[0])
         found.update({name: value for name, value in checks.items()
                       if name in names})
     return DownfoldingTerms(
-        vtilde=(vt,), sigma_bar=sigma_bar, e_c_full=low.e_c_full,
+        vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=found)
