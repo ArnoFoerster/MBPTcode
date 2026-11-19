@@ -840,3 +840,29 @@ def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
     imaginary_axis.self_energy_matrix_imaginary_axis(
         mf, mf.mol, low.nocc, np.array([0.5]), coarse)
     assert calls == [coarse] * 3
+
+
+def test_imagfrequency_energy_grid_is_shared(monkeypatch):
+    """The imagfrequency E_c and the grid kept for E_c^A both come from
+    `imaginary_axis_energy_grid`, on the run's numerics: one recipe, which
+    `rpa_correlation_energy_imaginary_axis` and downfolding both call, so
+    the E_c pair is one quadrature by construction."""
+    from src.SingleReference.LinearResponse import rpa_energy
+    mf = water()
+    shared = rpa_energy.imaginary_axis_energy_grid
+    calls = []
+
+    def counted(eps, nocc, numerics=None, grid='minimax'):
+        calls.append((numerics, grid))
+        return shared(eps, nocc, numerics, grid)
+
+    monkeypatch.setattr(rpa, 'imaginary_axis_energy_grid', counted)
+    monkeypatch.setattr(rpa_energy, 'imaginary_axis_energy_grid', counted)
+    numerics = Numerics(quadrature={'nfreq_rpa': 20})
+    low = run_low_level(mf, method='rpa', mode='imagfrequency',
+                        numerics=numerics)
+    assert calls == [(numerics, 'minimax')] * 2   # E_c, then the kept grid
+    points, weights = shared(low.eps, low.nocc, numerics)
+    assert len(points) == 20
+    assert np.array_equal(low.cache['grid'][0], points)
+    assert np.array_equal(low.cache['grid'][1], weights)

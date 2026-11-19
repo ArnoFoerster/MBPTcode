@@ -72,6 +72,25 @@ def solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points):
     return np.array([eye - np.linalg.inv(W) for W in W_grid])
 
 
+def imaginary_axis_energy_grid(eps, nocc, numerics=None, grid='minimax'):
+    """(points, weights) of the frequency quadrature the imaginary-axis dRPA
+    correlation energy integrates on: `rpa_quadrature`'s count for `grid`,
+    'minimax' over the particle-hole window of eps, 'gauss_legendre' scaled
+    to the gap (`gap_scaled_w0`).
+
+    The one recipe of `rpa_correlation_energy_imaginary_axis` and of the RPA
+    downfolding's imagfrequency route
+    (`MultiReference.Downfolding.methods.rpa`), which integrates the active
+    correlation energy on the same points so that the pair cancels."""
+    nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
+    if grid == 'minimax':
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
+        return minimax_frequency_grid(nfreq, e_min, e_max)
+    if grid == 'gauss_legendre':
+        return gauss_legendre_grid(nfreq, w0=gap_scaled_w0(eps, nocc))
+    raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
+
+
 def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='minimax',
                                           w0=None, flags=None):
     """dRPA correlation energy via imaginary-frequency-axis integration (eqs 26-28, Spadetto et al., JCTC 2023, 19, 1499).
@@ -86,19 +105,14 @@ def rpa_correlation_energy_imaginary_axis(lr_solver, nocc, numerics=None, grid='
     numerics: the run's `Numerics`; the frequency count is `rpa_quadrature`'s
     for `grid`, the one every dRPA energy of the run reads.
     """
-    nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
     eps = lr_solver.eps
     occ, virt = get_occ_virt_indices(eps, nocc)
 
-    if grid == 'minimax':
-        e_min, e_max, _ = particle_hole_window(eps, nocc)
-        freq_points, freq_weights = minimax_frequency_grid(nfreq, e_min, e_max)
-    elif grid == 'gauss_legendre':
-        if w0 is None:
-            w0 = gap_scaled_w0(eps, nocc)
+    if grid == 'gauss_legendre' and w0 is not None:
+        nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
         freq_points, freq_weights = gauss_legendre_grid(nfreq, w0=w0)
     else:
-        raise ValueError(f"Unknown grid '{grid}'; choose 'minimax' or 'gauss_legendre'.")
+        freq_points, freq_weights = imaginary_axis_energy_grid(eps, nocc, numerics, grid)
 
     Z_grid = solve_polarizability_imaginary_axis(lr_solver, nocc, freq_points)
 

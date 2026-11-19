@@ -86,8 +86,7 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
                                                         pade_fit_elementwise,
                                                         pade_nodes)
-from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
-                                        minimax_frequency_grid)
+from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
 from src.SingleReference.common.active_space import closed_shell_nocc
@@ -101,7 +100,8 @@ from src.SingleReference.LinearResponse.imaginary_frequency import \
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import (
-    rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
+    imaginary_axis_energy_grid, rpa_correlation_energy_imaginary_axis,
+    solve_polarizability_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
@@ -241,14 +241,12 @@ def _imaginary_axis(eps, nocc, factors, numerics):
     """(E_c, cache) of the restricted direct RPA on the imaginary axis:
     E_c by `rpa_correlation_energy_imaginary_axis` (minimax grid), and the
     cache with 'grid', the points and weights that energy integrates on
-    (the same `rpa_quadrature` count and particle-hole window), and 'p0',
+    (`imaginary_axis_energy_grid`, the function it calls), and 'p0',
     P(0) = 1 - W(0)^-1 in the normalized fitting basis. The active E_c^A is
     integrated on this grid so that the E_c pair is one quadrature."""
     lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode='restricted')
     e_c = rpa_correlation_energy_imaginary_axis(lr, nocc, numerics)
-    nfreq = rpa_quadrature(numerics_or_default(numerics), 'minimax')[1]
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
-    grid = minimax_frequency_grid(nfreq, e_min, e_max)
+    grid = imaginary_axis_energy_grid(eps, nocc, numerics)
     p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]
     return float(e_c), {'grid': grid, 'p0': p0}
 
