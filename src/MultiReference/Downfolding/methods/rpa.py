@@ -591,7 +591,9 @@ def screening_correction(low, part, screening):
     and it is the fully screened W(0) - v on those orbitals.
 
     On imagfrequency the same correction is P - P^A and one Dyson step,
-    vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw with W^r =
+    vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw (for two channels B of the
+    first pair's spin on the left and of the second's on the right; W^r is
+    one matrix, P and P^A the sums over both spins) with W^r =
     [1 - (P(0) - P^A(0))]^-1 in the normalized fitting basis, P(0) from
     low.cache['p0'], P^A(0) `active_polarizability_static` and B the
     factors of every active pair (`active_pair_factors`). By the
@@ -615,23 +617,22 @@ def screening_correction(low, part, screening):
     if screening == 'bare' or n == 0 or not any(r.any() for r in res):
         return _per_block([np.zeros((n,) * 4) for _ in spins])
     if low.mode != 'casida':
-        b_act = active_pair_factors(low, part).reshape(-1, n * n)
+        b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
         w_r = dyson_screening(
             low.cache['p0'] - active_polarizability_static(low, part),
             correlation=True)
-        vt = (b_act.T @ w_r @ b_act).reshape((n,) * 4)
-        if screening == 'crpa_ph':
-            vt *= ph_element_mask(part)
-        return vt
-    g = _spin_weight(chans)
-    k_rr, v_rt = _residual_integrals(low, chans, res)
-    apb = (2.0 * g) * k_rr
-    apb[np.diag_indices_from(apb)] += _join(
-        [_delta(c, r) for c, r in zip(chans, res)])
-    factor = cho_factor(apb)
-    solved = [cho_solve(factor, v) for v in v_rt]
-    vt = [((-2.0 * g) * v_rt[s].T @ solved[t]).reshape((n,) * 4)
-          for s, t in spins]
+        vt = [(b_act[s].T @ w_r @ b_act[t]).reshape((n,) * 4)
+              for s, t in spins]
+    else:
+        g = _spin_weight(chans)
+        k_rr, v_rt = _residual_integrals(low, chans, res)
+        apb = (2.0 * g) * k_rr
+        apb[np.diag_indices_from(apb)] += _join(
+            [_delta(c, r) for c, r in zip(chans, res)])
+        factor = cho_factor(apb)
+        solved = [cho_solve(factor, v) for v in v_rt]
+        vt = [((-2.0 * g) * v_rt[s].T @ solved[t]).reshape((n,) * 4)
+              for s, t in spins]
     if screening == 'crpa_ph':
         for (s, t), block in zip(spins, vt):
             block *= ph_element_mask(chans[s].part, chans[t].part)
@@ -686,18 +687,22 @@ def active_pair_factors(low, part):
     full RPA's fitted v on the active orbitals. vtilde needs all of them,
     not only the ov block. On space-time they are built from
     the active columns of the collocation X alone, B_Q,tu = sum_P D_PQ X_Pt
-    X_Pu (low.cache['factors']), the factors chi0 is built from."""
-    return _pair_factors(low, part.act)
+    X_Pu (low.cache['factors']), the factors chi0 is built from. For an
+    unrestricted result `part` is the pair (alpha, beta) and the pair of
+    each spin's factors is returned, both on the one auxiliary basis."""
+    return _per_channel([_pair_factors(low, c)
+                         for c in _channels(low, part)])
 
 
-def _pair_factors(low, act):
-    """`active_pair_factors` on the orbitals `act`."""
+def _pair_factors(low, chan):
+    """`active_pair_factors` of one spin channel."""
+    act = chan.part.act
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         n, x_act = len(act), x[:, act]
         pairs = (x_act[:, :, None] * x_act[:, None, :]).reshape(len(x), n * n)
         return (d.T @ pairs).reshape(d.shape[1], n, n)
-    return low.factors[:, act][:, :, act]
+    return chan.factors[:, act][:, :, act]
 
 
 def active_polarizability_static(low, part):
@@ -713,7 +718,13 @@ def active_polarizability_static(low, part):
     tau point, transformed by the grid's cosine weights) with X restricted
     to the active columns and the full system's mid-gap mu, i.e. the
     transform of -2 sum_ia B_ia B_ia^T exp(-delta_ia tau) over the active ph
-    pairs: with every orbital active it is P(0) itself, to the bit."""
+    pairs: with every orbital active it is P(0) itself, to the bit.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and P^A(0)
+    the sum of the two spins' active pairs' responses, each
+    -2 sum_ia B_ia B_ia^T / delta_ia with that spin's factors and orbital
+    energies: the -4 above is -2g of the one restricted channel."""
+    chans = _channels(low, part)
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         k = part.n_act_occ
@@ -724,13 +735,12 @@ def active_polarizability_static(low, part):
         return chi0_imaginary_frequency(
             x[:, act], d, low.eps[act], k, low.cache['static_grid'], mu=mu,
             tile_memory_gb=layout_tile_gb(low.numerics))[0]
-    nocc = low.nocc
-    b = low.factors
-    mask = active_pair_mask(part)
-    c_a = b[:, :nocc, nocc:].reshape(b.shape[0], -1)[:, mask]
-    eps = low.eps
-    delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[mask]
-    return chi0_aux([(c_a, frequency_factor(delta, 0.0, True))], 2.0)
+    blocks = []
+    for chan in chans:
+        mask = active_pair_mask(chan.part)
+        blocks.append((_ov_factors(chan)[:, mask],
+                       frequency_factor(_delta(chan, mask), 0.0, True)))
+    return chi0_aux(blocks, _spin_weight(chans))
 
 
 def _active_v(low, chans):
@@ -744,7 +754,7 @@ def _active_v(low, chans):
     so that the double counting cancels against E_c and W."""
     n = chans[0].part.n_act
     if low.mode == 'space-time':
-        b_act = _pair_factors(low, chans[0].part.act).reshape(-1, n * n)
+        b_act = _pair_factors(low, chans[0]).reshape(-1, n * n)
         return ((b_act.T @ b_act).reshape((n,) * 4),)
     spins = _BLOCKS[len(chans)]
     if low.factors is not None:
@@ -828,8 +838,9 @@ def active_correlation_energy(low, part, v_eff):
     in the active ph space, U = K^A the ph block of v_eff and Pi^A the
     diagonal bare response 2 f(i w) = -4 delta/(delta^2 + w^2), the spin
     and frequency factor of the full chi0
-    (`solve_polarizability_imaginary_axis`). With every orbital active and
-    v_eff the fitted v, U = B^T B and
+    (`solve_polarizability_imaginary_axis`); for two spin channels g f(i w)
+    with g = 1 on the active pairs of both spins side by side. With every
+    orbital active and v_eff the fitted v, U = B^T B and
     Tr ln(1 - Pi B^T B) = ln det(1 - B Pi B^T): the full integrand at every
     point, so the pair cancels to rounding. The dense-Casida value on the
     same v_eff is the 'ec_active_casida' diagnostic.
@@ -878,7 +889,8 @@ def _active_ec_quadrature(low, chans, v_eff):
         pi = -2.0 * grid.cosft_wt @ np.exp(-np.outer(grid.tau_points, delta))
     else:
         points, weights = low.cache['grid']
-        pi = [2.0 * frequency_factor(delta, w, True) for w in points]
+        g = _spin_weight(chans)
+        pi = [g * frequency_factor(delta, w, True) for w in points]
     e_c = 0.0
     for k, (pi_k, wt) in enumerate(zip(pi, weights)):
         pu = pi_k[:, None] * k_ph
@@ -924,9 +936,10 @@ def static_defect(low, part, v_eff):
         return 0.0
     g = _spin_weight(chans)
     if low.mode != 'casida':
-        b_act = active_pair_factors(low, part).reshape(-1, n * n)
-        w_full = [(b_act.T @ dyson_screening(low.cache['p0'])
-                   @ b_act).reshape((n,) * 4)]
+        b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
+        w_static = dyson_screening(low.cache['p0'])
+        w_full = [(b_act[s].T @ w_static @ b_act[t]).reshape((n,) * 4)
+                  for s, t in spins]
     else:
         r = [ov @ low.xpy for ov in _active_ov(low, chans)]
         w_full = [v - (2.0 * g) * ((r[s] / low.omega) @ r[t].T).reshape(
