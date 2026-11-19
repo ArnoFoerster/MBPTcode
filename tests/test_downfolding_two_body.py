@@ -1,7 +1,9 @@
-"""The exact active-space integrals and the packing of g_eff.
+"""The two-body term (bare active integrals, v + vtilde) and the driver's packing of g_eff.
 
-active_eri reproduces the active block of the exact MO integrals of the
-oracle. Packed spin-free and spin-orbital, the same restricted Hamiltonian of
+active_eri (two_body.py) reproduces the active block of the exact MO integrals
+of the oracle and effective_interaction adds the method's vtilde to it;
+`pack` (the driver, effective_hamiltonian.py) writes g_eff from the
+assembled terms. Packed spin-free and spin-orbital, the same restricted Hamiltonian of
 H2/6-31G (all four spatial orbitals active, two electrons) gives the same
 ground state energy from the openfermion and the pyscf_fci backends, and both
 equal pyscf's FCI energy when the constant is the nuclear repulsion. An
@@ -48,7 +50,9 @@ from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import (active_pair_mask,
                                                       partition,
                                                       ph_element_mask)
-from src.MultiReference.Downfolding.two_body import active_eri, pack
+from src.MultiReference.Downfolding.effective_hamiltonian import pack
+from src.MultiReference.Downfolding.two_body import (active_eri,
+                                                     effective_interaction)
 from src.SingleReference.common.active_space import ActiveSpace
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
@@ -594,3 +598,29 @@ def test_one_restricted_channel_of_the_two_body_term():
     assert h[0, 0] != 5.0
     empty = active_eri(mf.mol, (mf.mo_coeff[:, []],))
     assert [b.shape for b in empty] == [(0, 0, 0, 0)]
+
+
+def test_effective_interaction_is_bare_plus_vtilde():
+    """v_eff = v + vtilde per spin block: the exact active integrals of
+    `active_eri` plus the method's correction, for one restricted channel and
+    for two; a vtilde with the wrong number of blocks, or of another shape,
+    is refused."""
+    mf = water()
+    idx = [2, 4, 5, 6]
+    act = mf.mo_coeff[:, idx]
+    rng = np.random.default_rng(7)
+    vt = rng.normal(size=(4,) * 4)
+    bare = active_eri(mf.mol, (act,))[0]
+    one = effective_interaction(mf.mol, (act,), (vt,))
+    assert len(one) == 1 and np.array_equal(one[0], bare + vt)
+    blocks = tuple(rng.normal(size=(4,) * 4) for _ in range(3))
+    three = effective_interaction(mf.mol, (act, act), blocks)
+    assert len(three) == 3
+    assert all(np.array_equal(v, bare + b) for v, b in zip(three, blocks))
+    with pytest.raises(ValueError, match='vtilde'):
+        effective_interaction(mf.mol, (act,), (vt, vt, vt))
+    with pytest.raises(ValueError, match='vtilde'):
+        effective_interaction(mf.mol, (act,), (vt[:3, :3, :3, :3],))
+    empty = effective_interaction(mf.mol, (mf.mo_coeff[:, []],),
+                                  (np.zeros((0,) * 4),))
+    assert empty[0].shape == (0, 0, 0, 0)

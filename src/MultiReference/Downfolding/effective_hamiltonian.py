@@ -13,11 +13,19 @@ so the general layer gets ONE spin channel (the orbitals, the `Partition`,
 one vtilde) and computes everything once: one exact J/K build of the inactive
 core, shared by the core Fock operator and the environment energy, and one
 integral transformation of the active block.
+
+The three parts of H_eff come from the general layer's three files, E_0 from
+energy.py, h_eff from one_body.py and v_eff from two_body.py; `pack` here
+writes them into the g_eff dictionary the active-space solvers read
+(src/Solvers/active_space.py).
 """
+import numpy as np
+
 from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                             require_gas_phase_ground_state)
 from src.Base.utils.parallel.mpi_grid import grid_comm
 from src.SingleReference.common.active_space import closed_shell_nocc
+from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
 from .energy import assemble_energies, environment_hf_energy
 from .methods import LOW_LEVEL
@@ -25,9 +33,10 @@ from .one_body import (DC_MODES, core_fock, double_counting,
                        effective_one_body, inactive_jk)
 from .partition import partition
 from .terms import choice
-from .two_body import active_eri, pack
+from .two_body import effective_interaction
 
 WHO = 'Downfolding'
+RESTRICTED_TOL = 1e-12
 
 
 def run_low_level(mf, method='rpa', **method_opts):
@@ -111,8 +120,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     f = core_fock(mol, hcore, mo, parts, jk=jk)
     hartree, exchange = double_counting(terms.vtilde, n_act_occ)
     h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
-    v_bare = active_eri(mol, (c[:, part.act],))
-    v_eff = tuple(v + vt for v, vt in zip(v_bare, terms.vtilde))
+    v_eff = effective_interaction(mol, (c[:, part.act],), terms.vtilde)
     environment = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
     energies = assemble_energies(mf.energy_nuc(), *environment, terms,
                                  n_act_occ)
@@ -128,3 +136,48 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         'active_space': active_space,
     }
     return g_eff, space, energies
+
+
+def pack(h_eff, v_eff, e0, spin_free):
+    """The g_eff dictionary {0: e0, 1: one-body, 2: two-body} of the solvers.
+
+    h_eff and v_eff hold the one-body term and the chemist active interaction
+    (bare plus vtilde) per spin channel: (h,) and (v,) for the one channel of
+    a restricted reference, or (h_a, h_b) and (aa, ab, bb). Spin-free,
+    g_eff[1] is the spatial one-body and g_eff[2] the spatial physicist
+    <pq|rs> = (pr|qs); otherwise both go through spatial_to_spin_orbitals and
+    key 0 is added here.
+
+    Only a restricted Hamiltonian is packed: one channel as it is, and two
+    channels only where they agree, h_a with h_b and the three blocks of
+    v_eff, to 1e-12 (relative to max(1, max element)). The arrays of g_eff
+    are copies, never views of the inputs; an empty active space packs
+    zero-size arrays. A spin-resolved g_eff for the unrestricted case, solved
+    by fci.direct_uhf, is deferred.
+    """
+    if len(h_eff) == 1:
+        (h_a,), (aa,) = h_eff, v_eff
+    else:
+        h_a, h_b = h_eff
+        aa, ab, bb = v_eff
+        if not (_same(h_a, h_b) and _same(aa, ab) and _same(aa, bb)):
+            raise NotImplementedError(
+                "pack takes a restricted Hamiltonian only (one spin channel, "
+                "or equal alpha and beta channels); the unrestricted "
+                "extension, a spin-resolved g_eff solved with fci.direct_uhf, "
+                "is deferred.")
+    spatial = {1: np.array(h_a), 2: np.array(aa.transpose(0, 2, 1, 3))}
+    if spin_free:
+        return {0: e0, **spatial}
+    g = spatial_to_spin_orbitals(spatial, h_a.shape[0])
+    g[0] = e0
+    return g
+
+
+def _same(x, y):
+    if x.shape != y.shape:
+        return False
+    if x.size == 0:
+        return True
+    scale = max(1.0, float(np.max(np.abs(x))), float(np.max(np.abs(y))))
+    return np.max(np.abs(x - y)) <= RESTRICTED_TOL * scale
