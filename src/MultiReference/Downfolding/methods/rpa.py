@@ -4,9 +4,19 @@
 known, and keeps what every later active space needs: on the casida route
 the excitation energies Omega, the amplitudes X+Y, the full correlation
 energy E_RPA,corr = 1/2 (sum Omega - Tr A), and the integrals the Casida
-matrices were built from. The reference is restricted closed shell and the
-response the singlet one (A = delta + 2K, B = 2K, K_ia,jb = (ia|jb)); triplet
-modes contribute nothing to the direct RPA.
+matrices were built from. For a restricted closed-shell reference the
+response is the singlet one (A = delta + 2K, B = 2K, K_ia,jb = (ia|jb));
+triplet modes contribute nothing to the direct RPA.
+
+An unrestricted reference (UHF/UKS) is two spin channels, each with its own
+orbitals, orbital energies and occupied count, and one RPA problem over the
+particle-hole pairs of both spins, stacked: the alpha pairs in C order over
+(i, a), then the beta ones, with A = delta + K, B = K and
+K_(ia s),(jb s') = (i_s a_s | j_s' b_s'). Every formula below is written
+once with the spin weight g, the number of electrons an occupied orbital of
+one channel holds: g = 2 for the one channel of a restricted reference,
+g = 1 for each of two. A + B = delta + 2g K, the static response is
+-2g [(A+B)^-1], and W is one spin-independent operator.
 
 `screening_correction` gives the static (omega = 0) screening correction of an
 active space on the casida route: the active pairs deleted from A+B and one
@@ -66,6 +76,7 @@ from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import numpy as np
+from pyscf import scf
 from scipy.linalg import cho_factor, cho_solve
 
 from src.Base.factorization.sliced_factors import unpack_factors
@@ -122,6 +133,14 @@ DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
 class RPALowLevel:
     """The RPA low-level result: the mean field, the full RPA, and a cache.
 
+    For an unrestricted reference (`unrestricted`) eps, nocc and factors are
+    pairs (alpha, beta), eri is the three blocks (aa, ab, bb) with
+    ab[p,q,r,s] = (p_a q_a | r_b s_b), and omega and xpy are those of the
+    one RPA problem on the stacked pairs of both spins, the alpha pairs in
+    C order over (i, a), then the beta ones, where
+    xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 2K)^-1. What follows
+    describes the one channel of a restricted reference.
+
     eps, nocc: the orbital energies and the occupied count of `mf`.
     e_c_full: E_RPA,corr of the whole system: on casida 1/2 (sum omega -
         Tr A), on imagfrequency the minimax quadrature of
@@ -173,6 +192,11 @@ class RPALowLevel:
     method: str = METHOD
     numerical_flags: list = field(default_factory=list)
 
+    @property
+    def unrestricted(self):
+        """True for a UHF/UKS reference: two spin channels."""
+        return isinstance(self.nocc, tuple)
+
 
 def _refuse_options(opts, which):
     if opts:
@@ -210,8 +234,17 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         raise ValueError(
             f"method={METHOD!r} mode={mode!r} is {how}; df=False (the exact "
             f"4-centre screening) is mode='casida' only.")
-    eps = np.asarray(get_orbital_energies(mf))
-    nocc = closed_shell_nocc(mf.mo_occ)
+    if isinstance(mf, scf.uhf.UHF):
+        if mode != 'casida':
+            raise NotImplementedError(
+                f"method={METHOD!r} mode={mode!r} takes a restricted "
+                f"reference only; for an unrestricted one (UHF/UKS) use "
+                f"mode='casida'.")
+        eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
+        nocc = tuple(closed_shell_nocc(occ) for occ in mf.mo_occ)
+    else:
+        eps = np.asarray(get_orbital_energies(mf))
+        nocc = closed_shell_nocc(mf.mo_occ)
     if mode == 'space-time':
         e_c, cache = _space_time(mf, eps, nocc, numerics)
         return RPALowLevel(
@@ -305,13 +338,22 @@ def _space_time(mf, eps, nocc, numerics):
 
 
 def _plasmon(eps, nocc, factors, eri, numerics):
-    """(E_c, omega, X+Y) of the restricted singlet direct RPA on the
-    integrals `factors` (three-index) or `eri` (chemist), by the plasmon
-    formula E_c = 1/2 (sum omega - Tr A). A and B are freed by the solver,
-    so Tr A is taken before it. The full RPA and the active one go through
-    here, so the E_c pair is the same formula on the same solver."""
-    lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
-                              spin_mode='restricted')
+    """(E_c, omega, X+Y) of the direct RPA on the integrals `factors`
+    (three-index) or `eri` (chemist), by the plasmon formula
+    E_c = 1/2 (sum omega - Tr A): the restricted singlet problem for one
+    channel, and for two (eps, nocc and factors pairs, eri the blocks
+    (aa, ab, bb)) the problem on the stacked pairs of both spins. A and B
+    are freed by the solver, so Tr A is taken before it. The full RPA and
+    the active one go through here, so the E_c pair is the same formula on
+    the same solver."""
+    if isinstance(nocc, tuple):
+        # the solver takes the three blocks as (aa, bb, ab)
+        blocks = None if eri is None else (eri[0], eri[2], eri[1])
+        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=blocks,
+                                  spin_mode='unrestricted')
+    else:
+        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
+                                  spin_mode='restricted')
     A, B = lr.build_casida_matrices(nocc, lBSE=False)
     trace_a = np.trace(A)
     solver = CasidaSolver(A, B)

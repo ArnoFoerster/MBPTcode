@@ -61,11 +61,13 @@ CH2 = 'C 0 0 0; H 0 0.9931 0.4226; H 0 -0.9931 0.4226'
 NH = 'N 0 0 0; H 0 0 1.04'
 
 
-def unrestricted(atom, spin, basis='6-31g', xc=None):
+def unrestricted(atom, spin, basis='6-31g', xc=None, density_fit=False):
     """Converged UHF (UKS with the functional `xc`) of `atom` with
-    `spin` = N_alpha - N_beta, spherical basis."""
+    `spin` = N_alpha - N_beta, spherical basis; density fitted on request."""
     mol = gto.M(atom=atom, basis=basis, spin=spin, cart=False, verbose=0)
     mf = scf.UHF(mol) if xc is None else dft.UKS(mol, xc=xc)
+    if density_fit:
+        mf = mf.density_fit()
     mf.conv_tol = 1e-12
     mf.verbose = 0
     mf.kernel()

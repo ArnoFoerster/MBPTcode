@@ -36,6 +36,7 @@ import warnings
 import numpy as np
 import pytest
 from pyscf import fci, mcscf, scf
+from pyscf.gw import urpa
 
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
@@ -455,3 +456,76 @@ def test_oracle_reduces_to_the_restricted_one():
     ref = sigma_mode_a(eri, eps, nocc, part)
     for block in sigma_mode_a_uhf(*so):
         assert np.max(np.abs(block - ref)) < 1e-10
+
+
+# --- method='rpa' on casida: the full RPA of both spins ------------------------
+
+def _molecule_so(mf):
+    """(eri_so, eps_so, occ_so) of the whole molecule for the oracle."""
+    nmo = mf.mo_coeff.shape[-1]
+    _, eri_so = spin_orbital_integrals(mf.mol, *mf.mo_coeff)
+    n_a, n_b = _nocc(mf)
+    occ_so = list(range(n_a)) + [nmo + i for i in range(n_b)]
+    return eri_so, np.concatenate(mf.mo_energy), occ_so
+
+
+@pytest.mark.parametrize('name', ['oh', 'ch2'])
+@pytest.mark.parametrize('df', [False, True])
+def test_ec_full_against_oracle(request, name, df):
+    """The full direct RPA of an unrestricted reference, solved once on the
+    stacked pairs of both spins (the alpha pairs in C order, then the beta
+    ones): E_c, the excitation energies and X+Y against the oracle's
+    spin-orbital RPA on exact integrals. df=True on a mean field without a
+    density fit takes the eigendecomposition of the exact integrals. With
+    the exact blocks handed to the solver in another order (the
+    opposite-spin block as the beta-beta one) E_c of OH is -0.1360 and not
+    -0.1057. Measured: E_c at most 5.7e-14, the excitation energies 1.4e-13,
+    (A+B)^-1 5.4e-13 (58 pairs for OH, 70 for CH2)."""
+    mf = request.getfixturevalue(name)
+    nmo = mf.mo_coeff.shape[-1]
+    low = run_low_level(mf, method='rpa', df=df)
+    e_c, omega, xpy, pairs = drpa_so(*_molecule_so(mf))
+    assert low.unrestricted and low.mode == 'casida'
+    assert low.nocc == _nocc(mf) and len(low.eps) == 2
+    assert abs(low.e_c_full - e_c) < 1e-9
+    assert low.omega.shape == (len(pairs),)
+    assert low.xpy.shape == (len(pairs),) * 2
+    assert np.abs(np.sort(low.omega) - omega).max() < 1e-9
+    # rows in the stacked pair order, and normalized so that
+    # xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 2K)^-1
+    ours = (low.xpy / low.omega) @ low.xpy.T
+    assert np.abs(ours - (xpy / omega) @ xpy.T).max() < 1e-9
+    if df:
+        assert low.eri is None and len(low.factors) == 2
+        assert all(b.shape[1:] == (nmo, nmo) for b in low.factors)
+        assert low.factors[0].shape[0] == low.factors[1].shape[0]
+    else:
+        assert low.factors is None and len(low.eri) == 3
+        assert all(v.shape == (nmo,) * 4 for v in low.eri)
+
+
+def test_ec_full_against_pyscf_urpa():
+    """On a density-fitted UHF the plasmon-formula E_c on the mean field's
+    own fit against pyscf's URPA, an imaginary-frequency quadrature on the
+    same with_df object (80 points). Measured: 1.5e-12 (7e-10 with pyscf's
+    default 40 points)."""
+    mf = unrestricted(OH, 1, density_fit=True)
+    low = run_low_level(mf, method='rpa')
+    ref = urpa.URPA(mf)
+    ref.verbose = 0
+    ref.kernel(nw=80)
+    assert abs(low.e_c_full - ref.e_corr) < 1e-9
+
+
+def test_a_restricted_run_is_one_channel():
+    low = run_low_level(water(), method='rpa')
+    assert not low.unrestricted
+    assert isinstance(low.nocc, int) and low.eps.ndim == 1
+
+
+def test_unrestricted_numerical_routes_point_to_casida(oh):
+    """The imaginary-frequency and space-time routes do not take an
+    unrestricted reference yet."""
+    for mode in ('imagfrequency', 'space-time'):
+        with pytest.raises(NotImplementedError, match="mode='casida'"):
+            run_low_level(oh, method='rpa', mode=mode)
