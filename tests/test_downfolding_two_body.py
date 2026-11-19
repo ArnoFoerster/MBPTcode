@@ -24,7 +24,7 @@ alone; it has the symmetry of a real chemist integral, only lowers the
 diagonal, vanishes when every orbital is active and is the fully screened
 W(0) - v when no pair is active. cRPA_ph is cRPA on the particle-hole
 elements, 'bare' is zero. It also equals the cRPA written in spin
-orbitals, both spins and no spin adaptation (ruling R12), which pins the
+orbitals, both spins and no spin adaptation, which pins the
 restricted factor -4 on delta + 4K.
 
 E_c^A[v_eff], the dRPA of the active ph pairs with v_eff, and the static
@@ -212,7 +212,7 @@ def test_xpy_convention(wat):
 
 @pytest.mark.parametrize('df', [False, True])
 def test_casida_pair_order_is_the_mask_order(wat, df):
-    """Ruling R2: the Casida pair index of build_casida_matrices is C order
+    """The Casida pair index of build_casida_matrices is C order
     over (i, a), a counted from nocc, which is the order active_pair_mask
     reads. A - B = delta (diagonal to rounding, zero off it), and delta is
     non-degenerate on water, so a different order would show; the mask then picks the pairs whose i and a
@@ -375,7 +375,7 @@ def test_screening_refusals(wat, low_exact):
 @pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
                          ids=['contiguous_44', 'non_contiguous'])
 def test_crpa_is_the_spin_orbital_crpa(wat, low_exact, aspace):
-    """Ruling R12: the restricted -4 on delta + 4K against the cRPA written
+    """The restricted -4 on delta + 4K against the cRPA written
     in spin orbitals (both spins, the active pairs of both deleted,
     -2 V (A+B)_so,rr^-1 V^T), its alpha-alpha block. Measured max deviation
     (contiguous / non-contiguous): 2.6e-16 / 1.9e-16."""
@@ -449,7 +449,7 @@ def test_no_active_pair_correlation_and_defect(wat, low_exact, occ, virt):
     assert rpa.static_defect(low_exact, part, v_eff) < 1e-8
 
 
-# --- mRPA (spec §3.3, §3.5; Scott and Booth, PRL 132, 076401, Eq. 5) --------
+# --- mRPA (Scott and Booth, PRL 132, 076401, Eq. 5) --------------------------
 
 @pytest.mark.parametrize('df', [False, True])
 @pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
@@ -477,7 +477,7 @@ def test_mrpa_against_the_spin_orbital_oracle(wat, aspace, df):
 @pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
                          ids=['contiguous_44', 'non_contiguous'])
 def test_mrpa_is_spin_independent(wat, aspace):
-    """Spec §3.5: in spin orbitals the same-spin and the opposite-spin blocks
+    """In spin orbitals the same-spin and the opposite-spin blocks
     of the mRPA correction are equal, i.e. the triplet-type channel (alpha
     minus beta) gives no correction; that is what lets the restricted form
     carry one interaction for every spin block. Measured 3.9e-14 / 3.7e-14

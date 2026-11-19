@@ -255,7 +255,7 @@ def test_all_active_ec_pair_cancels(s):
 def test_all_active_ec_pair_cancels_on_a_coarse_grid(s):
     """Water/6-31G with every orbital active on the coarsest minimax grid
     (nfreq_rpa = 6): the quadrature error of E_c[v] against casida is
-    measured 2.0e-6, the E_c pair cancels to 1.3e-14 (ruling R19). Only if
+    measured 2.0e-6, the E_c pair cancels to 1.3e-14. Only if
     both energies are integrated on one grid does the pair cancel below
     1e-12, so this fails when E_c^A leaves the full energy's grid; at the
     default 20 points the quadrature error (6.2e-13) is too small to tell."""
@@ -297,7 +297,7 @@ def test_e0_terms_match_casida(ref, aspace, s):
 @pytest.mark.parametrize('ref', ('hf', 'df_hf'))
 def test_static_defect_zero_for_crpa(ref):
     """W(0) from the cache's P(0), projected on the active pairs, against
-    the active dRPA of the fitted v + vtilde (R3, R4): zero for crpa
+    the active dRPA of the fitted v + vtilde: zero for crpa
     (measured 1.1e-16 / 5.0e-16), and the casida route's defect for bare
     and crpa_ph (measured 3.9e-15)."""
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
@@ -418,10 +418,10 @@ def test_route_agreement_with_sigma(ref, s):
 
 
 def test_mrpa_refused_here():
-    """mRPA is casida only (spec §3.5) and its refusal points to casida.
+    """mRPA is casida only and its refusal points to casida.
     df=False has no meaning here (the route is density fitted). The residues
     of W (`screened_residues`) need the Casida eigenvectors and refuse here
-    too, pointing to casida (ruling R19)."""
+    too, pointing to casida."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
     with pytest.raises(NotImplementedError, match="mode='casida'"):
@@ -635,8 +635,8 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     at most 1.4e-6; for crpa E_HF,ee[vtilde] = 1/2 Tr[t^DC rho^A,0] sums the
     vtilde error over the active occupied orbitals, 2.6e-5, and E_0 follows
     (2.5e-5), as does h_eff = f - t^DC (1.6e-5): the target missed by 2.6x,
-    hence 5e-5 on those for crpa alone (ruling R23; the same at G3, 2.2e-5,
-    so the ISDF fit's), 1e-5 for bare and crpa_ph (R24). The two cancel in
+    hence 5e-5 on those for crpa alone (the same at G3, 2.2e-5,
+    so the ISDF fit's), 1e-5 for bare and crpa_ph. The two cancel in
     the energy of H_eff: FCI at most 1.1e-6, v_eff 4.7e-6. The route's
     E_c^A against the dense one on the same v_eff ('ec_active_casida'):
     1.9e-11."""
@@ -659,7 +659,7 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
 def test_space_time_static_defect_zero_for_crpa(ref):
     """W(0) = [1 - P(0)]^-1 of the static grid, projected on the active
     pairs, against the active dRPA of the ISDF v + vtilde with the ph pairs'
-    static response on the same grid (R3, R4): an identity for crpa
+    static response on the same grid: an identity for crpa
     (measured 4.4e-16; with the exact -4/delta in W^A it would be the
     transform's error instead), and the casida route's defect for bare and
     crpa_ph to the ISDF error (target 1e-5; measured at most 3.7e-6 on

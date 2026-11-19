@@ -1,7 +1,7 @@
 """The one-body term of the downfolded Hamiltonian: core Fock, split double counting.
 
 `core_fock`, `double_counting` and `effective_one_body` are written per spin
-channel. The restricted tests pin the spatial formulas of spec §3.3 on water;
+channel. The restricted tests pin the spatial formulas on water;
 the per-spin test gives the two channels different orbitals and different
 active sets and compares with the spin-orbital oracle
 (tests/downfolding_oracle.py), the only place the per-spin paths see two

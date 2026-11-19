@@ -37,7 +37,7 @@ to the bit; E_c^A takes the active ph pairs' exp(-delta tau) through the
 energy's own tau -> omega transform.
 
 `embedding_self_energy` gives the static environment self-energy
-Sigma_bar^E on the casida route (spec §3.6): the residues of the full W
+Sigma_bar^E on the casida route: the residues of the full W
 between the active and the environment orbitals (`screened_residues`) and
 the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
 by mode A at eta = 0 (Eq. 12, 'mode_a', which warns near the poles,
@@ -320,7 +320,7 @@ def screening_correction(low, part, screening):
     Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
     screening: 'bare' gives zeros; 'crpa' the restricted cRPA correction
         vt_tu,vw = -4 sum_{ia,jb in r} (tu|ia) [(delta + 4K)_rr^-1]_ia,jb (jb|vw),
-    r the (i, a) pairs that are not both active (spec §3.3, §3.4): the
+    r the (i, a) pairs that are not both active: the
     response of the active pairs is deleted from A+B = delta + 4K, which is
     the paper's zeroing of A+B and A-B on the active block with its Omega = 0
     modes dropped, and the static response chi^r(0) = -4 [(A+B)_rr]^-1 of
@@ -328,7 +328,7 @@ def screening_correction(low, part, screening):
     matrix. 'crpa_ph' keeps that correction on the particle-hole elements
     alone (`ph_element_mask`). 'mrpa', casida only, is Scott and Booth's
     moment-conserving interaction (PRL 132, 076401, Eq. 5) on the active ph
-    pairs (spec §3.3, §3.5),
+    pairs,
         (ia|jb)_eff = 1/4 [eta0_S^-1 delta_A eta0_S^-1 - delta_A],
         vt_ia,jb = (ia|jb)_eff - (ia|jb),
     eta0_S = xpy_A xpy_A^T the zeroth moment of the full RPA's singlet
@@ -351,8 +351,8 @@ def screening_correction(low, part, screening):
     with no active occupied or no active virtual orbital nothing is deleted
     and it is the fully screened W(0) - v on those orbitals.
 
-    On imagfrequency the same correction is P - P^A and one Dyson step
-    (spec §3.4), vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw with W^r =
+    On imagfrequency the same correction is P - P^A and one Dyson step,
+    vt_tu,vw = sum_PQ B_P,tu [W^r - 1]_PQ B_Q,vw with W^r =
     [1 - (P(0) - P^A(0))]^-1 in the normalized fitting basis, P(0) from
     low.cache['p0'], P^A(0) `active_polarizability_static` and B the
     factors of every active pair (`active_pair_factors`). By the
@@ -432,7 +432,7 @@ def active_pair_factors(low, part):
     pair, occupied-occupied, occupied-virtual and virtual-virtual, on
     part.act (occupied first), so (tu|vw) = sum_Q B_Q,tu B_Q,vw is the
     full RPA's fitted v on the active orbitals. vtilde needs all of them,
-    not only the ov block (spec §3.4). On space-time they are built from
+    not only the ov block. On space-time they are built from
     the active columns of the collocation X alone, B_Q,tu = sum_P D_PQ X_Pt
     X_Pu (low.cache['factors']), the factors chi0 is built from."""
     return _pair_factors(low, part.act)
@@ -487,8 +487,8 @@ def _active_v(low, act):
     `active_pair_factors`.
 
     Not the exact v of H_eff (`two_body.active_eri`): E_c^A, W^A and the
-    static defect take the integrals the full RPA was solved with (spec
-    §3.2), so that the double counting cancels against E_c and W."""
+    static defect take the integrals the full RPA was solved with,
+    so that the double counting cancels against E_c and W."""
     n = len(act)
     if low.mode == 'space-time':
         b_act = _pair_factors(low, act).reshape(-1, n * n)
@@ -536,7 +536,7 @@ def active_correlation_energy(low, part, v_eff):
     orbital energies of the reference, by the plasmon formula of the full
     RPA. v_eff is (n_act,)*4 chemist; for the E_c pair to cancel when every
     orbital is active it has to be built on the same v as low.e_c_full
-    (spec §3.2). Zero when there is no active ph pair.
+    (low.factors or low.eri). Zero when there is no active ph pair.
 
     On imagfrequency it is the full energy's quadrature on the full
     energy's grid (low.cache['grid'], not one of the active window):
@@ -600,7 +600,7 @@ def static_defect(low, part, v_eff):
     W(0) - v = -4 V xpy diag(1/omega) xpy^T V^T, V = (pq|ia) on the v of the
     full RPA; W^A[v_eff](0) = v_eff - 4 v_eff[:, ph] (delta_A + 4 K^A)^-1
     v_eff[ph, :] on the active ph pairs, K^A the ph block of v_eff. v_eff has
-    to be built on that same v (spec §3.2): for crpa, W^A[W^r](0) = W(0)
+    to be built on that same v: for crpa, W^A[W^r](0) = W(0)
     exactly and the defect is zero to rounding. delta_A + 4 K^A is positive
     definite for every built screening (for crpa it is a Schur complement of
     delta + 4K, for mrpa eta0_S^-1 delta_A eta0_S^-1), so one Cholesky
@@ -608,7 +608,7 @@ def static_defect(low, part, v_eff):
     Zero for an empty active space.
 
     On imagfrequency W(0) is the cache's: B_act^T [1 - P(0)]^-1 B_act with
-    B_act `active_pair_factors` (ruling R4), against the same W^A on v_eff
+    B_act `active_pair_factors`, against the same W^A on v_eff
     of the fitted v + vtilde, so the crpa defect is again an identity. On
     space-time likewise, with the static grid's response of each active ph
     pair in W^A: -4/delta becomes pi(0) = -2 sum_tau cosft_wt[0, tau]
@@ -792,9 +792,11 @@ def lowest_excitation(low, solver=None):
     (X, D) of low.cache['factors']), A = delta + 2K, B = 2K; by the dense
     solve up to DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs and above that by
     the Davidson for one root (the DF or the ISDF block action, the run's
-    other Davidson settings), ruling R21; cached in low.cache['omega_min']
-    on the first request. solver: 'dense' or 'davidson' forces that solver
-    and bypasses the cache (for tests).
+    other Davidson settings), which never builds the matrix: above that
+    size a dense solve for this one number would cost more than the route's
+    own RPA. Cached in low.cache['omega_min'] on the first request.
+    solver: 'dense' or 'davidson' forces that solver and bypasses the cache
+    (for tests).
     """
     if low.mode == 'casida':
         return float(low.omega.min()) if low.omega.size else None
@@ -1000,7 +1002,7 @@ def _require_finite(sigma_bar, part, sigma):
 def embedding_self_energy(low, part, sigma):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
     part.act (occupied first): iG^E(W - v) with r over part.env, the full
-    RPA's W and the mean-field energies (spec §3.6).
+    RPA's W and the mean-field energies.
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
     sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
@@ -1237,7 +1239,7 @@ def _continued_pole_weights(fit, eps_act):
 
 
 def _sigma_poles(low, part, sigma, sigma_bar, kept):
-    """The 'sigma_poles' record (spec §4.6), and a SigmaDampingWarning (the
+    """The 'sigma_poles' record, and a SigmaDampingWarning (the
     named flag 'sigma_srg_damping') naming the active orbitals whose row of
     Sigma_bar the SRG damping moves by more than DOWNFOLDING_SRG_DAMPING_WARN.
 
@@ -1297,7 +1299,7 @@ def continuation_spread(z, samples, eps_act, sigma):
 
 
 def _sigma_continuation(low, part, sigma, kept):
-    """The 'sigma_continuation' record (spec §4.6): `continuation_spread` on
+    """The 'sigma_continuation' record: `continuation_spread` on
     the nodes Sigma_bar was continued from, and a SigmaContinuationWarning
     (the named flag 'sigma_continuation_spread') naming the elements (as
     orbital pairs) above DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without
@@ -1328,7 +1330,7 @@ def _sigma_name(sigma):
     """None, or the SIGMAS entry the string `sigma` names, in any case and
     with '-' or '_' (`choice`, as screening and mode); refused (ValueError)
     otherwise. None is kept apart, not passed through `choice`, which would
-    read it as 'none' and so accept the string 'None' (ruling R13)."""
+    read it as 'none' and so accept the string 'None'."""
     if sigma is None:
         return None
     if isinstance(sigma, str):
@@ -1362,8 +1364,8 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         (`embedding_self_energy`), one block for the restricted reference,
         with dc='hartree',
         the Hartree-only double counting that goes with it; E_0 then gains
-        the exchange energy term and -Tr[Sigma_bar gamma^A,0] (spec §3.6,
-        §3.7). Allowed with every screening; the third term of the
+        the exchange energy term and -Tr[Sigma_bar gamma^A,0].
+        Allowed with every screening; the third term of the
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
         space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
@@ -1393,7 +1395,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
-    (low.factors or low.eri, spec §3.2), not the exact v of H_eff. 'bare'
+    (low.factors or low.eri), not the exact v of H_eff. 'bare'
     keeps E_c[v] - E_c^A[v], the mechanical embedding.
     """
     _refuse_options(opts, 'terms')

@@ -1,20 +1,19 @@
 """Brute-force numpy reference for the downfolding tests.
 
-Every function here is written from the spin-orbital formulas of the
-downfolding spec (§3.3, "Every formula in both forms"), literally and with
-plain loops where that reads closest to the formula, on exact 4-centre
-integrals taken straight from `mol.intor`. Nothing in `src/` is used, so the
+Every function here is written from the spin-orbital form of the
+downfolding formulas, literally and with plain loops where that reads
+closest to the formula, on exact 4-centre integrals taken straight from
+`mol.intor`. Nothing in `src/` is used, so the
 production code in `src/MultiReference/Downfolding/` is checked against an
 independent implementation (tests/test_downfolding_one_body.py,
 tests/test_downfolding_energy.py, tests/test_downfolding_two_body.py).
-The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form
-(spec §3.3, row E_RPA,corr); the cRPA correction (`vtilde_crpa` and the two
-zeroing variants, spec §3.4) is the pole sum of its modes, and
-`vtilde_crpa_so` the same correction built in spin orbitals without spin
-adaptation; `w_static_active` is the full W(0) on the active orbitals.
+The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form;
+the cRPA correction (`vtilde_crpa` and the two zeroing variants) is the
+pole sum of its modes, and `vtilde_crpa_so` the same correction built in
+spin orbitals without spin adaptation; `w_static_active` is the full W(0) on the active orbitals.
 `vtilde_mrpa` is the mRPA interaction (Scott and Booth's Eq. 5) in spin
 orbitals, from its own solve of every singlet and triplet mode.
-The environment self-energy (spec §3.6) has its own residues of the full W
+The environment self-energy has its own residues of the full W
 (`env_residues`), the exact pole sum S^E(z) at a complex frequency
 (`sigma_env`) and the static reductions written from Marie and Loos's
 Eq. 12 at eta = 0 (`sigma_mode_a`) and Eq. 44 (`sigma_srg`)
@@ -88,7 +87,7 @@ def spin_orbital_integrals(mol, mo_a, mo_b):
 
 
 def spin_orbital_one_body(h_so, eri_so, occ_env, act, vtilde_so, occ_act, dc):
-    """(f, t_dc) on the active spin orbitals, from spec §3.3's spin-orbital column.
+    """(f, t_dc) on the active spin orbitals, in spin-orbital form.
 
     f_tu    = h_tu + sum_{i in E} (v_tu,ii - v_ti,iu) rho_ii
     t^DC_tu = sum_{vw in A} (vt_tu,vw - vt_tw,vu) rho_vw     (dc='full')
@@ -129,7 +128,7 @@ def spin_orbital_one_body(h_so, eri_so, occ_env, act, vtilde_so, occ_act, dc):
 
 def spin_orbital_energies(h_so, eri_so, occ_env, vtilde_so, occ_act,
                           sigma_bar_so=None):
-    """The E_0 terms of spec §3.3's spin-orbital column, as a dict.
+    """The E_0 terms in spin-orbital form, as a dict.
 
     e_core        = sum_{i in E} h_ii rho_ii
     e_hartree     = 1/2 sum_{ij in E} v_ii,jj rho_ii rho_jj
@@ -231,7 +230,7 @@ def _pole_sum(eri, nocc, act, omega, xpy, pairs):
     """W(0) - v on the orbitals `act`, chemist order, from restricted singlet
     RPA modes (omega, xpy) whose xpy rows are the (i, a) pairs `pairs`.
 
-    Spin orbitals (paper Eq. 2.12, spec §3.4): W(0) - v = sum_n w_n w_n^T (-2/Omega_n),
+    Spin orbitals (paper Eq. 2.12): W(0) - v = sum_n w_n w_n^T (-2/Omega_n),
     w_n,pq = sum_ia (pq|ia) (X+Y)_ia,n over the spin-orbital pairs. A
     restricted singlet mode has (X+Y)_{ia sigma} = xpy_ia / sqrt(2) on both
     spins (same norm X^TX - Y^TY = 1), so for either spin of p, q its

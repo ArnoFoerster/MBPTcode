@@ -37,7 +37,7 @@ What the SI columns are, determined from the rows:
   vtilde, the trace over the compound pair index; trV == trW in every BARE
   row of the JSON.
 
-Measured deviations (ours - SI), against the targets of the plan:
+Measured deviations (ours - SI), against the targets:
 - H2/cc-pVTZ, HF and PBE, (0,0): Ecore, Eh, Ex up to 1.6e-5, Ec 2.9e-6,
   Etot 7.9e-6 (target 5e-5).
 - H2 (1,1) bare/crpa/crpa_ph/mrpa and (-1,-1): Etot up to 1.0e-5, Eact
@@ -49,7 +49,7 @@ Measured deviations (ours - SI), against the targets of the plan:
   Eact 6.3e-5, Etot 5.2e-4; the mrpa rows alone Ec 9.8e-6,
   Etot(mrpa) - Etot(BARE) 5.1e-6, Eact 5.0e-5.
 
-The traces (ruling R14). The primary check is trW - trV, the screening
+The traces. The primary check is trW - trV, the screening
 content, on every row: measured 5.4e-6 (H2) and 2.0e-5 (N2), tolerance
 5e-5 (the mrpa rows 3.0e-6 and 4.8e-6). The absolute traces see the bare
 integrals of the two codes' basis representations, which differ where the
@@ -60,11 +60,11 @@ alike), the (1,1) trace at r = 0.5 by 5.5e-4 (HF) and 1.5e-4 (PBE), while
 the energies of those rows agree to 1e-5. So the absolute H2 traces are
 tested at 5e-5 on the (1,1) rows with r >= 0.75 (measured 1.7e-5, the mrpa
 rows too) and skipped at r = 0.5 and on (-1,-1). The N2
-absolute traces miss the plan's 1e-4 (measured 1.28e-4 trV and 1.41e-4 trW
+absolute traces miss the 1e-4 target (measured 1.28e-4 trV and 1.41e-4 trW
 at r = 1.1, 1.0e-4 / 1.08e-4 at 1.6, 5.1e-5 at 2.2), in line with the N2
 HF terms' 6.8e-4, and are tested at 2e-4.
 
-Benzene (ruling R26): the SI's (6,6) Frobenius norms of vtilde and its
+Benzene: the SI's (6,6) Frobenius norms of vtilde and its
 (10,10) Omega^R list, on the QUEST geometry of the prototype pins, since the
 SI does not give its own; the tests at the end of this module say what that
 leaves to compare.
@@ -114,7 +114,7 @@ H2_TRACE_SKIP = pytest.mark.skip(
            'overlap (smallest S eigenvalue 3.3e-4 at r = 0.5, 1.7e-3 at '
            '0.75) makes the AMS and pyscf virtuals differ; measured misses '
            '5.5e-4 (HF) / 1.5e-4 (PBE) for (1,1) at r = 0.5 and 10.5, 0.58, '
-           '0.064, 0.049 for (-1,-1) at r = 0.5, 0.75, 1.5, 3.0 (ruling R14; '
+           '0.064, 0.049 for (-1,-1) at r = 0.5, 0.75, 1.5, 3.0 ('
            'trW - trV is tested on these rows)')
 
 
@@ -234,7 +234,7 @@ def test_h2_downfolded_rows(case):
 
 
 def _h2_trace_skip(case):
-    """The skip mark of the absolute H2 traces (ruling R14), or None."""
+    """The skip mark of the absolute H2 traces, or None."""
     if case['n_act_occ'] == -1 or case['r'] < 0.75:
         return H2_TRACE_SKIP
     return None
@@ -256,8 +256,8 @@ def test_n2_downfolded_rows(case):
     in the environment. The absolute HF terms differ by up to 6.8e-4 from AMS
     (tolerance 1e-3); Ec (9.8e-6) and Etot(screening) - Etot(BARE)
     (5.2e-6) to 1e-4; Eact (6.3e-5) to 1e-4; Etot (5.2e-4) to 1e-3;
-    trW - trV (2.0e-5) to 5e-5 and the absolute traces (1.41e-4, ruling
-    R14) to 2e-4."""
+    trW - trV (2.0e-5) to 5e-5 and the absolute traces (1.41e-4)
+    to 2e-4."""
     ours, en = _ours(case)
     assert abs(ours['Eh'] + ours['Ex']
                - (en.e_hf_ee + en.e_hf_ee_vtilde)) < 1e-10
@@ -276,7 +276,7 @@ def test_n2_downfolded_rows(case):
 def test_pbe0_orbitals_no_xc_leak():
     """Water/6-31G (4,4) on PBE0 orbitals: E_nuc + e_hf_core + e_hf_ee plus
     the reference determinant's active part is the HF energy expression on
-    those orbitals, no exchange-correlation functional in it (spec §3.1).
+    those orbitals, no exchange-correlation functional in it.
     Measured 0 (tolerance 1e-9)."""
     mf = dft.RKS(water().mol, xc='pbe0')
     mf.conv_tol = 1e-11
@@ -382,14 +382,14 @@ def test_total_minus_e0_is_the_prototype_cas_energy(molecule, screening):
     assert abs(root - en.e0 - pin['cas_ground']) < 1e-7
 
 
-# --- benzene against the SI (ruling R26) -------------------------------------
+# --- benzene against the SI --------------------------------------------------
 # The SI does not give its benzene geometry. These tests run on the QUEST
 # benzene geometry of the prototype pins (cc-pVDZ, spherical, the pinned
 # orbitals), so they check magnitudes, not decimals: scaling that geometry by
 # 1.005 moves the lowest Omega^R by -2.0e-3 Eh and the (6,6) norms by +2e-3
 # (crpa) and +6e-3 (crpa_ph, mrpa) relative, the size of the misses below.
 
-# |norm - SI| / SI allowed per screening: the plan's 1e-3 where it is met
+# |norm - SI| / SI allowed per screening: 1e-3 where it is met
 # (measured crpa_ph 2.0e-4, mrpa 1.5e-4); crpa misses it (measured 1.5e-3),
 # so 1.5 times that
 BENZENE_FROBENIUS_TOL = {'crpa': 2.3e-3, 'crpa_ph': 1e-3, 'mrpa': 1e-3}
@@ -418,7 +418,7 @@ def test_benzene_66_frobenius(screening):
 
 
 def test_mrpa_close_to_crpa_ph():
-    """Spec §6.2 (the paper's Figs. 1 and 2a): at omega = 0 mRPA and cRPA_ph
+    """The paper's Figs. 1 and 2a: at omega = 0 mRPA and cRPA_ph
     screen the benzene (6,6) particle-hole elements alike: Frobenius norms
     within 20%. Measured |mrpa| / |crpa_ph| = 0.924 (the SI's 0.924)."""
     m, c = (np.linalg.norm(_benzene_vtilde(s)) for s in ('mrpa', 'crpa_ph'))
@@ -433,7 +433,7 @@ def test_benzene_1010_omega_r():
     deleted, 1928 of them as in the SI list. The lowest 20 lie above the
     SI's by 1.2e-3 to 3.0e-3 Eh, all upwards and with the SI's degeneracy
     pattern (measured max 2.95e-3; the geometry caveat above), so the
-    tolerance is 4.5e-3 Eh, not the plan's 1e-4."""
+    tolerance is 4.5e-3 Eh, not 1e-4."""
     low, _ = _pinned_low('benzene')
     aspace = ActiveSpace.from_counts(low.eps, low.nocc, 5, 5)
     part = partition(aspace, low.eps)
@@ -449,7 +449,7 @@ def _release_cached_mean_fields():
     """Empty the caches when the module is done: a mean field still held at
     interpreter shutdown leaves pyscf's temporary chkfile to be finalized
     after the tempfile module, which warns (ResourceWarning) when this file
-    runs in one process with others (ruling R20)."""
+    runs in one process with others."""
     yield
     for cached in (_benzene_vtilde, _pinned_build, _pinned_low, _low):
         cached.cache_clear()

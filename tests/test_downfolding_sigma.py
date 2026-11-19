@@ -2,7 +2,7 @@
 imagfrequency and the space-time route.
 
 Sigma_bar^E is the static reduction of iG^E(W - v) on the active orbitals,
-the internal orbital r running over the environment (spec §3.6): 'srg' is
+the internal orbital r running over the environment: 'srg' is
 Eq. 44 of Marie and Loos (s = None: Eq. 42), 'mode_a' their Eq. 12 at
 eta = 0, both at the mean-field energies.
 
@@ -21,7 +21,7 @@ refused. On the prototype's own orbitals 'mode_a' is its Sigma_bar. The
 `downfolding` numerics section holds srg_s, pole_margin and
 continuation_margin.
 
-A term of Eq. 44 exactly at a pole is 0, not NaN (ruling R17). The
+A term of Eq. 44 exactly at a pole is 0, not NaN. The
 'sigma_poles' diagnostic of `terms` (window, pole distances, Z_t against
 the oracle's S^E, the s applied, the SRG damping) warns on the near-pole
 space only; along a short scan through a pole crossing 'srg' stays as
@@ -184,7 +184,7 @@ def test_srg_and_mode_a_against_the_oracle(wat, low_exact, aspace):
 @SPACES
 def test_diagonals_agree_at_infinite_s(low_infinite_s, wat, aspace):
     """srg_s = None: (a + b)/(a^2 + b^2) at a = b is 1/a, so the diagonal of
-    'srg' is that of 'mode_a' (spec §3.6); off the diagonal they differ
+    'srg' is that of 'mode_a'; off the diagonal they differ
     (by up to 1.9e-4 / 1.7e-4). Measured max diagonal deviation 2.2e-19 /
     1.7e-18 (tolerance 1e-10)."""
     _, _, eps, nocc = wat
@@ -393,7 +393,7 @@ def test_numerics_section():
 
 
 def test_srg_term_at_an_exact_pole_is_zero():
-    """Ruling R17: a term with D_tr = D_ur = 0 exactly is 0/0 in Eq. 44; its
+    """A term with D_tr = D_ur = 0 exactly is 0/0 in Eq. 44; its
     limit at finite s is 0 (the kernel is about 2 D s near D = 0), and that
     is what it gives, without a NaN or a floating-point warning. The other
     term is untouched. Energies chosen exactly representable: D = 1 - 1/2 -
@@ -410,7 +410,7 @@ def test_srg_term_at_an_exact_pole_is_zero():
 
 
 def test_srg_kernel_blocked_over_excitations(wat, low_exact, monkeypatch):
-    """Ruling R27(b): the (nexc, n_act, n_act, n_r) kernel of Eq. 44 is
+    """The (nexc, n_act, n_act, n_r) kernel of Eq. 44 is
     built a block of excitations at a time, the block from the byte budget
     tile_gb, so the working set is bounded and only the order of the sum
     over n changes. One excitation per block (tile_gb 1e-12) against all of
@@ -635,8 +635,8 @@ def test_pade_alone(wat, low_exact):
 def test_sigma_bar_matches_casida_benzene():
     """Benzene (6,6) pi space cc-pVDZ on the prototype's orbitals, density
     fitted: Sigma_bar^E on imagfrequency against casida on the same
-    three-index object at srg_s = None, the case spec §3.6 fixes the route
-    tolerance on. Target 1e-4 Eh per element; measured 1.6e-7 for both
+    three-index object at srg_s = None, the case the route's tolerance is
+    set on. Target 1e-4 Eh per element; measured 1.6e-7 for both
     forms (|Sigma_bar| up to 4.5e-2; the Pade error alone is 1.8e-7,
     test_pade_alone), the lowest root (Davidson) 2.1e-14 from casida's."""
     mf, part = _pinned_mean_field('benzene', density_fit=True)
@@ -818,7 +818,7 @@ def test_continuation_diagnostic_present(wat):
 def _scaled_water(scale):
     """Converged RHF of water/6-31G with both H positions of `water()`
     scaled by `scale` towards the origin (the O-H bonds shortened and the
-    window edges moved, the reviewer's scan of ruling R22)."""
+    window edges moved: the scan behind DOWNFOLDING_CONTINUATION_MARGIN)."""
     y, z = 0.7572 * scale, -0.4692 * scale
     mol = gto.M(atom=f'O 0 0 0.1173; H 0 {y} {z}; H 0 {-y} {z}',
                 basis='6-31g', cart=False, verbose=0)
@@ -1037,7 +1037,7 @@ def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):
     """Omega_min on space-time is the lowest root of the Casida problem on
     the ISDF v: the dense solve and the Davidson (ISDF block action, one
     root) agree (measured 3.8e-14) and both are casida's on the RI factors
-    to the ISDF error (2.7e-6; target 1e-5). Ruling R21: dense up to
+    to the ISDF error (2.7e-6; target 1e-5). Dense up to
     DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs (NH3 has 120), the Davidson
     above; the window is the route's own, no factors needed."""
     low = nh3_space_time

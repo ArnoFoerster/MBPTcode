@@ -293,7 +293,7 @@ DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
 # The 'sigma_continuation' diagnostic of the imaginary-axis routes warns when
 # two Pade fits of S^E on disjoint halves of the nodes (even- and
 # odd-indexed) disagree by more than this, in Ha, at an element's evaluation
-# point: the 1e-4 Ha target of the continued Sigma_bar^E (spec §3.6). The
+# point: the 1e-4 Ha target of the continued Sigma_bar^E. The
 # spread is a lower-bound-type indicator, not an error bound: near the
 # pole-free window's edge the continuation amplifies the small error of the
 # sampled S^E (2e-8) and the spread falls short of the error by ten to
@@ -356,7 +356,7 @@ DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS = 2000
 # roots, DAVIDSON_GUESS_FACTOR = 2 each), more when the run asks for more. A
 # one-root guess (5 vectors) can miss the irrep of the lowest root, whose
 # stand-in then lies above Omega_min and widens the pole-free window in the
-# unsafe direction (ruling R25).
+# unsafe direction.
 DOWNFOLDING_OMEGA_DAVIDSON_GUESS = 10
 # Working set, in GB, of one block of excitations of the SRG Sigma_bar^E
 # (`rpa.srg_self_energy`, Eq. 44) when numerics.layout.tile_gb is None: the

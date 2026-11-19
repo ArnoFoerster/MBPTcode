@@ -494,7 +494,7 @@ def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
 @pytest.mark.parametrize('density_fit', [False, True], ids=['rhf', 'df_rhf'])
 def test_static_defect_is_zero_for_crpa(density_fit):
     """W^A[v + vtilde](0) = W(0) for crpa when v_eff is built on the v of the
-    full RPA (ruling R3): also with a density-fitted mean field, whose fitted
+    full RPA: also with a density-fitted mean field, whose fitted
     v is not the exact one. 'bare' leaves the environment screening out.
     Measured crpa (rhf / df_rhf): 3.8e-15 / 4.4e-15; bare: 0.143 / 0.143."""
     mf = water()
@@ -515,7 +515,7 @@ def test_diagnostics_keyword(wat_rpa):
     mf, low, aspace = wat_rpa
     _, _, en = build_effective_hamiltonian(low, aspace, diagnostics=())
     assert en.diagnostics == {}
-    # None is no diagnostics, as () (ruling R27c), not a TypeError
+    # None is no diagnostics, as (), not a TypeError
     _, _, en = build_effective_hamiltonian(low, aspace, sigma='srg',
                                            diagnostics=None)
     assert en.diagnostics == {}
@@ -541,7 +541,7 @@ def test_rpa_option_refusals(wat_rpa):
     for sigma in ('None', 'none', '', 'gw', 1):
         with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
             build_effective_hamiltonian(low, aspace, sigma=sigma)
-    # the string members in any case and either of '-', '_' (ruling R27c),
+    # the string members in any case and either of '-', '_',
     # as screening and mode take them; None alone is no Sigma^E
     for canonical, spellings in (('srg', ('SRG', 'Srg')),
                                  ('mode_a', ('MODE_A', 'mode-a', 'Mode-A'))):
@@ -598,7 +598,7 @@ def test_pbe_all_active_fci_equals_hf(s):
 
 
 def test_empty_active_space_e0(wat_rpa):
-    """Spec §3.9: with no active orbital E_0 = E_HF + E_c[v]; ActiveSpace
+    """With no active orbital E_0 = E_HF + E_c[v]; ActiveSpace
     takes the empty selection. No solver is called. On the fitted and on the
     exact integrals of the low-level run. Measured 1.4e-14."""
     mf, low_df, _ = wat_rpa
@@ -612,7 +612,7 @@ def test_empty_active_space_e0(wat_rpa):
             assert g[0] == en.e0 and g[2].shape == (0, 0, 0, 0)
 
 
-# --- Sigma^E in H_eff and E_0 (spec §3.6, §3.7) -------------------------------
+# --- Sigma^E in H_eff and E_0 -----------------------------------------------
 
 SIGMAS_1 = ('srg', 'mode_a')
 
@@ -642,7 +642,7 @@ def test_reference_determinant_is_unchanged_by_sigma(wat_rpa, s, sigma):
 @pytest.mark.parametrize('s', SCREENINGS_1)
 @pytest.mark.parametrize('sigma', SIGMAS_1)
 def test_sigma_switch_with_zero_sigma_bar(wat_rpa, monkeypatch, s, sigma):
-    """Spec §6.2 sign test: with Sigma_bar forced to 0 (the residues of W
+    """The sign test: with Sigma_bar forced to 0 (the residues of W
     zeroed) the switch changes only the double counting and E_0 (the exchange
     energy term), and the reference determinant keeps its energy. Measured
     0.0 in all six cases (tolerance 1e-9); for crpa the switch moves h_eff by the
