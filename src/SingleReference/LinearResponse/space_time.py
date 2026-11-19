@@ -100,7 +100,6 @@ from src.Base.utils.parallel.mpi_grid import (agreement, allgather_rows,
                                               exchange_rows, ordered_chain_sum,
                                               ordered_sum, partition,
                                               reduce_scatter_rows, reduce_sum)
-from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
 from src.Base.orbital_spaces import (get_occ_virt_indices,
@@ -1309,26 +1308,6 @@ def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
         ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
     return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
                                            with_sine=False, with_inverse=False)
-
-
-def rpa_energy_grid(eps, nocc, ntau, nfreq, tau_target=DEFAULT_TAU_TARGET):
-    """The TimeFrequencyGrid of the space-time RPA correlation energy
-    (`rpa_correlation_energy_space_time`): ntau minimax tau points over the
-    particle-hole window of eps (None: the smallest count that meets
-    tau_target, `minimax_points_for_accuracy`), transformed onto nfreq
-    Gauss-Legendre frequencies scaled to the gap (`gap_scaled_w0`), the
-    quadrature of the energy integral itself; cosine transforms only.
-
-    The one recipe of the RPA ground-state chain
-    (`gradients.rpa.ground_state.RPAGroundStateChain`) and of the RPA
-    downfolding's space-time route."""
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
-    if ntau is None:
-        ntau = minimax_points_for_accuracy(e_min, e_max, target=tau_target)[0]
-    nu, wt = gauss_legendre_grid(nfreq, w0=gap_scaled_w0(eps, nocc))
-    return TimeFrequencyGrid.minimax_split(int(ntau), e_min, e_max, nu, wt,
-                                           with_sine=False,
-                                           with_inverse=False)
 
 
 def static_screening_matrix(X, D, eps, nocc, grid=None, mu=None, comm=None,

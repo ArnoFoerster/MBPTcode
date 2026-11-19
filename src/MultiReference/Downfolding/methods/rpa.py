@@ -86,8 +86,10 @@ from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
                                                         pade_fit_elementwise,
                                                         pade_nodes)
-from src.Base.utils.grids.grids import minimax_frequency_grid
-from src.Base.utils.grids.time_frequency import TimeFrequencyGrid
+from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
+                                        minimax_frequency_grid)
+from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
+                                                 minimax_points_for_accuracy)
 from src.SingleReference.common.active_space import closed_shell_nocc
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
@@ -103,7 +105,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
 from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
-    rpa_energy_grid, static_screening_grid)
+    static_screening_grid)
 
 from ..partition import active_pair_mask, ph_element_mask
 from ..terms import DownfoldingTerms, choice
@@ -263,12 +265,14 @@ def _space_time(mf, eps, nocc, numerics):
         screening (`static_screening_grid` at quadrature.ntau_w, as the BSE's
         W), and 'p0' P(0) = chi0(0) on it (`chi0_imaginary_frequency`), the
         chi0 `static_screening_matrix` inverts: 1 - W(0)^-1, built directly.
-    'energy_grid': the TimeFrequencyGrid of E_c, `rpa_energy_grid`, shared
-        with the RPA ground-state chain: minimax tau (quadrature.ntau_rpa,
+    'energy_grid': the TimeFrequencyGrid of E_c, built as the RPA
+        ground-state chain builds its own: minimax tau (quadrature.ntau_rpa,
         else ntau_w, else the minimax count of the window at tau_target)
         transformed onto a Gauss-Legendre frequency axis
         (quadrature.nfreq_rpa, else RPA_ENERGY_NFREQ; `rpa_quadrature`)
-        scaled to the gap.
+        scaled to the gap. The chain takes its counts from the chain before
+        it where there is one, and always the default tau target, so the
+        two do not share one function.
 
     E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
     E_c^A are built on these same grids and transforms, so the active part
@@ -289,7 +293,13 @@ def _space_time(mf, eps, nocc, numerics):
     p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
                                   tile_memory_gb=tile_gb)[0]
     ntau, nfreq = rpa_quadrature(num)
-    grid = rpa_energy_grid(eps, nocc, ntau, nfreq, q.tau_target)
+    e_min, e_max, _ = particle_hole_window(eps, nocc)
+    if ntau is None:
+        ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
+    nu, wt = gauss_legendre_grid(nfreq, gap_scaled_w0(eps, nocc))
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
+                                           with_sine=False,
+                                           with_inverse=False)
     e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid,
                                             tile_gb=tile_gb, comm=None)
     return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
@@ -1081,9 +1091,8 @@ def _screening_grid(low):
 
 def _build_screening_grid(low):
     """The (points, W) of `_screening_grid`, computed."""
-    nfreq = numerics_or_default(low.numerics).imagfreq.nfreq
     e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
-    points, weights, _ = screening_fit_grid(low.eps, low.nocc, nfreq)
+    points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         ntau = len(low.cache['static_grid'].tau_points)
@@ -1136,7 +1145,7 @@ def sigma_env_imag_axis(low, part, query_freqs):
         return np.zeros((len(query_freqs), n, n), dtype=complex)
     mu = particle_hole_window(low.eps, low.nocc)[2]
     points, w_grid = _screening_grid(low)
-    poles = screening_fit_grid(low.eps, low.nocc, len(points))[2]
+    poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
     if low.mode == 'space-time':
         x, d = low.cache['factors']
         x_act, x_env = x[:, part.act], x[:, env]

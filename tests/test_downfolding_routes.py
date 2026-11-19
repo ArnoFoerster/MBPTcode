@@ -59,7 +59,7 @@ from src.SingleReference.LinearResponse.linear_response import \
 from src.SingleReference.LinearResponse.rpa_energy import (
     rpa_correlation_energy_imaginary_axis, solve_polarizability_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
-    rpa_correlation_energy_space_time, rpa_energy_grid, static_screening_grid,
+    rpa_correlation_energy_space_time, static_screening_grid,
     static_screening_matrix)
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import h2, water
@@ -813,9 +813,9 @@ def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
     shared = imaginary_axis.screening_fit_grid
     calls, fitted = [], []
 
-    def counted(eps, nocc, nfreq):
-        calls.append(nfreq)
-        return shared(eps, nocc, nfreq)
+    def counted(eps, nocc, numerics=None):
+        calls.append(numerics)
+        return shared(eps, nocc, numerics)
 
     fit = rpa.fitted_self_energy_matrix_imaginary_axis
 
@@ -826,27 +826,17 @@ def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
     monkeypatch.setattr(rpa, 'screening_fit_grid', counted)
     monkeypatch.setattr(imaginary_axis, 'screening_fit_grid', counted)
     monkeypatch.setattr(rpa, 'fitted_self_energy_matrix_imaginary_axis', spy)
-    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    coarse = Numerics(imagfreq={'nfreq': 26})
+    low = run_low_level(mf, method='rpa', mode='imagfrequency',
+                        numerics=coarse)
     rpa.sigma_env_imag_axis(low, part, [0.5])
-    nfreq = Numerics().imagfreq.nfreq
-    assert calls == [nfreq, nfreq]   # W's points, then the fit's poles
-    points, _, poles = shared(low.eps, low.nocc, nfreq)
+    # W's points, then the fit's poles, both on the run's numerics
+    assert calls == [coarse, coarse]
+    points, _, poles = shared(low.eps, low.nocc, coarse)
+    assert len(points) == 26
     assert np.array_equal(low.cache['w_grid'][0], points)
     assert np.array_equal(fitted[0][0], points)
     assert np.array_equal(fitted[0][1], poles)
     imaginary_axis.self_energy_matrix_imaginary_axis(
-        mf, mf.mol, low.nocc, np.array([0.5]), Numerics())
-    assert calls == [nfreq] * 3
-
-
-def test_space_time_energy_grid_is_the_rpa_chain_grid():
-    """The space-time E_c integrates on `rpa_energy_grid`, the grid of the
-    RPA ground-state chain, at the run's quadrature counts and tau_target:
-    one recipe, not a copy."""
-    low = _st_low('HF', 'space-time')
-    q = low.numerics.quadrature
-    ntau, nfreq = rpa_quadrature(low.numerics)
-    want = rpa_energy_grid(low.eps, low.nocc, ntau, nfreq, q.tau_target)
-    got = low.cache['energy_grid']
-    for name in ('tau_points', 'omega_points', 'omega_weights', 'cosft_wt'):
-        assert np.array_equal(getattr(got, name), getattr(want, name))
+        mf, mf.mol, low.nocc, np.array([0.5]), coarse)
+    assert calls == [coarse] * 3

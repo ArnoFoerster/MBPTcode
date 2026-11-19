@@ -130,10 +130,11 @@ def fitted_self_energy_matrix_imaginary_axis(df_coeff, eps_mu, freq_points, W_gr
     return sigma
 
 
-def screening_fit_grid(eps, nocc, nfreq):
+def screening_fit_grid(eps, nocc, numerics=None):
     """(points, weights, poles) of the Lorentzian fit of W on the imaginary
-    axis: the nfreq minimax frequency points over the particle-hole window
-    (gap, span) of eps, on which W(i w) is sampled, with their minimax
+    axis: the numerics.imagfreq.nfreq minimax frequency points over the
+    particle-hole window (gap, span) of eps, on which W(i w) is sampled,
+    with their minimax
     weights (which a TimeFrequencyGrid on these points carries; the fit
     itself does not use them), and as many fit poles log-spaced over
     [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span].
@@ -142,6 +143,7 @@ def screening_fit_grid(eps, nocc, nfreq):
     downfolding's environment self-energy
     (`MultiReference.Downfolding.methods.rpa.sigma_env_imag_axis`), whose
     samples go to `fitted_self_energy_matrix_imaginary_axis`."""
+    nfreq = numerics_or_default(numerics).imagfreq.nfreq
     e_min, e_max, _ = particle_hole_window(eps, nocc)
     points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
     poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
@@ -161,13 +163,12 @@ def self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
     one per W-grid point, regularized by GW_DENSITY_W_FIT_TIKHONOV."""
     where = 'self_energy_matrix_imaginary_axis'
     require_gas_phase_ground_state(mf, where, mol=mol)
-    nfreq = numerics.imagfreq.nfreq
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted',
                               eta=DEFAULT_BROADENING_ETA)
     mu = particle_hole_window(eps, nocc)[2]
-    freq_points, _, poles = screening_fit_grid(eps, nocc, nfreq)
+    freq_points, _, poles = screening_fit_grid(eps, nocc, numerics)
     W_grid = lr.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
     sigma = fitted_self_energy_matrix_imaginary_axis(df_coeff, eps - mu, freq_points, W_grid,
                                                      query_freqs, poles,
