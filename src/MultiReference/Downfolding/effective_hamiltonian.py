@@ -40,7 +40,8 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             spin_orbital_chemist,
                                             spin_orbital_one_body)
 from src.Base.utils.parallel.mpi_grid import grid_comm
-from src.SingleReference.common.active_space import closed_shell_nocc
+from src.SingleReference.common.active_space import (closed_shell_nocc,
+                                                     unrestricted_nocc)
 from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
 from .energy import assemble_energies, environment_hf_energy
@@ -60,18 +61,13 @@ def _spin_channels(mf):
     channel for a restricted reference, (alpha, beta) for UHF/UKS. nocc is
     the occupied count of each channel, refused unless its occupied orbitals
     are its lowest ones: every partition takes [0, nocc) as the occupied
-    block."""
+    block. An unrestricted reference is also refused unless every
+    occupation is 0 or 1 (`unrestricted_nocc`)."""
     if not isinstance(mf, scf.uhf.UHF):
         return ((mf.mo_coeff,), (get_orbital_energies(mf),),
                 (closed_shell_nocc(mf.mo_occ),))
-    nocc = []
-    for spin, occ in zip(SPINS, mf.mo_occ):
-        try:
-            nocc.append(closed_shell_nocc(occ))
-        except ValueError as err:
-            raise ValueError(
-                f'the {spin} orbitals of the mean field: {err}') from None
-    return tuple(mf.mo_coeff), tuple(get_orbital_energies(mf)), tuple(nocc)
+    return (tuple(mf.mo_coeff), tuple(get_orbital_energies(mf)),
+            unrestricted_nocc(mf.mo_occ))
 
 
 def _partitions(active_space, eps, nocc):
@@ -121,7 +117,8 @@ def run_low_level(mf, method='rpa', **method_opts):
     The result does not depend on an active space, so one run serves every
     active space built from it. A gas-phase, T = 0 mean field is taken,
     restricted closed-shell (RHF/RKS) or unrestricted (UHF/UKS) with the
-    lowest orbitals of each spin occupied, and only serially: on more than
+    lowest orbitals of each spin occupied by one electron each (no
+    fractional occupations), and only serially: on more than
     one MPI rank every rank would repeat the whole calculation. An open
     shell run restricted (ROHF/ROKS) is refused: its orbitals are not
     canonical for the alpha and beta Fock operators. method_opts go to the
@@ -146,7 +143,8 @@ def run_low_level(mf, method='rpa', **method_opts):
     if isinstance(mf, scf.uhf.UHF):
         # the check above does not look at the occupations of an
         # unrestricted reference: refuse, before the method runs, a spin
-        # whose occupied orbitals are not its lowest
+        # whose occupations are fractional or whose occupied orbitals are
+        # not its lowest
         _spin_channels(mf)
     method = choice(method, tuple(LOW_LEVEL), 'method')
     flags = []

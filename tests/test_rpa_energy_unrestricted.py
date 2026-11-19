@@ -269,6 +269,12 @@ def test_closed_shell_two_spin_space_time_energy_is_the_restricted_one():
     with pytest.raises(ValueError, match='mid-gap'):
         rpa_correlation_energy_space_time(
             (x, x), d, (eps, eps), (nocc, nocc), grid, mu=0.0, comm=None)
+    # the tape is what the restricted reverse pass reads; there is none for
+    # two channels
+    with pytest.raises(NotImplementedError, match='want_tape'):
+        rpa_correlation_energy_space_time(
+            (x, x), d, (eps, eps), (nocc, nocc), grid, comm=None,
+            want_tape=True)
 
 
 def test_two_spin_static_grid(oh_isdf):

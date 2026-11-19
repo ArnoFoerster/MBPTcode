@@ -324,12 +324,18 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
                          f"choose one of {tuple(SOLVERS)}.")
     resolved = _spin_resolved(g_eff)
     if resolved:
-        if np.isscalar(n_elec_active):
+        if np.ndim(n_elec_active) == 0:
             raise ValueError(
                 f"a spin-resolved g_eff (per-spin blocks) takes n_elec_active "
                 f"as the pair (N_alpha, N_beta); got {n_elec_active!r}.")
         n_elec_active = tuple(int(n) for n in n_elec_active)
-    elif not np.isscalar(n_elec_active):
+        # an empty space with electrons has its own refusal below
+        if min(n_elec_active) < 0 or (n_spin_orbs
+                                      and max(n_elec_active) > n_spin_orbs):
+            raise ValueError(
+                f"n_elec_active={n_elec_active}: a space of {n_spin_orbs} "
+                f"orbitals takes 0 to {n_spin_orbs} electrons per spin.")
+    elif np.ndim(n_elec_active) != 0:
         n_alpha, n_beta = (int(n) for n in n_elec_active)
         if n_alpha != n_beta:
             raise NotImplementedError(

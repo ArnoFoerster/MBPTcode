@@ -99,14 +99,18 @@ Options of the RPA:
 | `run_low_level` | `mode` | `'casida'`, `'imagfrequency'`, `'space-time'` |
 | | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none; ISDF factors on `'space-time'`); `False`: exact 4-centre integrals, `'casida'` only |
 | | `numerics` | a `Numerics`, or `None` for the defaults (`'space-time'` needs one naming the ISDF grid) |
-| `build_effective_hamiltonian` | `spin_free` | `True` (default): spatial-orbital `g_eff`; `False`: the 2 n_act interleaved spin orbitals |
+| `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS |
+| | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
 | | `diagnostics` | a tuple of names, default all; see below |
 
 `g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and `space` follow the QDPT
 `build_effective_hamiltonian` contract (`n_orbs`, `n_elec_active`, `act_idx`,
-`act_occ_idx`, `act_vir_idx`, `spin_free`, `active_space`). Every backend of
+`act_occ_idx`, `act_vir_idx`, `spin_free`, `active_space`); for a UHF/UKS
+reference `g_eff[1]` and `g_eff[2]` hold the per-spin blocks and the entries
+of `space` are pairs (see
+[Unrestricted references](#unrestricted-references)). Every backend of
 `solve` adds `g_eff[0]`, so the roots it returns are **total energies**. The
 `ActiveSpace` is the user's choice (`from_indices`, `from_counts`,
 `from_irreps`, `from_population`); nothing here selects orbitals.
@@ -331,7 +335,10 @@ narrower still. `'mrpa'` is casida only, as for a restricted reference.
 **Not supported.** An open shell run restricted (ROHF/ROKS) is refused: its
 orbitals are not canonical for the alpha and beta Fock operators; run it as
 UHF/UKS. A UHF solution whose occupied orbitals are not the lowest of their
-spin (a symmetry-constrained or MOM solution) is refused, naming the spin.
+spin (a symmetry-constrained or MOM solution) is refused, naming the spin,
+and so is one with fractional occupations (`frac_occ`, a smearing): it is
+not one determinant, and counting each fractionally occupied orbital as
+occupied would describe a system with another number of electrons.
 
 **A symmetry-broken reference stays visible in H_eff.** H_eff is built on
 the UHF determinant, and its states inherit what that determinant breaks.
@@ -539,8 +546,9 @@ reference E_0 is a well-defined working choice, not a derived one.
   `from_population`). Arbitrary rotations inside a degenerate set would
   otherwise change single elements of H_eff.
 - **Mean field.** Gas phase, T = 0 only; restricted closed-shell or
-  unrestricted with the lowest orbitals of each spin occupied. Open-shell
-  ROHF and solvent models are refused.
+  unrestricted with the lowest orbitals of each spin occupied by one
+  electron each. Open-shell ROHF, solvent models and, for UHF/UKS,
+  fractional occupations (a smearing, pyscf's `frac_occ`) are refused.
 - **Serial only.** More than one MPI rank is refused (every rank would repeat
   the whole calculation).
 - **Option validation.** An unknown or not-yet-available mode, screening,

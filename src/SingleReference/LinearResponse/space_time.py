@@ -1468,13 +1468,18 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     counts, on the one D. chi0 is then chi0_alpha + chi0_beta
     (`spin_summed`), each spin at its own mid-gap, so `mu` is not taken
     (ValueError); `grid` has to cover the transitions of both spins
-    (`transition_range`).
+    (`transition_range`). There is no tape for two channels: the reverse
+    pass that reads it is restricted (want_tape is refused).
     """
     two_spin = np.ndim(nocc) != 0
     if two_spin and mu is not None:
         raise ValueError(
             'rpa_correlation_energy_space_time with two spin channels puts '
             'each spin at its own mid-gap; mu is for one channel.')
+    if two_spin and want_tape:
+        raise NotImplementedError(
+            'rpa_correlation_energy_space_time: want_tape is for one spin '
+            'channel; the reverse pass that reads the tape is restricted.')
     n_mat, g = (None, None) if screening is None else screening
     comm = current_comm() if comm is None else comm
     rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None

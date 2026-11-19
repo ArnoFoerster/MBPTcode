@@ -100,7 +100,8 @@ from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
-from src.SingleReference.common.active_space import closed_shell_nocc
+from src.SingleReference.common.active_space import (closed_shell_nocc,
+                                                     unrestricted_nocc)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
 from src.SingleReference.GW.space_time import separable_factors
@@ -185,13 +186,13 @@ class RPALowLevel:
     mode: str
     df: bool
     numerics: object
-    eps: np.ndarray
-    nocc: int
+    eps: object        # an array, or the pair (alpha, beta)
+    nocc: object       # an int, or the pair
     e_c_full: float
     omega: Optional[np.ndarray]
     xpy: Optional[np.ndarray]
-    factors: Optional[np.ndarray]
-    eri: Optional[np.ndarray]
+    factors: object    # None, an array, or the pair
+    eri: object        # None, an array, or the blocks (aa, ab, bb)
     cache: dict = field(default_factory=dict)
     method: str = METHOD
     numerical_flags: list = field(default_factory=list)
@@ -371,8 +372,9 @@ def _residual_integrals(low, chans, res):
             eri = _eri_block(low, s, t)
             ov = eri[:chan_s.nocc, chan_s.nocc:].reshape(
                 res_s.size, *eri.shape[2:])[res_s]
+            # the pair count spelt out: a channel may hold no pair at all
             k_rows[s].append(ov[:, :chan_t.nocc, chan_t.nocc:].reshape(
-                len(ov), -1)[:, res_t])
+                len(ov), res_t.size)[:, res_t])
             act = chan_t.part.act
             v_cols[t].append(ov[:, act][:, :, act].reshape(len(ov), n * n))
     return _square(k_rows), [_join(col) for col in v_cols]
@@ -410,7 +412,7 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
             f"4-centre screening) is mode='casida' only.")
     if isinstance(mf, scf.uhf.UHF):
         eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
-        nocc = tuple(closed_shell_nocc(occ) for occ in mf.mo_occ)
+        nocc = unrestricted_nocc(mf.mo_occ)
         if mode != 'casida':
             for spin, eps_s, nocc_s in zip(SPINS, eps, nocc):
                 if not 0 < nocc_s < len(eps_s):
@@ -467,7 +469,7 @@ def _imaginary_axis(eps, nocc, factors, numerics):
 
 
 def _space_time(mf, eps, nocc, numerics):
-    """(E_c, cache) of the restricted direct RPA in imaginary time, serial,
+    """(E_c, cache) of the direct RPA in imaginary time, serial,
     on the separable factors (X, D) of `separable_factors` on
     numerics.isdf's grid (refused, ValueError, when it names none):
 

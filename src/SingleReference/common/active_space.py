@@ -321,6 +321,35 @@ def closed_shell_nocc(mo_occ):
     return nocc
 
 
+def unrestricted_nocc(mo_occ):
+    """(N_alpha, N_beta), the occupied counts of an unrestricted determinant
+    with the occupations mo_occ = (occ_alpha, occ_beta); raises, naming the
+    spin, unless each spin's occupations are 1 on its lowest orbitals and 0
+    on the rest.
+
+    Fractional occupations (a smearing, pyscf's `frac_occ`) are not one
+    determinant: counting each as an occupied orbital would describe a
+    system with another number of electrons. A hole below an occupied
+    orbital would label a virtual orbital as occupied (`closed_shell_nocc`).
+    """
+    counts = []
+    for spin, occ in zip(('alpha', 'beta'), mo_occ):
+        occ = np.asarray(occ, float)
+        off = np.minimum(np.abs(occ), np.abs(occ - 1.0)) > 1e-8
+        if off.any():
+            raise ValueError(
+                f'the {spin} orbitals of the mean field: occupations that '
+                f'are not 0 or 1 ({occ[off][:4]} on orbitals '
+                f'{np.flatnonzero(off)[:4]}); a fractionally occupied '
+                f'reference is not one determinant.')
+        try:
+            counts.append(closed_shell_nocc(occ))
+        except ValueError as err:
+            raise ValueError(
+                f'the {spin} orbitals of the mean field: {err}') from None
+    return tuple(counts)
+
+
 def irrep_labels(mol, mo_coeff):
     """Irrep label per MO. Needs mol built with symmetry=True."""
     return np.asarray(symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb,

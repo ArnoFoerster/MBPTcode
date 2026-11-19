@@ -39,7 +39,11 @@ The mean fields there are density-fitted UHF calculations of OH and of
 triplet CH2 in cc-pVDZ (6-31G has no validated ISDF grid), on the G1 grid.
 The reference is the casida route on the SAME ISDF factors, built here as
 the three-index objects B^s_Q,pq = sum_P D_PQ X^s_Pp X^s_Pq, so the two
-differ by the route's quadratures alone and not by a fit.
+differ by the route's quadratures alone and not by a fit. That reference
+cannot see the ISDF fit itself: a poor fit of one spin's orbital products
+would pass. So one test compares space-time with casida on the mean field's
+ordinary density fit (cc-pvdz-ri), where the difference is the ISDF fit's
+error, per spin block.
 """
 import dataclasses
 import re
@@ -551,6 +555,11 @@ def test_sigma_records_of_two_spins():
         assert s.shape == (n, n) and z.shape == dist.shape == (n,)
         assert s.max() < 1e-4 and dist.min() > 0.26
         assert np.all((z > 0.9) & (z <= 1.0))
+    for dist, (lo, hi), part, eps in zip(poles['pole_distance'],
+                                         poles['window'], parts, low.eps):
+        own = np.minimum(eps[part.act] - lo, hi - eps[part.act])
+        assert np.array_equal(dist, own)
+    assert not np.array_equal(*poles['pole_distance'])
 
 
 def test_near_pole_warning_on_imagfrequency_names_the_spin():
@@ -727,7 +736,8 @@ def _st_casida(ref):
 @pytest.fixture(scope='module', autouse=True)
 def _release_space_time_caches():
     yield
-    for cached in (_st_casida, _st_low, _st_mean_field):
+    for cached in (_st_casida_on_the_density_fit, _st_casida, _st_low,
+                   _st_mean_field):
         cached.cache_clear()
 
 
@@ -1124,3 +1134,76 @@ def test_mrpa_stays_casida_only_on_space_time():
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         rpa.screening_correction(_st_low('oh'),
                                  _st_parts('oh', 'unequal_cores'), 'mrpa')
+
+
+@cache
+def _st_casida_on_the_density_fit(ref):
+    """The casida low-level result on the mean field's own density fit
+    (df=True: the RI factors of cc-pvdz-ri), at srg_s = None."""
+    return run_low_level(_st_mean_field(ref), method='rpa', mode='casida',
+                         numerics=Numerics(downfolding={'srg_s': None}))
+
+
+@pytest.mark.parametrize('ref', REFS)
+def test_space_time_against_casida_on_the_density_fit(ref):
+    """space-time (ISDF factors, one collocation per spin, G1 grid) against
+    casida on the mean field's ordinary density fit: here the two differ by
+    the ISDF fit itself, which the tests on the same ISDF factors cannot
+    see. Checked per spin block, so that a poor fit of one spin's orbital
+    products would show: the fitted bare v on the active orbitals, vtilde,
+    v_eff, h_eff and Sigma_bar of each spin; and E_c, every energy term and
+    the FCI energy of H_eff. Targets as for a restricted reference: 1e-5,
+    5e-5 on the terms that sum the vtilde error over the occupied active
+    orbitals for crpa (E_HF,ee[vtilde], E_0, h_eff), 1e-4 on Sigma_bar.
+
+    Measured, OH and CH2: the bare v of the two fits differs by at most
+    8.8e-6 and 2.2e-5 (aa, ab, bb: 2.9e-6, 5.3e-6, 8.8e-6 for OH; 2.2e-5,
+    2.1e-5, 8.8e-6 for CH2); E_c 6.7e-7 and 1.5e-7; vtilde 1.3e-6 and
+    3.7e-6; the energy terms 2.2e-6 and 1.6e-5 (E_HF,ee[vtilde] for crpa),
+    h_eff 2.6e-6 and 1.2e-5, v_eff 1.3e-6 and 3.7e-6, the FCI energy 6.3e-7
+    and 1.2e-8; Sigma_bar 5.0e-7 and 2.2e-6. With the alpha collocation used
+    for both spins this test fails and the 60 tests on the same ISDF
+    factors pass (tried)."""
+    low, cas = _st_low(ref), _st_casida_on_the_density_fit(ref)
+    assert low.cache['factors'][1].shape[1] == cas.factors[0].shape[0]
+    parts = _st_parts(ref, 'unequal_cores')
+    spaces = _st_spaces(ref, 'unequal_cores')
+    n = parts[0].n_act
+
+    # the bare v of the two fits between the active orbitals of each spin
+    isdf = [b[:, p.act][:, :, p.act].reshape(len(b), n * n)
+            for b, p in zip(_isdf_three_index(low), parts)]
+    ri = [b[:, p.act][:, :, p.act].reshape(len(b), n * n)
+          for b, p in zip(cas.factors, parts)]
+    for first, second in ((0, 0), (0, 1), (1, 1)):
+        fit_error = np.abs(isdf[first].T @ isdf[second]
+                           - ri[first].T @ ri[second]).max()
+        assert 1e-9 < fit_error < 1e-4
+
+    assert abs(low.e_c_full - cas.e_c_full) < 1e-5
+    for screening in ('crpa', 'crpa_ph'):
+        vt = rpa.screening_correction(low, parts, screening)
+        want = rpa.screening_correction(cas, parts, screening)
+        for ours, casida in zip(vt, want):
+            assert np.abs(ours - casida).max() < 1e-5
+    for screening in SCREENINGS:
+        g, space, en = build_effective_hamiltonian(low, spaces,
+                                                   screening=screening)
+        g_c, _, en_c = build_effective_hamiltonian(cas, spaces,
+                                                   screening=screening)
+        tol = 5e-5 if screening == 'crpa' else 1e-5
+        for field in dataclasses.fields(Energies):
+            if field.name not in RECORDS:
+                assert abs(getattr(en, field.name)
+                           - getattr(en_c, field.name)) < tol, field.name
+        for ours, casida in zip(g[1], g_c[1]):
+            assert np.abs(ours - casida).max() < tol
+        for ours, casida in zip(g[2], g_c[2]):
+            assert np.abs(ours - casida).max() < 1e-5
+        assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
+    for sigma in ('srg', 'mode_a'):
+        got = rpa.embedding_self_energy(low, parts, sigma)
+        want = rpa.embedding_self_energy(cas, parts, sigma)
+        for ours, casida in zip(got, want):
+            assert np.abs(casida).max() > 1e-3
+            assert np.abs(ours - casida).max() < 1e-4

@@ -32,6 +32,7 @@ ones).
 """
 import copy
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -134,8 +135,22 @@ def _occupied_only(mf):
             ActiveSpace.from_indices(nmo, 4, [2, 3], []))
 
 
+def _beta_lumo_outside(mf):
+    """OH/6-31G: the beta LUMO, orbital 4, is left in the environment. It is
+    empty in beta but lies below the alpha occupied count (5), so it tells
+    which spin's occupied count sorts the beta environment into occupied
+    and empty orbitals. N^A = (2, 2) in 4 orbitals. (Measured against the
+    oracle on this space: vtilde 4.6e-15, Sigma_bar 4.5e-15 with 'srg' and
+    3.5e-14 with 'mode_a'. With the alpha count used for beta, the Sigma^E
+    tests and the H_eff test on this space fail; tried.)"""
+    nmo = mf.mo_coeff.shape[-1]
+    return (ActiveSpace.from_indices(nmo, 5, [3, 4], [6, 7]),
+            ActiveSpace.from_indices(nmo, 4, [2, 3], [5, 6]))
+
+
 SPACES = {'asymmetric': _asymmetric, 'unequal_cores': _unequal_cores,
-          'no_beta_pair': _no_beta_pair, 'occupied_only': _occupied_only}
+          'no_beta_pair': _no_beta_pair, 'occupied_only': _occupied_only,
+          'beta_lumo_outside': _beta_lumo_outside}
 
 
 def _parts(mf, spaces):
@@ -352,6 +367,24 @@ def test_unsupported_unrestricted_references(oh):
     hole.mo_occ[1][[3, 4]] = hole.mo_occ[1][[4, 3]]
     with pytest.raises(ValueError, match='beta'):
         run_low_level(hole, method='hf')
+
+    # fractional occupations are not one determinant: counting them as
+    # occupied would describe a system with another number of electrons
+    half = copy.copy(oh)
+    half.mo_occ = oh.mo_occ.copy()
+    half.mo_occ[1][3:5] = 0.5
+    for method in ('hf', 'rpa'):
+        with pytest.raises(ValueError, match='beta.*0 or 1'):
+            run_low_level(half, method=method)
+    with pytest.raises(ValueError, match='beta.*0 or 1'):
+        build_effective_hamiltonian(SimpleNamespace(mf=half, method='hf'),
+                                    _none_active(oh))
+    smeared = scf.addons.frac_occ(scf.UHF(oh.mol))
+    smeared.verbose = 0
+    smeared.kernel()
+    assert np.any((smeared.mo_occ > 1e-3) & (smeared.mo_occ < 1 - 1e-3))
+    with pytest.raises(ValueError, match='0 or 1'):
+        run_low_level(smeared, method='rpa')
 
     # triplet NH: the pi pair is degenerate in both spins, occupied in alpha
     # (3, 4) and virtual in beta (3, 4)
@@ -787,7 +820,7 @@ def _no_core(mf):
 
 
 @pytest.mark.parametrize('space', ['asymmetric', 'unequal_cores',
-                                   'no_beta_pair'])
+                                   'no_beta_pair', 'beta_lumo_outside'])
 @pytest.mark.parametrize('df', [False, True])
 def test_residues_against_oracle(oh, oh_low, space, df):
     """The residues of W between the active and the environment orbitals of
@@ -830,7 +863,7 @@ def test_residues_against_oracle(oh, oh_low, space, df):
 
 
 @pytest.mark.parametrize('space', ['asymmetric', 'unequal_cores',
-                                   'no_beta_pair'])
+                                   'no_beta_pair', 'beta_lumo_outside'])
 @pytest.mark.parametrize('df', [False, True])
 def test_sigma_against_oracle(oh, oh_low, space, df):
     """Sigma_bar^E of each spin, with that spin's orbital energies and the
@@ -1015,14 +1048,16 @@ def test_reference_determinant_identity(oh, oh_low, space, screening, sigma,
         assert abs(en.e_sigma_trace) > 1e-4
 
 
+@pytest.mark.parametrize('space', ['asymmetric', 'beta_lumo_outside'])
 @pytest.mark.parametrize('screening', ['crpa', 'crpa_ph'])
 @pytest.mark.parametrize('sigma', [None, 'srg'])
-def test_h_eff_against_oracle(oh, oh_low, screening, sigma):
-    """Every block of H_eff of the asymmetric space against the oracle
-    alone: h^s = f^s - t^DC,s (+ Sigma_bar^s) from the spin-orbital one-body
+def test_h_eff_against_oracle(oh, oh_low, screening, sigma, space):
+    """Every block of H_eff against the oracle alone, for the asymmetric
+    space and for the one with the beta LUMO in the environment:
+    h^s = f^s - t^DC,s (+ Sigma_bar^s) from the spin-orbital one-body
     formulas with the oracle's vtilde, and v_eff = v + vtilde. Measured:
     one-body 1.4e-14, two-body 4.7e-15."""
-    spaces = _asymmetric(oh)
+    spaces = SPACES[space](oh)
     parts = _parts(oh, spaces)
     so = _spin_orbitals(oh, parts)
     eri_so, _, _, act_so = so
@@ -1154,6 +1189,11 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
         assert dist.shape == z.shape == (n,)
         assert np.all((z > 0) & (z <= 1))
     assert poles['pole_distance'][1][2] < 0 < poles['pole_distance'][0].min()
+    for dist, (lo, hi), part, eps in zip(poles['pole_distance'],
+                                         poles['window'], parts,
+                                         oh.mo_energy):
+        own = np.minimum(eps[part.act] - lo, hi - eps[part.act])
+        assert np.array_equal(dist, own)
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
 
     with pytest.warns(rpa.SigmaDampingWarning,
@@ -1480,3 +1520,40 @@ def test_a_reference_without_any_pair(df):
         low, ActiveSpace.from_indices(1, 1, [0], []), sigma='srg')
     assert abs(solve('pyscf_fci', g_eff, 1, 2, spin_free=True)[0]
                - he.e_tot) < 1e-10
+
+
+# --- a spin without occupied orbitals, with exact integrals --------------------
+
+@pytest.mark.parametrize('df', [False, True])
+def test_a_spin_without_occupied_orbitals_runs_on_casida(df):
+    """Triplet H2 in 6-31G: both electrons alpha, so the beta channel has no
+    occupied orbital and no particle-hole pair, and the stacked problem
+    holds the alpha pairs alone. Every screening builds, also from the
+    exact four-index blocks, where the beta-beta and alpha-beta pair blocks
+    have no row or no column: vtilde against the oracle, the
+    reference-determinant identity, and the solve. Measured for both df
+    settings: crpa 2.8e-16 (on blocks up to 0.045), mrpa 4.9e-16, the
+    identity 3.3e-16."""
+    mf = unrestricted('H 0 0 0; H 0 0 0.74', 2)
+    assert _nocc(mf) == (2, 0)
+    low = run_low_level(mf, method='rpa', df=df)
+    spaces = (ActiveSpace.from_indices(4, 2, [1], [2]),
+              ActiveSpace.from_indices(4, 0, [], [0, 1]))
+    parts = _parts(mf, spaces)
+    so = _spin_orbitals(mf, parts)
+    ref = vtilde_crpa_uhf(*so)
+    assert max(np.max(np.abs(block)) for block in ref) > 1e-3
+    for ours, exact in zip(rpa.screening_correction(low, parts, 'crpa'), ref):
+        assert np.max(np.abs(ours - exact)) < 1e-9
+    for ours, exact in zip(rpa.screening_correction(low, parts, 'mrpa'),
+                           vtilde_mrpa_uhf(*so)):
+        assert np.max(np.abs(ours - exact)) < 1e-9
+    for screening in SCREENINGS_RPA + ('mrpa',):
+        for sigma in SIGMAS_RPA:
+            g_eff, space, en = _quiet(build_effective_hamiltonian, low,
+                                      spaces, screening=screening,
+                                      sigma=sigma)
+            assert space['n_elec_active'] == (1, 0)
+            assert abs(reference_energy_uhf(g_eff, (1, 0))
+                       - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
+            assert np.isfinite(_solve(g_eff, space)[0])

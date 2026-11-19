@@ -215,3 +215,27 @@ def test_spin_resolved_refusals(oh):
         solve('openfermion', g_so, 6, n_elec, spin_free=False)
     with pytest.raises(ValueError, match='spin_free=True'):
         solve('pyscf_fci', g_so, 6, 3, spin_free=False)
+
+
+def test_electron_counts_must_fit_the_orbitals(oh):
+    """More electrons of one spin than active orbitals, or a negative count,
+    is refused by name; pyscf would be asked for zero roots of an empty
+    sector."""
+    g_eff, _, _ = _blocks(oh, (3, 3), 3)
+    for n_elec in ((4, 1), (2, 4), (-1, 1)):
+        with pytest.raises(ValueError, match='0 to 3 electrons per spin'):
+            solve('pyscf_fci', g_eff, 3, n_elec, spin_free=True)
+
+
+def test_a_scalar_electron_count_may_be_a_numpy_scalar():
+    """A restricted (single-array) g_eff takes its electron count as any
+    scalar, a Python int, a numpy integer or a 0-d array, as it always
+    did."""
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='6-31g', verbose=0)
+    mf = scf.RHF(mol).run()
+    h = mf.mo_coeff.T @ mf.get_hcore() @ mf.mo_coeff
+    eri = ao2mo.kernel(mol, mf.mo_coeff, compact=False).reshape((4,) * 4)
+    g_eff = {0: mf.energy_nuc(), 1: h, 2: eri.transpose(0, 2, 1, 3)}
+    ref = solve('pyscf_fci', g_eff, 4, 2, spin_free=True)[0]
+    for count in (np.int64(2), np.array(2)):
+        assert solve('pyscf_fci', g_eff, 4, count, spin_free=True)[0] == ref
