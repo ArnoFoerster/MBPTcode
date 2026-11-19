@@ -29,7 +29,7 @@ transform. With every orbital active P - P^A and the E_c pair vanish to
 rounding (also on a coarse grid); against casida on the mean field's RI
 factors the routes differ by the ISDF fit (NH3/cc-pVDZ, HF and PBE0, on the
 G1 grid; water/cc-pVDZ for the all-active cases). With sigma, Sigma_bar^E
-(the space-time GW kernel with the environment's G, Pade as on
+(the fit of W on the ISDF factors with the environment's G, Pade as on
 imagfrequency) and the E_0 and FCI energies follow casida and
 imagfrequency to the same ISDF error, and the near-pole space is refused.
 """

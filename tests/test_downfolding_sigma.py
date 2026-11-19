@@ -35,10 +35,11 @@ refused for both forms, pointing to casida; the 'sigma_continuation'
 diagnostic is present and warns on a too-coarse node set; on benzene the
 route matches casida.
 
-On space-time S^E(mu + i w) is the space-time GW kernel with the
-environment's G: plus the same call with the active orbitals' G it is the GW
-route's full Sigma_c on the active block, and Omega_min (dense or Davidson,
-ruling R21) is the lowest root on the ISDF v. Its agreement with casida is
+On space-time S^E(mu + i w) is sampled as on imagfrequency, on the ISDF
+factors and their W: against the Casida problem on the same factors it agrees
+on the nodes and after continuation, also for virtuals far from the gap, and
+the 0.26 Ha margin holds there too. Omega_min (dense or Davidson) is the
+lowest root on the ISDF v. Its agreement with casida on the RI factors is
 in tests/test_downfolding_routes.py.
 """
 import json
@@ -64,10 +65,7 @@ from src.MultiReference.Downfolding import (build_effective_hamiltonian,
 from src.MultiReference.Downfolding.methods import rpa
 from src.MultiReference.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
-from src.SingleReference.GW.imaginary_time import \
-    self_energy_matrix_imaginary_time
 from src.SingleReference.GW.self_energy import SelfEnergySolver
-from src.SingleReference.GW.space_time import self_energy_matrix_space_time
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
@@ -820,7 +818,7 @@ def test_continuation_margin_near_the_edge(wat):
                   - want).max() > 1e-4
 
 
-# --- the space-time route: S^E from the imaginary-time GW kernel ----------
+# --- the space-time route: S^E from the same fit, on the ISDF factors ------
 
 
 @pytest.fixture(scope='module')
@@ -837,35 +835,58 @@ def _nh3_part(mf, occ, virt):
                                               virt), mf.mo_energy)
 
 
-def test_environment_only_g_is_what_the_kernel_sees(nh3_space_time):
-    """S^E on space-time (G of the environment orbitals alone, the full
-    system's mu and fit ranges) plus S^A (the same kernel call with the
-    active orbitals' G) is the GW route's full Sigma_c on the active block,
-    `self_energy_matrix_space_time` on the same numerics, at the Pade nodes:
-    the orbital restriction is the only change, and the W and the axes of
-    `_screening_grid` are the GW route's. Target 1e-10; measured 1.1e-16 on
-    the contiguous (6,6) and the non-contiguous (2,3) of NH3 (|Sigma| up to
-    6.8e-2, |S^E| and |S^A| each above 4e-2). W is built on the first
-    request and kept in low.cache['w_grid']."""
+def _casida_on_the_isdf_factors(low):
+    """A casida low-level result on the three-index object of the space-time
+    result's own ISDF factors, B_Q,pq = sum_P D_PQ X_Pp X_Pq: the same fitted
+    integrals, with explicit poles, so the continuation can be judged apart
+    from the fit."""
+    x, d = low.cache['factors']
+    nmo = x.shape[1]
+    b = (d.T @ (x[:, :, None] * x[:, None, :]).reshape(len(x), -1)).reshape(
+        d.shape[1], nmo, nmo)
+    lr = LinearResponseSolver(low.eps, coeff_df=b, spin_mode='restricted')
+    omega, xpy, y = CasidaSolver(*lr.build_casida_matrices(
+        low.nocc, lBSE=False)).solve()
+    return rpa.RPALowLevel(
+        mf=low.mf, mode='casida', df=True, eps=low.eps, nocc=low.nocc,
+        e_c_full=0.0, omega=omega, xpy=xpy + y, factors=b, eri=None,
+        numerics=Numerics(downfolding={'srg_s': None}))
+
+
+def test_space_time_samples_the_fitted_self_energy(nh3_space_time):
+    """S^E on space-time is sampled as on imagfrequency, the Lorentzian fit
+    of W convolved exactly with G, on the route's own ISDF factors and its
+    own W; not through the imaginary-time quadrature of the space-time GW
+    self-energy, whose 1e-7 of noise on the nodes the continuation amplified
+    to above 1e-4 for a virtual far from the gap.
+
+    Against the Casida problem on the SAME ISDF factors (explicit poles), on
+    NH3/cc-pVDZ, G1 grid: S^E on the Pade nodes agrees with the exact pole
+    sum (measured 2.7e-8 and 2.8e-8, target 1e-5), and Sigma_bar (Eq. 42)
+    with its exact value, also for the space 4 | 5, 6, 7, 12, 13, whose
+    virtuals 12 and 13 lie 1.19 Ha above mu and which the default margin
+    accepts (0.28 Ha from the window edge): measured 5.6e-9 and 6.4e-7,
+    target 1e-5. The imaginary-time sampler gave 2.2e-4 on that space
+    against the RI casida; this one gives 3.2e-6 there, the ISDF fit. W is
+    built on the first request, on the minimax grid of imagfrequency, and
+    kept."""
     low = nh3_space_time
-    mf, eps, nmo = low.mf, low.eps, len(low.eps)
-    nodes = pade_nodes(low.numerics.quadrature)
-    full = self_energy_matrix_space_time(mf, mf.mol, low.nocc, nodes,
-                                         low.numerics)[0]
-    mu = particle_hole_window(eps, low.nocc)[2]
+    mf, eps = low.mf, low.eps
+    exact = _casida_on_the_isdf_factors(low)
+    nodes, mu = _pade_points(low)
     assert 'w_grid' not in low.cache
-    for occ, virt in (([2, 3, 4], [5, 6, 7]), ([1, 4], [5, 8, 9])):
+    for occ, virt in (([2, 3, 4], [5, 6, 7]), ([4], [5, 6, 7, 12, 13])):
         part = _nh3_part(mf, occ, virt)
-        act = part.act
         s_e = rpa.sigma_env_imag_axis(low, part, nodes)
-        axes, w = low.cache['w_grid']
-        x, d = low.cache['factors']
-        s_a = self_energy_matrix_imaginary_time(
-            x, d, w, np.eye(nmo)[:, act], eps[act], part.n_act_occ,
-            axes['tau_points'], axes['freq_points'], nodes, mu=mu,
-            ranges=axes['ranges'])[:, act][:, :, act]
-        assert min(np.abs(s_e).max(), np.abs(s_a).max()) > 1e-2
-        assert np.abs(s_e + s_a - full[:, act][:, :, act]).max() < 1e-10
+        assert np.abs(s_e).max() > 1e-2
+        assert np.abs(s_e - _pole_sum(exact, part, mu + 1j * nodes)).max() < 1e-5
+        got = rpa.continued_self_energy(mu + 1j * nodes, s_e, eps[part.act],
+                                        'srg')
+        want = rpa.embedding_self_energy(exact, part, 'srg')
+        assert np.abs(got - want).max() < 1e-5
+    points, w = low.cache['w_grid']
+    assert len(points) == low.numerics.imagfreq.nfreq == len(w)
+    rpa.sigma_env_imag_axis(low, part, nodes)
     assert low.cache['w_grid'][1] is w
 
 
@@ -929,3 +950,39 @@ def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):
     fresh = run_low_level(low.mf, method='rpa', mode='space-time',
                           numerics=low.numerics)
     assert rpa.lowest_excitation(fresh) == davidson
+
+
+def test_space_time_continuation_margin_near_the_edge(nh3_space_time):
+    """The continuation margin on space-time is imagfrequency's, 0.26 Ha,
+    because the two routes now sample S^E the same way (the scan repeated on
+    space-time: water, NH3 and benzene in cc-pVDZ, G1 grid; beyond the margin
+    the worst continuation error against casida on the same ISDF factors is
+    9.3e-7, and against the RI casida 4.2e-5 on water, 8.2e-6 on NH3 and
+    8.5e-5 on benzene, the last being the ISDF fit of the integrals alone).
+
+    NH3 with default numerics: occupied 4 and virtuals 5, 6, 7, 12, 13,
+    0.280 Ha from the edge with two virtuals 1.19 Ha above the mid-gap, is
+    accepted and agrees with the casida route on the RI factors to 1e-5
+    (measured 3.2e-6 'srg', the ISDF fit; the imaginary-time sampler this
+    replaced gave 2.2e-4); occupied 1, 4 and virtuals 5, 8, 9, 0.12 Ha from
+    the edge, is refused, naming its orbitals and pointing to casida."""
+    low = nh3_space_time
+    mf = low.mf
+    cas = run_low_level(mf, method='rpa', mode='casida',
+                        numerics=Numerics(downfolding={'srg_s': None}))
+    margin = DOWNFOLDING_CONTINUATION_MARGIN
+    outside = _nh3_part(mf, [4], [5, 6, 7, 12, 13])
+    inside = _nh3_part(mf, [1, 4], [5, 8, 9])
+    assert margin < _edge_distance(cas, outside) < 1.1 * margin
+    assert _edge_distance(cas, inside) < margin
+    assert (low.eps[outside.act] - particle_hole_window(
+        low.eps, low.nocc)[2]).max() > 1.0
+    for sigma in ('srg', 'mode_a'):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', rpa.SigmaContinuationWarning)
+            got = rpa.embedding_self_energy(low, outside, sigma)
+        want = rpa.embedding_self_energy(cas, outside, sigma)
+        assert np.abs(got - want).max() < 1e-5
+        with pytest.raises(ValueError, match="mode='casida'") as refusal:
+            rpa.embedding_self_energy(low, inside, sigma)
+        assert 'continuation_margin' in str(refusal.value)

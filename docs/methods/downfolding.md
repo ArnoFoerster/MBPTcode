@@ -337,17 +337,26 @@ case measured beyond 0.17 Ha met 1e-4 (a few much closer did too), and
 `continuation_margin` is 1.5 times that; the scan is in the comment of
 `DOWNFOLDING_CONTINUATION_MARGIN` in `src/Base/numerics/constants.py`.
 
-**Sigma^E on `mode='space-time'`** is the same continuation, refusal and
-diagnostics, with S^E(mu + i omega) from the space-time GW self-energy
-(`self_energy_matrix_imaginary_time`) on the ISDF factors: W on the GW
-route's time and frequency axes (`numerics.quadrature.ntau_st`,
-`nfreq_st`; built on the first Sigma^E request and kept) and G built from
-the environment orbitals alone, with the whole system's mu and fit ranges,
-so the GW route's Sigma_c on the active block is S^E plus the same sum over
-the active orbitals (to 1e-16). Against casida on the mean field's RI
-factors Sigma_bar^E agrees to the ISDF fit, 3.5e-6 Eh per element on
-NH3/cc-pVDZ (G1 grid), and the FCI energy of H_eff with `sigma='srg'` to
-1.2e-6 Eh.
+**Sigma^E on `mode='space-time'`** is sampled, continued, refused and
+diagnosed exactly as on imagfrequency, on the route's own objects: W on the
+same minimax frequency grid (`numerics.imagfreq.nfreq`), from chi0 of the
+ISDF factors (built on the first Sigma^E request and kept), its Lorentzian
+fit convolved exactly with the environment's G, and the active-environment
+fitting factors B_Q,tr = sum_P D_PQ X_Pt X_Pr. Only the active block is
+needed, so the cost stays cubic, times the number of active orbitals.
+
+Sampling S^E through the imaginary-time quadrature of the space-time GW
+self-energy does not work here: it leaves about 1e-7 of noise on the
+continuation's nodes, which the continuation amplifies to 1e-4 and more for
+an active orbital far from the gap (2.2e-4 on an NH3 space with virtuals
+1.2 Ha above the mid-gap). The fit's samples are an exact rational function
+and continue cleanly. Measured against the Casida problem on the same ISDF
+factors: 2.8e-8 on the nodes and at most 9.3e-7 Eh per element of
+Sigma_bar^E beyond the 0.26 Ha margin (water, NH3 and benzene in cc-pVDZ).
+Against casida on the mean field's RI factors the difference is the ISDF
+fit of the integrals: up to 4.2e-5 Eh on water, 8.2e-6 on NH3 and 8.5e-5 on
+benzene (G1 grid); the FCI energy of H_eff with `sigma='srg'` agrees to
+1.2e-6 Eh on NH3.
 
 ## Kohn-Sham references
 

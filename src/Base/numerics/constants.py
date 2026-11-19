@@ -330,6 +330,15 @@ DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
 # water high virtual whose nearest pole carries a small residue: 1.5e-6 at
 # d = 0.001, so the distance is a sufficient, not a sharp, criterion); 0.26
 # is 1.5 times that.
+# Space-time samples S^E as imagfrequency does (the Lorentzian fit of W on
+# its own ISDF factors), so the margin is the same. The scan repeated there
+# (water, NH3, benzene in cc-pVDZ, G1 grid, 160 spaces) gives beyond 0.26 Ha
+# a continuation error of at most 9.3e-7 against casida on the same ISDF
+# factors; against the RI casida 4.2e-5 (water), 8.2e-6 (NH3) and 8.5e-5
+# (benzene), which is the ISDF fit of the integrals. Sampling the space-time
+# GW self-energy through its imaginary-time quadrature instead left 1e-7 of
+# noise on the nodes and errors of 1e-4 to 5e-4 for orbitals far from the
+# gap at any distance; that sampler is not used.
 DOWNFOLDING_CONTINUATION_MARGIN = 0.26
 # Omega_min of the pole-free window on the numerical routes (imagfrequency,
 # space-time), which diagonalize nothing, is the lowest root of the full
