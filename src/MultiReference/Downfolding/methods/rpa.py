@@ -415,7 +415,7 @@ def _mrpa_correction(low, part):
     if k == 0 or k == n:
         return vt
     xpy_a = low.xpy[active_pair_mask(part)]
-    delta, k_ph, _ = _active_ph(low, part, _active_v(low, part.act)[0])
+    delta, k_ph, _ = _active_ph(low, part, _active_v(low, part.act))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
     k_eff = 0.25 * (0.5 * (k_eff + k_eff.T) - np.diag(delta))
@@ -482,24 +482,39 @@ def active_polarizability_static(low, part):
 
 
 def _active_v(low, act):
-    """The v of the full RPA (low.factors or low.eri) on the orbitals `act`:
-    (v_act, v_ov), v_act the (n,)*4 chemist (pq|rs) and v_ov the
-    (n*n, n_pair) (pq|ia) over every (i, a) pair in C order. On space-time
-    v_act is the ISDF v of `active_pair_factors` and v_ov None: only the
-    casida static defect reads it."""
-    n, nocc = len(act), low.nocc
+    """The (n,)*4 chemist (pq|rs) of the full RPA's v on the orbitals `act`:
+    from low.factors or low.eri, and on space-time the ISDF v of
+    `active_pair_factors`.
+
+    Not the exact v of H_eff (`two_body.active_eri`): E_c^A, W^A and the
+    static defect take the integrals the full RPA was solved with (spec
+    §3.2), so that the double counting cancels against E_c and W."""
+    n = len(act)
     if low.mode == 'space-time':
         b_act = _pair_factors(low, act).reshape(-1, n * n)
-        return (b_act.T @ b_act).reshape((n,) * 4), None
+        return (b_act.T @ b_act).reshape((n,) * 4)
+    if low.factors is not None:
+        b = low.factors
+        b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
+        return (b_act.T @ b_act).reshape((n,) * 4)
+    return low.eri[np.ix_(act, act)][:, :, act][:, :, :, act]
+
+
+def _active_ov(low, act):
+    """The (n*n, n_pair) (pq|ia) of the full RPA's v, p, q over the orbitals
+    `act` and (i, a) over every particle-hole pair in C order, from
+    low.factors or low.eri (casida). Its cost, n^2 naux n_pair with the
+    factors, is that of the whole pair space, so it is built only where it
+    is read: the casida W(0) of `static_defect`."""
+    n, nocc = len(act), low.nocc
     if low.factors is not None:
         b = low.factors
         b_act = b[:, act][:, :, act].reshape(b.shape[0], n * n)
         b_ov = b[:, :nocc, nocc:].reshape(b.shape[0], -1)
-        return (b_act.T @ b_act).reshape((n,) * 4), b_act.T @ b_ov
-    eri = low.eri[np.ix_(act, act)]
+        return b_act.T @ b_ov
     n_pair = nocc * (low.eri.shape[0] - nocc)  # spelt out: n may be 0
-    return (eri[:, :, act][:, :, :, act],
-            eri[:, :, :nocc, nocc:].reshape(n * n, n_pair))
+    return low.eri[np.ix_(act, act)][:, :, :nocc, nocc:].reshape(n * n,
+                                                                 n_pair)
 
 
 def _active_ph(low, part, v_eff):
@@ -609,8 +624,8 @@ def static_defect(low, part, v_eff):
         w_full = (b_act.T @ dyson_screening(low.cache['p0'])
                   @ b_act).reshape((n,) * 4)
     else:
-        v_act, v_ov = _active_v(low, part.act)
-        r = v_ov @ low.xpy
+        v_act = _active_v(low, part.act)
+        r = _active_ov(low, part.act) @ low.xpy
         w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
     w_act = v_eff.copy()
     delta, k_ph, v_ph = _active_ph(low, part, v_eff)
@@ -1365,7 +1380,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     screening = choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
     vt = screening_correction(low, part, screening)
-    v_eff = _active_v(low, part.act)[0] + vt
+    v_eff = _active_v(low, part.act) + vt
     found = {}
     if 'static_defect' in names:
         found['static_defect'] = static_defect(low, part, v_eff)

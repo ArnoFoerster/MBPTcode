@@ -624,3 +624,36 @@ def test_effective_interaction_is_bare_plus_vtilde():
     empty = effective_interaction(mf.mol, (mf.mo_coeff[:, []],),
                                   (np.zeros((0,) * 4),))
     assert empty[0].shape == (0, 0, 0, 0)
+
+
+def test_active_ov_only_for_the_casida_static_defect(monkeypatch):
+    """(tu|ia) over every particle-hole pair, the costly part of the RPA's v
+    on the active block, is built only where it is read: the 'static_defect'
+    diagnostic on casida, once per build. Without that diagnostic, on mRPA,
+    and on imagfrequency it is not built at all; (tu|vw) alone is."""
+    from tests.downfolding_oracle import water
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    built = []
+    real = rpa._active_ov
+
+    def counted(low, act):
+        built.append(low.mode)
+        return real(low, act)
+
+    monkeypatch.setattr(rpa, '_active_ov', counted)
+    cas = run_low_level(mf, method='rpa')
+    for df in (True, False):
+        low = cas if df else run_low_level(mf, method='rpa', df=False)
+        for screening in ('crpa', 'mrpa'):
+            built.clear()
+            build_effective_hamiltonian(low, aspace, screening=screening)
+            assert built == ['casida']
+            built.clear()
+            build_effective_hamiltonian(low, aspace, screening=screening,
+                                        diagnostics=())
+            assert built == []
+    built.clear()
+    build_effective_hamiltonian(
+        run_low_level(mf, method='rpa', mode='imagfrequency'), aspace)
+    assert built == []
