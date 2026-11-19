@@ -668,3 +668,113 @@ def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
     assert isinstance(rpa.screening_correction(low, one, 'crpa'), np.ndarray)
     with pytest.raises(NotImplementedError, match='mrpa'):
         rpa.screening_correction(oh_low[True], parts, 'mrpa')
+
+
+# --- E_c^A[v_eff] and the static defect ---------------------------------------
+
+def _local_so(blocks):
+    """The chemist array over 2n local spin orbitals, alpha first, of the
+    blocks (aa, ab, bb)."""
+    aa, ab, bb = blocks
+    n = aa.shape[0]
+    out = np.zeros((2 * n,) * 4)
+    out[:n, :n, :n, :n], out[n:, n:, n:, n:] = aa, bb
+    out[:n, :n, n:, n:] = ab
+    out[n:, n:, :n, :n] = ab.transpose(2, 3, 0, 1)
+    return out
+
+
+def _oracle_v_eff(so, parts, screening):
+    """(aa, ab, bb) of v + vtilde from the oracle alone: the exact active
+    integrals plus its cRPA correction (masked for crpa_ph, none for bare)."""
+    eri_so, _, _, act_so = so
+    n = parts[0].n_act
+    v = spin_blocks(eri_so[np.ix_(act_so, act_so, act_so, act_so)], n)
+    if screening == 'bare':
+        return tuple(np.array(x) for x in v)
+    vt = vtilde_crpa_uhf(*so)
+    if screening == 'crpa_ph':
+        masks = (_ph_mask(parts[0], parts[0]), _ph_mask(parts[0], parts[1]),
+                 _ph_mask(parts[1], parts[1]))
+        vt = tuple(x * mask for x, mask in zip(vt, masks))
+    return tuple(x + y for x, y in zip(v, vt))
+
+
+def _oracle_active_rpa(so, v_eff):
+    """(E_c^A, defect) from the oracle: the direct RPA of the active spin
+    orbitals alone with v_eff, and the largest |W(0) - W^A[v_eff](0)| over
+    the three blocks."""
+    eri_so, eps_so, occ_so, act_so = so
+    m = len(act_so)
+    v_so = _local_so(v_eff)
+    eps_act = np.asarray(eps_so)[act_so]
+    occ_act = [x for x, q in enumerate(act_so) if q in occ_so]
+    e_c = drpa_so(v_so, eps_act, occ_act)[0]
+    w_full = (eri_so[np.ix_(act_so, act_so, act_so, act_so)]
+              + w0_minus_v_so(eri_so, eps_so, occ_so, act_so))
+    w_act = v_so + w0_minus_v_so(v_so, eps_act, occ_act, list(range(m)))
+    defect = max(np.max(np.abs(x - y)) for x, y in zip(
+        spin_blocks(w_full, m // 2), spin_blocks(w_act, m // 2)))
+    return e_c, defect
+
+
+@pytest.mark.parametrize('space', sorted(SPACES))
+@pytest.mark.parametrize('screening', ['bare', 'crpa', 'crpa_ph'])
+@pytest.mark.parametrize('df', [False, True])
+def test_ec_active_and_defect(oh, oh_low, space, screening, df):
+    """E_c^A[v_eff], the direct RPA of the active pairs of both spins with
+    K^A = the particle-hole blocks of v_eff, and the static defect, the
+    largest |W(0) - W^A[v_eff](0)| over the three blocks, against the
+    oracle's RPA of the active spin orbitals alone. The crpa defect is zero.
+    With no active pair in a channel the stacked problem holds the other
+    spin's pairs; with none in either, E_c^A = 0 and W^A = v_eff. Measured
+    over the four spaces, three screenings and both df settings: E_c^A to
+    8.9e-16 (values -9.2e-3 to -6.0e-5), the defect to 2.4e-14 (0.08 to
+    0.16 for bare and crpa_ph, at most 2.6e-14 for crpa)."""
+    low = oh_low[df]
+    parts = _parts(oh, SPACES[space](oh))
+    so = _spin_orbitals(oh, parts)
+    v_eff = _oracle_v_eff(so, parts, screening)
+    e_ref, defect_ref = _oracle_active_rpa(so, v_eff)
+    e_c = rpa.active_correlation_energy(low, parts, v_eff)
+    defect = rpa.static_defect(low, parts, v_eff)
+    assert isinstance(e_c, float) and isinstance(defect, float)
+    assert abs(e_c - e_ref) < 1e-9
+    assert abs(defect - defect_ref) < 1e-9
+    if screening == 'crpa':
+        assert defect < 1e-10
+    else:
+        assert defect > 1e-3
+    if space == 'occupied_only':
+        assert e_c == 0.0
+    else:
+        assert e_c < -1e-5
+
+
+@pytest.mark.parametrize('name', ['h2_bs', 'oh_sto3g'])
+def test_all_active_ec_pair_cancels(request, name):
+    """Every orbital of both spins active: E_c^A[v] on the v of the full RPA
+    is E_c[v] itself, and the static defect is zero. Measured: the pair
+    cancels to 4.3e-14, the defect is at most 8.3e-15 (E_c = -0.0080 for
+    H2, -0.0307 for OH/STO-3G)."""
+    mf = (unrestricted(OH, 1, basis='sto-3g') if name == 'oh_sto3g'
+          else request.getfixturevalue(name))
+    parts = _parts(mf, _all_active(mf))
+    so = _spin_orbitals(mf, parts)
+    v = _oracle_v_eff(so, parts, 'bare')
+    for df in (False, True):
+        low = run_low_level(mf, method='rpa', df=df)
+        e_c = rpa.active_correlation_energy(low, parts, v)
+        assert abs(e_c - low.e_c_full) < 1e-10 and e_c < -1e-3
+        assert rpa.static_defect(low, parts, v) < 1e-10
+
+
+def test_two_body_blocks_must_fit_the_reference(oh, oh_low):
+    parts = _parts(oh, _asymmetric(oh))
+    so = _spin_orbitals(oh, parts)
+    v_eff = _oracle_v_eff(so, parts, 'crpa')
+    for function in (rpa.active_correlation_energy, rpa.static_defect):
+        with pytest.raises(ValueError, match='three blocks'):
+            function(oh_low[True], parts, v_eff[0])
+        with pytest.raises(ValueError, match='three blocks'):
+            function(oh_low[True], parts, v_eff[:2])

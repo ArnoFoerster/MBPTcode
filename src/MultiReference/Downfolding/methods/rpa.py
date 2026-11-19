@@ -267,6 +267,29 @@ def _per_block(blocks):
     return blocks[0] if len(blocks) == 1 else tuple(blocks)
 
 
+def _two_body_blocks(v, chans):
+    """The two-body blocks a public function is handed, as a tuple: the one
+    (n_act,)*4 array of a restricted reference, or the three (aa, ab, bb)
+    of an unrestricted one. Refused when they do not fit the channels."""
+    blocks = (v,) if isinstance(v, np.ndarray) else tuple(v)
+    if len(blocks) != len(_BLOCKS[len(chans)]):
+        raise ValueError(
+            'an unrestricted reference takes the three blocks (aa, ab, bb) '
+            'of the active interaction, a restricted one a single array; '
+            f'got {len(blocks)} for {len(chans)} spin channel(s).')
+    return blocks
+
+
+def _spin_block(blocks, s, t):
+    """The block of `blocks` ((v,) or (aa, ab, bb)) with the first pair in
+    spin channel s and the second in channel t; the beta-alpha one is the
+    alpha-beta one with its pairs exchanged."""
+    if len(blocks) == 1:
+        return blocks[0]
+    aa, ab, bb = blocks
+    return ((aa, ab), (ab.transpose(2, 3, 0, 1), bb))[s][t]
+
+
 def _delta(chan, mask=None):
     """eps_a - eps_i of the (i, a) pairs of one channel in C order, those of
     the bool mask when given."""
@@ -589,8 +612,8 @@ def _mrpa_correction(low, part):
     if k == 0 or k == n:
         return vt
     xpy_a = low.xpy[active_pair_mask(part)]
-    delta, k_ph, _ = _active_ph(low, part,
-                                _active_v(low, _channels(low, part))[0])
+    chans = _channels(low, part)
+    delta, k_ph, _ = _active_ph(chans, _active_v(low, chans))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
     k_eff = 0.25 * (0.5 * (k_eff + k_eff.T) - np.diag(delta))
@@ -707,16 +730,31 @@ def _active_ov(low, chans):
     return out
 
 
-def _active_ph(low, part, v_eff):
+def _active_ph(chans, v_eff):
     """(delta, K, v_ph) of the active ph pairs (k active occupied times the
-    active virtual, local indices, C order): delta the orbital energy
-    differences, K_ia,jb = v_eff[i,a,j,b] and v_ph (n*n, n_ph) the columns
-    v_eff[:, :, i, a]."""
-    n, k = part.n_act, part.n_act_occ
-    eps = low.eps[part.act]
-    delta = (eps[k:][None, :] - eps[:k][:, None]).ravel()
-    v_ph = v_eff[:, :, :k, k:].reshape(n * n, delta.size)
-    return delta, v_eff[:k, k:, :k, k:].reshape(delta.size, delta.size), v_ph
+    active virtual, local indices, C order; those of both spins stacked for
+    two channels): delta the orbital energy differences, K_ia,jb =
+    v_eff[i,a,j,b], and v_ph, one (n*n, n_ph) array per channel, the columns
+    v_eff[:, :, i, a] with the first pair in that channel. v_eff: the blocks
+    (v,) or (aa, ab, bb)."""
+    n = chans[0].part.n_act
+    occ = [c.part.n_act_occ for c in chans]
+    delta = []
+    for chan, k in zip(chans, occ):
+        eps = chan.eps[chan.part.act]
+        delta.append((eps[k:][None, :] - eps[:k][:, None]).ravel())
+    k_rows, v_ph = [], []
+    for s, k_s in enumerate(occ):
+        k_rows.append([])
+        cols = []
+        for t, k_t in enumerate(occ):
+            block = _spin_block(v_eff, s, t)
+            cols.append(block[:, :, :k_t, k_t:].reshape(n * n,
+                                                        delta[t].size))
+            k_rows[s].append(block[:k_s, k_s:, :k_t, k_t:].reshape(
+                delta[s].size, delta[t].size))
+        v_ph.append(_join(cols, axis=1))
+    return _join(delta), _square(k_rows), v_ph
 
 
 def active_correlation_energy(low, part, v_eff):
@@ -747,27 +785,38 @@ def active_correlation_energy(low, part, v_eff):
     cosft_wt[k, tau] exp(-delta tau): exp(-delta tau) pushed through the
     energy's own tau -> omega transform, as the full chi0 was
     (`rpa_correlation_energy_space_time`), not the exact Lorentzian, so the
-    pair again cancels to rounding with every orbital active."""
-    k = part.n_act_occ
-    if k == 0 or k == part.n_act:
+    pair again cancels to rounding with every orbital active.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and v_eff
+    the three blocks (aa, ab, bb): the direct RPA on the active ph pairs of
+    both spins, stacked, with K^A_(ia s),(jb s') = v_eff^{ss'}[i,a,j,b]. It
+    is zero only when neither channel has an active ph pair; with one in a
+    single channel the problem holds that spin's pairs."""
+    chans = _channels(low, part)
+    v_eff = _two_body_blocks(v_eff, chans)
+    if not any(0 < c.part.n_act_occ < c.part.n_act for c in chans):
         return 0.0
     if low.mode != 'casida':
-        return _active_ec_quadrature(low, part, v_eff)
-    return _active_ec_casida(low, part, v_eff)
+        return _active_ec_quadrature(low, chans, v_eff)
+    return _active_ec_casida(low, chans, v_eff)
 
 
-def _active_ec_casida(low, part, v_eff):
+def _active_ec_casida(low, chans, v_eff):
     """The dense dRPA E_c^A[v_eff] of the active ph pairs by the plasmon
-    formula (there is at least one active ph pair)."""
-    return _plasmon(low.eps[part.act], part.n_act_occ, None, v_eff,
-                    low.numerics)[0]
+    formula (there is at least one active ph pair); v_eff the blocks (v,)
+    or (aa, ab, bb)."""
+    eps = [c.eps[c.part.act] for c in chans]
+    occ = [c.part.n_act_occ for c in chans]
+    if len(chans) == 1:
+        return _plasmon(eps[0], occ[0], None, v_eff[0], low.numerics)[0]
+    return _plasmon(tuple(eps), tuple(occ), None, v_eff, low.numerics)[0]
 
 
-def _active_ec_quadrature(low, part, v_eff):
+def _active_ec_quadrature(low, chans, v_eff):
     """E_c^A[v_eff] on the imaginary axis, the formula of
     `active_correlation_energy`, with `dielectric_log_determinant` (its
     warning and flag for a non-positive det(1 - Pi^A U))."""
-    delta, k_ph, _ = _active_ph(low, part, v_eff)
+    delta, k_ph, _ = _active_ph(chans, v_eff)
     eye = np.eye(delta.size)
     if low.mode == 'space-time':
         grid = low.cache['energy_grid']
@@ -805,31 +854,45 @@ def static_defect(low, part, v_eff):
     exp(-delta tau), the one P^A(0) carries (`active_polarizability_static`),
     i.e. delta_A -> -4/pi(0) above, without which the crpa defect would be
     the transform's error and not zero.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and v_eff
+    the three blocks (aa, ab, bb). Both sides are then the two-spin ones,
+    W(0) - v = -2 V xpy diag(1/omega) xpy^T V^T on the stacked pairs and
+    W^A[v_eff](0) = v_eff - 2 v_eff[:, ph] (delta_A + 2 K^A)^-1 v_eff[ph, :]
+    on the active ph pairs of both spins, and the defect is the largest
+    deviation over the three blocks.
     """
-    n = part.n_act
+    chans = _channels(low, part)
+    v_eff = _two_body_blocks(v_eff, chans)
+    spins = _BLOCKS[len(chans)]
+    n = chans[0].part.n_act
     if n == 0:
         return 0.0
+    g = _spin_weight(chans)
     if low.mode != 'casida':
         b_act = active_pair_factors(low, part).reshape(-1, n * n)
-        w_full = (b_act.T @ dyson_screening(low.cache['p0'])
-                  @ b_act).reshape((n,) * 4)
+        w_full = [(b_act.T @ dyson_screening(low.cache['p0'])
+                   @ b_act).reshape((n,) * 4)]
     else:
-        chans = _channels(low, part)
-        v_act = _active_v(low, chans)[0]
-        r = _active_ov(low, chans)[0] @ low.xpy
-        w_full = v_act - 4.0 * ((r / low.omega) @ r.T).reshape((n,) * 4)
-    w_act = v_eff.copy()
-    delta, k_ph, v_ph = _active_ph(low, part, v_eff)
+        r = [ov @ low.xpy for ov in _active_ov(low, chans)]
+        w_full = [v - (2.0 * g) * ((r[s] / low.omega) @ r[t].T).reshape(
+                      (n,) * 4)
+                  for v, (s, t) in zip(_active_v(low, chans), spins)]
+    w_act = [v.copy() for v in v_eff]
+    delta, k_ph, v_ph = _active_ph(chans, v_eff)
     if delta.size:
         if low.mode == 'space-time':
             grid = low.cache['static_grid']
             delta = 2.0 / (np.exp(-np.outer(delta, grid.tau_points))
                            @ grid.cosft_wt[0])
-        apb = 4.0 * k_ph
+        apb = (2.0 * g) * k_ph
         apb[np.diag_indices_from(apb)] += delta
-        w_act -= (4.0 * v_ph @ cho_solve(cho_factor(apb), v_ph.T)).reshape(
-            (n,) * 4)
-    return float(np.abs(w_full - w_act).max())
+        factor = cho_factor(apb)
+        for block, (s, t) in zip(w_act, spins):
+            block -= ((2.0 * g) * v_ph[s]
+                      @ cho_solve(factor, v_ph[t].T)).reshape((n,) * 4)
+    return max(float(np.abs(full - act).max())
+               for full, act in zip(w_full, w_act))
 
 
 def screened_residues(low, part, orbitals=None):
@@ -1601,7 +1664,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if 'ec_active_casida' in names and low.mode != 'casida':
         k = part.n_act_occ
         dense = (0.0 if k in (0, part.n_act)
-                 else _active_ec_casida(low, part, v_eff))
+                 else _active_ec_casida(low, _channels(low, part), (v_eff,)))
         found['ec_active_casida'] = {'casida': dense,
                                      'difference': e_c_active - dense}
     sigma_bar, dc = None, 'full'
