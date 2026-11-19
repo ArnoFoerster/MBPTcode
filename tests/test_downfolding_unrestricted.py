@@ -35,7 +35,7 @@ import warnings
 
 import numpy as np
 import pytest
-from pyscf import fci, mcscf, scf
+from pyscf import fci, gto, mcscf, scf
 from pyscf.gw import urpa
 
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
@@ -1431,3 +1431,57 @@ def test_density_fitted_uhf_through_the_driver():
                              - sigma_bar[spin])) < 1e-9
     assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
                - (e_hf + en.e_c_full - en.e_c_active)) < 1e-9
+
+
+# --- a reference without any particle-hole pair --------------------------------
+
+@pytest.mark.parametrize('df', [False, True])
+def test_a_reference_without_any_pair(df):
+    """Triplet H2 in a minimal basis: both electrons in the two alpha
+    orbitals, so alpha has no virtual and beta no occupied orbital, and
+    there is no particle-hole pair at all. casida takes it: the RPA is
+    empty, E_c = 0, nothing is screened and Sigma_bar is zero, so H_eff is
+    the bare one and its one determinant has the UHF energy; the numerical
+    routes refuse it. The restricted counterpart, He in a one-function
+    basis, runs the same way."""
+    mf = unrestricted('H 0 0 0; H 0 0 0.74', 2, basis='sto-3g')
+    assert _nocc(mf) == (2, 0) and mf.mo_coeff.shape[-1] == 2
+    low = run_low_level(mf, method='rpa', df=df)
+    assert low.e_c_full == 0.0
+    assert low.omega.shape == (0,) and low.xpy.shape == (0, 0)
+    assert rpa.lowest_excitation(low) is None
+    spaces = (ActiveSpace.from_indices(2, 2, [0, 1], []),
+              ActiveSpace.from_indices(2, 0, [], [0, 1]))
+    bare, _, _ = _hf(mf, spaces)
+    for screening in SCREENINGS_RPA + ('mrpa',):
+        for sigma in SIGMAS_RPA:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                g_eff, space, en = build_effective_hamiltonian(
+                    low, spaces, screening=screening, sigma=sigma)
+            assert en.e_c_full == en.e_c_active == 0.0
+            assert en.diagnostics['static_defect'] == 0.0
+            for ours, hf in zip(g_eff[1] + g_eff[2], bare[1] + bare[2]):
+                assert np.max(np.abs(ours - hf)) < 1e-12
+            assert space['n_elec_active'] == (2, 0)
+            assert abs(_solve(g_eff, space)[0] - mf.e_tot) < 1e-10
+            if sigma is not None:
+                assert en.diagnostics['sigma_poles']['window'] == (
+                    (-np.inf, np.inf), (-np.inf, np.inf))
+    _, _, en = build_effective_hamiltonian(low, _none_active(mf))
+    assert abs(en.e0 - mf.e_tot) < 1e-10
+    for mode in ('imagfrequency', 'space-time'):
+        with pytest.raises(NotImplementedError,
+                           match="alpha channel has 2 occupied of 2.*"
+                                 "mode='casida'"):
+            run_low_level(mf, method='rpa', mode=mode)
+
+    he = scf.RHF(gto.M(atom='He', basis='sto-3g', verbose=0))
+    he.verbose = 0
+    he.kernel()
+    low = run_low_level(he, method='rpa', df=df)
+    assert low.e_c_full == 0.0 and low.omega.shape == (0,)
+    g_eff, space, en = build_effective_hamiltonian(
+        low, ActiveSpace.from_indices(1, 1, [0], []), sigma='srg')
+    assert abs(solve('pyscf_fci', g_eff, 1, 2, spin_free=True)[0]
+               - he.e_tot) < 1e-10

@@ -529,7 +529,9 @@ def _plasmon(eps, nocc, factors, eri, numerics):
     (aa, ab, bb)) the problem on the stacked pairs of both spins. A and B
     are freed by the solver, so Tr A is taken before it. The full RPA and
     the active one go through here, so the E_c pair is the same formula on
-    the same solver."""
+    the same solver. A reference without any particle-hole pair (no
+    virtual, or no occupied, orbital in every channel) has no excitation and
+    no correlation: (0.0, an empty omega, an empty X+Y)."""
     if isinstance(nocc, tuple):
         # the solver takes the three blocks as (aa, bb, ab)
         blocks = None if eri is None else (eri[0], eri[2], eri[1])
@@ -539,6 +541,8 @@ def _plasmon(eps, nocc, factors, eri, numerics):
         lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
                                   spin_mode='restricted')
     A, B = lr.build_casida_matrices(nocc, lBSE=False)
+    if A.size == 0:
+        return 0.0, np.zeros(0), np.zeros((0, 0))
     trace_a = np.trace(A)
     solver = CasidaSolver(A, B)
     del A, B
