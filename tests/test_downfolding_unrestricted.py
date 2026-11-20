@@ -684,6 +684,20 @@ def test_all_active_vtilde_is_zero(h2_bs):
         assert len(blocks) == 3 and not any(b.any() for b in blocks)
 
 
+def test_pair_factor_functions_need_the_three_index_factors(oh, oh_low):
+    """The exact four-index blocks (df=False) hold no three-index factors:
+    active_pair_factors and active_polarizability_static refuse such a
+    result by name, and take the one on factors."""
+    parts = _parts(oh, _asymmetric(oh))
+    for function in (rpa.active_pair_factors,
+                     rpa.active_polarizability_static):
+        with pytest.raises(NotImplementedError,
+                           match='three-index factors.*df=True'):
+            function(oh_low[False], parts)
+    b_alpha, b_beta = rpa.active_pair_factors(oh_low[True], parts)
+    assert b_alpha.shape[1:] == b_beta.shape[1:] == (4, 4)
+
+
 def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
     """The functions of the RPA method take one Partition with a restricted
     result and the pair (alpha, beta) with an unrestricted one."""
@@ -1478,7 +1492,8 @@ def test_a_reference_without_any_pair(df):
     empty, E_c = 0, nothing is screened and Sigma_bar is zero, so H_eff is
     the bare one and its one determinant has the UHF energy; the numerical
     routes refuse it. The restricted counterpart, He in a one-function
-    basis, runs the same way."""
+    basis, runs the same way on casida and is refused the same way on the
+    numerical routes."""
     mf = unrestricted('H 0 0 0; H 0 0 0.74', 2, basis='sto-3g')
     assert _nocc(mf) == (2, 0) and mf.mo_coeff.shape[-1] == 2
     low = run_low_level(mf, method='rpa', df=df)
@@ -1520,6 +1535,11 @@ def test_a_reference_without_any_pair(df):
         low, ActiveSpace.from_indices(1, 1, [0], []), sigma='srg')
     assert abs(solve('pyscf_fci', g_eff, 1, 2, spin_free=True)[0]
                - he.e_tot) < 1e-10
+    for mode in ('imagfrequency', 'space-time'):
+        with pytest.raises(NotImplementedError,
+                           match="the reference has 1 occupied of 1.*"
+                                 "mode='casida'"):
+            run_low_level(he, method='rpa', mode=mode)
 
 
 # --- a spin without occupied orbitals, with exact integrals --------------------

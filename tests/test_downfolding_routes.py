@@ -220,6 +220,20 @@ def test_active_pair_factors_and_polarizability():
                   - low.cache['p0']).max() < 1e-12
 
 
+def test_pair_factor_functions_need_the_three_index_factors():
+    """A casida result on the exact four-index integrals (df=False) keeps no
+    three-index factors, so active_pair_factors and
+    active_polarizability_static refuse it by name and point to df=True."""
+    mf = _mean_field('hf')
+    low = run_low_level(mf, method='rpa', mode='casida', df=False)
+    part = partition(_aspace(mf, 'contiguous'), mf.mo_energy)
+    for function in (rpa.active_pair_factors,
+                     rpa.active_polarizability_static):
+        with pytest.raises(NotImplementedError,
+                           match='three-index factors.*df=True'):
+            function(low, part)
+
+
 def test_naive_w_difference_is_wrong():
     """Screening is not additive: 'W^r' = W - W^A + v, W^A the RPA of the
     active pairs alone, misses the cRPA vtilde by 0.015 (contiguous (4,4)),

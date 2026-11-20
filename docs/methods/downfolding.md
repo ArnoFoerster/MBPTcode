@@ -92,6 +92,12 @@ mean field's RI factors the route differs by the ISDF fit (NH3/cc-pVDZ, G1
 grid: v~ 5e-6 per element, the FCI energy of H_eff 1e-6 Eh, E_0 3e-5 Eh
 through E_HF,ee[v~], which cancels against h_eff in the energy).
 
+`'imagfrequency'` and `'space-time'` build their frequency grids on the
+occupied-virtual transitions, so a reference without a virtual (or an
+occupied) orbital, such as He in a one-function basis, is refused there
+(`NotImplementedError`, pointing to casida). `'casida'` takes it: there is
+no excitation, E_c = 0 and nothing is screened.
+
 Options of the RPA:
 
 | call | option | values |
@@ -445,8 +451,10 @@ named, when an active orbital energy is within `numerics.downfolding.
 pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
 or outside the window. Sigma_bar is computed and H_eff built all the same;
 the elements on those orbitals are then dominated by the nearest pole.
-`'srg'` never warns of the poles on the Casida route; near a pole its
-damping matters, which the `'sigma_poles'` diagnostic reports.
+`'srg'` with a finite `srg_s` does not warn of the poles on the Casida
+route; near a pole its damping matters, which the `'sigma_poles'` diagnostic
+reports. At `srg_s=None` it is as undamped as `'mode_a'` and warns the same
+way.
 
 Nothing is refused near a pole. Only a Sigma_bar that is not finite, an
 active orbital energy exactly on a pole with `'mode_a'`, is

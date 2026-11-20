@@ -304,11 +304,41 @@ def test_near_pole_space(wat, low_exact):
     assert np.abs(srg - sigma_srg(eri, eps, nocc, part, None)).max() > 5e-5
 
 
+def test_undamped_srg_warns_near_a_pole(wat, low_infinite_s):
+    """At srg_s = None 'srg' is Eq. 42: undamped, with the diagonal of
+    'mode_a'. On casida it therefore warns of an active orbital near a pole
+    as 'mode_a' does (the same orbital, the named flag 'sigma_near_pole' in
+    the energies), and neither message calls 'srg' finite everywhere: what
+    is bounded near a pole is 'srg' with a finite srg_s, which does not warn
+    (`test_near_pole_space`)."""
+    _, _, eps, nocc = wat
+    aspace = _high_virtual(eps, nocc)
+    part = partition(aspace, eps)
+    found = {}
+    for sigma in ('srg', 'mode_a'):
+        with pytest.warns(rpa.SigmaNearPoleWarning,
+                          match=r'orbital 7 \(') as rec:
+            found[sigma] = rpa.embedding_self_energy(low_infinite_s, part,
+                                                     sigma)
+        text = str(rec[0].message)
+        assert text.startswith(f"sigma={sigma!r}:")
+        assert 'finite everywhere' not in text and 'finite srg_s' in text
+        assert rec[0].filename == __file__
+    assert np.abs(np.diag(found['srg'])
+                  - np.diag(found['mode_a'])).max() < 1e-12
+    with pytest.warns(rpa.SigmaNearPoleWarning, match="'srg' at srg_s = None"):
+        _, _, en = build_effective_hamiltonian(low_infinite_s, aspace,
+                                               sigma='srg', diagnostics=())
+    assert [entry['flag'] for entry in en.numerical_flags] == [
+        'sigma_near_pole']
+
+
 def test_mode_a_margin_uses_srg_s(wat):
     """The margin is pole_margin / sqrt(2 s), with the default s when
     srg_s = None: a margin wide enough to reach the active LUMO warns of it
     and changes no number; the default does not warn; an unknown sigma is
-    refused."""
+    refused. 'srg' warns within that margin at srg_s = None, where it is
+    undamped, and not at a finite srg_s."""
     mf, _, eps, nocc = wat
     part = partition(_contiguous_44(eps, nocc), eps)
     _, hi = rpa.pole_window(run_low_level(mf, method='rpa', df=False), part)
@@ -325,8 +355,15 @@ def test_mode_a_margin_uses_srg_s(wat):
         with pytest.warns(rpa.SigmaNearPoleWarning, match=r'orbital 6 \('):
             got = rpa.embedding_self_energy(low, part, 'mode_a')
         assert np.array_equal(got, quiet)
-        assert np.all(np.isfinite(rpa.embedding_self_energy(low, part,
-                                                            'srg')))
+        if srg_s is None:
+            with pytest.warns(rpa.SigmaNearPoleWarning,
+                              match=r'orbital 6 \('):
+                srg = rpa.embedding_self_energy(low, part, 'srg')
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
+                srg = rpa.embedding_self_energy(low, part, 'srg')
+        assert np.all(np.isfinite(srg))
     with pytest.raises(ValueError, match='sigma'):
         rpa.embedding_self_energy(run_low_level(mf, method='rpa', df=False),
                                   part, 'mode_b')

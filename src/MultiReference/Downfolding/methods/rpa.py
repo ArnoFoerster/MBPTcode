@@ -203,6 +203,17 @@ class RPALowLevel:
         return isinstance(self.nocc, tuple)
 
 
+def _require_factors(low, who):
+    """Refuse (NotImplementedError) a low-level result without three-index
+    factors for `who`: casida on the exact four-index integrals (df=False).
+    Space-time builds its factors from (X, D) and is let through."""
+    if low.mode != 'space-time' and low.factors is None:
+        raise NotImplementedError(
+            f"{who} needs the three-index factors B, which a df=False "
+            f"low-level result (the exact four-index integrals) does not "
+            f"keep: use df=True.")
+
+
 def _refuse_options(opts, which):
     if opts:
         raise TypeError(f"method={METHOD!r} {which} does not take "
@@ -413,19 +424,22 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     if isinstance(mf, scf.uhf.UHF):
         eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
         nocc = unrestricted_nocc(mf.mo_occ)
-        if mode != 'casida':
-            for spin, eps_s, nocc_s in zip(SPINS, eps, nocc):
-                if not 0 < nocc_s < len(eps_s):
-                    raise NotImplementedError(
-                        f"method={METHOD!r} mode={mode!r} needs occupied "
-                        f"and virtual orbitals in both spins: the {spin} "
-                        f"channel has {nocc_s} occupied of {len(eps_s)} "
-                        f"orbitals, so no transition and no mid-gap, which "
-                        f"the frequency grids and the self-energy of this "
-                        f"route are built on. Use mode='casida'.")
+        channels = [(f' in both spins: the {spin} channel', eps_s, nocc_s)
+                    for spin, eps_s, nocc_s in zip(SPINS, eps, nocc)]
     else:
         eps = np.asarray(get_orbital_energies(mf))
         nocc = closed_shell_nocc(mf.mo_occ)
+        channels = [(': the reference', eps, nocc)]
+    if mode != 'casida':
+        for which, eps_s, nocc_s in channels:
+            if not 0 < nocc_s < len(eps_s):
+                raise NotImplementedError(
+                    f"method={METHOD!r} mode={mode!r} needs occupied and "
+                    f"virtual orbitals{which} has {nocc_s} occupied of "
+                    f"{len(eps_s)} orbitals, so no "
+                    f"transition and no mid-gap, which the frequency grids "
+                    f"and the self-energy of this route are built on. Use "
+                    f"mode='casida'.")
     if mode == 'space-time':
         e_c, cache = _space_time(mf, eps, nocc, numerics)
         return RPALowLevel(
@@ -724,7 +738,10 @@ def active_pair_factors(low, part):
     the active columns of the collocation X alone, B_Q,tu = sum_P D_PQ X_Pt
     X_Pu (low.cache['factors']), the factors chi0 is built from. For an
     unrestricted result `part` is the pair (alpha, beta) and the pair of
-    each spin's factors is returned, both on the one auxiliary basis."""
+    each spin's factors is returned, both on the one auxiliary basis. A
+    casida result on the exact integrals (df=False) has no factors and is
+    refused (NotImplementedError)."""
+    _require_factors(low, 'active_pair_factors')
     return _per_channel([_pair_factors(low, c)
                          for c in _channels(low, part)])
 
@@ -758,7 +775,10 @@ def active_polarizability_static(low, part):
     For an unrestricted result `part` is the pair (alpha, beta) and P^A(0)
     the sum of the two spins' active pairs' responses, each
     -2 sum_ia B_ia B_ia^T / delta_ia with that spin's factors and orbital
-    energies: the -4 above is -2g of the one restricted channel."""
+    energies: the -4 above is -2g of the one restricted channel. A casida
+    result on the exact integrals (df=False) has no factors and is refused
+    (NotImplementedError)."""
+    _require_factors(low, 'active_polarizability_static')
     chans = _channels(low, part)
     if low.mode == 'space-time':
         # per spin, on the grid and with the mid-gap P(0) was built with;
@@ -1386,7 +1406,8 @@ def _windows(low, chans):
 class SigmaNearPoleWarning(RuntimeWarning):
     """An active orbital energy lies within the margin of an edge of the
     pole-free window of the environment self-energy, or outside the window:
-    Sigma_bar^E is computed all the same, undamped ('mode_a' on casida) or
+    Sigma_bar^E is computed all the same, undamped ('mode_a', and 'srg' at
+    srg_s = None, on casida) or
     continued from the imaginary axis (imagfrequency, space-time), and is
     unreliable on that orbital."""
 
@@ -1397,14 +1418,19 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
     `pole_window`, or outside it, in any spin channel (one warning, naming
     the spin of each orbital); Sigma_bar is computed all the same. The
     margin: on casida pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when
-    srg_s is None, for sigma='mode_a' alone, pointing to 'srg'; on
+    srg_s is None, for the undamped forms, 'mode_a' and 'srg' at
+    srg_s = None, pointing to 'srg' with a finite srg_s; on
     imagfrequency and space-time the larger of that and continuation_margin
     (the Pade continuation loses accuracy towards the poles), for both
     forms, pointing to casida. stacklevel: as for `flag`, counted from this
     function."""
-    s = DOWNFOLDING_SRG_S if settings.srg_s is None else settings.srg_s
+    damped = settings.srg_s is not None
+    s = settings.srg_s if damped else DOWNFOLDING_SRG_S
     margin = settings.pole_margin / np.sqrt(2.0 * s)
-    why = (f"pole_margin {settings.pole_margin:g} / sqrt(2 s), s = {s:g}")
+    why = (f"pole_margin {settings.pole_margin:g} / sqrt(2 s), s = {s:g}"
+           if damped else
+           f"pole_margin {settings.pole_margin:g} / sqrt(2 s) at the "
+           f"default s = {s:g}, srg_s being None")
     if low.mode != 'casida' and settings.continuation_margin > margin:
         margin = settings.continuation_margin
         why = (f"continuation_margin {margin:g} Ha, the distance beyond "
@@ -1420,10 +1446,18 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
                   for p, e, x in zip(act[bad], eps[bad], dist[bad])]
     if named:
         named = ', '.join(named)
+        # what is bounded near a pole: 'srg' at a finite s, which this run
+        # has unless its srg_s is None
+        cure = ("sigma='srg', finite everywhere" if damped else
+                "sigma='srg' and a finite srg_s (numerics.downfolding.srg_s, "
+                "None in this run), which is damped there")
         if low.mode == 'casida':
-            what = ("'mode_a' is undamped and grows without bound towards a "
-                    "pole, so its elements on these orbitals are dominated by "
-                    "that pole; sigma='srg' is finite everywhere.")
+            form = ("'mode_a' is" if sigma == 'mode_a' else
+                    "'srg' at srg_s = None (s = inf, Eq. 42) is")
+            what = (f"{form} undamped and grows without bound towards a "
+                    f"pole, so its elements on these orbitals are dominated "
+                    f"by that pole; " + ("sigma='srg' is finite everywhere."
+                                         if damped else f"use {cure}."))
         else:
             what = (f"On mode={low.mode!r} it is continued from the imaginary "
                     f"axis without damping (s = inf) and loses accuracy "
@@ -1431,8 +1465,9 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
                     f"been measured off by 1e-4 Ha at 0.16 Ha from the edge "
                     f"and by 7e-4 Ha at 0.09 Ha (water), an error the "
                     f"'sigma_continuation' check does not show. Where that "
-                    f"matters use mode='casida' with sigma='srg', finite "
-                    f"everywhere.")
+                    f"matters use mode='casida' with "
+                    + ("sigma='srg', finite everywhere." if damped
+                       else f"{cure}."))
         flag(
             'sigma_near_pole',
             f"sigma={sigma!r}: active orbitals near a pole of the "
@@ -1468,11 +1503,13 @@ def embedding_self_energy(low, part, sigma):
     RPA's W and the mean-field energies.
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
-    sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s (None: Eq. 42),
-        finite everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
+    sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
+        everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
         (SigmaNearPoleWarning, naming the orbitals) when an active energy
         is within pole_margin/sqrt(2 s) of the pole-free window's edge or
-        outside it (`pole_window`), and is computed all the same.
+        outside it (`pole_window`), and is computed all the same. At
+        srg_s = None 'srg' is Eq. 42, undamped like 'mode_a' and with its
+        diagonal, and warns the same way.
     imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
         continued once and evaluated per element (`continued_self_energy`):
         'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
@@ -1505,7 +1542,9 @@ def _embedding(low, part, sigma, infinite=False, stacklevel=3):
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
     chans = _channels(low, part)
-    if sigma == 'mode_a' or low.mode != 'casida':
+    # 'srg' at a finite s is bounded near a pole and needs no warning on
+    # casida; at srg_s = None it is as undamped as 'mode_a'
+    if sigma == 'mode_a' or low.mode != 'casida' or settings.srg_s is None:
         _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
     sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
                                            infinite)
@@ -1909,8 +1948,9 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
         space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
-        computed with a SigmaNearPoleWarning ('mode_a' on casida; both
-        forms on the other routes, pointing to casida), and refused only
+        computed with a SigmaNearPoleWarning ('mode_a', and 'srg' at
+        srg_s = None, on casida; both forms on the other routes, pointing
+        to casida), and refused only
         when it is not finite (`embedding_self_energy`). The
         names in any case and with '-' or '_' ('SRG', 'mode-a'), as
         screening; anything but None and those is refused.
