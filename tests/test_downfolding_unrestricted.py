@@ -698,6 +698,21 @@ def test_pair_factor_functions_need_the_three_index_factors(oh, oh_low):
     assert b_alpha.shape[1:] == b_beta.shape[1:] == (4, 4)
 
 
+def test_a_mean_field_changed_after_the_run_is_refused():
+    """As for a restricted reference: a UHF object converged again at
+    another bond length does not go with the low-level result of the first
+    one, and the build is refused."""
+    mf = unrestricted(OH, 1)
+    spaces = _unequal_cores(mf)
+    low = run_low_level(mf, method='rpa')
+    build_effective_hamiltonian(low, spaces)
+    mf.mol.set_geom_('O 0 0 0; H 0 0 1.1')
+    mf.kernel()
+    with pytest.raises(ValueError,
+                       match='mean field has changed.*run_low_level'):
+        build_effective_hamiltonian(low, spaces)
+
+
 def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
     """The functions of the RPA method take one Partition with a restricted
     result and the pair (alpha, beta) with an unrestricted one."""

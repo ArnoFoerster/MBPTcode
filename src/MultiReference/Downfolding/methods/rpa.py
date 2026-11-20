@@ -203,6 +203,31 @@ class RPALowLevel:
         return isinstance(self.nocc, tuple)
 
 
+def _require_current_mean_field(low):
+    """Refuse (ValueError) a low-level result whose mean field has changed
+    since the run: the orbital energies or the occupied counts of low.mf
+    are no longer those the result holds. `build_effective_hamiltonian`
+    reads the orbitals, the core Hamiltonian and E_nuc from low.mf itself,
+    so H_eff would mix them with the screening, the self-energy and E_c of
+    the orbitals of the run."""
+    mf = low.mf
+    if low.unrestricted:
+        now = (get_orbital_energies(mf), unrestricted_nocc(mf.mo_occ))
+        same = (all(np.array_equal(a, b) for a, b in zip(low.eps, now[0]))
+                and tuple(low.nocc) == tuple(now[1]))
+    else:
+        same = (np.array_equal(low.eps, get_orbital_energies(mf))
+                and low.nocc == closed_shell_nocc(mf.mo_occ))
+    if not same:
+        raise ValueError(
+            f"method={METHOD!r}: the mean field has changed since "
+            f"run_low_level (its orbital energies or occupations are no "
+            f"longer those of this low-level result), so the screening, "
+            f"the self-energy and E_c kept here belong to other orbitals "
+            f"than the ones the Hamiltonian would be built from. Call "
+            f"run_low_level again on the mean field as it is now.")
+
+
 def _require_factors(low, who):
     """Refuse (NotImplementedError) a low-level result without three-index
     factors for `who`: casida on the exact four-index integrals (df=False).
@@ -1977,8 +2002,14 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
     (low.factors or low.eri), not the exact v of H_eff. 'bare'
     keeps E_c[v] - E_c^A[v], the mechanical embedding.
+
+    Refused (ValueError) when the mean field of `low` has changed since the
+    run, e.g. the same object converged at another geometry: the driver
+    reads the orbitals from the mean field, and they would no longer be
+    those of the screening kept here.
     """
     _refuse_options(opts, 'terms')
+    _require_current_mean_field(low)
     names = _diagnostic_names(diagnostics)
     screening = choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)

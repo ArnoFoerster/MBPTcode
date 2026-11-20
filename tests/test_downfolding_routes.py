@@ -366,6 +366,32 @@ def _same(a, b):
     assert e1.numerical_flags == e2.numerical_flags
 
 
+MOVED = 'O 0 0 0.1173; H 0 0.9 -0.55; H 0 -0.9 -0.55'
+
+
+@pytest.mark.parametrize('mode', ['casida', 'imagfrequency'])
+def test_a_mean_field_changed_after_the_run_is_refused(mode):
+    """A low-level result holds the screening and E_c of the orbitals it was
+    run on, and the build reads the orbitals, the core Hamiltonian and E_nuc
+    from the mean-field object itself. When that object is converged again
+    at another geometry, a build on the old result is refused (ValueError)
+    and not a mixture of the two; a new run on the changed mean field
+    builds. (Before the check, casida returned E_0 = -69.783 Ha without a
+    word; the new run gives -69.083 Ha.)"""
+    mf = water()
+    space = _aspace(mf, 'contiguous')
+    low = run_low_level(mf, method='rpa', mode=mode)
+    build_effective_hamiltonian(low, space)
+    mf.mol.set_geom_(MOVED)
+    mf.kernel()
+    with pytest.raises(ValueError,
+                       match='mean field has changed.*run_low_level'):
+        build_effective_hamiltonian(low, space)
+    _, _, en = build_effective_hamiltonian(
+        run_low_level(mf, method='rpa', mode=mode), space)
+    assert np.isfinite(en.e0)
+
+
 def test_low_reuse():
     """One imagfrequency low-level result, used for crpa, crpa_ph, bare and
     a second active space in turn, gives each the same H_eff as a fresh

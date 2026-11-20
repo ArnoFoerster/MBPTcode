@@ -51,6 +51,9 @@ roots = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
 not know the active space; `build_effective_hamiltonian` then makes the
 effective Hamiltonian of one active space. One `low` serves any number of
 active spaces and screenings, so a comparison loop pays for the RPA once.
+It belongs to the mean field as it was at the run: when the same `mf`
+object is converged again (another geometry in a scan), a build on the old
+`low` is refused (`ValueError`), and `run_low_level` has to be called again.
 `method='hf'` takes no options: `run_low_level(mf, method='hf')`, and
 `build_effective_hamiltonian(low_hf, active)` is CASCI.
 
