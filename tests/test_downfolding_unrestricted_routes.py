@@ -53,6 +53,7 @@ from functools import cache
 import numpy as np
 import pytest
 from pyscf import gto, scf
+from scipy.sparse.linalg import ArpackNoConvergence
 
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting
@@ -374,25 +375,38 @@ def test_ec_active_casida_diagnostic(ref, screening):
 @pytest.mark.parametrize('ref', REFS)
 def test_lowest_excitation_of_two_spins(ref):
     """Omega_min of the pole-free window on imagfrequency, which
-    diagonalizes nothing: the lowest root of the dense two-spin Casida
-    problem on the route's factors, i.e. the casida route's lowest Omega;
-    the windows of both spins follow. Measured: 0 difference (0.662550 Ha
-    for OH with 58 pairs, 0.674525 for CH2 with 70)."""
+    diagonalizes nothing: the lowest root of the two-spin problem on the
+    stacked pairs of the route's factors, found without building it, i.e.
+    the casida route's lowest Omega; the windows of both spins follow.
+    Measured: 1.1e-16 and 4.2e-15 (0.662550 Ha for OH with 58 pairs,
+    0.674525 for CH2 with 70). No Casida matrix is built for it."""
     low, cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     om = rpa.lowest_excitation(low)
-    assert abs(om - cas.omega.min()) < 1e-9
+    assert abs(om - cas.omega.min()) < 1e-10
     assert low.cache['omega_min'] == om
-    assert rpa.lowest_excitation(low, solver='dense') == om
     parts = _parts(ref, 'unequal_cores')
     for ours, casida in zip(rpa.pole_window(low, parts),
                             rpa.pole_window(cas, parts)):
-        assert np.abs(np.subtract(ours, casida)).max() < 1e-9
-    with pytest.raises(ValueError, match="'dense', 'bound'"):
-        rpa.lowest_excitation(low, solver='davidson')
+        assert np.abs(np.subtract(ours, casida)).max() < 1e-10
+    fresh = run_low_level(_mean_field(ref), method='rpa',
+                          mode='imagfrequency')
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(rpa, 'CasidaSolver', _refuse_a_casida_problem)
+        assert rpa.lowest_excitation(fresh) == om
 
 
-def test_gap_bound_above_the_dense_limit(monkeypatch):
-    """Above the dense limit there is no two-spin Davidson, and Omega_min is
+def _refuse_a_casida_problem(*args, **kwargs):
+    raise AssertionError('a Casida problem was built for Omega_min')
+
+
+def _no_convergence(*args, **kwargs):
+    """Stands in for the Lanczos solver: the iteration gives up."""
+    raise ArpackNoConvergence('ARPACK error -1: No convergence (stood in)',
+                              np.zeros(0), np.zeros((0, 0)))
+
+
+def test_gap_bound_when_the_lanczos_fails(monkeypatch):
+    """When the iteration for Omega_min does not finish, Omega_min is
     replaced by the exact lower bound of the direct RPA, the smallest
     orbital-energy gap over both spins. The window is then narrower than the
     true one, so the near-pole warning can come too often, never too rarely.
@@ -400,7 +414,7 @@ def test_gap_bound_above_the_dense_limit(monkeypatch):
     'sigma_pole_window_bound' is with every later use of the cached value.
     Measured for OH: the bound is the beta gap, 0.6295 Ha, 0.033 below the
     true Omega_min (CH2: the alpha gap, 0.015 below)."""
-    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 10)
+    monkeypatch.setattr(rpa, 'eigsh', _no_convergence)
     mf = _mean_field('oh')
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
     gap = min(eps[nocc] - eps[nocc - 1]
@@ -410,7 +424,7 @@ def test_gap_bound_above_the_dense_limit(monkeypatch):
     raised = []
     with collecting(raised), pytest.warns(
             rpa.SigmaNearPoleWarning,
-            match='smallest orbital-energy gap') as rec:
+            match='did not finish.*smallest orbital-energy gap') as rec:
         windows = rpa.pole_window(low, parts)
     assert len(rec) == 1
     assert [entry['flag'] for entry in raised] == ['sigma_pole_window_bound']
@@ -425,12 +439,6 @@ def test_gap_bound_above_the_dense_limit(monkeypatch):
         with collecting(again):
             assert rpa.pole_window(low, parts) == windows
     assert again == raised
-    # the bound, asked for by name, whatever the size
-    assert rpa.lowest_excitation(_low('oh', 'imagfrequency'),
-                                 solver='dense') > om
-    with pytest.warns(rpa.SigmaNearPoleWarning):
-        assert rpa.lowest_excitation(_low('oh', 'imagfrequency'),
-                                     solver='bound') == gap
 
 
 # the spaces whose active orbitals are inside both pole-free windows by more
@@ -595,7 +603,7 @@ def test_the_bound_reaches_every_build(monkeypatch):
     """With Omega_min replaced by its bound, the flag is in the
     numerical_flags of every Hamiltonian built with Sigma^E on that
     low-level result, and the warning is issued by the first alone."""
-    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 10)
+    monkeypatch.setattr(rpa, 'eigsh', _no_convergence)
     low = run_low_level(_mean_field('oh'), method='rpa', mode='imagfrequency')
     spaces = _spaces('oh', 'unequal_cores')
     with pytest.warns(rpa.SigmaNearPoleWarning,
@@ -962,17 +970,17 @@ def test_space_time_e0_terms_match_casida(ref, which, screening):
 
 @pytest.mark.parametrize('ref', REFS)
 def test_space_time_lowest_excitation(ref):
-    """Omega_min on space-time: the lowest root of the dense two-spin Casida
-    problem on the ISDF factors, the lowest Omega of the casida reference on
-    those factors. Measured: 0 difference (0.667597 Ha for OH, 0.615249 for
-    CH2)."""
+    """Omega_min on space-time: the lowest root of the two-spin problem on
+    the ISDF factors, applied through each spin's collocation, i.e. the
+    lowest Omega of the casida reference on those factors. Measured:
+    1.3e-15 and 2.1e-15 (0.667597 Ha for OH, 0.615249 for CH2)."""
     low, cas = _st_low(ref), _st_casida(ref)
-    om = rpa.lowest_excitation(low, solver='dense')
-    assert abs(om - cas.omega.min()) < 1e-9
+    om = rpa.lowest_excitation(low)
+    assert abs(om - cas.omega.min()) < 1e-10
     parts = _st_parts(ref, 'unequal_cores')
     for ours, casida in zip(rpa.pole_window(low, parts),
                             rpa.pole_window(cas, parts)):
-        assert np.abs(np.subtract(ours, casida)).max() < 1e-9
+        assert np.abs(np.subtract(ours, casida)).max() < 1e-10
 
 
 @pytest.mark.parametrize('ref', REFS)

@@ -333,12 +333,9 @@ beta orbital), pointing to casida. On `'space-time'` the ISDF factors hold
 one collocation per spin on a shared Coulomb factor; the `'rows'`
 realization of the fit builds one collocation and is refused for an
 unrestricted reference (`numerics.isdf.fit='replicated'`, the default,
-works). On the numerical routes Omega_min is the lowest root of the dense
-two-spin problem up to 2000 pairs, both spins counted. Above that there is
-no solver for the one root, and it is replaced by its exact lower bound, the
-smallest orbital-energy gap of the two spins, with a `SigmaNearPoleWarning`
-and the named flag `'sigma_pole_window_bound'`; the windows are then
-narrower still. `'mrpa'` is casida only, as for a restricted reference.
+works). On the numerical routes Omega_min is the lowest root of the
+two-spin problem on the stacked pairs, found as for a restricted reference
+(below). `'mrpa'` is casida only, as for a restricted reference.
 
 **Not supported.** An open shell run restricted (ROHF/ROKS) is refused: its
 orbitals are not canonical for the alpha and beta Fock operators; run it as
@@ -509,16 +506,28 @@ not reliable**: on water its elements on the named orbitals were off by
 1e-4 Eh at 0.16 Ha from the edge, 3.5e-4 at 0.11 Ha and 7.0e-4 at 0.09 Ha,
 and no case closer than that or outside the window was measured. The
 `'sigma_continuation'` spread does not show this error (3.6e-5 at 0.09 Ha),
-so the pole warning is the only sign of it. Omega_min of the window
-is the lowest root of the same Casida problem on the route's own v (dense
-up to 2000 particle-hole pairs, `DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS`, the
-Davidson for one root above that, started from at least 10 unit vectors),
-computed once and kept. Omega_min changes no number of H_eff, only where
-the pole warning starts, so a Davidson that does not converge does not stop
-the build: its estimate is kept with the Davidson's own named flag and a
-`SigmaNearPoleWarning` (named flag `'sigma_pole_window_unconverged'`). That
-estimate can lie above Omega_min, so the window may be too wide and an
-orbital near a pole may then go without its warning.
+so the pole warning is the only sign of it.
+
+Omega_min of the window is the lowest root of the same Casida problem on
+the route's own v, for one spin channel or two, computed once and kept. It
+is found without building that problem. In the direct RPA A - B is the
+diagonal delta of orbital-energy differences, so the Omega^2 are the
+eigenvalues of M = delta^1/2 (delta + 2g B^T B) delta^1/2, B the
+occupied-virtual fitting factors. A Lanczos iteration on M^-1, which the
+Woodbury identity gives from the P(0) the route already has, finds the
+lowest one in some tens of applications of B (through the collocation on
+space-time, without the three-index object); Omega_min^2 is then the
+Rayleigh quotient of M itself, so the quadrature error of space-time's
+P(0) does not reach it. It agrees with the casida route's lowest root to
+4e-14 Ha or better on water, NH3, N2, benzene, OH and CH2.
+
+Omega_min changes no number of H_eff, only where the pole warning starts,
+so an iteration that does not finish does not stop the build. Omega_min is
+then replaced by its exact lower bound, the smallest orbital-energy gap,
+with a `SigmaNearPoleWarning` and the named flag
+`'sigma_pole_window_bound'`. The window is then narrower than the true one:
+the near-pole warning can come for an orbital that is not near a pole,
+never the other way.
 
 The measured accuracy: the exact Casida S^E fed through the continuation
 alone misses the exact Sigma_bar by at most 1.8e-7 Eh per element on
@@ -706,8 +715,7 @@ with the paper: Cartesian ones are far further from its numbers.
 - For unrestricted references: ROHF/ROKS; spin-adapted states (H_eff
   conserves S_z only); the DMRG and coupled-cluster backends on a
   spin-resolved H_eff; selecting the two active spaces by character or by
-  alpha-beta overlap; a Davidson for Omega_min of the two-spin problem
-  above 2000 pairs (a lower bound is used).
+  alpha-beta overlap.
 - Further low-level methods (MP2, TDHF/BSE, CC polarizability), a MACIS
   backend and MPI-parallel downfolding.
 

@@ -346,18 +346,17 @@ DOWNFOLDING_SIGMA_CONTINUATION_WARN = 1e-4
 DOWNFOLDING_CONTINUATION_MARGIN = 0.26
 # Omega_min of the pole-free window on the numerical routes (imagfrequency,
 # space-time), which diagonalize nothing, is the lowest root of the full
-# Casida problem: by the dense solve up to this many particle-hole pairs, by
-# the Davidson (one root) above. The dense solve is N^6 for one number, which
-# defeats an N^4 or N^3 route long before its (A, B) stops fitting in memory
-# (BSE_DENSE_MAX_NOV = 12000); at 2000 pairs it takes a few seconds.
-DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS = 2000
-# The fewest unit vectors that Davidson for the one root Omega_min starts
-# from: the count the run's own Davidson seeds (BSE_DAVIDSON_NROOTS = 5
-# roots, DAVIDSON_GUESS_FACTOR = 2 each), more when the run asks for more. A
-# one-root guess (5 vectors) can miss the irrep of the lowest root, whose
-# stand-in then lies above Omega_min and widens the pole-free window in the
-# unsafe direction.
-DOWNFOLDING_OMEGA_DAVIDSON_GUESS = 10
+# Casida problem, found by a Lanczos iteration that never builds it
+# (`rpa.lowest_excitation`). The seed of its start vector. The vector is
+# pseudo-random because it has to overlap with the lowest root: one with
+# equal weights on degenerate pairs is orthogonal to their antisymmetric
+# combinations, and such a combination can be the lowest root, since its
+# transition density vanishes and the Coulomb kernel leaves it at the
+# orbital-energy gap. N2 in symmetry-adapted orbitals is the case:
+# pi_x -> pi*_y minus pi_y -> pi*_x, where an equal-weight start returned
+# the next root, 0.056 Ha (6-31G) and 0.049 Ha (cc-pVDZ) too high. The seed
+# is fixed so that Omega_min is the same number on every run.
+DOWNFOLDING_OMEGA_LANCZOS_SEED = 0
 # Working set, in GB, of one block of excitations of the SRG Sigma_bar^E
 # (`rpa.srg_self_energy`, Eq. 44) when numerics.layout.tile_gb is None: the
 # kernel (D_tr + D_ur)/(D_tr^2 + D_ur^2) [1 - exp(-(D_tr^2 + D_ur^2) s)] is

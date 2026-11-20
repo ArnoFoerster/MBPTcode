@@ -39,8 +39,8 @@ route matches casida.
 On space-time S^E(mu + i w) is sampled as on imagfrequency, on the ISDF
 factors and their W: against the Casida problem on the same factors it agrees
 on the nodes and after continuation, also for virtuals far from the gap, and
-the 0.26 Ha margin holds there too. Omega_min (dense or Davidson) is the
-lowest root on the ISDF v. Its agreement with casida on the RI factors is
+the 0.26 Ha margin holds there too. Omega_min is the lowest root on the
+ISDF v. Its agreement with casida on the RI factors is
 in tests/test_downfolding_routes.py.
 """
 import json
@@ -52,8 +52,9 @@ import numpy as np
 import pytest
 from pyscf import gto, scf
 
+from scipy.sparse.linalg import ArpackNoConvergence
+
 from src.Base.numerics.constants import (DOWNFOLDING_CONTINUATION_MARGIN,
-                                         DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
                                          DOWNFOLDING_POLE_MARGIN,
                                          DOWNFOLDING_SRG_S)
 from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
@@ -743,15 +744,14 @@ def test_sigma_bar_matches_casida_benzene():
     three-index object at srg_s = None, the case the route's tolerance is
     set on. Target 1e-4 Eh per element; measured 1.6e-7 for both
     forms (|Sigma_bar| up to 4.5e-2; the Pade error alone is 1.8e-7,
-    test_pade_alone), the lowest root (Davidson) 2.1e-14 from casida's."""
+    test_pade_alone), the lowest root 2.0e-14 from casida's."""
     mf, part = _pinned_mean_field('benzene', density_fit=True)
     infinite = Numerics(downfolding={'srg_s': None})
     low_if = run_low_level(mf, method='rpa', mode='imagfrequency',
                            numerics=infinite)
     low_cas = run_low_level(mf, method='rpa', mode='casida',
                             numerics=infinite)
-    assert abs(rpa.lowest_excitation(low_if, solver='davidson')
-               - low_cas.omega.min()) < 1e-8
+    assert abs(rpa.lowest_excitation(low_if) - low_cas.omega.min()) < 1e-10
     for sigma in ('srg', 'mode_a'):
         got = rpa.embedding_self_energy(low_if, part, sigma)
         want = rpa.embedding_self_energy(low_cas, part, sigma)
@@ -790,24 +790,26 @@ def test_sigma_env_imag_axis_against_the_pole_sum(wat):
 
 def test_lowest_excitation(wat):
     """Omega_min on imagfrequency (no eigenvectors kept) is the lowest RPA
-    root, by the dense Casida solve when the pair space is small and by the
-    Davidson otherwise; both equal the casida route's lowest omega (measured
-    0.0 dense, the same solver, and 1.7e-15 Davidson), cached in
-    low.cache['omega_min']; so the pole-free windows agree. Without an
-    environment the window is the whole axis and no root is solved for."""
+    root, found without building the Casida problem (`lowest_excitation`):
+    it equals the casida route's lowest omega (measured 1.8e-15; bar
+    1e-10), is cached in low.cache['omega_min'], and is the same number on a
+    second run, the start vector being fixed; so the pole-free windows
+    agree. Without an environment the window is the whole axis and no root
+    is solved for."""
     mf, _, eps, nocc = wat
     low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
     low_cas = run_low_level(mf, method='rpa', mode='casida')
     ref = low_cas.omega.min()
     assert rpa.lowest_excitation(low_cas) == ref
-    for solver in ('dense', 'davidson'):
-        assert abs(rpa.lowest_excitation(low_if, solver=solver) - ref) < 1e-8
     assert 'omega_min' not in low_if.cache
     om = rpa.lowest_excitation(low_if)
+    assert abs(om - ref) < 1e-10
     assert low_if.cache['omega_min'] == om
+    assert rpa.lowest_excitation(
+        run_low_level(mf, method='rpa', mode='imagfrequency')) == om
     part = partition(_contiguous_44(eps, nocc), eps)
     assert np.allclose(rpa.pole_window(low_if, part),
-                       rpa.pole_window(low_cas, part), atol=1e-8, rtol=0)
+                       rpa.pole_window(low_cas, part), atol=1e-10, rtol=0)
     fresh = run_low_level(mf, method='rpa', mode='imagfrequency')
     every = partition(ActiveSpace.from_counts(eps, nocc, nocc,
                                               len(eps) - nocc), eps)
@@ -1074,94 +1076,146 @@ def test_space_time_samples_the_fitted_self_energy(nh3_space_time):
     assert low.cache['w_grid'][1] is w
 
 
-def test_lowest_excitation_davidson_is_hardened(wat, monkeypatch):
-    """The Davidson for Omega_min solves one root from at least
-    DOWNFOLDING_OMEGA_DAVIDSON_GUESS (10) unit vectors -- the count the
-    run's own Davidson (BSE_DAVIDSON_NROOTS roots, guess_factor each) seeds,
-    more when the run asks for more: a guess that misses the irrep of the
-    lowest root gives a root above Omega_min, which widens the pole-free
-    window in the unsafe direction. Its root is the dense one (water/6-31G,
-    measured 1.8e-15; bar 1e-8).
+def _no_convergence(*args, **kwargs):
+    """Stands in for the Lanczos solver: the iteration gives up."""
+    raise ArpackNoConvergence('ARPACK error -1: No convergence (stood in)',
+                              np.zeros(0), np.zeros((0, 0)))
 
-    An unconverged root (here forced by max_cycle = 1) does not stop the
-    build, since Omega_min decides only the near-pole warning: its estimate
-    is kept with the Davidson's own named flag and a SigmaNearPoleWarning,
-    the flag 'sigma_pole_window_unconverged', which says that the window
-    may be too wide; the flags reach the energies of every build on that
-    result. Sigma_bar is unchanged by it."""
+
+def _n2():
+    """N2/6-31G RHF, density fitted, in symmetry-adapted orbitals: pi_y and
+    pi*_y are pi_x and pi*_x turned by 90 degrees, with the same phases."""
+    mf = scf.RHF(gto.M(atom='N 0 0 0; N 0 0 1.1', basis='6-31g', verbose=0,
+                       symmetry=True)).density_fit()
+    mf.conv_tol = 1e-11
+    return mf.run()
+
+
+def _rhf(atom, basis):
+    """RHF without a density fit: the three-index factors of both routes
+    are then the eigendecomposition of the exact integrals."""
+    mf = scf.RHF(gto.M(atom=atom, basis=basis, verbose=0))
+    mf.conv_tol = 1e-11
+    return mf.run()
+
+
+def test_omega_min_builds_no_casida_problem(wat, monkeypatch):
+    """Omega_min on a numerical route comes from applications of the
+    occupied-virtual factors alone: no Casida matrix is built or
+    diagonalized for it (a stand-in for the dense solver that fails when
+    called is never called), and it is the casida route's lowest root."""
     mf = wat[0]
-    seen = []
-    solve = rpa.solve_casida_davidson
-
-    def spy(*args, **kwargs):
-        seen.append(kwargs)
-        return solve(*args, **kwargs)
-
-    monkeypatch.setattr(rpa, 'solve_casida_davidson', spy)
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
-    davidson = rpa.lowest_excitation(low, solver='davidson')
-    assert abs(davidson - rpa.lowest_excitation(low, solver='dense')) < 1e-8
-    bse = seen[-1]['numerics'].bse
-    assert bse.nroots == 1
-    assert bse.guess_factor == DOWNFOLDING_OMEGA_DAVIDSON_GUESS == 10
-    assert seen[-1]['refuse_unconverged'] is False
-    wide = run_low_level(mf, method='rpa', mode='imagfrequency',
-                         numerics=Numerics(bse={'nroots': 6,
-                                                'guess_factor': 3}))
-    rpa.lowest_excitation(wide, solver='davidson')
-    assert seen[-1]['numerics'].bse.guess_factor == 18
-    starved = run_low_level(mf, method='rpa', mode='imagfrequency',
-                            numerics=Numerics(bse={'max_cycle': 1}))
-    with pytest.warns(RuntimeWarning) as rec:
-        rough = rpa.lowest_excitation(starved, solver='davidson')
-    near = [str(w.message) for w in rec
-            if w.category is rpa.SigmaNearPoleWarning]
-    assert len(near) == 1 and 'pole-free window may be too wide' in near[0]
-    assert any('unconverged' in str(w.message) for w in rec
-               if w.category is RuntimeWarning)
-    assert np.isfinite(rough) and rough >= davidson - 1e-8
+    ref = run_low_level(mf, method='rpa', mode='casida').omega.min()
 
-    # through the build, with the dense rule bypassed: H_eff is built, the
-    # flags are in its energies and in those of a later build on the cache
-    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 0)
-    starved = run_low_level(mf, method='rpa', mode='imagfrequency',
-                            numerics=Numerics(bse={'max_cycle': 1}))
-    space = _contiguous_44(*wat[2:])
+    def refuse(*args, **kwargs):
+        raise AssertionError('a Casida problem was built for Omega_min')
+
+    monkeypatch.setattr(rpa, 'CasidaSolver', refuse)
+    assert abs(rpa.lowest_excitation(low) - ref) < 1e-10
+
+
+@pytest.mark.parametrize('case', ['two pairs', 'three pairs', 'n2'])
+def test_lowest_excitation_of_small_and_degenerate_pair_spaces(case):
+    """The solver at its edges, against the casida route on the same
+    factors (bar 1e-10): two particle-hole pairs (He/6-311G) and three
+    (H2/6-31G), where the Lanczos space is the whole space; and N2 in
+    symmetry-adapted orbitals. Its lowest root is the combination
+    pi_x -> pi*_y minus pi_y -> pi*_x, whose transition density vanishes, so
+    it lies at the orbital-energy gap itself (0.770970 Ha), and a start
+    vector with equal weights on those two pairs is orthogonal to it: with
+    such a start the iteration returns the next root, 0.056 Ha too high,
+    which would widen the pole-free window (tried; this test fails then).
+    The pseudo-random start finds it. Measured: 0.0, 1.1e-16 and 1.4e-14."""
+    mf = {'two pairs': lambda: _rhf('He', '6-311g'),
+          'three pairs': lambda: _rhf('H 0 0 0; H 0 0 0.74', '6-31g'),
+          'n2': _n2}[case]()
+    ref = run_low_level(mf, method='rpa', mode='casida').omega.min()
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    assert abs(rpa.lowest_excitation(low) - ref) < 1e-10
+
+
+def test_lowest_excitation_of_one_pair():
+    """One particle-hole pair is its own root, Omega^2 = delta (delta +
+    4 K), with nothing to iterate. The imagfrequency run itself needs more
+    than one transition energy for its grid, so the result is put together
+    by hand from the casida one of H2 in a minimal basis: its factors and
+    P(0) = -4 B B^T / delta. Measured: 0.0."""
+    cas = run_low_level(_rhf('H 0 0 0; H 0 0 0.74', 'sto-3g'), method='rpa',
+                        mode='casida')
+    assert cas.omega.shape == (1,)
+    b = cas.factors[:, :1, 1:].reshape(-1, 1)
+    p0 = -4.0 * (b @ b.T) / (cas.eps[1] - cas.eps[0])
+    low = rpa.RPALowLevel(
+        mf=cas.mf, mode='imagfrequency', df=True, numerics=None, eps=cas.eps,
+        nocc=1, e_c_full=cas.e_c_full, omega=None, xpy=None,
+        factors=cas.factors, eri=None, cache={'p0': p0})
+    assert abs(rpa.lowest_excitation(low) - cas.omega[0]) < 1e-12
+
+
+def test_omega_min_falls_back_to_the_gap_bound(wat, monkeypatch):
+    """A Lanczos iteration that does not finish does not stop the build
+    and leaves no estimate that could lie above Omega_min: the exact lower
+    bound of the direct RPA, the smallest orbital-energy gap, takes its
+    place, with one SigmaNearPoleWarning and the named flag
+    'sigma_pole_window_bound' in the energies of every build on that
+    result. The window is then narrower than the true one (water: the gap
+    is 0.0228 Ha below Omega_min), the safe side; Sigma_bar and h_eff
+    do not read it."""
+    mf, _, eps, nocc = wat
+    space = _contiguous_44(eps, nocc)
+    gap = eps[nocc] - eps[nocc - 1]
+    true = run_low_level(mf, method='rpa', mode='casida').omega.min()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        g, _, en = build_effective_hamiltonian(starved, space, sigma='srg')
-        _, _, again = build_effective_hamiltonian(starved, space,
-                                                  sigma='srg')
-    names = {f['flag'] for f in en.numerical_flags}
-    assert {'davidson_not_converged', 'sigma_pole_window_unconverged'} <= names
-    assert {f['flag'] for f in again.numerical_flags} == names
-    assert np.all(np.isfinite(g[1]))
+        g_ok, _, en_ok = build_effective_hamiltonian(
+            run_low_level(mf, method='rpa', mode='imagfrequency'), space,
+            sigma='srg')
+    monkeypatch.setattr(rpa, 'eigsh', _no_convergence)
+    low = run_low_level(mf, method='rpa', mode='imagfrequency')
+    with pytest.warns(rpa.SigmaNearPoleWarning,
+                      match='did not finish.*smallest orbital-energy '
+                            'gap') as rec:
+        om = rpa.lowest_excitation(low)
+    assert len(rec) == 1
+    assert om == gap and 1e-3 < true - om < 0.1
+    fresh = run_low_level(mf, method='rpa', mode='imagfrequency')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        g, _, en = build_effective_hamiltonian(fresh, space, sigma='srg')
+        _, _, again = build_effective_hamiltonian(fresh, space, sigma='srg')
+    names = [f['flag'] for f in en.numerical_flags]
+    assert 'sigma_pole_window_bound' in names
+    assert [f['flag'] for f in again.numerical_flags] == names
+    assert 'sigma_pole_window_bound' not in [
+        f['flag'] for f in en_ok.numerical_flags]
+    assert np.array_equal(g[1], g_ok[1])
+    (lo, hi), (lo_ok, hi_ok) = (e.diagnostics['sigma_poles']['window']
+                                for e in (en, en_ok))
+    assert lo_ok < lo and hi < hi_ok
 
 
-def test_lowest_excitation_space_time(nh3_space_time, monkeypatch):
+def test_lowest_excitation_space_time(nh3_space_time):
     """Omega_min on space-time is the lowest root of the Casida problem on
-    the ISDF v: the dense solve and the Davidson (ISDF block action, one
-    root) agree (measured 3.8e-14) and both are casida's on the RI factors
-    to the ISDF error (2.7e-6; target 1e-5). Dense up to
-    DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs (NH3 has 120), the Davidson
-    above; the window is the route's own, no factors needed."""
+    the ISDF v, with the factors applied through the collocation (the
+    three-index object is never built): it is the lowest root of the dense
+    problem on those same factors (measured 3.8e-14; bar 1e-10, which
+    the quadrature error of the route's P(0), 2e-9 in the inverse the
+    iteration runs on, would miss without the Rayleigh quotient that ends
+    it), and casida's on the RI factors to the ISDF error (2.7e-6; target
+    1e-5). Cached; the window is the route's own."""
     low = nh3_space_time
-    dense = rpa.lowest_excitation(low, solver='dense')
-    davidson = rpa.lowest_excitation(low, solver='davidson')
-    assert abs(dense - davidson) < 1e-10
+    om = rpa.lowest_excitation(low)
+    assert abs(om - _casida_on_the_isdf_factors(low).omega.min()) < 1e-10
     cas = run_low_level(low.mf, method='rpa', mode='casida')
-    assert abs(dense - cas.omega.min()) < 1e-5
+    assert abs(om - cas.omega.min()) < 1e-5
     fresh = run_low_level(low.mf, method='rpa', mode='space-time',
                           numerics=low.numerics)
-    assert rpa.lowest_excitation(fresh) == dense
-    assert fresh.cache['omega_min'] == dense
+    assert rpa.lowest_excitation(fresh) == om
+    assert fresh.cache['omega_min'] == om
     part = _nh3_part(low.mf, [2, 3, 4], [5, 6, 7])
     assert np.allclose(rpa.pole_window(fresh, part),
                        rpa.pole_window(cas, part), atol=1e-5, rtol=0)
-    monkeypatch.setattr(rpa, 'DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS', 100)
-    fresh = run_low_level(low.mf, method='rpa', mode='space-time',
-                          numerics=low.numerics)
-    assert rpa.lowest_excitation(fresh) == davidson
 
 
 def test_space_time_continuation_margin_near_the_edge(nh3_space_time):

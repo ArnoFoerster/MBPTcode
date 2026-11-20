@@ -78,12 +78,12 @@ from typing import Optional
 import numpy as np
 from pyscf import scf
 from scipy.linalg import cho_factor, cho_solve
+from scipy.sparse.linalg import ArpackError, LinearOperator, eigsh
 
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting, flag
-from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
-                                         DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS,
-                                         DOWNFOLDING_OMEGA_DAVIDSON_GUESS,
+from src.Base.numerics.constants import (BYTES_PER_GB,
+                                         DOWNFOLDING_OMEGA_LANCZOS_SEED,
                                          DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SIGMA_TILE_GB,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
@@ -107,7 +107,6 @@ from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import CasidaSolver
-from src.SingleReference.LinearResponse.davidson import solve_casida_davidson
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
 from src.SingleReference.LinearResponse.linear_response import \
@@ -1256,49 +1255,32 @@ def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
         return 0.5 * (half + half.T)
 
 
-def lowest_excitation(low, solver=None):
+def lowest_excitation(low):
     """Omega_min, the lowest excitation energy of the full RPA (None without
     a particle-hole pair), the one number the pole-free window needs.
 
     casida: the lowest of low.omega. imagfrequency and space-time, which
-    diagonalize nothing: the lowest root of the same restricted singlet
-    Casida problem on the route's own v (low.factors, or the ISDF factors
-    (X, D) of low.cache['factors']), A = delta + 2K, B = 2K; by the dense
-    solve up to DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS pairs and above that by
-    the Davidson for one root (the DF or the ISDF block action, the run's
-    other Davidson settings), which never builds the matrix: above that
-    size a dense solve for this one number would cost more than the route's
-    own RPA. Cached in low.cache['omega_min'] on the first request.
-    solver: 'dense' or 'davidson' forces that solver and bypasses the cache
-    (for tests).
+    diagonalize nothing: the lowest root of the same Casida problem on the
+    route's own v, for one spin channel or two, found without building it
+    (`_lowest_root`). Cached in low.cache['omega_min'] on the first request.
 
-    An unrestricted result: the lowest root of the two-spin problem on the
-    stacked pairs (A = delta + K, B = K), by the dense solve up to the same
-    number of pairs, both spins counted. Above it there is no two-spin
-    Davidson, and Omega_min is replaced by its exact lower bound, the
-    smallest orbital-energy gap of the two spins (`_gap_bound`), with a
-    SigmaNearPoleWarning and the named flag 'sigma_pole_window_bound'.
-    solver: 'dense' or 'bound' there.
+    When that iteration does not finish, Omega_min is replaced by its exact
+    lower bound, the smallest orbital-energy gap (`_gap_bound`), with a
+    SigmaNearPoleWarning and the named flag 'sigma_pole_window_bound': an
+    unfinished estimate could lie above Omega_min and widen the window in
+    the unsafe direction, the bound cannot.
     """
     if low.mode == 'casida':
         return float(low.omega.min()) if low.omega.size else None
 
     def solved():
         chans = _reference_channels(low)
-        n_pair = sum(c.nocc * (len(c.eps) - c.nocc) for c in chans)
-        if not n_pair:
-            return None
-        dense = n_pair <= DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS
-        if low.unrestricted:
-            how = choice(solver or ('dense' if dense else 'bound'),
-                         ('dense', 'bound'), 'solver')
-            return _lowest_dense(low) if how == 'dense' else _gap_bound(low)
-        rule = 'dense' if dense else 'davidson'
-        how = choice(solver or rule, ('dense', 'davidson'), 'solver')
-        return _lowest_dense(low) if how == 'dense' else _lowest_davidson(low)
+        try:
+            return _lowest_root(low, chans)
+        except (ArpackError, np.linalg.LinAlgError) as failure:
+            return _gap_bound(low, chans, failure)
 
-    return solved() if solver is not None else _cached(low, 'omega_min',
-                                                       solved)
+    return _cached(low, 'omega_min', solved)
 
 
 def _cached(low, key, build):
@@ -1321,102 +1303,113 @@ def _cached(low, key, build):
     return low.cache[key]
 
 
-def _lowest_dense(low):
-    """The lowest root of the dense Casida problem on the occupied-virtual
-    factors of the route, A = delta + g K, B = g K with K = B_ov^T B_ov: the
-    restricted singlet one (g = 2), or the two-spin one on the stacked pairs
-    (g = 1). B_ov from low.factors or, on space-time, sum_P D_PQ X_Pi
-    X_Pa."""
-    chans = _reference_channels(low)
-    g = _spin_weight(chans)
-    if low.mode == 'space-time':
-        d = low.cache['factors'][1]
-        b_ov = []
-        for chan in chans:
-            x, nocc = chan.collocation, chan.nocc
-            pairs = x[:, :nocc, None] * x[:, None, nocc:]
-            b_ov.append(d.T @ pairs.reshape(len(x), -1))
-        b_ov = _join(b_ov, axis=1)
-    else:
+def _pair_actions(low, chans):
+    """(apply, apply_t) of the occupied-virtual factors B (naux, n_pair) on
+    the stacked (i, a) pairs of the spin channels: u -> B u and w -> B^T w.
+    imagfrequency: the ov block of the three-index factors, joined once.
+    space-time: through each spin's collocation, B u = D^T [sum_ia X_Pi
+    X_Pa u_ia]_P and B^T w = X_i^T diag(D w) X_a, at M nocc nvirt per
+    application and without the three-index object."""
+    if low.mode != 'space-time':
         b_ov = _join([_ov_factors(c) for c in chans], axis=1)
-    k = b_ov.T @ b_ov
-    a = g * k
-    a[np.diag_indices_from(a)] += _join([_delta(c) for c in chans])
-    return float(np.min(CasidaSolver(a, g * k).solve(
-        numerics=low.numerics)[0]))
+        return (lambda u: b_ov @ u), (lambda w: b_ov.T @ w)
+    d = low.cache['factors'][1]
+    xs = [(c.collocation[:, :c.nocc], c.collocation[:, c.nocc:])
+          for c in chans]
+    cuts = np.cumsum([0] + [xo.shape[1] * xv.shape[1] for xo, xv in xs])
+
+    def apply(u):
+        on_grid = np.zeros(d.shape[0])
+        for (xo, xv), start, stop in zip(xs, cuts[:-1], cuts[1:]):
+            on_grid += np.einsum(
+                'pa,pa->p', xo @ u[start:stop].reshape(xo.shape[1], -1), xv)
+        return d.T @ on_grid
+
+    def apply_t(w):
+        on_grid = d @ w
+        return _join([((xo * on_grid[:, None]).T @ xv).ravel()
+                      for xo, xv in xs])
+
+    return apply, apply_t
 
 
-def _gap_bound(low):
+def _lowest_root(low, chans):
+    """Omega_min, the lowest root of the direct-RPA Casida problem on the
+    occupied-virtual factors B of the route (`_pair_actions`), without
+    building the problem. A - B = delta is diagonal there, so the Omega^2
+    are the eigenvalues of the symmetric
+
+        M = delta^1/2 (delta + 2g B^T B) delta^1/2
+
+    on the stacked pairs. Its lowest one is sought through the inverse,
+
+        M^-1 = delta^-2 - delta^-3/2 B^T C^-1 B delta^-3/2,
+        C = 1/(2g) + B delta^-1 B^T = [1 - P(0)] / (2g)
+
+    (the Woodbury identity), with the P(0) the route keeps. The largest
+    eigenvalue of M^-1 is well separated, and a Lanczos iteration (scipy's
+    `eigsh`, converged to machine precision) finds it in some tens of
+    applications, each two applications of B and one solve with the
+    factorized C. On the smallest eigenvalue of M itself the same iteration
+    needs many more, growing with the spread of delta (measured 161 to 2581
+    applications against 21 to 51, from OH/6-31G to benzene/cc-pVDZ).
+
+    Omega_min^2 is then the Rayleigh quotient of M itself on the vector
+    found, exact to second order in the error of the vector: the quadrature
+    error of space-time's P(0) is in the inverse and does not reach it
+    (NH3 and OH: 4e-14 and 1e-15 from the dense problem on the same
+    factors, 2e-9 and 8e-9 without this step).
+
+    The start vector is pseudo-random with a fixed seed
+    (DOWNFOLDING_OMEGA_LANCZOS_SEED): it has to overlap with the lowest
+    root, and a vector with equal weights on degenerate pairs does not
+    always. One pair is its own root."""
+    g = _spin_weight(chans)
+    delta = _join([_delta(c) for c in chans])
+    apply, apply_t = _pair_actions(low, chans)
+    root = np.sqrt(delta)
+
+    def matrix(x):
+        y = root * x
+        return root * (delta * y + (2.0 * g) * apply_t(apply(y)))
+
+    n = len(delta)
+    if n == 1:
+        return float(np.sqrt(matrix(np.ones(1))[0]))
+    p0 = low.cache['p0']
+    cho = cho_factor((np.eye(len(p0)) - p0) / (2.0 * g))
+    near, far = delta ** -2.0, delta ** -1.5
+
+    def inverse(x):
+        return near * x - far * apply_t(cho_solve(cho, apply(far * x)))
+
+    start = np.random.default_rng(
+        DOWNFOLDING_OMEGA_LANCZOS_SEED).standard_normal(n)
+    x = eigsh(LinearOperator((n, n), matvec=inverse, dtype=float), k=1,
+              which='LA', v0=start)[1][:, 0]
+    return float(np.sqrt(x @ matrix(x) / (x @ x)))
+
+
+def _gap_bound(low, chans, failure):
     """The smallest orbital-energy gap eps_a - eps_i over the spin channels:
-    a lower bound of Omega_min, used where the two-spin problem is too large
-    for the dense solve. In the direct RPA Omega^2 are the eigenvalues of
-    delta^1/2 (delta + 2K) delta^1/2 with K positive semidefinite, which is
-    delta^2 or more, so every Omega is at least the smallest delta. Raises
-    the named flag 'sigma_pole_window_bound' (SigmaNearPoleWarning)."""
-    gap = min(float(_delta(c).min()) for c in _reference_channels(low)
-              if 0 < c.nocc < len(c.eps))
+    an exact lower bound of Omega_min, used when the iteration for it did
+    not finish (`failure`, the exception it ended with). In the direct RPA
+    the Omega^2 are the eigenvalues of delta^1/2 (delta + 2g K) delta^1/2
+    with K positive semidefinite, which is delta^2 or more, so every Omega
+    is at least the smallest delta. Raises the named flag
+    'sigma_pole_window_bound' (SigmaNearPoleWarning)."""
+    gap = min(float(_delta(c).min()) for c in chans)
     flag('sigma_pole_window_bound',
-         f"Omega_min, the lowest RPA excitation that bounds the pole-free "
-         f"window of the environment self-energy, is replaced by its lower "
-         f"bound {gap:.6f} Ha, the smallest orbital-energy gap of the two "
-         f"spins: an unrestricted reference with more than "
-         f"{DOWNFOLDING_DENSE_OMEGA_MAX_PAIRS} particle-hole pairs has no "
-         f"solver for the one root on mode={low.mode!r}. The pole-free "
-         f"windows are then narrower than the true ones, so a "
+         f"The iteration for Omega_min, the lowest RPA excitation that "
+         f"bounds the pole-free window of the environment self-energy, did "
+         f"not finish on mode={low.mode!r} ({type(failure).__name__}: "
+         f"{failure}). Omega_min is replaced by its exact lower bound, "
+         f"{gap:.6f} Ha, the smallest orbital-energy gap. The pole-free "
+         f"window is then narrower than the true one, so a "
          f"SigmaNearPoleWarning can come for an orbital that is not near a "
          f"pole, never the other way. Sigma_bar^E and H_eff do not depend "
          f"on it.", SigmaNearPoleWarning, stacklevel=2)
     return gap
-
-
-def _lowest_davidson(low):
-    """The lowest root of the same problem by the matrix-free Davidson for
-    one root (`solve_casida_davidson`, the run's other Davidson settings):
-    the DF block action on low.factors, the ISDF one on (X, D).
-
-    The one root starts from as many unit vectors as the run's own Davidson
-    would seed for its nroots (guess_factor each), never fewer than
-    DOWNFOLDING_OMEGA_DAVIDSON_GUESS: a root from a guess that missed the
-    irrep of the lowest one lies above Omega_min and widens the pole-free
-    window in the unsafe direction.
-
-    An unconverged root does not stop the build: Omega_min decides only
-    whether the near-pole warning is raised, no number of H_eff. Its last
-    estimate is kept, with the Davidson's own named flag
-    ('davidson_not_converged' or 'davidson_unconfirmed') and a
-    SigmaNearPoleWarning, the flag 'sigma_pole_window_unconverged': the
-    estimate can lie above Omega_min, so the window may be too wide and an
-    orbital near a pole may go without its warning."""
-    num = numerics_or_default(low.numerics)
-    bse = num.bse
-    guesses = max(bse.guess_factor * (bse.nroots or BSE_DAVIDSON_NROOTS),
-                  DOWNFOLDING_OMEGA_DAVIDSON_GUESS)
-    num = replace(num, bse=replace(bse, nroots=1, guess_factor=guesses))
-    raised = []
-    with collecting(raised):
-        if low.mode == 'space-time':
-            lr = LinearResponseSolver(low.eps, spin_mode='restricted')
-            omega = solve_casida_davidson(lr, low.nocc, numerics=num,
-                                          isdf_factors=low.cache['factors'],
-                                          refuse_unconverged=False)[0]
-        else:
-            lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                                      spin_mode='restricted')
-            omega = solve_casida_davidson(lr, low.nocc, numerics=num,
-                                          refuse_unconverged=False)[0]
-    om = float(np.min(omega))
-    if raised:
-        names = ', '.join(sorted({e['flag'] for e in raised}))
-        flag('sigma_pole_window_unconverged',
-             f"Omega_min = {om:.6f} Ha, the lowest RPA excitation that bounds "
-             f"the pole-free window of the environment self-energy, comes "
-             f"from a Davidson that did not finish ({names}): it can lie "
-             f"above the true Omega_min, so the pole-free window may be too "
-             f"wide and an active orbital near a pole may go without its "
-             f"SigmaNearPoleWarning. Sigma_bar^E and H_eff do not depend on "
-             f"it. More cycles (numerics.bse.max_cycle) settle it.",
-             SigmaNearPoleWarning, stacklevel=2)
-    return om
 
 
 def pole_window(low, part):
