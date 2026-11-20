@@ -142,9 +142,7 @@ Three properties give the sums per kind, `eh = e_hartree + e_hartree_dc`,
 `ex = e_exchange + e_exchange_dc + e_exchange_term` and
 `ec = e_c_full - e_c_active`, so that
 `e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace`. These are the `Enuc`,
-`Ecore`, `Eh`, `Ex`, `Ec` columns of the paper's supporting data. The earlier
-names `e_hf_core`, `e_hf_ee` (= `e_hartree + e_exchange`) and
-`e_hf_ee_vtilde` (= `e_hartree_dc + e_exchange_dc`) remain as properties.
+`Ecore`, `Eh`, `Ex`, `Ec` columns of the paper's supporting data.
 
 A restricted reference is one spin channel throughout: the general layer
 builds the exact J and K of the environment once and transforms the active

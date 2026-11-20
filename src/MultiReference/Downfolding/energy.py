@@ -122,9 +122,7 @@ class Energies:
 
     Sums (properties): `eh`, `ex`, `ec` are the Hartree, exchange and
     correlation energies of E_0 with their corrections, so that
-    e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace. `e_hf_core`,
-    `e_hf_ee` and `e_hf_ee_vtilde` are the earlier names of e_core and of the
-    two Hartree-plus-exchange sums.
+    e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace.
     """
     e_nuc: float
     e_core: float
@@ -154,22 +152,6 @@ class Energies:
     def ec(self):
         """The correlation energy in E_0, E_c[v] - E_c^A[v_eff]."""
         return self.e_c_full - self.e_c_active
-
-    @property
-    def e_hf_core(self):
-        """e_core under its earlier name."""
-        return self.e_core
-
-    @property
-    def e_hf_ee(self):
-        """The two-electron HF energy of the inactive core,
-        e_hartree + e_exchange."""
-        return self.e_hartree + self.e_exchange
-
-    @property
-    def e_hf_ee_vtilde(self):
-        """E_HF,ee[vtilde], e_hartree_dc + e_exchange_dc."""
-        return self.e_hartree_dc + self.e_exchange_dc
 
     @property
     def e0(self):

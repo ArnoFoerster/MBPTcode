@@ -599,7 +599,7 @@ def test_reference_determinant_energy_mrpa(wat_df):
     g, _, en = build_effective_hamiltonian(low, aspace, screening='mrpa')
     assert abs(reference_energy(g, 2)
                - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
-    assert en.e_hf_ee_vtilde == 0.0
+    assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert en.e_c_active < 0.0 and en.e_c_full < en.e_c_active
 
 

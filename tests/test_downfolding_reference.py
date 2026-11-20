@@ -218,7 +218,8 @@ def test_h2_all_environment_row(case):
     the HF terms, E_RPA,corr and E_0. Measured: Ecore/Eh/Ex at most 1.6e-5,
     Ec 2.9e-6, Etot 7.9e-6 (tolerance 5e-5)."""
     ours, en = _ours(case)
-    assert abs(ours['Eh'] + ours['Ex'] - en.e_hf_ee) < 1e-10
+    assert abs(ours['Eh'] + ours['Ex']
+               - (en.e_hartree + en.e_exchange)) < 1e-10
     assert not _misses(ours, case, dict.fromkeys(ENERGIES + ('dTr',), 5e-5))
 
 
@@ -229,7 +230,8 @@ def test_h2_downfolded_rows(case):
     1.0e-5 (Etot, Eact), trW - trV 5.4e-6 (tolerance 5e-5)."""
     ours, en = _ours(case)
     assert abs(ours['Eh'] + ours['Ex']
-               - (en.e_hf_ee + en.e_hf_ee_vtilde)) < 1e-10
+               - (en.e_hartree + en.e_exchange
+                  + en.e_hartree_dc + en.e_exchange_dc)) < 1e-10
     assert not _misses(ours, case, dict.fromkeys(ENERGIES + ('dTr',), 5e-5))
 
 
@@ -260,7 +262,8 @@ def test_n2_downfolded_rows(case):
     to 2e-4."""
     ours, en = _ours(case)
     assert abs(ours['Eh'] + ours['Ex']
-               - (en.e_hf_ee + en.e_hf_ee_vtilde)) < 1e-10
+               - (en.e_hartree + en.e_exchange
+                  + en.e_hartree_dc + en.e_exchange_dc)) < 1e-10
     tols = {'Enuc': 1e-6, 'Ecore': 1e-3, 'Eh': 1e-3, 'Ex': 1e-3, 'Ec': 1e-4,
             'Eact': 1e-4, 'Etot': 1e-3, 'dTr': 5e-5}
     if case['n_act_occ'] > 0:
@@ -274,7 +277,8 @@ def test_n2_downfolded_rows(case):
 
 
 def test_pbe0_orbitals_no_xc_leak():
-    """Water/6-31G (4,4) on PBE0 orbitals: E_nuc + e_hf_core + e_hf_ee plus
+    """Water/6-31G (4,4) on PBE0 orbitals: E_nuc + e_core + e_hartree +
+    e_exchange plus
     the reference determinant's active part is the HF energy expression on
     those orbitals, no exchange-correlation functional in it.
     Measured 0 (tolerance 1e-9)."""
@@ -287,7 +291,8 @@ def test_pbe0_orbitals_no_xc_leak():
     g, _, en = build_effective_hamiltonian(low, aspace, screening='bare')
     active = reference_energy(g, 2) - g[0]
     e_hf = scf.RHF(mf.mol).energy_tot(dm=mf.make_rdm1())
-    assert abs(en.e_nuc + en.e_hf_core + en.e_hf_ee + active - e_hf) < 1e-9
+    assert abs(en.e_nuc + en.e_core + en.e_hartree + en.e_exchange + active
+               - e_hf) < 1e-9
 
 
 @functools.lru_cache(maxsize=None)

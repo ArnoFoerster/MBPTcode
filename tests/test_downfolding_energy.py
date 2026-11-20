@@ -186,12 +186,14 @@ def test_e0_assembly_and_dc_modes():
         assert abs(en.e_hartree_dc - hartree) < TOL
         assert abs(en.e_exchange_dc - exchange) < TOL
         assert (en.e_c_full, en.e_c_active) == (-0.31, -0.12)
-        # the sums: AMS's Eh, Ex, Ec columns and the earlier field names
+        # the sums: AMS's Eh, Ex, Ec columns
         assert abs(en.eh - (e_h + hartree)) < TOL
         assert abs(en.ex - (e_x + exchange + en.e_exchange_term)) < TOL
         assert abs(en.ec - (-0.31 + 0.12)) < TOL
-        assert en.e_hf_core == e_core and en.e_hf_ee == e_h + e_x
-        assert abs(en.e_hf_ee_vtilde - (hartree + exchange)) < TOL
+        assert (en.e_core, en.e_hartree, en.e_exchange) == (e_core, e_h, e_x)
+        # one name per number: no second names for the HF terms
+        for second in ('e_hf_core', 'e_hf_ee', 'e_hf_ee_vtilde'):
+            assert not hasattr(en, second)
         assert abs(en.e0 - (en.e_nuc + en.e_core + en.eh + en.ex + en.ec
                             - en.e_sigma_trace)) < TOL
         assert abs(en.e0 - (e_nuc + e_core + e_h + e_x + hartree + exchange
@@ -342,7 +344,8 @@ def test_reference_determinant_is_the_scf_energy():
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     g, _, en = _hf_heff(mf, aspace)
     assert abs(reference_energy(g, 2) - mf.e_tot) < 1e-8
-    assert (en.e_c_full, en.e_c_active, en.e_hf_ee_vtilde) == (0.0, 0.0, 0.0)
+    assert (en.e_c_full, en.e_c_active) == (0.0, 0.0)
+    assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
 
 
 def test_unsupported_mean_fields_are_refused():
@@ -376,7 +379,7 @@ def test_all_orbitals_active_is_fci():
     mf = h2()
     aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
     g, space, en = _hf_heff(mf, aspace)
-    assert (en.e_hf_core, en.e_hf_ee) == (0.0, 0.0)
+    assert (en.e_core, en.e_hartree, en.e_exchange) == (0.0, 0.0, 0.0)
     assert abs(_solve(g, space) - fci.FCI(mf).kernel()[0]) < 1e-9
 
 
@@ -472,11 +475,11 @@ def test_ph_screenings_leave_the_active_mean_field(wat_rpa):
     mf, low, aspace = wat_rpa
     g, _, en = build_effective_hamiltonian(low, aspace, screening='crpa_ph')
     g_hf, _, _ = _hf_heff(mf, aspace)
-    assert en.e_hf_ee_vtilde == 0.0
+    assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert np.array_equal(g[1][:2], g_hf[1][:2])
     assert np.abs(g[1][2:, 2:] - g_hf[1][2:, 2:]).max() > 1e-4
     _, _, en_crpa = build_effective_hamiltonian(low, aspace, screening='crpa')
-    assert abs(en_crpa.e_hf_ee_vtilde) > 1e-3
+    assert abs(en_crpa.e_hartree_dc + en_crpa.e_exchange_dc) > 1e-3
 
 
 def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
@@ -484,7 +487,7 @@ def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
     E_c[v] - E_c^A[v]. Measured 0.0."""
     mf, low, aspace = wat_rpa
     g, space, en = build_effective_hamiltonian(low, aspace, screening='bare')
-    assert en.e_hf_ee_vtilde == 0.0
+    assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert abs(_solve(g, space)
                - (_casci(mf) + en.e_c_full - en.e_c_active)) < 1e-8
 
@@ -555,7 +558,8 @@ def _same(a, b):
     assert abs(g1[0] - g2[0]) < 1e-12
     assert np.abs(g1[1] - g2[1]).max() < 1e-12
     assert np.abs(g1[2] - g2[2]).max() < 1e-12
-    for name in ('e_hf_ee_vtilde', 'e_c_full', 'e_c_active', 'e0'):
+    for name in ('e_hartree_dc', 'e_exchange_dc', 'e_c_full', 'e_c_active',
+                 'e0'):
         assert abs(getattr(e1, name) - getattr(e2, name)) < 1e-12
     assert e1.diagnostics.keys() == e2.diagnostics.keys()
 
@@ -720,7 +724,8 @@ def test_e0_terms_do_not_depend_on_the_form_at_infinite_s(wat_rpa, s):
     (g_srg, _, srg), (g_a, _, mode_a) = (
         build_effective_hamiltonian(low, aspace, screening=s, sigma=sigma)
         for sigma in SIGMAS_1)
-    for name in ('e_hf_ee_vtilde', 'e_exchange_term', 'e_sigma_trace', 'e0'):
+    for name in ('e_hartree_dc', 'e_exchange_dc', 'e_exchange_term',
+                 'e_sigma_trace', 'e0'):
         assert abs(getattr(srg, name) - getattr(mode_a, name)) < 1e-12
     assert np.abs(np.diag(g_srg[1]) - np.diag(g_a[1])).max() < 1e-12
     assert np.abs(g_srg[1] - g_a[1]).max() > 1e-6
