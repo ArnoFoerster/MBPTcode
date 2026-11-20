@@ -113,6 +113,7 @@ Options of the RPA:
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
 | | `diagnostics` | a tuple of names, default all; see below |
+| | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 
 `g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and `space` follow the QDPT
 `build_effective_hamiltonian` contract (`n_orbs`, `n_elec_active`, `act_idx`,
@@ -473,8 +474,14 @@ active orbital energy exactly on a pole with `'mode_a'`, is
 (`FloatingPointError`).
 
 `srg_s`, `pole_margin` and `continuation_margin` are read from `low.numerics`,
-the `Numerics` given to `run_low_level`: they are fixed with the low-level
-result, and a new value needs a new `run_low_level`.
+the `Numerics` given to `run_low_level`. They act after the RPA, so a build
+can take other values on the same low-level result:
+`build_effective_hamiltonian(low, active, sigma='srg', numerics=other)` uses
+the `downfolding` section of `other` for that Hamiltonian and leaves `low` as
+it is; a scan over `srg_s` pays for the RPA once. Every other section of
+`other` has to equal the run's, which used it (`NumericsMismatch`, a
+`ValueError`, otherwise); `low.numerics.derive('why', downfolding={...})`
+makes such an object.
 
 **Sigma^E on `mode='imagfrequency'`.** There are no residues on this route.
 S^E(mu + i omega), mu the whole system's mid-gap, comes from the GW

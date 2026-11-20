@@ -89,7 +89,8 @@ from src.Base.numerics.constants import (BSE_DAVIDSON_NROOTS, BYTES_PER_GB,
                                          DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S,
                                          GW_DENSITY_W_FIT_TIKHONOV)
-from src.Base.numerics.numerics import numerics_or_default, rpa_quadrature
+from src.Base.numerics.numerics import (NumericsMismatch,
+                                        numerics_or_default, rpa_quadrature)
 from src.Base.orbital_spaces import particle_hole_window, transition_range
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
@@ -226,6 +227,31 @@ def _require_current_mean_field(low):
             f"the self-energy and E_c kept here belong to other orbitals "
             f"than the ones the Hamiltonian would be built from. Call "
             f"run_low_level again on the mean field as it is now.")
+
+
+def _with_settings(low, numerics):
+    """`low` under the Sigma^E settings of `numerics`, its downfolding
+    section (srg_s, pole_margin, continuation_margin), in place of the
+    run's: the same result, sharing its cache; `low` itself for None. The
+    settings act after the RPA, so they can change from one Hamiltonian to
+    the next without a new run. Every other section was used by the run
+    and has to be the run's: a difference is refused (NumericsMismatch, a
+    ValueError), naming the fields."""
+    if numerics is None:
+        return low
+    held, asked = numerics_or_default(low.numerics).values(), numerics.values()
+    differ = [f'{section}.{name}' for section in held
+              if section != 'downfolding' for name in held[section]
+              if held[section][name] != asked[section][name]]
+    if differ:
+        raise NumericsMismatch(
+            f"method={METHOD!r}: the numerics of a build can differ from "
+            f"those of the low-level run in numerics.downfolding alone "
+            f"(srg_s, pole_margin, continuation_margin, the settings of "
+            f"Sigma^E, which act after the RPA); these differ in "
+            f"{', '.join(differ)}, which the run used. Derive the build's "
+            f"numerics from the run's, or call run_low_level with them.")
+    return replace(low, numerics=numerics)
 
 
 def _require_factors(low, who):
@@ -1522,7 +1548,7 @@ def _require_finite(sigma_bar, chan, sigma):
             f"out of the active space.")
 
 
-def embedding_self_energy(low, part, sigma):
+def embedding_self_energy(low, part, sigma, numerics=None):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
     part.act (occupied first): iG^E(W - v) with r over part.env, the full
     RPA's W and the mean-field energies.
@@ -1554,8 +1580,13 @@ def embedding_self_energy(low, part, sigma):
     spin, with the residues between that spin's active and environment
     orbitals, that spin's orbital energies, and the Omega_n of the two-spin
     RPA, which both spins share. One sigma and one srg_s serve both.
+
+    numerics: None, or a Numerics whose downfolding section (srg_s,
+        pole_margin, continuation_margin) is used here in place of the
+        run's; the rest has to be the run's (`_with_settings`).
     """
-    return _per_channel(_embedding(low, part, sigma)[0])
+    return _per_channel(_embedding(_with_settings(low, numerics), part,
+                                   sigma)[0])
 
 
 def _embedding(low, part, sigma, infinite=False, stacklevel=3):
@@ -1949,7 +1980,7 @@ def _diagnostic_names(diagnostics):
 
 
 def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
-          **opts):
+          numerics=None, **opts):
     """The DownfoldingTerms of the RPA on the active space `part`.
 
     `part` is one Partition for a restricted low-level result, and the terms
@@ -1997,6 +2028,12 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         'ec_active_casida' (imagfrequency, space-time): {'casida': the
         dense-Casida E_c^A on the same v_eff, 'difference': the route's
         quadrature value minus it}.
+    numerics: None, the settings of Sigma^E are those of the low-level run
+        (low.numerics); or a Numerics whose downfolding section (srg_s,
+        pole_margin, continuation_margin) is used for this Hamiltonian
+        instead. They act after the RPA, so one low-level result serves any
+        number of them; `low` itself keeps its own. Every other section has
+        to equal the run's, which used it (NumericsMismatch otherwise).
 
     E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
     pairs with v_eff = v + vtilde, v the same integrals as the full RPA
@@ -2009,6 +2046,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     those of the screening kept here.
     """
     _refuse_options(opts, 'terms')
+    low = _with_settings(low, numerics)
     _require_current_mean_field(low)
     names = _diagnostic_names(diagnostics)
     screening = choice(screening, SCREENINGS, 'screening')

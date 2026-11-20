@@ -429,6 +429,74 @@ def test_numerics_section():
             Numerics(downfolding=bad)
 
 
+def test_the_settings_of_sigma_can_change_per_hamiltonian(wat, low_exact):
+    """srg_s, pole_margin and continuation_margin act after the RPA. A build
+    takes them from the `numerics` it is given (its downfolding section) on
+    the same low-level result, and gives what a new run with those numerics
+    gives, bit for bit: h_eff, E_0 and the 'sigma_poles' record at a second
+    srg_s on the near-pole space, where the damping matters (h_eff moves by
+    4.9e-4 Ha between s = 500 and 50); on imagfrequency, both margins at
+    zero silence the near-pole warning and leave Sigma_bar as it is. The
+    low-level result keeps its own settings for the next build. Numerics
+    derived from the run's count as theirs but for the change; any other
+    difference from the run's numerics is refused: the run used those."""
+    mf, _, eps, nocc = wat
+    aspace = _high_virtual(eps, nocc)
+    part = partition(aspace, eps)
+    other = Numerics(downfolding={'srg_s': 50.0})
+    fresh = run_low_level(mf, method='rpa', df=False, numerics=other)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', rpa.SigmaDampingWarning)
+        g, _, en = build_effective_hamiltonian(low_exact, aspace,
+                                               sigma='srg', numerics=other)
+        g_new, _, en_new = build_effective_hamiltonian(fresh, aspace,
+                                                       sigma='srg')
+        g_own, _, en_own = build_effective_hamiltonian(low_exact, aspace,
+                                                       sigma='srg')
+    assert g[0] == g_new[0] and np.array_equal(g[1], g_new[1])
+    poles, poles_new = (e.diagnostics['sigma_poles'] for e in (en, en_new))
+    assert poles['srg_s'] == poles_new['srg_s'] == 50.0
+    assert poles['srg_damping'] == poles_new['srg_damping']
+    assert en_own.diagnostics['sigma_poles']['srg_s'] == DOWNFOLDING_SRG_S
+    assert np.abs(g[1] - g_own[1]).max() > 1e-4
+    assert low_exact.numerics is None
+    derived = Numerics().derive('a second srg_s',
+                                downfolding={'srg_s': 50.0})
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', rpa.SigmaDampingWarning)
+        g_derived, _, _ = build_effective_hamiltonian(
+            low_exact, aspace, sigma='srg', numerics=derived)
+    assert np.array_equal(g_derived[1], g[1])
+    assert np.array_equal(
+        rpa.embedding_self_energy(low_exact, part, 'srg', numerics=other),
+        rpa.embedding_self_energy(fresh, part, 'srg'))
+
+    near = ActiveSpace.from_indices(13, 5, [3, 4], [5, 6, 12])
+    low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
+    with pytest.warns(rpa.SigmaNearPoleWarning, match=r'orbital 12 \('):
+        g_warned, _, _ = build_effective_hamiltonian(low_if, near,
+                                                     sigma='srg')
+    quiet = Numerics(downfolding={'pole_margin': 0.0,
+                                  'continuation_margin': 0.0})
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
+        g_quiet, _, en_quiet = build_effective_hamiltonian(
+            low_if, near, sigma='srg', numerics=quiet)
+    assert np.array_equal(g_quiet[1], g_warned[1])
+    assert 'sigma_near_pole' not in [f['flag']
+                                     for f in en_quiet.numerical_flags]
+
+    for wrong in (Numerics(quadrature={'npade': 12}),
+                  Numerics(downfolding={'srg_s': 50.0},
+                           imagfreq={'nfreq': 24})):
+        with pytest.raises(ValueError, match='numerics.downfolding'):
+            build_effective_hamiltonian(low_exact, aspace, sigma='srg',
+                                        numerics=wrong)
+    with pytest.raises(TypeError, match='takes no options'):
+        build_effective_hamiltonian(run_low_level(mf, method='hf'), aspace,
+                                    numerics=other)
+
+
 def test_srg_term_at_an_exact_pole_is_zero():
     """A term with D_tr = D_ur = 0 exactly is 0/0 in Eq. 44; its
     limit at finite s is 0 (the kernel is about 2 D s near D = 0), and that
