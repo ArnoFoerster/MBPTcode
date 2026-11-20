@@ -347,6 +347,17 @@ and so is one with fractional occupations (`frac_occ`, a smearing): it is
 not one determinant, and counting each fractionally occupied orbital as
 occupied would describe a system with another number of electrons.
 
+**Spin contamination and instability are reported, not refused.**
+`run_low_level` runs the reference diagnostics of the GW driver on a UHF/UKS
+determinant: <S^2> against S(S+1), and pyscf's internal stability analysis.
+A determinant more than 0.1 above S(S+1) (broken-symmetry H2: 0.98 against
+0), or one pyscf finds unstable, is taken with a `RuntimeWarning` and the
+named flag `'uhf_spin_contaminated'` or `'uhf_reference_unstable'` in
+`low.numerical_flags` and in `energies.numerical_flags` of every Hamiltonian
+built on it; the numbers are in `mf.reference_diagnostics`. They are
+computed once per converged mean field, so the warning comes with the first
+run on it and the flags with every run.
+
 **A symmetry-broken reference stays visible in H_eff.** H_eff is built on
 the UHF determinant, and its states inherit what that determinant breaks.
 For the OH radical, whose 2-Pi ground state is doubly degenerate, the two

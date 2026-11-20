@@ -38,7 +38,8 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             get_orbital_energies,
                                             require_gas_phase_ground_state,
                                             spin_orbital_chemist,
-                                            spin_orbital_one_body)
+                                            spin_orbital_one_body,
+                                            unrestricted_reference_diagnostics)
 from src.Base.utils.parallel.mpi_grid import grid_comm
 from src.SingleReference.common.active_space import (closed_shell_nocc,
                                                      unrestricted_nocc)
@@ -126,7 +127,11 @@ def run_low_level(mf, method='rpa', **method_opts):
 
     Every named flag raised during the run (src.Base.numerical_flags) is
     collected into `low.numerical_flags`, a list of {'flag': name, 'message':
-    text}, empty for a clean run.
+    text}, empty for a clean run. An unrestricted reference that is
+    spin-contaminated or internally unstable is taken, with a warning and
+    the flags 'uhf_spin_contaminated' / 'uhf_reference_unstable' there
+    (`unrestricted_reference_diagnostics`, whose numbers are kept on the
+    mean field as `mf.reference_diagnostics`).
     """
     _, _, size = grid_comm()
     if size > 1:
@@ -149,6 +154,8 @@ def run_low_level(mf, method='rpa', **method_opts):
     method = choice(method, tuple(LOW_LEVEL), 'method')
     flags = []
     with collecting(flags):
+        unrestricted_reference_diagnostics(mf, WHO,
+                                           what='effective Hamiltonians')
         low = LOW_LEVEL[method].run(mf, **method_opts)
     low.numerical_flags = gathered(flags)
     return low

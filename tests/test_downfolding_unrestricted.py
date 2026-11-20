@@ -40,6 +40,7 @@ from pyscf import fci, gto, mcscf, scf
 from pyscf.gw import urpa
 
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
+from src.Base.pyscf import pyscf_interface
 from src.MultiReference.Downfolding import (build_effective_hamiltonian,
                                             run_low_level)
 from src.MultiReference.Downfolding.methods import rpa
@@ -62,6 +63,17 @@ from tests.downfolding_oracle import (CH2, NH, OH, active_pairs_so, drpa_so,
                                       vtilde_crpa, vtilde_crpa_uhf,
                                       vtilde_mrpa, vtilde_mrpa_uhf,
                                       w0_minus_v, w0_minus_v_so, water)
+
+
+# run_low_level warns of a spin-contaminated or internally unstable UHF/UKS
+# determinant at the first run on each mean field, and two references of
+# this file are such: the broken-symmetry H2 (<S^2> = 0.98 against 0) and
+# the OH UKS/PBE0 determinant, which pyscf's stability analysis reports as
+# unstable. Which test meets them first depends on the selection, so the two
+# warnings are let through here;
+# test_reference_diagnostics_are_flags_of_the_result checks them.
+pytestmark = pytest.mark.filterwarnings(
+    'ignore:Downfolding. the unrestricted reference is:RuntimeWarning')
 
 
 @pytest.fixture(scope='module')
@@ -1157,6 +1169,49 @@ def test_none_active_is_uhf_plus_ec(oh, oh_low):
             assert abs(en.e0 - (oh.e_tot + low.e_c_full)) < 1e-10
             assert en.e_c_active == 0.0 and space['n_elec_active'] == (0, 0)
             assert [h.shape for h in g_eff[1]] == [(0, 0)] * 2
+
+
+def test_reference_diagnostics_are_flags_of_the_result(h2_bs, monkeypatch):
+    """A spin-contaminated or internally unstable UHF determinant is taken,
+    with a warning from run_low_level and the named flags
+    'uhf_spin_contaminated' / 'uhf_reference_unstable' in
+    low.numerical_flags, for every method and for every later run on the
+    same mean field, and in the energies of every Hamiltonian built on it.
+    Broken-symmetry H2 has <S^2> = 0.98 against 0; the unstable case is a
+    stood-in stability analysis on OH. A clean reference has no flag."""
+    mf = h2_broken()
+    with pytest.warns(RuntimeWarning, match='Downfolding: the unrestricted '
+                      'reference is spin-contaminated.*its effective '
+                      'Hamiltonians describe') as rec:
+        low = run_low_level(mf, method='rpa')
+    assert rec[0].filename == __file__
+    lows = [low]
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        lows += [run_low_level(mf, method='hf'),
+                 run_low_level(mf, method='rpa', df=False)]
+        for low in lows:
+            assert [entry['flag'] for entry in low.numerical_flags] == [
+                'uhf_spin_contaminated']
+            _, _, en = build_effective_hamiltonian(low, _all_active(mf))
+            assert 'uhf_spin_contaminated' in [
+                entry['flag'] for entry in en.numerical_flags]
+
+    oh = unrestricted(OH, 1)
+    monkeypatch.setattr(pyscf_interface.scf_stability, 'uhf_internal',
+                        lambda mf, return_status, verbose: (None, False))
+    with pytest.warns(RuntimeWarning, match='internally UNSTABLE.*the '
+                      'effective Hamiltonians start from a saddle point'):
+        low = run_low_level(oh, method='rpa')
+    assert [entry['flag'] for entry in low.numerical_flags] == [
+        'uhf_reference_unstable']
+    monkeypatch.undo()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        clean = run_low_level(unrestricted(OH, 1), method='rpa')
+    assert clean.numerical_flags == []
+    assert clean.mf.reference_diagnostics['spin_contaminated'] is False
 
 
 def test_uks_reference():

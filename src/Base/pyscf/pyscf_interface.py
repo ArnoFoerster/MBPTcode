@@ -8,7 +8,7 @@ from pyscf import scf, ao2mo, lib
 from pyscf import df as pyscf_df
 from pyscf.scf import stability as scf_stability
 
-from src.Base.numerical_flags import flag
+from src.Base.numerical_flags import collecting, flag
 from src.Base.numerics.constants import DF_MO_BLOCK, UHF_SPIN_CONTAMINATION_WARN
 from src.Base.factorization.distributed_df import distributed_fock
 from src.Base.environment_seam import NoEnvironment, environment_of
@@ -178,46 +178,71 @@ def get_dipole_integrals(mol, mf, representation='spatial'):
         else:
             return dip_mo
 
-def unrestricted_reference_diagnostics(mf, who):
+def unrestricted_reference_diagnostics(mf, who,
+                                       what='quasiparticle energies'):
     """{'s2', 's2_exact', 'stable', 'spin_contaminated'} of an unrestricted
     reference, warned, cached on the mean field as `reference_diagnostics`.
 
-    A quasiparticle calculation on a UHF/UKS determinant is only as meaningful
-    as the determinant: spin contamination mixes spin states into every
-    orbital energy, and an internally unstable solution is not the ground state
-    the calculation claims to start from. Both are reported rather than
-    silently carried, and computed once per converged mean field (a
-    self-consistent GW loop calls back in every cycle). None for a restricted
-    reference.
+    A calculation on a UHF/UKS determinant is only as meaningful as the
+    determinant: spin contamination mixes spin states into every orbital
+    energy, and an internally unstable solution is not the ground state the
+    calculation claims to start from. Both are reported rather than silently
+    carried, as the named flags 'uhf_spin_contaminated' and
+    'uhf_reference_unstable'. `what` names, in the plural, what `who` builds
+    on the reference, for the two messages. None for a restricted reference.
+
+    Computed once per converged mean field, and warned then (a
+    self-consistent GW loop calls back in every cycle). A later call on the
+    same mean field does not warn again but hands the flags, in its own
+    words, to the `collecting` block it runs in, so every record built on
+    the reference carries them. A reference without any occupied-virtual
+    pair has no orbital rotation and is stable; pyscf's analysis is not
+    asked there (it divides by zero).
     """
     if not isinstance(mf, scf.uhf.UHF):
         return None
     key = np.asarray(mf.mo_energy, float).tobytes()
     cached = getattr(mf, '_reference_diagnostics', None)
-    if cached is not None and cached[0] == key:
-        return cached[1]
-    s2, _ = mf.spin_square()
-    s = 0.5 * mf.mol.spin
-    exact = s * (s + 1.0)
-    _, stable = scf_stability.uhf_internal(mf, return_status=True, verbose=0)
-    # the named flags a record copies (refuse inputs, warn numerics): 'stable'
-    # False, 'spin_contaminated' True
-    out = {'s2': float(s2), 's2_exact': float(exact), 'stable': bool(stable),
-           'spin_contaminated': bool(s2 - exact
-                                     > UHF_SPIN_CONTAMINATION_WARN)}
+    known = cached is not None and cached[0] == key
+    if known:
+        out = cached[1]
+    else:
+        s2, _ = mf.spin_square()
+        s = 0.5 * mf.mol.spin
+        exact = s * (s + 1.0)
+        occupied = [np.asarray(occ) > 0 for occ in mf.mo_occ]
+        stable = True
+        if any(occ.any() and not occ.all() for occ in occupied):
+            _, stable = scf_stability.uhf_internal(mf, return_status=True,
+                                                   verbose=0)
+        # the named flags a record copies (refuse inputs, warn numerics):
+        # 'stable' False, 'spin_contaminated' True
+        out = {'s2': float(s2), 's2_exact': float(exact),
+               'stable': bool(stable),
+               'spin_contaminated': bool(s2 - exact
+                                         > UHF_SPIN_CONTAMINATION_WARN)}
+        mf._reference_diagnostics = (key, out)
+        mf.reference_diagnostics = out
+    raised = []
     if out['spin_contaminated']:
-        flag('uhf_spin_contaminated',
+        raised.append((
+            'uhf_spin_contaminated',
             f'{who}: the unrestricted reference is spin-contaminated, <S^2> = '
-            f'{s2:.4f} against S(S+1) = {exact:.4f}; its quasiparticle energies '
-            f'describe a mixture of spin states.', RuntimeWarning, stacklevel=3)
-    if not stable:
-        flag('uhf_reference_unstable',
+            f'{out["s2"]:.4f} against S(S+1) = {out["s2_exact"]:.4f}; its '
+            f'{what} describe a mixture of spin states.'))
+    if not out['stable']:
+        raised.append((
+            'uhf_reference_unstable',
             f'{who}: the unrestricted reference is internally UNSTABLE -- a '
             f'lower UHF solution exists (pyscf.scf.stability.uhf_internal); '
-            f'the quasiparticle energies start from a saddle point.',
-            RuntimeWarning, stacklevel=3)
-    mf._reference_diagnostics = (key, out)
-    mf.reference_diagnostics = out
+            f'the {what} start from a saddle point.'))
+    for name, text in raised:
+        if known:
+            # warned when it was computed: only the record of this caller
+            with collecting([]) as again:
+                again.append({'flag': name, 'message': text})
+        else:
+            flag(name, text, RuntimeWarning, stacklevel=3)
     return out
 
 
