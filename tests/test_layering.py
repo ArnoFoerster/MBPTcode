@@ -314,7 +314,8 @@ if __name__ == '__main__':
 LAYERS = {
     'src.Base': 0, 'src.Solvers': 0,                    # foundation
     'src.environments': 1,                              # environments: Base only
-    'src.SingleReference': 2, 'src.MultiReference': 2,  # electronic structure: the shared
+    'src.SingleReference': 2,
+    'src.EffectiveHamiltonian': 2,                      # electronic structure: the shared
     # pieces (common) first, then the method packages in the order they build on
     # each other -- response machinery, Epstein-Nesbet, CC, MPn densities, GW,
     # and the methods built on those -- so GW may import CC and never the reverse
@@ -327,7 +328,7 @@ LAYERS = {
     'src.SingleReference.Periodic': 2.6,
     # the RPA downfolding builds on the response machinery and GW; its driver
     # reaches the methods through a registry, so the whole package sits here
-    'src.MultiReference.Downfolding': 2.6,
+    'src.EffectiveHamiltonian.Downfolding': 2.6,
     'src.fragments': 2.7,
     'src.gradients': 3.0,                               # the method-neutral core
     'src.gradients.rpa': 3.1,                           # the RPA screening GW-BSE is built on

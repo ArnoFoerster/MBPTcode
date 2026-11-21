@@ -88,13 +88,13 @@ import numpy as np
 import pytest
 from pyscf import dft, gto, scf
 
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
-from src.MultiReference.Downfolding.methods import rpa
-from src.MultiReference.Downfolding.one_body import (core_fock,
-                                                     double_counting)
-from src.MultiReference.Downfolding.partition import (active_pair_mask,
-                                                      partition)
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
+from src.EffectiveHamiltonian.Downfolding.methods import rpa
+from src.EffectiveHamiltonian.Downfolding.one_body import (core_fock,
+                                                           double_counting)
+from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
+                                                            partition)
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 from src.Solvers.active_space_solver import PyscfFCISolver

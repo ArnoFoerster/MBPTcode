@@ -71,7 +71,7 @@ def _get_evaluator(max_pt_order, max_vertex, spin_free):
             f"{sorted(available)} are available.")
     suffix = '_spinfree' if spin_free else ''
     module = importlib.import_module(
-        f'src.MultiReference.QDPT.generated_evaluators{suffix}')
+        f'src.EffectiveHamiltonian.QDPT.generated_evaluators{suffix}')
     return getattr(module, f'eval_pt{max_pt_order}_v{max_vertex}{suffix}')
 
 

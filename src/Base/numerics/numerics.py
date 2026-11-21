@@ -512,12 +512,12 @@ class GWDensityNumerics:
 @dataclass(frozen=True)
 class DownfoldingNumerics:
     """The static embedding self-energy of the RPA downfolding
-    (`MultiReference.Downfolding.methods.rpa.embedding_self_energy`): srg_s,
-    the SRG flow parameter s of sigma='srg', Hartree^-2, None for s = inf
-    (Eq. 42, no damping); pole_margin, how close, in units of 1/sqrt(2 s),
-    an active orbital energy may come to the edge of the pole-free window
-    before an undamped form warns, sigma='mode_a' and 'srg' at srg_s = None
-    (s = DOWNFOLDING_SRG_S when srg_s is None);
+    (`EffectiveHamiltonian.Downfolding.methods.rpa.embedding_self_energy`):
+    srg_s, the SRG flow parameter s of sigma='srg', Hartree^-2, None for
+    s = inf (Eq. 42, no damping); pole_margin, how close, in units of
+    1/sqrt(2 s), an active orbital energy may come to the edge of the
+    pole-free window before an undamped form warns, sigma='mode_a' and 'srg'
+    at srg_s = None (s = DOWNFOLDING_SRG_S when srg_s is None);
     continuation_margin, Hartree, the least such distance on the numerical
     routes (imagfrequency, space-time), where both forms are continued from
     the imaginary axis and warn within max(pole_margin/sqrt(2 s),

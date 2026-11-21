@@ -26,7 +26,7 @@ SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 ADC_OUT_DIR = os.path.join(SRC_DIR, 'SingleReference', 'ADC', 'generatedADC')    # not committed
 DM_OUT_DIR = os.path.join(SRC_DIR, 'SingleReference', 'DensityMatrix')          # generated_mpn*/
 CC_OUT_DIR = os.path.join(SRC_DIR, 'SingleReference', 'CC')                     # generated_*/
-QDPT_OUT_DIR = os.path.join(SRC_DIR, 'MultiReference', 'QDPT')
+QDPT_OUT_DIR = os.path.join(SRC_DIR, 'EffectiveHamiltonian', 'QDPT')
 
 __all__ = [
     'OCC_LETTERS', 'VIR_LETTERS', 'OCC_FAMILY', 'VIR_FAMILY', 'OCC_SUBSCRIPTS', 'VIR_SUBSCRIPTS',

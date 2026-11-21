@@ -61,10 +61,10 @@ from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
                                         numerics_or_default)
 from src.Base.orbital_spaces import particle_hole_window
 from src.Base.utils.grids.analytic_continuation import pade_nodes
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
-from src.MultiReference.Downfolding.methods import rpa
-from src.MultiReference.Downfolding.partition import partition
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
+from src.EffectiveHamiltonian.Downfolding.methods import rpa
+from src.EffectiveHamiltonian.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.SingleReference.LinearResponse.casida import CasidaSolver

@@ -268,7 +268,7 @@ QSGW_SRG_FLOW = 100.0
 QSGW_SRG_QUAD_TOL = 1e-7
 
 # Defaults of `numerics.downfolding`, the static embedding self-energy of the
-# RPA downfolding (`MultiReference.Downfolding.methods.rpa`).
+# RPA downfolding (`EffectiveHamiltonian.Downfolding.methods.rpa`).
 # The SRG flow parameter s of Sigma_bar^E, Hartree^-2 (Marie and Loos, JCTC
 # 2023, doi 10.1021/acs.jctc.3c00281, eq. 44): Marie and Loos recommend 500
 # to 1000 for their one-shot and self-consistent schemes. Separate from

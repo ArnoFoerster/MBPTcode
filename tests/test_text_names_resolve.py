@@ -5,10 +5,11 @@ A comment or docstring that names `gradients.gwbse.state_following` or
 module moves, such a pointer is the one thing no import checks. Every
 backticked `a.b.c` whose first part is `src` or a top-level package
 (Base, Solvers, SingleReference, gradients, properties, environments,
-fragments, photophysics, CodeGeneration, MultiReference, autograd_oracle) is
-resolved: the longest prefix that is a module, then each remaining part a
-name that module (or the class before it) defines. The scanner is shown to
-fail on a planted stale name. Scanned: the packages listed in SCANNED.
+fragments, photophysics, CodeGeneration, EffectiveHamiltonian,
+autograd_oracle) is resolved: the longest prefix that is a module, then each
+remaining part a name that module (or the class before it) defines. The
+scanner is shown to fail on a planted stale name. Scanned: the packages listed
+in SCANNED.
 """
 import ast
 import pathlib
@@ -19,7 +20,7 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ROOTS = ('Base', 'Solvers', 'SingleReference', 'gradients', 'properties',
          'environments', 'fragments', 'photophysics', 'CodeGeneration',
-         'MultiReference', 'autograd_oracle')
+         'EffectiveHamiltonian', 'autograd_oracle')
 TICKED = re.compile(r'`(?:src\.)?((?:' + '|'.join(ROOTS) + r')(?:\.[A-Za-z_]\w*)+)')
 _DEFS = {}
 

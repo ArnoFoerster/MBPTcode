@@ -1,6 +1,6 @@
 """The downfolding package keeps its general layer free of method code.
 
-`src/MultiReference/Downfolding/` is a method-agnostic layer (`terms`,
+`src/EffectiveHamiltonian/Downfolding/` is a method-agnostic layer (`terms`,
 `partition`, `two_body`, `one_body`, `energy`, and the driver
 `effective_hamiltonian`) plus one file per low-level method under `methods/`.
 The two sides meet only in `DownfoldingTerms`, and the driver reaches the
@@ -15,20 +15,20 @@ import pathlib
 
 import pytest
 
-from src.MultiReference.Downfolding.terms import choice
+from src.EffectiveHamiltonian.Downfolding.terms import choice
 
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
-           / 'src' / 'MultiReference' / 'Downfolding')
+           / 'src' / 'EffectiveHamiltonian' / 'Downfolding')
 GENERAL = ['terms', 'partition', 'two_body', 'one_body', 'energy']
 KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
-METHODS = 'src.MultiReference.Downfolding.methods'
+METHODS = 'src.EffectiveHamiltonian.Downfolding.methods'
 FORBIDDEN = KERNELS + (METHODS,)
 
 
 def _imports(path):
     """(module, names) of every import in `path`; names is [] for a plain
     `import x`. Relative imports are resolved against the package."""
-    package = ['src', 'MultiReference', 'Downfolding']
+    package = ['src', 'EffectiveHamiltonian', 'Downfolding']
     found = []
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
@@ -48,7 +48,7 @@ def _under(module, prefix):
 
 def _targets(module, names):
     """The module an import names and each module.name it takes: `from
-    src.MultiReference.Downfolding import methods` reaches the methods
+    src.EffectiveHamiltonian.Downfolding import methods` reaches the methods
     package through its name, not its module."""
     return [module] + [f'{module}.{n}' for n in names]
 

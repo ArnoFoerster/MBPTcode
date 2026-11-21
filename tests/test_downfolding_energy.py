@@ -41,17 +41,17 @@ import pytest
 from pyscf import dft, fci, gto, mcscf, scf
 
 from src.Base.numerics.numerics import Numerics
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            effective_hamiltonian,
-                                            run_low_level)
-from src.MultiReference.Downfolding.energy import (
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  effective_hamiltonian,
+                                                  run_low_level)
+from src.EffectiveHamiltonian.Downfolding.energy import (
     Energies, active_hf_energy, assemble_energies, environment_hf_energy,
     exchange_energy_term, sigma_trace)
-from src.MultiReference.Downfolding.methods import LOW_LEVEL, rpa
-from src.MultiReference.Downfolding.one_body import (
+from src.EffectiveHamiltonian.Downfolding.methods import LOW_LEVEL, rpa
+from src.EffectiveHamiltonian.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body)
-from src.MultiReference.Downfolding.partition import partition
-from src.MultiReference.Downfolding.terms import DownfoldingTerms
+from src.EffectiveHamiltonian.Downfolding.partition import partition
+from src.EffectiveHamiltonian.Downfolding.terms import DownfoldingTerms
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 from tests.downfolding_oracle import (
@@ -780,7 +780,7 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
     ONE exact J/K build (shared by the core Fock operator and the environment
     energy) and ONE integral transformation of the active block, and the
     method hands back one vtilde."""
-    from src.MultiReference.Downfolding import one_body, two_body
+    from src.EffectiveHamiltonian.Downfolding import one_body, two_body
     mf = water()
     low = run_low_level(mf, method=method)
     calls = {'jk': 0, 'ao2mo': 0}

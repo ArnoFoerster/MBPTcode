@@ -145,7 +145,7 @@ def screening_fit_grid(eps, nocc, numerics=None):
 
     The one recipe of `self_energy_matrix_imaginary_axis` and of the RPA
     downfolding's environment self-energy
-    (`MultiReference.Downfolding.methods.rpa.sigma_env_imag_axis`), whose
+    (`EffectiveHamiltonian.Downfolding.methods.rpa.sigma_env_imag_axis`), whose
     samples go to `fitted_self_energy_matrix_imaginary_axis`."""
     nfreq = numerics_or_default(numerics).imagfreq.nfreq
     e_min, e_max = response_range(eps, nocc)

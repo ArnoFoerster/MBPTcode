@@ -109,7 +109,7 @@ class PyscfFCISolver(ActiveSpaceSolver):
         return fci.direct_spin1.make_rdm12(vector, norb, spin_sector(nelec, spin))
 
 
-class PyscfUHFFCISolver(ActiveSpaceSolver):
+class PyscfSpinResolvedFCISolver(ActiveSpaceSolver):
     """pyscf's fci.direct_uhf: a Hamiltonian whose alpha and beta blocks
     differ (an unrestricted reference's orbitals), at fixed (N_alpha, N_beta).
 
@@ -149,7 +149,7 @@ def total_spin_square(dm1a, dm1b, dm2ab, overlap):
     the whole molecule's state, in orbitals that differ between the spins.
 
     dm1a, dm1b, dm2ab: the active-space density matrices of
-    `PyscfUHFFCISolver.rdms`. overlap: the alpha-beta overlaps
+    `PyscfSpinResolvedFCISolver.rdms`. overlap: the alpha-beta overlaps
     O_pq = <phi^alpha_p | phi^beta_q> of the orbitals, as the blocks
     'core_core' (inactive alpha x inactive beta), 'core_active' (inactive
     alpha x active beta), 'active_core' (active alpha x inactive beta) and

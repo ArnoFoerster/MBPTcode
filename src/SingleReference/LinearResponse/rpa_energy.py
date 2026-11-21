@@ -87,8 +87,8 @@ def imaginary_axis_energy_grid(eps, nocc, numerics=None, grid='minimax'):
 
     The one recipe of `rpa_correlation_energy_imaginary_axis` and of the RPA
     downfolding's imagfrequency route
-    (`MultiReference.Downfolding.methods.rpa`), which integrates the active
-    correlation energy on the same points so that the pair cancels."""
+    (`EffectiveHamiltonian.Downfolding.methods.rpa`), which integrates the
+    active correlation energy on the same points so that the pair cancels."""
     nfreq = rpa_quadrature(numerics_or_default(numerics), grid)[1]
     if grid == 'minimax':
         e_min, e_max = response_range(eps, nocc)

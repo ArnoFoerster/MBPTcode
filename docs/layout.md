@@ -9,7 +9,7 @@ layers below it, never from a layer above:
 | physics | `src/photophysics` | composite runs of a molecule: rates, the staged TADF run, solvated spectra |
 | properties | `src/properties`, `src/autograd_oracle` | geometry optimization, vibrations, couplings, band shapes: anything computed from a potential-energy surface; the torch reference for the GW-BSE forces |
 | gradients | `src/gradients` and its `rpa/`, `gwbse/`, `adc/` | the surfaces and their analytic forces |
-| electronic structure | `src/SingleReference`, `src/MultiReference`, `src/fragments` | the methods: ADC, CC, GW, BSE, linear response, ... |
+| electronic structure | `src/SingleReference`, `src/EffectiveHamiltonian`, `src/fragments` | the methods: ADC, CC, GW, BSE, linear response, ... |
 | environments | `src/environments` | solvent continua, point charges, polarizable sites |
 | foundation | `src/Base`, `src/Solvers` | the pySCF interface, numerical settings, factorizations, grids, eigensolvers |
 
@@ -118,10 +118,11 @@ src/SingleReference/
                                methods/periodic.md)
     common/                    pieces several methods share: MP1 amplitudes,
                                ERI blocks, DF amplitudes, ActiveSpace
-src/MultiReference/QDPT/       active-space downfolding: generated MP2/MP3
+src/EffectiveHamiltonian/
+    QDPT/                      active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them
-src/MultiReference/Downfolding/ static effective Hamiltonians of an active
+    Downfolding/               static effective Hamiltonians of an active
                                space downfolded from HF or RPA (see
                                methods/downfolding.md); builds on
                                LinearResponse and GW

@@ -47,11 +47,11 @@ from src.Base.numerics.numerics import (Numerics, numerics_or_default,
 from src.Base.orbital_spaces import ov_energies, particle_hole_window
 from src.Base.utils.grids.grids import (gap_scaled_w0, gauss_legendre_grid,
                                         minimax_frequency_grid)
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
-from src.MultiReference.Downfolding.energy import Energies
-from src.MultiReference.Downfolding.methods import rpa
-from src.MultiReference.Downfolding.partition import partition
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
+from src.EffectiveHamiltonian.Downfolding.energy import Energies
+from src.EffectiveHamiltonian.Downfolding.methods import rpa
+from src.EffectiveHamiltonian.Downfolding.partition import partition
 from src.SingleReference.common.active_space import ActiveSpace
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.linear_response import \

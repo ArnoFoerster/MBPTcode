@@ -3,8 +3,8 @@
 Every function here is written from the spin-orbital form of the
 downfolding formulas, literally and with plain loops where that reads
 closest to the formula, on exact 4-centre integrals taken straight from
-`mol.intor`. Nothing in `src/` is used, so the
-production code in `src/MultiReference/Downfolding/` is checked against an
+`mol.intor`. Nothing in `src/` is used, so the production
+code in `src/EffectiveHamiltonian/Downfolding/` is checked against an
 independent implementation (tests/test_downfolding_one_body.py,
 tests/test_downfolding_energy.py, tests/test_downfolding_two_body.py).
 The direct RPA (`drpa`, `rpa_energy`) is written from its restricted form;

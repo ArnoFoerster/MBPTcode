@@ -1,15 +1,15 @@
 """Unified solver interface for (downfolded) active-space Hamiltonians.
 
 solve() takes an effective Hamiltonian g_eff (dict body-rank -> tensor, as
-produced by src/MultiReference/QDPT/perturbative.py) and dispatches to one of
-the many-body solver backends:
+produced by src/EffectiveHamiltonian/QDPT/perturbative.py) and dispatches to
+one of the many-body solver backends:
   'openfermion' (default) -- explicit determinant-basis matrix + exact
                              diagonalization (ExactDiagonalizationSolver)
   'pyscf_fci'             -- pyscf's FCI at fixed Sz (PyscfFCISolver); the
                              one backend that also solves a spin-resolved
                              g_eff, the per-spin blocks of an unrestricted
                              reference, with fci.direct_uhf
-                             (PyscfUHFFCISolver)
+                             (PyscfSpinResolvedFCISolver)
   'dmrg'                  -- DMRG through block2, SU2 spin-adapted
                              (Block2DMRGSolver); reaches active spaces the
                              two exact engines above cannot. block2 must be
@@ -41,7 +41,7 @@ from src.Solvers.active_space_solver import (Block2DMRGSolver,
                                              CoupledClusterSolver,
                                              ExactDiagonalizationSolver,
                                              PyscfFCISolver,
-                                             PyscfUHFFCISolver,
+                                             PyscfSpinResolvedFCISolver,
                                              total_spin_square)
 from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
@@ -254,7 +254,7 @@ def _pyscf_fci_uhf(r, out, spin_overlap):
     when `out` and the alpha-beta overlaps are given."""
     g_eff, norb, n_elec = r.g_eff, r.n_spin_orbs, r.n_elec_active
     h, eri = _spin_resolved_hamiltonian(g_eff, norb, r.symmetrize, 'pyscf_fci')
-    engine = PyscfUHFFCISolver()
+    engine = PyscfSpinResolvedFCISolver()
     energies, vectors = engine.roots(h, eri, norb, n_elec, nroots=r.nroots)
     if out is not None and spin_overlap is not None:
         out['spin_square'] = []

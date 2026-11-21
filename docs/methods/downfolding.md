@@ -1,7 +1,7 @@
 # Downfolding to an active space (HF and RPA)
 
-`src.MultiReference.Downfolding` builds a static effective Hamiltonian for an
-active space from a low-level method on the whole molecule: the orbitals
+`src.EffectiveHamiltonian.Downfolding` builds a static effective Hamiltonian
+for an active space from a low-level method on the whole molecule: the orbitals
 outside the active space enter as a frozen core (HF) and, for the RPA, as a
 screening of the active-space Coulomb interaction. The scheme is that of the
 RPA-downfolding paper (cRPA, cRPA_ph and mRPA screening of an active-space
@@ -28,8 +28,8 @@ Available now:
 ```python
 from pyscf import gto, scf
 
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
 from src.SingleReference.common.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 
@@ -228,8 +228,8 @@ beta blocks.
 ```python
 from pyscf import gto, scf
 
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
 from src.SingleReference.common.active_space import unrestricted_from_counts
 from src.Solvers.active_space import solve
 

@@ -1,12 +1,12 @@
 """Every committed generated module is what its generator writes today.
 
 The generated modules under src/SingleReference/CC/generated_*,
-src/SingleReference/DensityMatrix/generated_mpn* and src/MultiReference/QDPT
-are committed, so a generator change that is not regenerated (or a hand edit of
-a generated file) leaves code nothing reproduces. Each generator here writes into
-a temporary directory and its output is compared byte for byte with the
-committed file. A deliberate change regenerates the committed file in the same
-commit.
+src/SingleReference/DensityMatrix/generated_mpn* and
+src/EffectiveHamiltonian/QDPT are committed, so a generator change that is
+not regenerated (or a hand edit of a generated file) leaves code nothing
+reproduces. Each generator here writes into a temporary directory and its
+output is compared byte for byte with the committed file. A deliberate change
+regenerates the committed file in the same commit.
 
 KNOWN_STALE: committed modules written by an older emitter that their generator
 no longer reproduces -- the MP3/MP4 Laplace pieces predate laplace_codegen's
@@ -59,7 +59,7 @@ pytestmark = [
 
 _CC = os.path.join(ROOT, 'src', 'SingleReference', 'CC')
 _DM = os.path.join(ROOT, 'src', 'SingleReference', 'DensityMatrix')
-_QDPT = os.path.join(ROOT, 'src', 'MultiReference', 'QDPT')
+_QDPT = os.path.join(ROOT, 'src', 'EffectiveHamiltonian', 'QDPT')
 
 KNOWN_STALE = {
     'generated_mpn_restricted/mp3_t3_laplace_restricted.py',

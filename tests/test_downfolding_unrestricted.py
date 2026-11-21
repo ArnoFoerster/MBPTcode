@@ -41,11 +41,11 @@ from pyscf.gw import urpa
 
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
 from src.Base.pyscf import pyscf_interface
-from src.MultiReference.Downfolding import (build_effective_hamiltonian,
-                                            run_low_level)
-from src.MultiReference.Downfolding.methods import rpa
-from src.MultiReference.Downfolding.partition import (partition,
-                                                      ph_element_mask)
+from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
+                                                  run_low_level)
+from src.EffectiveHamiltonian.Downfolding.methods import rpa
+from src.EffectiveHamiltonian.Downfolding.partition import (partition,
+                                                            ph_element_mask)
 from src.SingleReference.common.active_space import (ActiveSpace,
                                                      unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve

@@ -32,7 +32,8 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, mcscf, scf
 
-from src.MultiReference.QDPT.perturbative import build_effective_hamiltonian
+from src.EffectiveHamiltonian.QDPT.perturbative import (
+    build_effective_hamiltonian)
 from src.SingleReference.CC import amplitudes
 from src.SingleReference.CC.integrals import energy_denominators
 from src.Solvers import active_space_solver

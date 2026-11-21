@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from src.Base.numerics.constants import QP_DEGENERACY_TOL
-from src.MultiReference.Downfolding.partition import (
+from src.EffectiveHamiltonian.Downfolding.partition import (
     active_pair_mask, partition, ph_element_mask)
 from src.SingleReference.common.active_space import ActiveSpace
 
