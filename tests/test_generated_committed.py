@@ -15,14 +15,26 @@ the committed files loop over tau). Regenerating them changes the summation
 order, so it is a numerics decision of its own; they are strict xfails here, so
 the regeneration that brings them in line also has to drop them from the list.
 
-The comparison is byte for byte, so it holds only on the pdaggerq build the
-committed files were recorded with: the workstation's conda env py310 (Python
-3.10, pdaggerq 0.0.1, macOS arm64). Other builds order the factors of a term
-differently (a Python 3.11 build on a Linux cluster writes t1 before l1, and
-reorders terms); there
-the base generators miss the same files, so this is a build pin, not a defect.
+The comparison is byte for byte, so it holds only on a pdaggerq build that
+orders the factors of a term as the recording build did: the workstation's
+conda env py310 (Python 3.10, pdaggerq 0.0.1, macOS arm64). pdaggerq writes
+the amplitudes of a term in the iteration order of a std::unordered_map
+(pq_string.cc, get_string), so the order is decided by the C++ standard
+library the extension was compiled against, not by the Python version.
+Commit f3a1f29 (the one docs/installation.md names), built for Python 3.10 on
+macOS arm64 with Apple clang 14.0.3 and the macOS 13.3 SDK (Xcode 14.3.1),
+gives the recorded order, l1 before t1, and on that build this test runs and
+passes. The same commit and Python built with Apple clang 21.0.0 and the
+macOS 27.0 SDK give t1 before l1, as does a GCC (libstdc++) build on macOS; a
+Python 3.11 build on a Linux cluster does too, and reorders terms. There the
+base generators miss the same files, so this is a build pin, not a defect.
 _recording_build() checks pdaggerq's factor order on one small density term and
 skips the test on any other build.
+
+To get the recorded order on a newer macOS, build the wheel with the old
+toolchain selected (DEVELOPER_DIR and SDKROOT of Xcode 14.3.1, CC and CXX
+Apple's clang). CMake takes the newest Python it finds, not the one running
+pip, unless the target environment is the active one.
 
 Needs pdaggerq (skipped without it); about 8 minutes at 2 threads.
 """
