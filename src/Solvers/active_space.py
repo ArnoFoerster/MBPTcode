@@ -1,8 +1,9 @@
 """Unified solver interface for (downfolded) active-space Hamiltonians.
 
 solve() takes an effective Hamiltonian g_eff (dict body-rank -> tensor, as
-produced by src/EffectiveHamiltonian/QDPT/perturbative.py) and dispatches to
-one of the many-body solver backends:
+produced by the builders of src/EffectiveHamiltonian: QDPT/perturbative.py
+and Downfolding/effective_hamiltonian.py) and dispatches to one of the
+many-body solver backends:
   'openfermion' (default) -- explicit determinant-basis matrix + exact
                              diagonalization (ExactDiagonalizationSolver)
   'pyscf_fci'             -- pyscf's FCI at fixed Sz (PyscfFCISolver); the
