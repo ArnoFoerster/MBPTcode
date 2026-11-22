@@ -210,23 +210,10 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].terms(
             low, spaces if unrestricted else spaces[0], **method_opts)
-        blocks = [len(terms.vtilde)]
-        if terms.sigma_bar is not None:
-            blocks.append(len(terms.sigma_bar))
-        if blocks != ([3, 2] if unrestricted else [1, 1])[:len(blocks)]:
-            raise ValueError(
-                f"method={method!r} returned {len(terms.vtilde)} vtilde blocks"
-                + (f" and {len(terms.sigma_bar)} Sigma_bar blocks"
-                   if terms.sigma_bar is not None else "")
-                + ("; an unrestricted reference is two spin channels: "
-                   "vtilde = (aa, ab, bb), sigma_bar = (a, b)."
-                   if unrestricted else
-                   "; a restricted reference is one spin channel: "
-                   "vtilde = (v,), sigma_bar = (s,)."))
+        _check_terms(terms, method, unrestricted)
 
         core = core_terms(mol, mf.get_hcore(), mo, spaces)
-        n_act_occ = tuple(s.n_act_occ for s in spaces)
-        dc = double_counting(terms, n_act_occ)
+        dc = double_counting(terms, tuple(s.n_act_occ for s in spaces))
         h_eff = effective_one_body(core.fock, dc.hartree, dc.exchange,
                                    dc.mode, terms.sigma_bar)
         v_eff = effective_interaction(
@@ -236,30 +223,51 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     inherited = list(getattr(low, 'numerical_flags', ()))
     energies = replace(energies,
                        numerical_flags=gathered(inherited + flags))
+    return g_eff, _space(mf, mo, spaces, spin_free), energies
+
+
+def _check_terms(terms, method, unrestricted):
+    """Refuse a `DownfoldingTerms` whose spin blocks do not fit the reference:
+    vtilde = (v,) and sigma_bar = (s,) for a restricted one, (aa, ab, bb)
+    and (a, b) for an unrestricted one (spin.py)."""
+    blocks = [len(terms.vtilde)]
+    if terms.sigma_bar is not None:
+        blocks.append(len(terms.sigma_bar))
+    if blocks != ([3, 2] if unrestricted else [1, 1])[:len(blocks)]:
+        raise ValueError(
+            f"method={method!r} returned {len(terms.vtilde)} vtilde blocks"
+            + (f" and {len(terms.sigma_bar)} Sigma_bar blocks"
+               if terms.sigma_bar is not None else "")
+            + ("; an unrestricted reference is two spin channels: "
+               "vtilde = (aa, ab, bb), sigma_bar = (a, b)."
+               if unrestricted else
+               "; a restricted reference is one spin channel: "
+               "vtilde = (v,), sigma_bar = (s,)."))
+
+
+def _space(mf, mo, spaces, spin_free):
+    """The `space` record of `build_effective_hamiltonian`: the active space
+    in the form QDPT's builder gives it, each index entry a pair (alpha, beta)
+    for an unrestricted reference, which also gets spin_overlap."""
+    restricted = len(spaces) == 1
+
+    def per_channel(view):
+        return view(spaces[0]) if restricted else tuple(map(view, spaces))
 
     n_act = spaces[0].n_act
-    if unrestricted:
-        space = {
-            'n_orbs': n_act if spin_free else 2 * n_act,
-            'n_elec_active': n_act_occ,
-            'act_idx': tuple(s.act for s in spaces),
-            'act_occ_idx': tuple(s.occ_active for s in spaces),
-            'act_vir_idx': tuple(s.virt_active for s in spaces),
-            'spin_free': spin_free,
-            'active_space': spaces,
-            'spin_overlap': _spin_overlap(mf, mo, spaces),
-        }
-    else:
-        space = {
-            'n_orbs': n_act if spin_free else 2 * n_act,
-            'n_elec_active': active_space.nelec_active,
-            'act_idx': active_space.act,
-            'act_occ_idx': active_space.occ_active,
-            'act_vir_idx': active_space.virt_active,
-            'spin_free': spin_free,
-            'active_space': active_space,
-        }
-    return g_eff, space, energies
+    space = {
+        'n_orbs': n_act if spin_free else 2 * n_act,
+        'n_elec_active': (spaces[0].nelec_active if restricted
+                          else tuple(s.n_act_occ for s in spaces)),
+        'act_idx': per_channel(lambda s: s.act),
+        'act_occ_idx': per_channel(lambda s: s.occ_active),
+        'act_vir_idx': per_channel(lambda s: s.virt_active),
+        'spin_free': spin_free,
+        'active_space': spaces[0] if restricted else spaces,
+    }
+    if not restricted:
+        space['spin_overlap'] = _spin_overlap(mf, mo, spaces)
+    return space
 
 
 def _spin_overlap(mf, mo, spaces):
