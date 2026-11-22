@@ -1,19 +1,22 @@
 """The one-body term of the downfolded Hamiltonian: core Fock, split double counting.
 
-`core_fock`, `double_counting` and `effective_one_body` are written per spin
-channel. The restricted tests pin the spatial formulas on water;
-the per-spin test gives the two channels different orbitals and different
-active sets and compares with the spin-orbital oracle
+`core_fock` (core.py), `double_counting_potential` (double_counting.py) and
+`effective_one_body` are written per spin channel. The restricted tests pin the
+spatial formulas on water; the per-spin test gives the two channels different
+orbitals and different active sets and compares with the spin-orbital oracle
 (tests/downfolding_oracle.py), the only place the per-spin paths see two
 genuinely different channels. Measured agreement: at most 1.2e-14 against both
 (tolerance 1e-10).
 """
 import numpy as np
 import pytest
-from src.EffectiveHamiltonian.Downfolding.one_body import (
-    core_fock, double_counting, effective_one_body, inactive_jk)
-from src.EffectiveHamiltonian.Downfolding.spin import spin_weight
+
+from src.EffectiveHamiltonian.Downfolding.core import core_fock, core_jk
+from src.EffectiveHamiltonian.Downfolding.double_counting import (
+    double_counting_potential)
 from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
+from src.EffectiveHamiltonian.Downfolding.one_body import effective_one_body
+from src.EffectiveHamiltonian.Downfolding.spin import spin_weight
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from tests.downfolding_oracle import (
     mo_integrals, spin_orbital_integrals, spin_orbital_one_body, water)
@@ -68,7 +71,7 @@ def test_double_counting_restricted_matches_the_spatial_formula():
     vt = _random_vtilde(rng, n)[0]
     f = rng.standard_normal((n, n))
     f = (f + f.T, f + f.T)
-    hartree, exchange = double_counting((vt, vt, vt), (n_occ, n_occ))
+    hartree, exchange = double_counting_potential((vt, vt, vt), (n_occ, n_occ))
     k = slice(0, n_occ)
     t_h = 2 * np.einsum('tukk->tu', vt[:, :, k, k])
     t_x = np.einsum('tkku->tu', vt[:, k, k, :])
@@ -99,7 +102,7 @@ def test_per_spin_channels_differ():
     sigma_bar = tuple(rng.standard_normal((n, n)) for _ in range(2))
 
     f = core_fock(mf.mol, mf.get_hcore(), (c_a, c_b), (part_a, part_b))
-    hartree, exchange = double_counting((aa, ab, bb), (n_occ, n_occ))
+    hartree, exchange = double_counting_potential((aa, ab, bb), (n_occ, n_occ))
 
     h_so, eri_so = spin_orbital_integrals(mf.mol, c_a, c_b)
     occ_env = list(part_a.env_occ) + list(nmo + part_b.env_occ)
@@ -136,7 +139,7 @@ def test_ph_only_vtilde_has_no_hartree_dc():
     rng = np.random.default_rng(0)
     vtilde = tuple(v * mask for v in _random_vtilde(rng, part.n_act))
     n_occ = part.n_act_occ
-    hartree, exchange = double_counting(vtilde, (n_occ, n_occ))
+    hartree, exchange = double_counting_potential(vtilde, (n_occ, n_occ))
     virt = np.arange(part.n_act) >= n_occ
     for s in (0, 1):
         assert np.all(hartree[s] == 0.0)
@@ -159,8 +162,8 @@ def test_one_restricted_channel_is_two_identical_channels():
 
     f_one = core_fock(mf.mol, hcore, (c,), (part,))
     f_two = core_fock(mf.mol, hcore, (c, c), (part, part))
-    h_one, x_one = double_counting((vt,), (k,))
-    h_two, x_two = double_counting((vt, vt, vt), (k, k))
+    h_one, x_one = double_counting_potential((vt,), (k,))
+    h_two, x_two = double_counting_potential((vt, vt, vt), (k, k))
     assert len(f_one) == len(h_one) == len(x_one) == 1
     for one, two in ((f_one, f_two), (h_one, h_two), (x_one, x_two)):
         assert np.abs(one[0] - two[0]).max() < 1e-12
@@ -170,7 +173,7 @@ def test_one_restricted_channel_is_two_identical_channels():
         two = effective_one_body(f_two, h_two, x_two, dc, (sig, sig))
         assert len(one) == 1 and np.abs(one[0] - two[0]).max() < 1e-12
 
-    jk = inactive_jk(mf.mol, (c,), (part,))
+    jk = core_jk(mf.mol, (c,), (part,))
     assert jk[0].shape[0] == 1 and len(jk[2]) == 1
     marked = (jk[0], jk[1] + 1.0, jk[2])          # a J no fresh build would give
     shifted = core_fock(mf.mol, hcore, (c,), (part,), jk=marked)[0]

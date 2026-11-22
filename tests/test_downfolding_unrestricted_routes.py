@@ -62,7 +62,7 @@ from src.Base.utils.grids.analytic_continuation import pade_nodes
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
-from src.EffectiveHamiltonian.Downfolding.energy import Energies
+from src.EffectiveHamiltonian.Downfolding.zero_body import Energies
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.Downfolding.masks import active_pair_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace

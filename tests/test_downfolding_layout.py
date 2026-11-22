@@ -19,8 +19,8 @@ from src.EffectiveHamiltonian.Downfolding.options import choice
 
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
            / 'src' / 'EffectiveHamiltonian' / 'Downfolding')
-GENERAL = ['low_level', 'options', 'spin', 'masks', 'two_body', 'one_body',
-           'energy']
+GENERAL = ['low_level', 'options', 'spin', 'masks', 'core', 'double_counting',
+           'zero_body', 'one_body', 'two_body']
 KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
 METHODS = 'src.EffectiveHamiltonian.Downfolding.methods'
 FORBIDDEN = KERNELS + (METHODS,)

@@ -23,10 +23,11 @@ coincide:
     e = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
               spin_free=space['spin_free'])
 
-The three parts of H_eff come from the general layer's three files, E_0 from
-energy.py, h_eff from one_body.py and v_eff from two_body.py; `pack` here
-writes them into the g_eff dictionary the active-space solvers read
-(src/EffectiveHamiltonian/solvers/solve.py).
+The corrections are computed once each, the frozen core (core.py) and the
+double counting (double_counting.py), and the three parts of H_eff only add
+them up: E_0 in zero_body.py, h_eff in one_body.py, v_eff in two_body.py.
+`pack` here writes them into the g_eff dictionary the active-space solvers
+read (src/EffectiveHamiltonian/solvers/solve.py).
 """
 from dataclasses import replace
 
@@ -45,13 +46,14 @@ from src.Base.utils.parallel.mpi_grid import grid_comm
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
 
-from .energy import assemble_energies, environment_hf_energy
+from .core import core_terms
+from .double_counting import double_counting
 from .methods import LOW_LEVEL
-from .one_body import (DC_MODES, core_fock, double_counting,
-                       effective_one_body, inactive_jk)
+from .one_body import effective_one_body
 from .options import choice
 from .spin import SPINS
 from .two_body import effective_interaction
+from .zero_body import assemble_energies
 
 WHO = 'Downfolding'
 
@@ -208,13 +210,6 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].terms(
             low, spaces if unrestricted else spaces[0], **method_opts)
-        dc = choice(terms.dc, DC_MODES, 'dc')
-        if terms.sigma_bar is not None and dc == 'full':
-            raise ValueError(
-                f"method={method!r} returned a static self-energy with "
-                f"dc='full'; Sigma_bar carries the exchange, so it comes "
-                f"with dc='hartree', which also sets the double counting and "
-                f"E_0 to match.")
         blocks = [len(terms.vtilde)]
         if terms.sigma_bar is not None:
             blocks.append(len(terms.sigma_bar))
@@ -229,17 +224,14 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
                    "; a restricted reference is one spin channel: "
                    "vtilde = (v,), sigma_bar = (s,)."))
 
-        n_act_occ = tuple(p.n_act_occ for p in spaces)
-        hcore = mf.get_hcore()
-        jk = inactive_jk(mol, mo, spaces)
-        f = core_fock(mol, hcore, mo, spaces, jk=jk)
-        hartree, exchange = double_counting(terms.vtilde, n_act_occ)
-        h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
+        core = core_terms(mol, mf.get_hcore(), mo, spaces)
+        n_act_occ = tuple(s.n_act_occ for s in spaces)
+        dc = double_counting(terms, n_act_occ)
+        h_eff = effective_one_body(core.fock, dc.hartree, dc.exchange,
+                                   dc.mode, terms.sigma_bar)
         v_eff = effective_interaction(
-            mol, tuple(c[:, p.act] for c, p in zip(mo, spaces)), terms.vtilde)
-        environment = environment_hf_energy(mol, hcore, mo, spaces, jk=jk)
-        energies = assemble_energies(mf.energy_nuc(), *environment, terms,
-                                     n_act_occ)
+            mol, tuple(c[:, s.act] for c, s in zip(mo, spaces)), terms.vtilde)
+        energies = assemble_energies(mf.energy_nuc(), core, dc, terms)
         g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
     inherited = list(getattr(low, 'numerical_flags', ()))
     energies = replace(energies,

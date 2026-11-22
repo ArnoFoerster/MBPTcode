@@ -42,14 +42,16 @@ from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   effective_hamiltonian,
                                                   run_low_level)
-from src.EffectiveHamiltonian.Downfolding.energy import (
-    Energies, active_hf_energy, assemble_energies, environment_hf_energy,
+from src.EffectiveHamiltonian.Downfolding.core import (
+    Core, core_energy, core_terms)
+from src.EffectiveHamiltonian.Downfolding.double_counting import (
+    double_counting, double_counting_energy, double_counting_potential,
     exchange_energy_term, sigma_trace)
-from src.EffectiveHamiltonian.Downfolding.methods import LOW_LEVEL, rpa
-from src.EffectiveHamiltonian.Downfolding.one_body import (
-    core_fock, double_counting, effective_one_body)
-
 from src.EffectiveHamiltonian.Downfolding.low_level import DownfoldingTerms
+from src.EffectiveHamiltonian.Downfolding.methods import LOW_LEVEL, rpa
+from src.EffectiveHamiltonian.Downfolding.one_body import effective_one_body
+from src.EffectiveHamiltonian.Downfolding.zero_body import (
+    Energies, assemble_energies)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import (
@@ -94,7 +96,7 @@ def test_environment_energy_all_environment_is_hf():
     part = _water_part(mf, [], [])
     assert len(part.env_occ) == mf.mol.nelectron // 2 and part.n_act == 0
     c = mf.mo_coeff
-    e_core, e_h, e_x = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c),
+    e_core, e_h, e_x = core_energy(mf.mol, mf.get_hcore(), (c, c),
                                              (part, part))
     assert abs(mf.energy_nuc() + e_core + e_h + e_x - mf.e_tot) < 1e-9
     # the Hartree and exchange halves, against pyscf's own J and K
@@ -125,9 +127,9 @@ def test_per_spin_energy_terms():
     aa, ab, bb = _random_vtilde(rng, n)
     sigma_bar = (_symmetric(rng, n), _symmetric(rng, n))
 
-    e_core, e_h, e_x = environment_hf_energy(
+    e_core, e_h, e_x = core_energy(
         mf.mol, mf.get_hcore(), (c_a, c_b), (part_a, part_b))
-    hartree, exchange = active_hf_energy((aa, ab, bb), n_occ)
+    hartree, exchange = double_counting_energy((aa, ab, bb), n_occ)
 
     h_so, eri_so = spin_orbital_integrals(mf.mol, c_a, c_b)
     occ_env = list(part_a.env_occ) + list(nmo + part_b.env_occ)
@@ -153,7 +155,8 @@ def test_per_spin_energy_terms():
                - ref['exchange_term']) < TOL
     assert abs(sigma_trace(sigma_bar, n_occ) - ref['sigma_trace']) < TOL
     # the alpha-beta block counts: swapping its orientation changes the Hartree term
-    swapped = active_hf_energy((aa, ab.transpose(2, 3, 0, 1), bb), n_occ)[0]
+    swapped = double_counting_energy((aa, ab.transpose(2, 3, 0, 1), bb),
+                                     n_occ)[0]
     assert abs(swapped - hartree) > 1e-2
 
 
@@ -163,18 +166,19 @@ def test_e0_assembly_and_dc_modes():
     vtilde = _random_vtilde(rng, n)
     sigma_bar = (_symmetric(rng, n), _symmetric(rng, n))
     e_nuc, e_core, e_h, e_x = 9.1, -120.3, 60.2, -22.5
-    hartree, exchange = active_hf_energy(vtilde, n_occ)
+    hartree, exchange = double_counting_energy(vtilde, n_occ)
     k_term = exchange_energy_term(vtilde, n_occ)
     s_term = sigma_trace(sigma_bar, n_occ)
     assert abs(k_term + 2 * exchange) < TOL
     assert abs(k_term) > 1e-2 and abs(s_term) > 1e-2
 
     energies = {}
-    for dc in ('full', 'hartree'):
-        terms = DownfoldingTerms(vtilde=vtilde, sigma_bar=sigma_bar,
+    for dc, s_bar in (('full', None), ('hartree', sigma_bar)):
+        terms = DownfoldingTerms(vtilde=vtilde, sigma_bar=s_bar,
                                  e_c_full=-0.31, e_c_active=-0.12, dc=dc,
                                  diagnostics={'probe': dc})
-        en = assemble_energies(e_nuc, e_core, e_h, e_x, terms, n_occ)
+        en = assemble_energies(e_nuc, Core(None, e_core, e_h, e_x),
+                               double_counting(terms, n_occ), terms)
         assert isinstance(en, Energies)
         assert en.diagnostics == {'probe': dc}
         # every term on its own: nuclear, core, and the Hartree and exchange
@@ -198,17 +202,22 @@ def test_e0_assembly_and_dc_modes():
                             - 0.31 + 0.12 + en.e_exchange_term
                             - en.e_sigma_trace)) < TOL
         energies[dc] = en
-    # dc='full': neither Sigma^E term, whatever vtilde and sigma_bar are
+    # dc='full': neither Sigma^E term, and no Sigma_bar to go with it
     assert energies['full'].e_exchange_term == 0.0
     assert energies['full'].e_sigma_trace == 0.0
     assert abs(energies['hartree'].e_exchange_term - k_term) < TOL
     assert abs(energies['hartree'].e_sigma_trace - s_term) < TOL
     assert abs(energies['hartree'].e0 - energies['full'].e0
                - (k_term - s_term)) < TOL
+    with pytest.raises(ValueError, match="dc='hartree'"):
+        double_counting(DownfoldingTerms(vtilde=vtilde, sigma_bar=sigma_bar,
+                                         e_c_full=0.0, e_c_active=0.0,
+                                         dc='full'), n_occ)
     # dc='hartree' without a Sigma_bar keeps the exchange term only
     bare = DownfoldingTerms(vtilde=vtilde, sigma_bar=None, e_c_full=0.0,
                             e_c_active=0.0, dc='hartree')
-    en = assemble_energies(e_nuc, e_core, e_h, e_x, bare, n_occ)
+    en = assemble_energies(e_nuc, Core(None, e_core, e_h, e_x),
+                           double_counting(bare, n_occ), bare)
     assert en.e_sigma_trace == 0.0
     assert abs(en.e_exchange_term - k_term) < TOL
 
@@ -232,16 +241,16 @@ def test_reference_determinant_energy_is_hf_plus_correlation_pair():
     a = part.act
     v_act = eri[np.ix_(a, a, a, a)]
 
-    env = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c), (part, part))
-    f = core_fock(mf.mol, mf.get_hcore(), (c, c), (part, part))
-    hartree, exchange = double_counting(vtilde, (k, k))
+    core = core_terms(mf.mol, mf.get_hcore(), (c, c), (part, part))
+    hartree, exchange = double_counting_potential(vtilde, (k, k))
     expected = mf.e_tot - 0.31 + 0.12
     for dc, sigma_bar in (('full', None), ('hartree', None),
                           ('hartree', (sig, sig))):
         terms = DownfoldingTerms(vtilde=vtilde, sigma_bar=sigma_bar,
                                  e_c_full=-0.31, e_c_active=-0.12, dc=dc)
-        en = assemble_energies(mf.energy_nuc(), *env, terms, (k, k))
-        h_eff = effective_one_body(f, hartree, exchange, dc, sigma_bar)
+        en = assemble_energies(mf.energy_nuc(), core,
+                               double_counting(terms, (k, k)), terms)
+        h_eff = effective_one_body(core.fock, hartree, exchange, dc, sigma_bar)
         g_eff = {0: en.e0, 1: h_eff[0],
                  2: (v_act + vt).transpose(0, 2, 1, 3)}
         assert abs(reference_energy(g_eff, k) - expected) < 1e-8
@@ -753,22 +762,25 @@ def test_one_restricted_channel_of_the_energy_terms():
     rng = np.random.default_rng(6)
     vt = _random_vtilde(rng, n)[0]
     sig = _symmetric(rng, n)
-    one = environment_hf_energy(mf.mol, hcore, (c,), (part,))
-    two = environment_hf_energy(mf.mol, hcore, (c, c), (part, part))
+    one = core_energy(mf.mol, hcore, (c,), (part,))
+    two = core_energy(mf.mol, hcore, (c, c), (part, part))
     assert np.allclose(one, two, rtol=0, atol=1e-11)
-    assert np.allclose(active_hf_energy((vt,), (k,)),
-                       active_hf_energy((vt, vt, vt), (k, k)),
+    assert np.allclose(double_counting_energy((vt,), (k,)),
+                       double_counting_energy((vt, vt, vt), (k, k)),
                        rtol=0, atol=1e-12)
     assert abs(exchange_energy_term((vt,), (k,))
                - exchange_energy_term((vt, vt, vt), (k, k))) < 1e-12
     assert abs(sigma_trace((sig,), (k,))
                - sigma_trace((sig, sig), (k, k))) < 1e-12
     for dc in ('full', 'hartree'):
-        en = [assemble_energies(
-            1.0, *env, DownfoldingTerms(vtilde=v, sigma_bar=s, e_c_full=-0.3,
-                                        e_c_active=-0.1, dc=dc), occ).e0
-              for env, v, s, occ in ((one, (vt,), (sig,), (k,)),
-                                     (two, (vt, vt, vt), (sig, sig), (k, k)))]
+        en = []
+        for env, v, s, occ in ((one, (vt,), (sig,), (k,)),
+                               (two, (vt, vt, vt), (sig, sig), (k, k))):
+            terms = DownfoldingTerms(vtilde=v, e_c_full=-0.3, e_c_active=-0.1,
+                                     sigma_bar=s if dc == 'hartree' else None,
+                                     dc=dc)
+            en.append(assemble_energies(1.0, Core(None, *env),
+                                        double_counting(terms, occ), terms).e0)
         assert abs(en[0] - en[1]) < 1e-11
 
 
@@ -778,11 +790,11 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
     ONE exact J/K build (shared by the core Fock operator and the environment
     energy) and ONE integral transformation of the active block, and the
     method hands back one vtilde."""
-    from src.EffectiveHamiltonian.Downfolding import one_body, two_body
+    from src.EffectiveHamiltonian.Downfolding import core, two_body
     mf = water()
     low = run_low_level(mf, method=method)
     calls = {'jk': 0, 'ao2mo': 0}
-    real_jk, real_general = one_body.get_jk, two_body.ao2mo.general
+    real_jk, real_general = core.get_jk, two_body.ao2mo.general
 
     def counted_jk(*args, **kwargs):
         calls['jk'] += 1
@@ -792,11 +804,10 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
         calls['ao2mo'] += 1
         return real_general(*args, **kwargs)
 
-    monkeypatch.setattr(one_body, 'get_jk', counted_jk)
+    monkeypatch.setattr(core, 'get_jk', counted_jk)
     monkeypatch.setattr(two_body.ao2mo, 'general', counted_general)
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    part = aspace
-    assert len(LOW_LEVEL[method].terms(low, part).vtilde) == 1
+    assert len(LOW_LEVEL[method].terms(low, aspace).vtilde) == 1
     build_effective_hamiltonian(low, aspace)
     assert calls == {'jk': 1, 'ao2mo': 1}
 

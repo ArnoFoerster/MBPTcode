@@ -89,8 +89,9 @@ from pyscf import dft, gto, scf
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.one_body import (core_fock,
-                                                           double_counting)
+from src.EffectiveHamiltonian.Downfolding.core import core_fock
+from src.EffectiveHamiltonian.Downfolding.double_counting import (
+    double_counting_potential)
 from src.EffectiveHamiltonian.Downfolding.masks import active_pair_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.solvers.solve import solve
@@ -324,11 +325,11 @@ def _pinned_build(molecule, screening):
 
 @pytest.mark.parametrize('molecule, screening', PIN_CASES)
 def test_prototype_elements(molecule, screening):
-    """v_eff (g_eff[2] back to chemist), f and t^DC (one_body's core_fock
-    and double_counting, dc='full': hartree - exchange) and h_eff = f - t^DC
-    against the prototype's, element by element, on its own orbitals (which
-    give its SCF energy back). Measured: v_eff 1.9e-16, f 0, t^DC 3.6e-16,
-    h_eff 2.2e-16 (tolerance 1e-7)."""
+    """v_eff (g_eff[2] back to chemist), f and t^DC (core_fock and
+    double_counting_potential, dc='full': hartree - exchange) and
+    h_eff = f - t^DC against the prototype's, element by element, on its own
+    orbitals (which give its SCF energy back). Measured: v_eff 1.9e-16, f 0,
+    t^DC 3.6e-16, h_eff 2.2e-16 (tolerance 1e-7)."""
     c = PINS[molecule]
     pin = c['screenings'][screening]
     low, aspace = _pinned_low(molecule)
@@ -341,7 +342,7 @@ def test_prototype_elements(molecule, screening):
     mo, parts = (mf.mo_coeff, mf.mo_coeff), (part, part)
     f = core_fock(mf.mol, mf.get_hcore(), mo, parts)[0]
     n_occ = (part.n_act_occ, part.n_act_occ)
-    hartree, exchange = double_counting((v_eff - v,) * 3, n_occ)
+    hartree, exchange = double_counting_potential((v_eff - v,) * 3, n_occ)
     t_dc = hartree[0] - exchange[0]
     for ours, ref in ((v_eff, pin['v_eff']), (f, c['f']),
                       (t_dc, pin['t_dc']),
