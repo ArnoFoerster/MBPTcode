@@ -30,7 +30,7 @@ from pyscf import gto, scf
 
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
-from src.SingleReference.common.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 
 mol = gto.M(atom='C 0 0.6695 0; C 0 -0.6695 0; H 0.9289 1.2321 0; '
@@ -230,7 +230,7 @@ from pyscf import gto, scf
 
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
-from src.SingleReference.common.active_space import unrestricted_from_counts
+from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
 from src.Solvers.active_space import solve
 
 mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1)   # OH

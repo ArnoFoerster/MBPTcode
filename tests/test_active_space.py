@@ -1,4 +1,4 @@
-"""ActiveSpace (src/SingleReference/common/active_space.py): the window-selection rules and the
+"""ActiveSpace (src/EffectiveHamiltonian/active_space.py): the window-selection rules and the
 index views built on top of them.
 
 Run: python tests/test_active_space.py, or under pytest.
@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.common.active_space import ActiveSpace, frozen_core
+from src.Base.orbital_spaces import frozen_core
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 
 #: N2 valence CAS(6,6): 3sigma_g + the 1pi_u pair occupied, the 1pi_g* pair +
 #: 3sigma_u* virtual. Stable in character all the way from 0.8 to 4.0 A, unlike

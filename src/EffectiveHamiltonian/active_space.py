@@ -40,6 +40,8 @@ NOT what this module does.)
 import numpy as np
 from pyscf import symm
 
+from src.Base.orbital_spaces import closed_shell_nocc
+
 class ReorderedMF:
     """Minimal mean-field shim with the MOs permuted to
     [core occupied | active occupied | active virtual | external virtual].
@@ -290,64 +292,6 @@ def _index_array(idx, lo, hi, name):
         raise ValueError(f'{name} must be strictly increasing indices in '
                          f'[{lo}, {hi}); got {out}')
     return out
-
-
-def frozen_core(mol):
-    """Doubly occupied core orbitals: 1s past He, 1s2s2p past Ne, 1s..3d past Ar
-    (the last only for Ga onwards; K-Zn keep their 3s3p frozen too). Not
-    pyscf's `chemcore`, which freezes the shell of the previous noble gas only
-    from the third element of a period on (Li, Be none; Na, Mg the 1s; K-Zn
-    1s..2p; Ga-Kr 1s..3p)."""
-    n = 0
-    for a in range(mol.natm):
-        z = mol.atom_charge(a)
-        n += (z > 2) + 4 * (z > 10) + 4 * (z > 18) + 5 * (z > 30)
-    return int(n)
-
-
-def closed_shell_nocc(mo_occ):
-    """Doubly occupied orbital count; raises unless the occupations are the aufbau [2 ... 2 0 ... 0].
-
-    Every view here indexes the occupied block as [0, nocc), so a hole in the
-    occupation list would label a virtual orbital as core."""
-    mo_occ = np.asarray(mo_occ)
-    if mo_occ.ndim != 1:
-        raise ValueError('ActiveSpace describes a restricted closed-shell '
-                         'reference; mo_occ is not a single occupation vector')
-    nocc = int(np.count_nonzero(mo_occ > 0))
-    if np.any(mo_occ[nocc:] > 0):
-        raise ValueError('the occupied orbitals are not the lowest ones; a '
-                         'non-aufbau reference has no [0, nocc) occupied block')
-    return nocc
-
-
-def unrestricted_nocc(mo_occ):
-    """(N_alpha, N_beta), the occupied counts of an unrestricted determinant
-    with the occupations mo_occ = (occ_alpha, occ_beta); raises, naming the
-    spin, unless each spin's occupations are 1 on its lowest orbitals and 0
-    on the rest.
-
-    Fractional occupations (a smearing, pyscf's `frac_occ`) are not one
-    determinant: counting each as an occupied orbital would describe a
-    system with another number of electrons. A hole below an occupied
-    orbital would label a virtual orbital as occupied (`closed_shell_nocc`).
-    """
-    counts = []
-    for spin, occ in zip(('alpha', 'beta'), mo_occ):
-        occ = np.asarray(occ, float)
-        off = np.minimum(np.abs(occ), np.abs(occ - 1.0)) > 1e-8
-        if off.any():
-            raise ValueError(
-                f'the {spin} orbitals of the mean field: occupations that '
-                f'are not 0 or 1 ({occ[off][:4]} on orbitals '
-                f'{np.flatnonzero(off)[:4]}); a fractionally occupied '
-                f'reference is not one determinant.')
-        try:
-            counts.append(closed_shell_nocc(occ))
-        except ValueError as err:
-            raise ValueError(
-                f'the {spin} orbitals of the mean field: {err}') from None
-    return tuple(counts)
 
 
 def irrep_labels(mol, mo_coeff):

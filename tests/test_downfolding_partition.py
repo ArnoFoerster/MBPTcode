@@ -10,7 +10,7 @@ import pytest
 from src.Base.numerics.constants import QP_DEGENERACY_TOL
 from src.EffectiveHamiltonian.Downfolding.partition import (
     active_pair_mask, partition, ph_element_mask)
-from src.SingleReference.common.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 
 EPS = np.array([-1.0, -0.6, -0.4, 0.3, 0.7, 1.1])
 

@@ -46,8 +46,8 @@ from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.Downfolding.partition import (partition,
                                                             ph_element_mask)
-from src.SingleReference.common.active_space import (ActiveSpace,
-                                                     unrestricted_from_counts)
+from src.EffectiveHamiltonian.active_space import (ActiveSpace,
+                                                 unrestricted_from_counts)
 from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
 from tests.downfolding_oracle import (CH2, NH, OH, active_pairs_so, drpa_so,
                                       env_residues_uhf,

@@ -34,6 +34,7 @@ import numpy as np
 from pyscf import scf
 
 from src.Base.numerical_flags import collecting, gathered
+from src.Base.orbital_spaces import closed_shell_nocc, unrestricted_nocc
 from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             get_orbital_energies,
                                             require_gas_phase_ground_state,
@@ -41,8 +42,6 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             spin_orbital_one_body,
                                             unrestricted_reference_diagnostics)
 from src.Base.utils.parallel.mpi_grid import grid_comm
-from src.SingleReference.common.active_space import (closed_shell_nocc,
-                                                     unrestricted_nocc)
 from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
 
 from .energy import assemble_energies, environment_hf_energy

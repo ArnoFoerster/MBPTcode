@@ -1,6 +1,6 @@
 {
- "src.Base.active_space:ActiveSpace": "src.SingleReference.common.active_space:ActiveSpace",
- "src.Base.active_space:ReorderedMF": "src.SingleReference.common.active_space:ReorderedMF",
+ "src.Base.active_space:ActiveSpace": "src.EffectiveHamiltonian.active_space:ActiveSpace",
+ "src.Base.active_space:ReorderedMF": "src.EffectiveHamiltonian.active_space:ReorderedMF",
  "src.Base.body_frame:BodyFrame": "src.Base.geometry.body_frame:BodyFrame",
  "src.Base.chain_settings:CarriedGrids": "src.gradients.rpa.chain_settings:CarriedGrids",
  "src.Base.composite_environment:CompositeEnvironment": "src.environments.composite_environment:CompositeEnvironment",
@@ -79,6 +79,8 @@
  "src.SingleReference.ADC.adc_r_faddeev:_Pieces": "src.SingleReference.ADC.adc_r_faddeev:Pieces",
  "src.SingleReference.ADC.eeADC.ee_state_model:ADC2State": "src.gradients.adc.ee_state_model:ADC2State",
  "src.SingleReference.LinearResponse.isdf_bse_adjoint:GridTiles": "src.SingleReference.LinearResponse.block_actions:GridTiles",
+ "src.SingleReference.common.active_space:ActiveSpace": "src.EffectiveHamiltonian.active_space:ActiveSpace",
+ "src.SingleReference.common.active_space:ReorderedMF": "src.EffectiveHamiltonian.active_space:ReorderedMF",
  "src.SingleReference.df_correlation_force:RIFactors": "src.gradients.df_correlation_force:RIFactors",
  "src.SingleReference.df_correlation_force_tiled:FactoredDerivatives": "src.gradients.df_correlation_force_tiled:FactoredDerivatives",
  "src.SingleReference.df_correlation_force_tiled:_RIFit": "src.gradients.df_correlation_force_tiled:_RIFit",

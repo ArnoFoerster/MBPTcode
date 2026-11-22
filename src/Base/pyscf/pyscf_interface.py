@@ -910,7 +910,7 @@ def get_system_data(mol=None, mf=None, n_occ_spatial=0, n_act_spatial=2,
 
     The window is the contiguous one [0, n_occ_spatial) | next n_act_spatial |
     rest. An ActiveSpace supplies it instead when given: its MOs are permuted so
-    a character-selected window is contiguous again (src/SingleReference/common/active_space.py).
+    a character-selected window is contiguous again (src/EffectiveHamiltonian/active_space.py).
     """
     mf, h1_mo, eri_chemist, n_occ_spatial, n_act_spatial = _active_window_mean_field(
         mol, mf, n_occ_spatial, n_act_spatial, active_space, 'get_system_data')

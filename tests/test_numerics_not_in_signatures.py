@@ -24,7 +24,7 @@ PACKAGES = ('src/gradients', 'src/properties', 'src/Base', 'src/Solvers',
             'src/SingleReference/GW', 'src/SingleReference/LinearResponse',
             'src/SingleReference/BSE', 'src/SingleReference/Periodic',
             'src/photophysics', 'src/environments', 'src/fragments',
-            'src/SingleReference/common')
+            'src/SingleReference/common', 'src/EffectiveHamiltonian')
 
 #: Parameter names that are a numerical choice of a run: grids, quadratures, the ISDF fit,
 #: the Davidson, the self-consistent loops' tolerances and mixing, the memory and layout

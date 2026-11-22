@@ -68,7 +68,7 @@ from src.EffectiveHamiltonian.Downfolding.energy import Energies
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
                                                             partition)
-from src.SingleReference.common.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.linear_response import \

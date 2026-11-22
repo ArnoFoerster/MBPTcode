@@ -23,7 +23,7 @@ def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
     act_vir_idx, spin_free, active_space.
     shift: Brillouin-Wigner energy shift in the PT denominators (None = plain).
 
-    active_space: an src.SingleReference.common.active_space.ActiveSpace in place of the two
+    active_space: an src.EffectiveHamiltonian.active_space.ActiveSpace in place of the two
     contiguous window counts; its MOs are permuted to match, which is the only
     way to downfold onto a window the energy ordering does not produce.
     """

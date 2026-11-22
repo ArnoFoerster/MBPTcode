@@ -948,7 +948,19 @@
  "src/fragments/localization.py::_newton_polish": [
   "tol"
  ],
- "src/SingleReference/common/active_space.py::from_population": [
+ "src/EffectiveHamiltonian/active_space.py::from_population": [
   "threshold"
+ ],
+ "src/EffectiveHamiltonian/Downfolding/methods/rpa.py::_excitation_blocks": [
+  "tile_gb"
+ ],
+ "src/EffectiveHamiltonian/Downfolding/methods/rpa.py::_srg_pair": [
+  "tile_gb"
+ ],
+ "src/EffectiveHamiltonian/Downfolding/methods/rpa.py::srg_self_energy": [
+  "tile_gb"
+ ],
+ "src/EffectiveHamiltonian/QDPT/perturbative.py::run_pipeline": [
+  "nroots"
  ]
 }

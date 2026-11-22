@@ -55,7 +55,7 @@ from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
 from src.EffectiveHamiltonian.Downfolding.effective_hamiltonian import pack
 from src.EffectiveHamiltonian.Downfolding.two_body import (
     active_eri, effective_interaction)
-from src.SingleReference.common.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import \

@@ -75,7 +75,9 @@ src/Base/                      the foundation
                                short warns and raises a flag, which the
                                function returning the record collects (see
                                warnings.md)
-    orbital_spaces.py          the occupied/virtual split
+    orbital_spaces.py          the occupied/virtual split, the checked
+                               occupied counts of a mean field, the
+                               frozen-core count
     step_failed.py             StepFailed, which a walk catches to shorten a
                                step
 src/Solvers/                   the quasiparticle root finder (one for every
@@ -117,8 +119,10 @@ src/SingleReference/
     Periodic/                  k-point RPA, BSE and GW (see
                                methods/periodic.md)
     common/                    pieces several methods share: MP1 amplitudes,
-                               ERI blocks, DF amplitudes, ActiveSpace
+                               ERI blocks, DF amplitudes
 src/EffectiveHamiltonian/
+    active_space.py            ActiveSpace: which canonical orbitals are
+                               active, chosen by energy, irrep or population
     QDPT/                      active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them

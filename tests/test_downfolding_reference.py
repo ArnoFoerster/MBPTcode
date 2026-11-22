@@ -95,7 +95,7 @@ from src.EffectiveHamiltonian.Downfolding.one_body import (core_fock,
                                                            double_counting)
 from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
                                                             partition)
-from src.SingleReference.common.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.Solvers.active_space import solve
 from src.Solvers.active_space_solver import PyscfFCISolver
 from tests.downfolding_oracle import drpa, reference_energy, water

@@ -91,7 +91,8 @@ from src.Base.numerics.constants import (BYTES_PER_GB,
                                          GW_DENSITY_W_FIT_TIKHONOV)
 from src.Base.numerics.numerics import (NumericsMismatch,
                                         numerics_or_default, rpa_quadrature)
-from src.Base.orbital_spaces import particle_hole_window, transition_range
+from src.Base.orbital_spaces import (closed_shell_nocc, particle_hole_window,
+                                     transition_range, unrestricted_nocc)
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
@@ -101,8 +102,6 @@ from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
-from src.SingleReference.common.active_space import (closed_shell_nocc,
-                                                     unrestricted_nocc)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
 from src.SingleReference.GW.space_time import separable_factors
