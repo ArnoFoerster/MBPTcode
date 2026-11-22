@@ -16,7 +16,7 @@ Available now:
   `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
   `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and on `mode='casida'`
   also `'mrpa'` (the numerical routes refuse it and point to casida); and
-  optionally (every route) `sigma='srg'` or `'mode_a'`: the static
+  optionally (every route) `sigma='srg'` or `'averaged'`: the static
   environment self-energy Sigma^E that the paper drops (see below).
 - E_0 always, term by term.
 - Restricted closed-shell (RHF/RKS) and unrestricted (UHF/UKS) references,
@@ -109,7 +109,7 @@ Options of the RPA:
 | `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS |
 | | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
-| | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'mode_a'` (Sigma^E, below) |
+| | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'averaged'` (Sigma^E, below) |
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 
@@ -395,7 +395,7 @@ active space is, in general,
     Sigma_emb = iG^E (W - v) + iG^A v~ + iG^A (W - W^A[v_eff]),
 
 W the full screened interaction and W^A[v_eff] the active-space RPA screened
-interaction built from v_eff. `sigma='srg'` or `'mode_a'` keeps the first two
+interaction built from v_eff. `sigma='srg'` or `'averaged'` keeps the first two
 terms and drops the third, for every screening:
 
 | screening | W^A[v_eff] against W | the dropped term iG^A (W - W^A[v_eff]) |
@@ -441,17 +441,19 @@ in one of two ways (Marie and Loos, JCTC 19, 3943 (2023)):
   [1 - exp(-(D_tr^2 + D_ur^2) s)].
   Finite everywhere: a term at an exact pole is 0, its limit. `srg_s=None`
   is s = infinity, Eq. 42.
-- `'mode_a'`: Eq. 12 at eta = 0, Sigma_bar_tu = 1/2 [S_tu(eps_t) +
-  S_tu(eps_u)], the form of the user's PySCF prototype. Undamped, so it
-  diverges at the poles.
+- `'averaged'`: Eq. 12 at eta = 0, Sigma_bar_tu = 1/2 [S_tu(eps_t) +
+  S_tu(eps_u)]: S evaluated at both orbital energies and averaged, mode A of
+  Kotani, van Schilfgaarde and Faleev (named for what it does, since no qsGW
+  loop runs here), and the form of the user's PySCF prototype. Undamped, so
+  it diverges at the poles.
 
-At s = infinity the diagonal of `'srg'` is that of `'mode_a'`, and since
+At s = infinity the diagonal of `'srg'` is that of `'averaged'`, and since
 gamma^A,0 is diagonal every E_0 term is the same for the two; only the
 off-diagonal h_eff differs.
 
 **The pole check** (always on with `sigma`). Every pole of S lies outside the
 window (max over inactive i of eps_i - Omega_min, min over environment
-virtuals a of eps_a + Omega_min). `'mode_a'` warns
+virtuals a of eps_a + Omega_min). `'averaged'` warns
 (`SigmaNearPoleWarning`, named flag `'sigma_near_pole'`), with the orbitals
 named, when an active orbital energy is within `numerics.downfolding.
 pole_margin` / sqrt(2 s) of an edge (default 3 widths, 0.095 Ha at s = 500)
@@ -459,11 +461,11 @@ or outside the window. Sigma_bar is computed and H_eff built all the same;
 the elements on those orbitals are then dominated by the nearest pole.
 `'srg'` with a finite `srg_s` does not warn of the poles on the Casida
 route; near a pole its damping matters, which the `'sigma_poles'` diagnostic
-reports. At `srg_s=None` it is as undamped as `'mode_a'` and warns the same
+reports. At `srg_s=None` it is as undamped as `'averaged'` and warns the same
 way.
 
 Nothing is refused near a pole. Only a Sigma_bar that is not finite, an
-active orbital energy exactly on a pole with `'mode_a'`, is
+active orbital energy exactly on a pole with `'averaged'`, is
 (`FloatingPointError`).
 
 `srg_s`, `pole_margin` and `continuation_margin` are read from `low.numerics`,
@@ -489,7 +491,7 @@ per element, and each element is evaluated at its own point:
   eps_u)/2 + i (eps_u - eps_t)/2, because (a + b)/(a^2 + b^2) = Re[(1 +
   i)/(a + i b)]. That is **s = infinity**: `srg_s` enters only the pole
   check here, and `'sigma_poles'` records `srg_s` None.
-- `'mode_a'` is 1/2 Re[S_tu(eps_t) + S_tu(eps_u)] on the real axis.
+- `'averaged'` is 1/2 Re[S_tu(eps_t) + S_tu(eps_u)] on the real axis.
 
 Without damping, both forms warn near the poles on this route
 (`SigmaNearPoleWarning`), and with a wider margin than on casida: within the
@@ -585,13 +587,13 @@ reference E_0 is a well-defined working choice, not a derived one.
   the whole calculation).
 - **Option validation.** An unknown or not-yet-available mode, screening,
   sigma or diagnostic is refused with the valid list. Their names are taken
-  in any case and with `-` or `_` (`'SRG'`, `'mode-a'`, `'CRPA-PH'`); for
+  in any case and with `-` or `_` (`'SRG'`, `'Averaged'`, `'CRPA-PH'`); for
   `sigma` only `None` itself means no Sigma^E (the string `'None'` is
   refused).
-- **Sigma^E poles.** `sigma='mode_a'` warns near a pole of the
+- **Sigma^E poles.** `sigma='averaged'` warns near a pole of the
   environment self-energy (`SigmaNearPoleWarning`, named flag
   `'sigma_near_pole'`); on `mode='imagfrequency'` and `'space-time'` both
-  `'srg'` and `'mode_a'` do, within the wider continuation margin (see
+  `'srg'` and `'averaged'` do, within the wider continuation margin (see
   above). H_eff is built all the same and the flag is in
   `h.numerical_flags`; only a Sigma_bar that is not finite is
   refused.
@@ -627,7 +629,7 @@ imagfrequency and space-time all four:
   its energy to the nearer edge (negative outside); `'z'`, per active
   orbital Z_t = 1/(1 - S'_tt(eps_t)) = 1/(1 + sum w_tr^2 / D_tr^2), 1 far
   from the poles and small near one; `'srg_s'`, the s applied (None for
-  s = infinity and for `'mode_a'`); and `'srg_damping'`, the largest
+  s = infinity and for `'averaged'`); and `'srg_damping'`, the largest
   |Sigma_bar(s) - Sigma_bar(infinity)| (0 when no finite s is applied).
   When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-6 Ha) a
   `SigmaDampingWarning` names the active orbitals concerned: their
@@ -671,7 +673,7 @@ imagfrequency and space-time all four:
 - The user's PySCF prototype, run on its own orbitals: v_eff, f, t^DC, h_eff,
   the excitation energies and the CAS energies of the ethylene (2,2) and
   benzene (6,6) pi spaces for `bare`, `crpa` and `crpa_ph`, to machine
-  precision, and its Sigma_bar (`'mode_a'`). The orbitals are pinned because
+  precision, and its Sigma_bar (`'averaged'`). The orbitals are pinned because
   the degenerate pi pairs of benzene rotate arbitrarily from one SCF to the
   next.
 - Sigma^E: `'srg'` with every orbital as the environment is the active block

@@ -493,7 +493,7 @@ def test_sigma_env_samples_against_the_pole_sum(ref):
     assert low.cache['w_grid'] is w_grid
 
 
-@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('sigma', ('srg', 'averaged'))
 @pytest.mark.parametrize('which', INSIDE)
 @pytest.mark.parametrize('ref', REFS)
 def test_sigma_bar_matches_casida(ref, which, sigma):
@@ -588,7 +588,7 @@ def test_near_pole_warning_on_imagfrequency_names_the_spin():
     energies.numerical_flags."""
     low = _low('oh', 'imagfrequency')
     spaces = _spaces('oh', 'asymmetric')
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always')
             ham = build_effective_hamiltonian(low, spaces, sigma=sigma)
@@ -627,7 +627,7 @@ def test_the_bound_reaches_every_build(monkeypatch):
             'sigma_pole_window_bound']
 
 
-@pytest.mark.parametrize('sigma', (None, 'srg', 'mode_a'))
+@pytest.mark.parametrize('sigma', (None, 'srg', 'averaged'))
 def test_imagfrequency_closed_shell_limit(sigma):
     """A closed-shell determinant on a density-fitted mean field, as RHF and
     as the same determinant in a UHF object: on imagfrequency the
@@ -1037,14 +1037,14 @@ def test_space_time_sigma_env_samples_against_the_pole_sum(ref):
     assert low.cache['w_grid'] is w_grid
 
 
-@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('sigma', ('srg', 'averaged'))
 @pytest.mark.parametrize('which', INSIDE)
 @pytest.mark.parametrize('ref', REFS)
 def test_space_time_sigma_bar_matches_casida(ref, which, sigma):
     """Sigma_bar^E of both spins on space-time against casida on the same
     ISDF factors at srg_s = None. No near-pole warning: the active orbitals
     are at least 0.67 Ha inside both windows. Measured: 5.9e-8 (OH), 1.9e-8
-    (CH2), the same for 'srg' and 'mode_a'."""
+    (CH2), the same for 'srg' and 'averaged'."""
     low, cas = _st_low(ref), _st_casida(ref)
     parts = _st_parts(ref, which)
     with warnings.catch_warnings():
@@ -1098,7 +1098,7 @@ def test_space_time_near_pole_warning_names_the_spin():
     both spins (1.5e-4 and 2.6e-4 Ha)."""
     low = _st_low('oh')
     spaces = _st_spaces('oh', 'asymmetric')
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always')
             ham = build_effective_hamiltonian(low, spaces, sigma=sigma)
@@ -1228,7 +1228,7 @@ def test_space_time_against_casida_on_the_density_fit(ref):
         for ours, casida in zip(g[2], g_c[2]):
             assert np.abs(ours - casida).max() < 1e-5
         assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         got = rpa.embedding_self_energy(low, parts, sigma)
         want = rpa.embedding_self_energy(cas, parts, sigma)
         for ours, casida in zip(got, want):

@@ -415,7 +415,7 @@ def test_low_reuse():
     assert np.array_equal(low.cache['p0'], p0)
 
 
-@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('sigma', ('srg', 'averaged'))
 @pytest.mark.parametrize('aspace', ('contiguous', 'no_virtual'))
 @pytest.mark.parametrize('ref', REFS)
 def test_sigma_bar_matches_casida(ref, aspace, sigma):
@@ -424,7 +424,7 @@ def test_sigma_bar_matches_casida(ref, aspace, sigma):
     casida on the same three-index object at srg_s = None, where 'srg' is
     Eq. 42 on both. Target 1e-4 Eh per element; measured max 5.8e-9 (HF,
     DF-HF), 9.3e-8 (PBE), the largest on the space without active virtual
-    orbitals; equal for 'srg' and 'mode_a' (a diagonal element).
+    orbitals; equal for 'srg' and 'averaged' (a diagonal element).
     (The non-contiguous space here has virtual 7 active over the
     environment's 6, beyond the pole-free window: refused on imagfrequency,
     tests/test_downfolding_sigma.py.)"""
@@ -768,7 +768,7 @@ def test_space_time_refusals():
     with pytest.raises(ValueError, match='numerics.isdf'):
         run_low_level(mf, mode='space-time')
     near = _st_aspace(mf, 'non_contiguous')
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with pytest.warns(rpa.SigmaNearPoleWarning,
                           match=r'orbital 1 \(.*orbital 8 \('
                           r".*orbital 9 \(.*continuation_margin"
@@ -789,7 +789,7 @@ def test_space_time_refusals():
         rpa.sigma_env_imag_axis(_st_low('HF', 'casida'), part, [1.0])
 
 
-@pytest.mark.parametrize('sigma', ('srg', 'mode_a'))
+@pytest.mark.parametrize('sigma', ('srg', 'averaged'))
 @pytest.mark.parametrize('aspace', ('contiguous', 'no_virtual'))
 @pytest.mark.parametrize('ref', ST_REFS)
 def test_space_time_sigma_bar_matches_casida(ref, aspace, sigma):

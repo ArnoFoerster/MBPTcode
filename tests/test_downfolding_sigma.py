@@ -3,7 +3,7 @@ imagfrequency and the space-time route.
 
 Sigma_bar^E is the static reduction of iG^E(W - v) on the active orbitals,
 the internal orbital r running over the environment: 'srg' is
-Eq. 44 of Marie and Loos (s = None: Eq. 42), 'mode_a' their Eq. 12 at
+Eq. 44 of Marie and Loos (s = None: Eq. 42), 'averaged' their Eq. 12 at
 eta = 0, both at the mean-field energies.
 
 The residues of W (`screened_residues`) carry the restricted factor sqrt(2):
@@ -11,13 +11,13 @@ with r over every orbital, 'srg' is the active block of the qsGW SRG kernel
 (`SelfEnergySolver.static_self_energy_matrix`), which pins that factor to
 the existing code. On the environment both reductions equal the numpy
 oracle's (its own dRPA residues), on a contiguous and a non-contiguous
-space; the s = inf diagonal of 'srg' is that of 'mode_a'; Eq. 42 is the real
+space; the s = inf diagonal of 'srg' is that of 'averaged'; Eq. 42 is the real
 part of the exact pole sum S^E at one complex frequency per element; 'srg'
-at finite s stays within its damping bound of s = inf. 'mode_a' warns on an
+at finite s stays within its damping bound of s = inf. 'averaged' warns on an
 active space whose orbital energy leaves the pole-free window (or comes
 within the margin of its edge) and is computed all the same; 'srg' stays
 finite and equal to the oracle there. A Sigma_bar that is not finite is
-refused. On the prototype's own orbitals 'mode_a' is its Sigma_bar. The
+refused. On the prototype's own orbitals 'averaged' is its Sigma_bar. The
 `downfolding` numerics section holds srg_s, pole_margin and
 continuation_margin.
 
@@ -128,7 +128,7 @@ def _pure_args(low, part):
 def test_srg_matches_the_qsgw_kernel(wat):
     """With r over every orbital and the DF factors, srg_self_energy at
     s = 100 is the active block of the qsGW SRG kernel, built from its own
-    Casida solve and transition density, and mode_a_self_energy is the
+    Casida solve and transition density, and averaged_self_energy is the
     kernel's mode A at eta = 1e-12. This pins the restricted factor of
     `screened_residues`: sqrt(2) on sum_ia (tr|ia) (X+Y)_ia, the kernel's
     2 sum chi chi (measured element ratio 1 - 3.7e-9 to 1 + 2.7e-9). The
@@ -155,7 +155,7 @@ def test_srg_matches_the_qsgw_kernel(wat):
     ref = se.static_self_energy_matrix(nocc, omega, rho, flow=100.0)[block]
     assert np.abs(ours - ref).max() < 1e-8
     assert np.abs(ref).max() > 1e-2
-    mode_a = rpa.mode_a_self_energy(w, eps[part.act], eps, every < nocc,
+    mode_a = rpa.averaged_self_energy(w, eps[part.act], eps, every < nocc,
                                     low.omega)
     ref = se.static_self_energy_matrix(nocc, omega, rho)[block]
     assert np.abs(mode_a - ref).max() < 1e-8
@@ -164,13 +164,13 @@ def test_srg_matches_the_qsgw_kernel(wat):
 @SPACES
 def test_srg_and_mode_a_against_the_oracle(wat, low_exact, aspace):
     """embedding_self_energy 'srg' (s = DOWNFOLDING_SRG_S, the default) and
-    'mode_a' against the oracle's Eq. 44 and Eq. 12 on its own residues,
+    'averaged' against the oracle's Eq. 44 and Eq. 12 on its own residues,
     both symmetric. Measured max deviation (contiguous / non-contiguous):
     srg 1.5e-16 / 3.0e-16, mode_a 1.5e-16 / 3.0e-16 (tolerance 1e-8)."""
     _, eri, eps, nocc = wat
     part = aspace(eps, nocc)
     srg = rpa.embedding_self_energy(low_exact, part, 'srg')
-    mode_a = rpa.embedding_self_energy(low_exact, part, 'mode_a')
+    mode_a = rpa.embedding_self_energy(low_exact, part, 'averaged')
     for ours, ref in ((srg, sigma_srg(eri, eps, nocc, part, DOWNFOLDING_SRG_S)),
                       (mode_a, sigma_mode_a(eri, eps, nocc, part))):
         assert ours.shape == (part.n_act, part.n_act)
@@ -182,13 +182,13 @@ def test_srg_and_mode_a_against_the_oracle(wat, low_exact, aspace):
 @SPACES
 def test_diagonals_agree_at_infinite_s(low_infinite_s, wat, aspace):
     """srg_s = None: (a + b)/(a^2 + b^2) at a = b is 1/a, so the diagonal of
-    'srg' is that of 'mode_a'; off the diagonal they differ
+    'srg' is that of 'averaged'; off the diagonal they differ
     (by up to 1.9e-4 / 1.7e-4). Measured max diagonal deviation 2.2e-19 /
     1.7e-18 (tolerance 1e-10)."""
     _, _, eps, nocc = wat
     part = aspace(eps, nocc)
     srg = rpa.embedding_self_energy(low_infinite_s, part, 'srg')
-    mode_a = rpa.embedding_self_energy(low_infinite_s, part, 'mode_a')
+    mode_a = rpa.embedding_self_energy(low_infinite_s, part, 'averaged')
     assert np.abs(np.diag(srg) - np.diag(mode_a)).max() < 1e-10
     assert np.abs(srg - mode_a).max() > 1e-6
 
@@ -255,16 +255,16 @@ def test_pole_window(wat, low_exact):
     every = ActiveSpace.from_counts(eps, nocc, nocc,
                                               len(eps) - nocc)
     assert rpa.pole_window(low_exact, every) == (-np.inf, np.inf)
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         out = rpa.embedding_self_energy(low_exact, every, sigma)
         assert out.shape == (len(eps),) * 2 and not out.any()
 
 
 def test_near_pole_space(wat, low_exact):
     """The virtual 7 made active over the environment virtual 6 has its
-    energy above hi - margin, within the 'mode_a' pole margin of the
+    energy above hi - margin, within the 'averaged' pole margin of the
     window's upper edge hi (asserted here first, as is the active virtual 5
-    below hi - margin; eps_7 in fact lies 0.030 Ha beyond hi): 'mode_a'
+    below hi - margin; eps_7 in fact lies 0.030 Ha beyond hi): 'averaged'
     warns (SigmaNearPoleWarning, the named flag 'sigma_near_pole'), naming
     orbital 7 and its distance, and is computed all the same, equal to the
     oracle's undamped pole sum; the Hamiltonian is built and the flag is in
@@ -278,7 +278,7 @@ def test_near_pole_space(wat, low_exact):
     margin = DOWNFOLDING_POLE_MARGIN / np.sqrt(2.0 * DOWNFOLDING_SRG_S)
     assert eps[7] > hi - margin and eps[5] < hi - margin
     with pytest.warns(rpa.SigmaNearPoleWarning, match=r'orbital 7 \(') as rec:
-        mode_a = rpa.embedding_self_energy(low_exact, part, 'mode_a')
+        mode_a = rpa.embedding_self_energy(low_exact, part, 'averaged')
     text = str(rec[0].message)
     assert 'orbital 5 ' not in text and "sigma='srg'" in text
     assert np.all(np.isfinite(mode_a))
@@ -286,7 +286,7 @@ def test_near_pole_space(wat, low_exact):
     assert rec[0].filename == __file__
     with pytest.warns(rpa.SigmaNearPoleWarning) as rec:
         ham = build_effective_hamiltonian(
-            low_exact, _high_virtual(eps, nocc), sigma='mode_a',
+            low_exact, _high_virtual(eps, nocc), sigma='averaged',
             diagnostics=())
         g, en = ham.g_eff, ham.energies
     # the warning points at the line that asked for the Hamiltonian
@@ -305,8 +305,8 @@ def test_near_pole_space(wat, low_exact):
 
 def test_undamped_srg_warns_near_a_pole(wat, low_infinite_s):
     """At srg_s = None 'srg' is Eq. 42: undamped, with the diagonal of
-    'mode_a'. On casida it therefore warns of an active orbital near a pole
-    as 'mode_a' does (the same orbital, the named flag 'sigma_near_pole' in
+    'averaged'. On casida it therefore warns of an active orbital near a pole
+    as 'averaged' does (the same orbital, the named flag 'sigma_near_pole' in
     the energies), and neither message calls 'srg' finite everywhere: what
     is bounded near a pole is 'srg' with a finite srg_s, which does not warn
     (`test_near_pole_space`)."""
@@ -314,7 +314,7 @@ def test_undamped_srg_warns_near_a_pole(wat, low_infinite_s):
     aspace = _high_virtual(eps, nocc)
     part = aspace
     found = {}
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with pytest.warns(rpa.SigmaNearPoleWarning,
                           match=r'orbital 7 \(') as rec:
             found[sigma] = rpa.embedding_self_energy(low_infinite_s, part,
@@ -324,7 +324,7 @@ def test_undamped_srg_warns_near_a_pole(wat, low_infinite_s):
         assert 'finite everywhere' not in text and 'finite srg_s' in text
         assert rec[0].filename == __file__
     assert np.abs(np.diag(found['srg'])
-                  - np.diag(found['mode_a'])).max() < 1e-12
+                  - np.diag(found['averaged'])).max() < 1e-12
     with pytest.warns(rpa.SigmaNearPoleWarning, match="'srg' at srg_s = None"):
         ham = build_effective_hamiltonian(low_infinite_s, aspace,
                                           sigma='srg', diagnostics=())
@@ -346,14 +346,14 @@ def test_mode_a_margin_uses_srg_s(wat):
     with warnings.catch_warnings():
         warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
         quiet = rpa.embedding_self_energy(
-            run_low_level(mf, method='rpa', df=False), part, 'mode_a')
+            run_low_level(mf, method='rpa', df=False), part, 'averaged')
     for srg_s in (None, 2.0):
         s = DOWNFOLDING_SRG_S if srg_s is None else srg_s
         wide = 1.01 * dist * np.sqrt(2.0 * s)
         low = run_low_level(mf, method='rpa', df=False, numerics=Numerics(
             downfolding={'srg_s': srg_s, 'pole_margin': wide}))
         with pytest.warns(rpa.SigmaNearPoleWarning, match=r'orbital 6 \('):
-            got = rpa.embedding_self_energy(low, part, 'mode_a')
+            got = rpa.embedding_self_energy(low, part, 'averaged')
         assert np.array_equal(got, quiet)
         if srg_s is None:
             with pytest.warns(rpa.SigmaNearPoleWarning,
@@ -397,7 +397,7 @@ def _pinned(molecule):
 
 @pytest.mark.parametrize('case', sorted(PINS))
 def test_prototype_sigma_bar(case):
-    """'mode_a' on the prototype's own orbitals is its Sigma_bar (1/2 [S(e_t)
+    """'averaged' on the prototype's own orbitals is its Sigma_bar (1/2 [S(e_t)
     + S(e_u)], environment sum, full W), evaluated at its sigma_energies,
     which are the mean-field active energies (both well inside the
     pole-free window). Measured max deviation ethylene 5.2e-17, benzene
@@ -406,7 +406,7 @@ def test_prototype_sigma_bar(case):
     low, part = _pinned(case)
     assert np.abs(low.eps[part.act] - np.array(c['sigma_energies'])).max() \
         < 1e-12
-    ours = rpa.embedding_self_energy(low, part, 'mode_a')
+    ours = rpa.embedding_self_energy(low, part, 'averaged')
     assert np.abs(ours - np.array(c['sigma_bar'])).max() < 1e-7
 
 
@@ -573,7 +573,7 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
     to 0.995), the s applied and the SRG damping max |Sigma_bar(s) -
     Sigma_bar(inf)|. On the contiguous (4,4) the damping is exactly 0 and
     nothing warns; on the near-pole space it is 1.5e-4 and a
-    SigmaDampingWarning names orbital 7 alone. 'mode_a' applies no s:
+    SigmaDampingWarning names orbital 7 alone. 'averaged' applies no s:
     srg_s None, damping 0. The warning does not depend on the record:
     with diagnostics=() nothing is stored and the near-pole space still
     warns, since a damped Sigma_bar goes into H_eff either way."""
@@ -593,7 +593,7 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
         with warnings.catch_warnings():
             warnings.simplefilter('error', RuntimeWarning)
             poles = _poles(low_exact, aspace)
-            mode_a = _poles(low_exact, aspace, sigma='mode_a')
+            mode_a = _poles(low_exact, aspace, sigma='averaged')
         assert mode_a['srg_s'] is None and mode_a['srg_damping'] == 0.0
         assert np.array_equal(mode_a['z'], poles['z'])
     assert set(poles) == {'window', 'pole_distance', 'z', 'srg_s',
@@ -736,7 +736,7 @@ def test_pade_alone(wat, low_exact):
         args = _pure_args(low, part)
         e = low.eps[part.act]
         for sigma, exact in (('srg', rpa.srg_self_energy(*args, None)),
-                             ('mode_a', rpa.mode_a_self_energy(*args))):
+                             ('averaged', rpa.averaged_self_energy(*args))):
             got = rpa.continued_self_energy(mu + 1j * nodes, samples, e,
                                             sigma)
             assert np.array_equal(got, got.T)
@@ -758,7 +758,7 @@ def test_sigma_bar_matches_casida_benzene():
     low_cas = run_low_level(mf, method='rpa', mode='casida',
                             numerics=infinite)
     assert abs(rpa.lowest_excitation(low_if) - low_cas.omega.min()) < 1e-10
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         got = rpa.embedding_self_energy(low_if, part, sigma)
         want = rpa.embedding_self_energy(low_cas, part, sigma)
         assert np.abs(want).max() > 1e-2
@@ -824,7 +824,7 @@ def test_lowest_excitation(wat):
 
 
 def test_near_pole_warning_points_to_casida(wat):
-    """On imagfrequency both 'srg' (s = inf there) and 'mode_a' warn on the
+    """On imagfrequency both 'srg' (s = inf there) and 'averaged' warn on the
     near-pole space of the casida tests (virtual 7 beyond the window's edge),
     naming orbital 7 alone and pointing to mode='casida', where 'srg' is
     finite; Sigma_bar is continued all the same, the Hamiltonian is built
@@ -833,7 +833,7 @@ def test_near_pole_warning_points_to_casida(wat):
     mf, _, eps, nocc = wat
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
     near = _high_virtual(eps, nocc)
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with pytest.warns(rpa.SigmaNearPoleWarning,
                           match=r'orbital 7 \(') as rec:
             got = rpa.embedding_self_energy(low, near, sigma)
@@ -857,31 +857,31 @@ def test_near_pole_warning_points_to_casida(wat):
 
 def test_a_sigma_that_is_not_finite_is_refused(wat, low_exact, monkeypatch):
     """Near a pole Sigma_bar^E is computed with a warning; exactly on one
-    'mode_a' divides by zero. A Sigma_bar with an element that is not finite
+    'averaged' divides by zero. A Sigma_bar with an element that is not finite
     cannot go into H_eff and is refused (FloatingPointError), naming the
     orbital pairs and pointing to sigma='srg' on casida."""
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         # D = eps_t - eps_r - Omega = 1 - 0.5 - 0.5 = 0 for the empty r
-        on_pole = rpa.mode_a_self_energy(
+        on_pole = rpa.averaged_self_energy(
             np.ones((1, 1, 1)), np.array([1.0]), np.array([0.5]),
             np.array([False]), np.array([0.5]))
     assert not np.isfinite(on_pole).any()
 
     _, _, eps, nocc = wat
     part = _contiguous_44(eps, nocc)
-    exact = rpa.mode_a_self_energy
+    exact = rpa.averaged_self_energy
 
     def with_a_pole(*args):
         out = exact(*args)
         out[-1, -1] = np.inf
         return out
 
-    monkeypatch.setattr(rpa, 'mode_a_self_energy', with_a_pole)
+    monkeypatch.setattr(rpa, 'averaged_self_energy', with_a_pole)
     act = part.act
     with pytest.raises(FloatingPointError,
                        match=rf"\({act[-1]}, {act[-1]}\).*sigma='srg'"):
-        rpa.embedding_self_energy(low_exact, part, 'mode_a')
+        rpa.embedding_self_energy(low_exact, part, 'averaged')
 
 
 def test_continuation_diagnostic_present(wat):
@@ -916,7 +916,7 @@ def test_continuation_diagnostic_present(wat):
     assert np.allclose(poles['window'], ref['window'], atol=1e-8, rtol=0)
     assert np.abs(poles['z'] - ref['z']).max() < 1e-4
     every = ActiveSpace.from_counts(eps, nocc, nocc, len(eps) - nocc)
-    ham = build_effective_hamiltonian(low, every, sigma='mode_a')
+    ham = build_effective_hamiltonian(low, every, sigma='averaged')
     en = ham.energies
     assert not ham.diagnostics['sigma_continuation'].any()
     assert not rpa.embedding_self_energy(low, every,
@@ -982,7 +982,7 @@ def test_continuation_margin_near_the_edge(wat):
     margin = DOWNFOLDING_CONTINUATION_MARGIN
     assert margin < _edge_distance(low_cas, outside) < 1.1 * margin
     assert _edge_distance(low_cas, inside) < margin
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with warnings.catch_warnings():
             warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
             got = rpa.embedding_self_energy(low_if, outside, sigma)
@@ -1260,7 +1260,7 @@ def test_space_time_continuation_margin_near_the_edge(nh3_space_time):
     assert _edge_distance(cas, inside) < margin
     assert (low.eps[outside.act] - particle_hole_window(
         low.eps, low.nocc)[2]).max() > 1.0
-    for sigma in ('srg', 'mode_a'):
+    for sigma in ('srg', 'averaged'):
         with warnings.catch_warnings():
             warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
             warnings.simplefilter('ignore', rpa.SigmaContinuationWarning)
@@ -1328,7 +1328,7 @@ def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         ham_later = build_effective_hamiltonian(
-            low, _contiguous_44(eps, nocc), sigma='mode_a')
+            low, _contiguous_44(eps, nocc), sigma='averaged')
         later = ham_later.energies
     assert ham_later.numerical_flags == [probe] and len(built) == 1
     assert low.numerical_flags == []

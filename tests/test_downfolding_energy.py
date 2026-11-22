@@ -26,7 +26,7 @@ diagnostics keyword, the option refusals and one low-level result reused
 for many active spaces and screenings are tested too. Measured values in
 each test's docstring.
 
-With sigma='srg' or 'mode_a' (Sigma^E, Hartree-only double counting, the
+With sigma='srg' or 'averaged' (Sigma^E, Hartree-only double counting, the
 exchange energy term and -Tr[Sigma_bar gamma^A,0] in E_0): the reference
 determinant keeps its energy with the real Sigma_bar and with Sigma_bar
 forced to 0, for every screening; crpa_ph has no exchange term and h_eff =
@@ -567,12 +567,12 @@ def test_rpa_option_refusals(wat_rpa):
     with pytest.raises(ValueError, match="'crpa'"):
         build_effective_hamiltonian(low, aspace, screening='rpa')
     for sigma in ('None', 'none', '', 'gw', 1):
-        with pytest.raises(ValueError, match="None, 'srg', 'mode_a'"):
+        with pytest.raises(ValueError, match="None, 'srg', 'averaged'"):
             build_effective_hamiltonian(low, aspace, sigma=sigma)
     # the string members in any case and either of '-', '_',
     # as screening and mode take them; None alone is no Sigma^E
     for canonical, spellings in (('srg', ('SRG', 'Srg')),
-                                 ('mode_a', ('MODE_A', 'mode-a', 'Mode-A'))):
+                                 ('averaged', ('AVERAGED', 'Averaged'))):
         want = build_effective_hamiltonian(low, aspace, sigma=canonical)
         for sigma in spellings:
             _same(build_effective_hamiltonian(low, aspace, sigma=sigma), want)
@@ -645,7 +645,7 @@ def test_empty_active_space_e0(wat_rpa):
 
 # --- Sigma^E in H_eff and E_0 -----------------------------------------------
 
-SIGMAS_1 = ('srg', 'mode_a')
+SIGMAS_1 = ('srg', 'averaged')
 
 
 @pytest.mark.parametrize('s', SCREENINGS_1)
@@ -752,7 +752,7 @@ def test_empty_active_space_with_sigma(wat_rpa):
 
 @pytest.mark.parametrize('s', SCREENINGS_1)
 def test_e0_terms_do_not_depend_on_the_form_at_infinite_s(wat_rpa, s):
-    """srg_s = None: the diagonal of 'srg' is that of 'mode_a' and
+    """srg_s = None: the diagonal of 'srg' is that of 'averaged' and
     gamma^A,0 is diagonal, so every E_0 term agrees between the two forms
     while the off-diagonal h_eff does not. Measured |Delta E_0| = 0.0 for every
     screening (tolerance 1e-12); the off-diagonal h_eff differs by up to
@@ -956,3 +956,15 @@ def test_the_result_is_one_record_that_solves_itself():
                      h.space['n_elec_active'], spin_free=spin_free,
                      nroots=2)
         assert np.array_equal(h.solve('pyscf_fci', nroots=2), want)
+
+
+def test_the_averaged_form_is_named_by_what_it_does(wat_rpa):
+    """sigma='averaged' is 1/2 [S_tu(eps_t) + S_tu(eps_u)] (mode A of Kotani,
+    van Schilfgaarde and Faleev); the old name 'averaged' is refused, with the
+    valid names listed."""
+    mf, low, aspace = wat_rpa
+    want = build_effective_hamiltonian(low, aspace, sigma='averaged')
+    _same(build_effective_hamiltonian(low, aspace, sigma='Averaged'), want)
+    with pytest.raises(ValueError, match="None, 'srg', 'averaged'"):
+        build_effective_hamiltonian(low, aspace, sigma='mode_a')
+    assert rpa.averaged_self_energy is not None

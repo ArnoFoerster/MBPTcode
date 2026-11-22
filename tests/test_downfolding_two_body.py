@@ -290,7 +290,7 @@ def test_mode_refusals(wat):
         run_low_level(mf, method='rpa', screening='crpa')
     assert rpa.MODES == ('casida', 'imagfrequency', 'space-time')
     assert rpa.SCREENINGS == ('bare', 'crpa', 'crpa_ph', 'mrpa')
-    assert rpa.SIGMAS == (None, 'srg', 'mode_a')
+    assert rpa.SIGMAS == (None, 'srg', 'averaged')
 
 
 @pytest.fixture(scope='module')
@@ -602,7 +602,7 @@ def test_reference_determinant_energy_mrpa(wat_df):
     assert en.e_c_active < 0.0 and en.e_c_full < en.e_c_active
 
 
-@pytest.mark.parametrize('sigma', ['srg', 'mode_a'])
+@pytest.mark.parametrize('sigma', ['srg', 'averaged'])
 def test_sigma_with_mrpa(wat_df, sigma):
     """mRPA with Sigma^E: vtilde has no (kl|lk) element, so the exchange
     energy term is exactly 0, and switching Sigma^E on keeps the energy of

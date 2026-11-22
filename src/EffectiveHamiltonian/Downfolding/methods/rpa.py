@@ -73,7 +73,7 @@ from ..spin import BLOCKS, SPINS, channels_of, spin_block, spin_weight
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
 SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
-SIGMAS = (None, 'srg', 'mode_a')
+SIGMAS = (None, 'srg', 'averaged')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
                'sigma_continuation')
 
@@ -81,7 +81,7 @@ DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
 class SigmaNearPoleWarning(RuntimeWarning):
     """An active orbital energy lies within the margin of an edge of the
     pole-free window of the environment self-energy, or outside the window:
-    Sigma_bar^E is computed all the same, undamped ('mode_a', and 'srg' at
+    Sigma_bar^E is computed all the same, undamped ('averaged', and 'srg' at
     srg_s = None, on casida) or
     continued from the imaginary axis (imagfrequency, space-time), and is
     unreliable on that orbital."""
@@ -276,7 +276,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         on imagfrequency and space-time); vtilde is its static correction
         (`screening_correction`), the same in every spin block (restricted).
     sigma: None, the paper's scheme: full double counting, no Sigma_bar.
-        'srg' or 'mode_a': the static environment self-energy
+        'srg' or 'averaged': the static environment self-energy
         (`embedding_self_energy`), one block for the restricted reference,
         with dc='hartree',
         the Hartree-only double counting that goes with it; E_0 then gains
@@ -285,11 +285,11 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
         space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
-        computed with a SigmaNearPoleWarning ('mode_a', and 'srg' at
+        computed with a SigmaNearPoleWarning ('averaged', and 'srg' at
         srg_s = None, on casida; both forms on the other routes, pointing
         to casida), and refused only
         when it is not finite (`embedding_self_energy`). The
-        names in any case and with '-' or '_' ('SRG', 'mode-a'), as
+        names in any case and with '-' or '_' ('SRG', 'Averaged'), as
         screening; anything but None and those is refused.
     diagnostics: the DIAGNOSTICS to record in the result's diagnostics (None:
         none, as ()); a name that does not apply here (on casida
@@ -851,8 +851,8 @@ def static_defect(low, part, v_eff):
 # Sigma_bar^E on the casida route: the residues of the full W
 # between the active and the environment orbitals (`screened_residues`) and
 # the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
-# by mode A at eta = 0 (Eq. 12, 'mode_a', which warns near the poles,
-# `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
+# by Kotani's mode A at eta = 0 (Eq. 12, 'averaged', which warns near the
+# poles, `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
 # both spin channels with the Hartree-only double counting (dc='hartree'), and
 # records the 'sigma_poles' diagnostic.
 #
@@ -862,7 +862,7 @@ def static_defect(low, part, v_eff):
 # request), is continued by one Pade fit per element, and each element is
 # evaluated at its own point (`continued_self_energy`): Eq. 42, Re
 # S^E_tu(z_tu), for 'srg' (s = inf; srg_s enters the pole check alone), the
-# real axis for 'mode_a'. Both warn near the poles and point to casida;
+# real axis for 'averaged'. Both warn near the poles and point to casida;
 # Omega_min of the window is the lowest root of the same Casida problem
 # (`lowest_excitation`). The 'sigma_continuation' diagnostic is the spread of
 # two Pade fits on the even and the odd nodes. Space-time samples S^E the same
@@ -882,17 +882,17 @@ def embedding_self_energy(low, part, sigma, numerics=None):
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
     sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
-        everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
+        everywhere; 'averaged', Eq. 12 at eta = 0, which warns
         (SigmaNearPoleWarning, naming the orbitals) when an active energy
         is within pole_margin/sqrt(2 s) of the pole-free window's edge or
         outside it (`pole_window`), and is computed all the same. At
-        srg_s = None 'srg' is Eq. 42, undamped like 'mode_a' and with its
+        srg_s = None 'srg' is Eq. 42, undamped like 'averaged' and with its
         diagonal, and warns the same way.
     imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
         continued once and evaluated per element (`continued_self_energy`):
         'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
-        (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
-        + S^E_tu(eps_u)]. Both warn near the poles as 'mode_a' does on
+        (srg_s enters the pole check alone), 'averaged' 1/2 Re[S^E_tu(eps_t)
+        + S^E_tu(eps_u)]. Both warn near the poles as 'averaged' does on
         casida, within the larger of pole_margin/sqrt(2 s) and
         numerics.downfolding.continuation_margin, pointing to mode='casida';
         the continuation is inaccurate there (constants.py,
@@ -926,8 +926,8 @@ def _embedding(low, part, sigma, with_undamped=False, stacklevel=3):
     settings = numerics_or_default(low.numerics).downfolding
     chans = _channels(low, part)
     # 'srg' at a finite s is bounded near a pole and needs no warning on
-    # casida; at srg_s = None it is as undamped as 'mode_a'
-    if sigma == 'mode_a' or low.mode != 'casida' or settings.srg_s is None:
+    # casida; at srg_s = None it is as undamped as 'averaged'
+    if sigma == 'averaged' or low.mode != 'casida' or settings.srg_s is None:
         _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
     sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
                                            with_undamped)
@@ -962,7 +962,7 @@ def _embedding_unchecked(low, part, sigma, settings, with_undamped):
                 *args, settings.srg_s, _sigma_tile_gb(low.numerics),
                 with_undamped)
         else:
-            s_bar = mode_a_self_energy(*args)
+            s_bar = averaged_self_energy(*args)
         sigma_bar.append(s_bar)
         kept_per_channel.append(kept)
     return sigma_bar, kept_per_channel
@@ -1126,8 +1126,10 @@ def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None):
     return _srg_pair(w, eps_t, eps_r, occupied_r, omega, s, tile_gb)[0]
 
 
-def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
-    """Mode A (n_act, n_act), Marie and Loos Eq. 12 at eta = 0:
+def averaged_self_energy(w, eps_t, eps_r, occupied_r, omega):
+    """The averaged form (n_act, n_act), sigma='averaged': mode A of Kotani,
+    van Schilfgaarde and Faleev, Marie and Loos Eq. 12 at eta = 0, the form
+    of Erik's PySCF prototype:
 
         Sigma_tu = 1/2 sum_rn [1/D_tr + 1/D_ur] w_tr w_ur
                  = 1/2 [S_tu(eps_t) + S_tu(eps_u)],
@@ -1285,7 +1287,7 @@ def _evaluate_continued(fit, eps_act, sigma):
     """The static reduction of a `pade_fit_elementwise` fit (Z, A) of S^E:
     'srg', Re S_tu(z_tu) with z_tu = (eps_t + eps_u)/2 + i |eps_u - eps_t|/2
     (Eq. 42; S(z*) = S(z)*, so the half plane of the fit's nodes serves both
-    t, u and u, t); 'mode_a', 1/2 Re[S_tu(eps_t) + S_tu(eps_u)]."""
+    t, u and u, t); 'averaged', 1/2 Re[S_tu(eps_t) + S_tu(eps_u)]."""
     e = np.asarray(eps_act, dtype=float)
     n = len(e)
     if sigma == 'srg':
@@ -1302,7 +1304,7 @@ def continued_self_energy(z, samples, eps_act, sigma):
     (samples (nz, n_act, n_act), symmetric): one Thiele-Pade fit per element
     (`pade_fit_elementwise`, greedy order, the upper triangle), then each
     element at its own point, Re S_tu(z_tu) for 'srg' (Eq. 42, s = inf) or
-    1/2 Re[S_tu(eps_t) + S_tu(eps_u)] for 'mode_a', eps_act the active
+    1/2 Re[S_tu(eps_t) + S_tu(eps_u)] for 'averaged', eps_act the active
     orbitals' energies."""
     if len(eps_act) == 0:
         return np.zeros((0, 0))
@@ -1491,7 +1493,7 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
     `pole_window`, or outside it, in any spin channel (one warning, naming
     the spin of each orbital); Sigma_bar is computed all the same. The
     margin: on casida pole_margin/sqrt(2 s), s = DOWNFOLDING_SRG_S when
-    srg_s is None, for the undamped forms, 'mode_a' and 'srg' at
+    srg_s is None, for the undamped forms, 'averaged' and 'srg' at
     srg_s = None, pointing to 'srg' with a finite srg_s; on
     imagfrequency and space-time the larger of that and continuation_margin
     (the Pade continuation loses accuracy towards the poles), for both
@@ -1525,7 +1527,7 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
                 "sigma='srg' and a finite srg_s (numerics.downfolding.srg_s, "
                 "None in this run), which is damped there")
         if low.mode == 'casida':
-            form = ("'mode_a' is" if sigma == 'mode_a' else
+            form = ("'averaged' is" if sigma == 'averaged' else
                     "'srg' at srg_s = None (s = inf, Eq. 42) is")
             what = (f"{form} undamped and grows without bound towards a "
                     f"pole, so its elements on these orbitals are dominated "
@@ -1572,7 +1574,7 @@ def _require_finite(sigma_bar, chan, sigma):
 
 def _pole_weights(w, eps_t, eps_r, occupied_r, omega):
     """Z_t = 1/(1 - S'_tt(eps_t)) of each active orbital t, S the pole sum
-    of `mode_a_self_energy`, S_tt(x) = sum_rn w_tr^2 / (x - eps_r - sgn
+    of `averaged_self_energy`, S_tt(x) = sum_rn w_tr^2 / (x - eps_r - sgn
     Omega_n), so S'_tt(eps_t) = -sum_rn w_tr^2 / D_tr^2 and Z_t = 1/(1 +
     sum_rn w_tr^2 / D_tr^2), in (0, 1]: 1 far from every pole, towards 0
     near one. A term exactly at a pole (D_tr = 0) makes Z_t 0."""
@@ -1617,7 +1619,7 @@ def _sigma_poles(low, chans, sigma, sigma_bar, kept):
         casida (`_pole_weights`), of the continued fraction on imagfrequency
         and space-time.
     srg_s: the s applied, None for s = inf (always on imagfrequency and
-        space-time, which apply no damping) and for 'mode_a' (undamped).
+        space-time, which apply no damping) and for 'averaged' (undamped).
     srg_damping: max |Sigma_bar_srg(s) - Sigma_bar_srg(inf)|; 0.0 when no
         finite s is applied.
     """

@@ -278,11 +278,11 @@ QSGW_SRG_QUAD_TOL = 1e-7
 # 1 - exp(-(a^2 + b^2) s), so terms further than about 1/sqrt(2 s) = 0.03 Ha
 # from a pole are kept whole.
 DOWNFOLDING_SRG_S = 500.0
-# The 'mode_a' pole check warns of an active orbital energy within this many
+# The 'averaged' pole check warns of an active orbital energy within this many
 # 1/sqrt(2 s) of the pole-free window's edge: beyond three such widths the SRG
 # damping exp(-(a^2 + b^2) s) of every term is below exp(-9), so a
 # regularization is not needed there; closer in, the undamped terms of
-# 'mode_a' (eta = 0) grow without bound.
+# 'averaged' (eta = 0) grow without bound.
 DOWNFOLDING_POLE_MARGIN = 3.0
 # The 'sigma_poles' diagnostic warns when the SRG damping moves an element of
 # Sigma_bar^E by more than this, in Ha: max |Sigma_bar(s) - Sigma_bar(inf)|.

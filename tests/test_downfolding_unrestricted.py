@@ -151,7 +151,7 @@ def _beta_lumo_outside(mf):
     which spin's occupied count sorts the beta environment into occupied
     and empty orbitals. N^A = (2, 2) in 4 orbitals. (Measured against the
     oracle on this space: vtilde 4.6e-15, Sigma_bar 4.5e-15 with 'srg' and
-    3.5e-14 with 'mode_a'. With the alpha count used for beta, the Sigma^E
+    3.5e-14 with 'averaged'. With the alpha count used for beta, the Sigma^E
     tests and the H_eff test on this space fail; tried.)"""
     nmo = mf.mo_coeff.shape[-1]
     return (ActiveSpace.from_indices(nmo, 5, [3, 4], [6, 7]),
@@ -920,7 +920,7 @@ def test_sigma_against_oracle(oh, oh_low, space, df):
     """Sigma_bar^E of each spin, with that spin's orbital energies and the
     Omega_n both spins share: the SRG form (Marie and Loos Eq. 44) and mode
     A (Eq. 12 at eta = 0) against the oracle's pole sums in spin orbitals.
-    Measured over three spaces and both df settings: 'srg' 4.9e-15, 'mode_a'
+    Measured over three spaces and both df settings: 'srg' 4.9e-15, 'averaged'
     1.9e-13, on elements up to 0.02 Ha whose alpha and beta blocks differ by
     0.01 to 0.03 Ha."""
     low = oh_low[df]
@@ -936,7 +936,7 @@ def test_sigma_against_oracle(oh, oh_low, space, df):
         assert np.max(np.abs(srg[0] - srg[1])) > 1e-3
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', rpa.SigmaNearPoleWarning)
-        mode_a = rpa.embedding_self_energy(low, parts, 'mode_a')
+        mode_a = rpa.embedding_self_energy(low, parts, 'averaged')
     for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
         assert np.max(np.abs(ours - ref)) < 1e-9
 
@@ -964,16 +964,16 @@ def test_pole_window_per_spin(oh, oh_low):
 
 
 def test_near_pole_warning_names_the_spin(oh, oh_low):
-    """'mode_a' warns of the active orbitals near a pole, naming their spin.
+    """'averaged' warns of the active orbitals near a pole, naming their spin.
     In the asymmetric space the beta orbitals 6 and 7 lie above the beta
     window (distances -0.20 and -0.27 Ha) and every alpha orbital is at
     least 0.64 Ha inside the alpha one. 'srg' is finite everywhere and does
-    not warn; with no orbital near a pole neither does 'mode_a'."""
+    not warn; with no orbital near a pole neither does 'averaged'."""
     low = oh_low[True]
     parts = _parts(oh, _asymmetric(oh))
     with pytest.warns(rpa.SigmaNearPoleWarning,
                       match=r'beta orbital 6 \(.*beta orbital 7 \(') as rec:
-        rpa.embedding_self_energy(low, parts, 'mode_a')
+        rpa.embedding_self_energy(low, parts, 'averaged')
     assert rec[0].filename == __file__
     text = str(rec[0].message)
     assert 'alpha orbital' not in text
@@ -982,14 +982,14 @@ def test_near_pole_warning_names_the_spin(oh, oh_low):
         warnings.simplefilter('error')
         rpa.embedding_self_energy(low, parts, 'srg')
         rpa.embedding_self_energy(low, _parts(oh, _unequal_cores(oh)),
-                                  'mode_a')
+                                  'averaged')
 
 
 def test_a_sigma_that_is_not_finite_names_the_spin(oh, oh_low, monkeypatch):
     """A Sigma_bar with an element that is not finite is refused, naming
     the spin of the orbital pair."""
     parts = _parts(oh, _unequal_cores(oh))
-    exact, calls = rpa.mode_a_self_energy, []
+    exact, calls = rpa.averaged_self_energy, []
 
     def with_a_pole(*args):
         out = exact(*args)
@@ -998,18 +998,18 @@ def test_a_sigma_that_is_not_finite_names_the_spin(oh, oh_low, monkeypatch):
             out[-1, -1] = np.inf
         return out
 
-    monkeypatch.setattr(rpa, 'mode_a_self_energy', with_a_pole)
+    monkeypatch.setattr(rpa, 'averaged_self_energy', with_a_pole)
     act = parts[1].act
     with pytest.raises(FloatingPointError,
                        match=rf"\({act[-1]}, {act[-1]}\) \(beta orbital "
                              rf"pairs\).*sigma='srg'"):
-        rpa.embedding_self_energy(oh_low[True], parts, 'mode_a')
+        rpa.embedding_self_energy(oh_low[True], parts, 'averaged')
 
 
 # --- the driver with method='rpa' (casida) on an unrestricted reference --------
 
 SCREENINGS_RPA = ('bare', 'crpa', 'crpa_ph')
-SIGMAS_RPA = (None, 'srg', 'mode_a')
+SIGMAS_RPA = (None, 'srg', 'averaged')
 ENERGY_TERMS = ('e_nuc', 'e_core', 'e_hartree', 'e_exchange', 'e_hartree_dc',
                 'e_exchange_dc', 'e_c_full', 'e_c_active', 'e_exchange_term',
                 'e_sigma_trace', 'e0')
@@ -1270,7 +1270,7 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
     """The records of an unrestricted build: one number for a summary of the
     whole (the static defect, the SRG damping, the largest over both spins),
     a pair (alpha, beta) for what belongs to one spin (the pole-free window,
-    the pole distances, Z). The near-pole warning of 'mode_a' points at the
+    the pole distances, Z). The near-pole warning of 'averaged' points at the
     caller, names the spin, and is in energies.numerical_flags; so does the
     damping warning of 'srg', whose number (2.5e-3 Ha here, on beta orbital
     6) equals the oracle's |Sigma(s) - Sigma(inf)| to 1.3e-14."""
@@ -1280,7 +1280,7 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
     so = _spin_orbitals(oh, parts)
     n = parts[0].n_act
     with pytest.warns(rpa.SigmaNearPoleWarning, match='beta orbital 6') as rec:
-        ham = build_effective_hamiltonian(low, spaces, sigma='mode_a')
+        ham = build_effective_hamiltonian(low, spaces, sigma='averaged')
         en = ham.energies
     near = [w for w in rec if w.category is rpa.SigmaNearPoleWarning]
     assert len(near) == 1 and near[0].filename == __file__
@@ -1495,7 +1495,7 @@ def test_density_fitted_uhf_through_the_driver():
     oracle on the fitted v: E_c 5.7e-14, vtilde 1.2e-15 (crpa), 5.4e-16
     (crpa_ph), 8.8e-14 (mrpa), E_c^A 8.9e-16, the defect 3.2e-15 (9.4e-16
     for crpa; 6.5e-4 if v_eff is put on the exact v), Sigma_bar 3.7e-15
-    ('srg') and 7.3e-14 ('mode_a'), the reference-determinant identity
+    ('srg') and 7.3e-14 ('averaged'), the reference-determinant identity
     5.7e-14 (3.6e-7 off with the density-fitted SCF energy). Tried against
     three wrong codes, each of which fails it: the spin weight 2 on two
     channels, the active v scaled by 1 + 1e-6, the beta pairs left out of
@@ -1557,7 +1557,7 @@ def test_density_fitted_uhf_through_the_driver():
             sigma_srg_uhf(*exact_so, DOWNFOLDING_SRG_S)):
         assert np.max(np.abs(ours - ref)) < 1e-9
         assert np.max(np.abs(ours - other)) > 1e-8
-    mode_a = _quiet(rpa.embedding_self_energy, low, parts, 'mode_a')
+    mode_a = _quiet(rpa.embedding_self_energy, low, parts, 'averaged')
     for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
         assert np.max(np.abs(ours - ref)) < 1e-9
 
