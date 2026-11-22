@@ -53,7 +53,7 @@ from src.EffectiveHamiltonian.Downfolding.one_body import (
 from src.EffectiveHamiltonian.Downfolding.partition import partition
 from src.EffectiveHamiltonian.Downfolding.terms import DownfoldingTerms
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import (
     h2, mo_integrals, reference_energy, spin_orbital_energies,
     spin_orbital_integrals, water)

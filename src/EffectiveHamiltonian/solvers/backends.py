@@ -13,7 +13,7 @@ and two-particle density matrices of a state in pyscf's make_rdm12 convention,
 
 which is the pair a Hellmann-Feynman derivative of the active space contracts
 with. Four engines satisfy the interface: pyscf's FCI, the determinant basis
-of exact_diagonalization.py (the only one that carries a three-body vertex),
+of determinants.py (the only one that carries a three-body vertex),
 DMRG through block2, whose cost is polynomial in the number of orbitals at
 fixed bond dimension and so reaches active spaces the two exact engines cannot,
 and high-order coupled cluster (CCSDT, CCSDTQ) on a Hartree-Fock reference in
@@ -37,8 +37,8 @@ from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL,
                                          CC_ACTIVE_SCF_TOL, DMRG_BOND_DIM,
                                          DMRG_DAVIDSON_TOL, DMRG_N_SWEEPS,
                                          DMRG_NOISE, FCI_CONV_TOL)
-from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
-                                               spatial_to_spin_orbitals)
+from src.EffectiveHamiltonian.solvers.determinants import (
+    build_explicit_hamiltonian, spatial_to_spin_orbitals)
 
 
 class ActiveSpaceSolver:

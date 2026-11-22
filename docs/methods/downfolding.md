@@ -6,7 +6,7 @@ outside the active space enter as a frozen core (HF) and, for the RPA, as a
 screening of the active-space Coulomb interaction. The scheme is that of the
 RPA-downfolding paper (cRPA, cRPA_ph and mRPA screening of an active-space
 Hamiltonian with a constant E_0), on canonical orbitals. The result goes to
-any active-space solver in `src.Solvers.active_space`.
+any active-space solver in `src.EffectiveHamiltonian.solvers.solve`.
 
 Available now:
 
@@ -31,7 +31,7 @@ from pyscf import gto, scf
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 mol = gto.M(atom='C 0 0.6695 0; C 0 -0.6695 0; H 0.9289 1.2321 0; '
                  'H -0.9289 1.2321 0; H 0.9289 -1.2321 0; H -0.9289 -1.2321 0',
@@ -231,7 +231,7 @@ from pyscf import gto, scf
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1)   # OH
 mf = scf.UHF(mol).run()

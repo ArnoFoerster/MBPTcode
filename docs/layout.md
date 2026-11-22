@@ -82,8 +82,7 @@ src/Base/                      the foundation
                                step
 src/Solvers/                   the quasiparticle root finder (one for every
                                route), the symmetric Davidson eigensolver,
-                               and the active-space solvers (FCI,
-                               determinant basis, DMRG, coupled cluster)
+                               DIIS
 src/environments/              medium.py (a medium by name or by eps and
                                n^2, and the cavity conventions),
                                solvent_screening.py (PCM reaction field and
@@ -126,6 +125,10 @@ src/EffectiveHamiltonian/
     QDPT/                      active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them
+    solvers/                   the many-body solvers of g_eff: solve.py
+                               (the dispatcher), backends.py (FCI, the
+                               determinant basis, DMRG, coupled cluster),
+                               determinants.py
     Downfolding/               static effective Hamiltonians of an active
                                space downfolded from HF or RPA (see
                                methods/downfolding.md); builds on

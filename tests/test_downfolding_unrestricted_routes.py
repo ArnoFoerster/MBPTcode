@@ -77,7 +77,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
     imaginary_axis_energy_grid, rpa_correlation_energy_imaginary_axis)
 from src.SingleReference.LinearResponse.space_time import (
     rpa_correlation_energy_space_time, static_screening_grid)
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import (CH2, OH, drpa_so,
                                       fitted_spin_orbital_integrals,
                                       sigma_env_uhf, spin_orbital_integrals,

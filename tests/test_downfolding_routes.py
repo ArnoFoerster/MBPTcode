@@ -61,7 +61,7 @@ from src.SingleReference.LinearResponse.rpa_energy import (
 from src.SingleReference.LinearResponse.space_time import (
     rpa_correlation_energy_space_time, static_screening_grid,
     static_screening_matrix)
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import h2, water
 from tests.gw_density_routes import fitted
 from tests.gw_density_routes import mean_field as nh3_mean_field

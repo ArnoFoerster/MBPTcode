@@ -629,16 +629,16 @@
  "src/Base/utils/linear_algebra/diagonalization.py::eigh_symmetric": [
   "threshold"
  ],
- "src/Solvers/active_space.py::solve": [
+ "src/EffectiveHamiltonian/solvers/solve.py::solve": [
   "nroots"
  ],
- "src/Solvers/active_space_solver.py::roots": [
+ "src/EffectiveHamiltonian/solvers/backends.py::roots": [
   "nroots"
  ],
- "src/Solvers/active_space_solver.py::_check_roots": [
+ "src/EffectiveHamiltonian/solvers/backends.py::_check_roots": [
   "nroots"
  ],
- "src/Solvers/active_space_solver.py::__init__": [
+ "src/EffectiveHamiltonian/solvers/backends.py::__init__": [
   "conv_tol",
   "tol"
  ],

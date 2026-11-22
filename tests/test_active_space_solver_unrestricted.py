@@ -19,7 +19,8 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, fci, gto, mcscf, scf
 
-from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
+from src.EffectiveHamiltonian.solvers.solve import (
+    EmptyActiveSpaceWarning, solve)
 
 
 def _uhf(atom, spin, basis='6-31g'):

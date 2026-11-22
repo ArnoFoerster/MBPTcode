@@ -1,6 +1,7 @@
-"""CoupledClusterSolver (src/Solvers/active_space_solver.py): CCSDT and CCSDTQ
-on a Hartree-Fock reference in the active space, and the 'ccsdt' / 'ccsdtq'
-backends of the downfolding dispatcher (src/Solvers/active_space.py).
+"""CoupledClusterSolver (src/EffectiveHamiltonian/solvers/backends.py): CCSDT
+and CCSDTQ on a Hartree-Fock reference in the active space, and the 'ccsdt' /
+'ccsdtq' backends of the downfolding dispatcher
+(src/EffectiveHamiltonian/solvers/solve.py).
 
 Checks:
   1. H4/STO-3G (4 electrons in 4 orbitals): CCSDTQ is FCI to round-off;
@@ -36,11 +37,11 @@ from src.EffectiveHamiltonian.QDPT.perturbative import (
     build_effective_hamiltonian)
 from src.SingleReference.CC import amplitudes
 from src.SingleReference.CC.integrals import energy_denominators
-from src.Solvers import active_space_solver
-from src.Solvers.active_space import _spatial_active_hamiltonian, solve
-from src.Solvers.active_space_solver import (ActiveSpaceCCNotConverged,
-                                             CoupledClusterSolver,
-                                             PyscfFCISolver)
+from src.EffectiveHamiltonian.solvers import backends
+from src.EffectiveHamiltonian.solvers.solve import (
+    _spatial_active_hamiltonian, solve)
+from src.EffectiveHamiltonian.solvers.backends import (
+    ActiveSpaceCCNotConverged, CoupledClusterSolver, PyscfFCISolver)
 
 H4_CHAIN = 'H 0 0 0; H 0 0 1.0; H 0 0 2.0; H 0 0 3.0'
 H4_BENT = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
@@ -165,7 +166,7 @@ def test_ccsdt_matches_the_spin_orbital_ccsdt_on_a_hermitian_vertex():
     h1 = mc.get_h1eff()[0]
     eri = (ao2mo.restore(1, mc.get_h2eff(), 6)
            + 0.04 * _hermitian_without_eightfold(6, seed=3))
-    reference = active_space_solver._active_space_reference(h1, eri, 6, 3, 3)
+    reference = backends._active_space_reference(h1, eri, 6, 3, 3)
     solver = CoupledClusterSolver(order=3)
     e_cc = solver.roots(h1, eri, 6, 6)[0][0]
 
@@ -218,7 +219,7 @@ def test_refusals(h4):
 
 def test_an_unconverged_iteration_warns_flags_and_keeps_its_energy(h4, monkeypatch):
     h1, eri, norb, nelec = h4
-    monkeypatch.setattr(active_space_solver, 'CC_ACTIVE_MAX_CYCLE', 2)
+    monkeypatch.setattr(backends, 'CC_ACTIVE_MAX_CYCLE', 2)
     solver = CoupledClusterSolver(order=3)
     with pytest.warns(ActiveSpaceCCNotConverged, match='did not converge'):
         energies, _ = solver.roots(h1, eri, norb, nelec)

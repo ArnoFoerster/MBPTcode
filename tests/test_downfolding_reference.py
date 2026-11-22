@@ -96,8 +96,8 @@ from src.EffectiveHamiltonian.Downfolding.one_body import (core_fock,
 from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
                                                             partition)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.Solvers.active_space import solve
-from src.Solvers.active_space_solver import PyscfFCISolver
+from src.EffectiveHamiltonian.solvers.solve import solve
+from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 from tests.downfolding_oracle import drpa, reference_energy, water
 
 DATA = json.loads((pathlib.Path(__file__).parent / 'data'

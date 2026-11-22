@@ -60,7 +60,7 @@ from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import \
     rpa_correlation_energy_casida
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import (drpa, h2, mo_integrals,
                                       reference_energy, rpa_energy,
                                       vtilde_crpa, vtilde_crpa_so,

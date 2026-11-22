@@ -32,7 +32,7 @@ from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.Solvers.active_space_solver import PyscfFCISolver
+from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 
 # both molecules lie in the xy plane, so the pi orbitals are the carbon p_z
 ETHYLENE = [('C', (0, 0.6695, 0)), ('C', (0, -0.6695, 0)),

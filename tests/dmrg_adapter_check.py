@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import ao2mo, gto, mcscf, scf
 
-from src.Solvers.active_space_solver import Block2DMRGSolver, PyscfFCISolver
+from src.EffectiveHamiltonian.solvers.backends import (
+    Block2DMRGSolver, PyscfFCISolver)
 
 H2O = 'O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471'
 

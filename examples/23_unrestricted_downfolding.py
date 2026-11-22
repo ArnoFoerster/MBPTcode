@@ -42,7 +42,7 @@ from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 METHODS = (('HF (UCASCI)', 'hf', {}),
            ('RPA bare', 'rpa', {'screening': 'bare'}),

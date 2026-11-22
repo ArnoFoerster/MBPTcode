@@ -26,7 +26,7 @@ coincide:
 The three parts of H_eff come from the general layer's three files, E_0 from
 energy.py, h_eff from one_body.py and v_eff from two_body.py; `pack` here
 writes them into the g_eff dictionary the active-space solvers read
-(src/Solvers/active_space.py).
+(src/EffectiveHamiltonian/solvers/solve.py).
 """
 from dataclasses import replace
 
@@ -42,7 +42,8 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             spin_orbital_one_body,
                                             unrestricted_reference_diagnostics)
 from src.Base.utils.parallel.mpi_grid import grid_comm
-from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
+from src.EffectiveHamiltonian.solvers.determinants import (
+    spatial_to_spin_orbitals)
 
 from .energy import assemble_energies, environment_hf_energy
 from .methods import LOW_LEVEL
@@ -166,8 +167,8 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     downfolded from the low-level result `low`.
 
     g_eff and space follow QDPT's build_effective_hamiltonian, so the result
-    goes straight to src.Solvers.active_space.solve: g_eff = {0: E_0, 1:
-    h_eff, 2: physicist v_eff}, spatial when spin_free, else over the 2 n_act
+    goes straight to src.EffectiveHamiltonian.solvers.solve.solve:
+    g_eff = {0: E_0, 1: h_eff, 2: physicist v_eff}, spatial when spin_free, else over the 2 n_act
     interleaved spin orbitals; space holds n_orbs, n_elec_active, act_idx,
     act_occ_idx, act_vir_idx (canonical spatial indices), spin_free and
     active_space. energies is the `Energies` record of every E_0 term.

@@ -28,7 +28,7 @@ many-body solver backends:
 Any other name is refused (`SOLVERS`).
 
 Every backend but 'openfermion' goes through the ActiveSpaceSolver
-interface of active_space_solver.py.
+interface of backends.py.
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -38,13 +38,11 @@ import numpy as np
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL, DMRG_BOND_DIM,
                                          DMRG_N_SWEEPS)
-from src.Solvers.active_space_solver import (Block2DMRGSolver,
-                                             CoupledClusterSolver,
-                                             ExactDiagonalizationSolver,
-                                             PyscfFCISolver,
-                                             PyscfSpinResolvedFCISolver,
-                                             total_spin_square)
-from src.Solvers.exact_diagonalization import spatial_to_spin_orbitals
+from src.EffectiveHamiltonian.solvers.backends import (
+    Block2DMRGSolver, CoupledClusterSolver, ExactDiagonalizationSolver,
+    PyscfFCISolver, PyscfSpinResolvedFCISolver, total_spin_square)
+from src.EffectiveHamiltonian.solvers.determinants import (
+    spatial_to_spin_orbitals)
 
 #: The coupled-cluster backends and their excitation order.
 CC_ORDERS = {'ccsdt': 3, 'ccsdtq': 4}

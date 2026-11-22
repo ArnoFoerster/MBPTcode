@@ -1,4 +1,4 @@
-"""ActiveSpaceSolver (src/Solvers/active_space_solver.py): the FCI,
+"""ActiveSpaceSolver (src/EffectiveHamiltonian/solvers/backends.py): the FCI,
 determinant-basis and DMRG engines behind one roots()/rdms() interface.
 
 Run: python tests/test_active_space_solver.py, or under pytest.
@@ -23,9 +23,10 @@ import numpy as np
 import pytest
 from pyscf import ao2mo, gto, mcscf, scf
 
-from src.Solvers.active_space import EmptyActiveSpaceWarning, solve
-from src.Solvers.active_space_solver import (ExactDiagonalizationSolver,
-                                             PyscfFCISolver)
+from src.EffectiveHamiltonian.solvers.solve import (
+    EmptyActiveSpaceWarning, solve)
+from src.EffectiveHamiltonian.solvers.backends import (
+    ExactDiagonalizationSolver, PyscfFCISolver)
 
 H4 = 'H 0 0 0; H 0 0 1.0; H 0 0 2.0; H 0 0 3.0'
 H2O = 'O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471'

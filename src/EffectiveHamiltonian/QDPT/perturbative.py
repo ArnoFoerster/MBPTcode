@@ -2,14 +2,14 @@
 space via the generated evaluators in generated_evaluators(_spinfree).py.
 
 Only builds effective Hamiltonians; solving (FCI, exact diagonalization,
-DMRG, ...) lives in src/Solvers/active_space.py.
+DMRG, ...) lives in src/EffectiveHamiltonian/solvers/solve.py.
 """
 import importlib
 
 import numpy as np
 
 from src.Base.pyscf.pyscf_interface import get_system_data, get_system_data_spatial
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 
 def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
@@ -81,7 +81,7 @@ def run_pipeline(max_pt_order=2, max_vertex=3, symmetrize=True, mol=None,
                  spin_free=False, nroots=1,
                  active_space=None, dmrg_bond_dim=500, dmrg_n_sweeps=20):
     """Downfold and solve in one call (build_effective_hamiltonian +
-    src.Solvers.active_space.solve).
+    src.EffectiveHamiltonian.solvers.solve.solve).
 
     nroots is passed to the solver, so a dynamical (Brillouin-Wigner) solve
     can follow an excited root."""

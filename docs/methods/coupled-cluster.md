@@ -30,8 +30,8 @@ An active space too large for FCI or DMRG (tens of electrons in tens of
 orbitals) can be solved by CCSDT or CCSDTQ instead. `CoupledClusterSolver`
 runs pyscf's implementation of these methods by Jin, Hillenbrand, Berkelbach
 and Zhai (J. Chem. Phys. 165, 144109 (2026)). It works like the other
-active-space solvers in `Solvers/active_space_solver.py`. It takes a one-body
-matrix `h1` and a two-body tensor `(pq|rs)` over the active orbitals, and
+active-space solvers in `EffectiveHamiltonian/solvers/backends.py`. It takes a
+one-body matrix `h1` and a two-body tensor `(pq|rs)` over the active orbitals, and
 returns the energy without the core constant.
 
 It first solves Hartree-Fock inside the active space, starting from the
@@ -60,7 +60,7 @@ warns and records it in `solver.last_result`
 
 ```python
 from pyscf import ao2mo, gto, mcscf, scf
-from src.Solvers.active_space_solver import CoupledClusterSolver
+from src.EffectiveHamiltonian.solvers.backends import CoupledClusterSolver
 
 mol = gto.M(atom='O 0 0 0.117; H 0 0.755 -0.471; H 0 -0.755 -0.471',
             basis='6-31g', verbose=0)
