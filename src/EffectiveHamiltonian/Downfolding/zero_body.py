@@ -11,7 +11,7 @@ active-environment cross terms are in the core Fock operator), from core.py;
 the double-counting terms come from double_counting.py, which says why
 E_HF,ee[vtilde] enters with a plus sign. This file only assembles them.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -36,10 +36,6 @@ class Energies:
         -2 e_exchange_dc; nonzero only with dc='hartree'.
     e_sigma_trace: Tr[Sigma_bar gamma^A,0]; E_0 subtracts it; nonzero only
         with a Sigma_bar.
-    diagnostics: the low-level method's diagnostics, keyed by name.
-    numerical_flags: the named flags behind this Hamiltonian
-        (src.Base.numerical_flags), each {'flag': name, 'message': text};
-        filled by `build_effective_hamiltonian`, empty for a clean result.
 
     Sums (properties): `eh`, `ex`, `ec` are the Hartree, exchange and
     correlation energies of E_0 with their corrections, so that
@@ -55,8 +51,6 @@ class Energies:
     e_c_active: float
     e_exchange_term: float
     e_sigma_trace: float
-    diagnostics: dict = field(default_factory=dict)
-    numerical_flags: list = field(default_factory=list)
 
     @property
     def eh(self):
@@ -84,13 +78,12 @@ class Energies:
 def assemble_energies(e_nuc, core, dc, terms):
     """The `Energies` of one Hamiltonian: the nuclear repulsion, the frozen
     core's three energies (`Core`), the four energies of the double counting
-    (`DoubleCounting`) and the method's correlation-energy pair and
-    diagnostics (`DownfoldingTerms`)."""
+    (`DoubleCounting`) and the method's correlation-energy pair
+    (`DownfoldingTerms`)."""
     return Energies(e_nuc=e_nuc, e_core=core.e_core,
                     e_hartree=core.e_hartree, e_exchange=core.e_exchange,
                     e_hartree_dc=dc.e_hartree_dc,
                     e_exchange_dc=dc.e_exchange_dc,
                     e_c_full=terms.e_c_full, e_c_active=terms.e_c_active,
                     e_exchange_term=dc.e_exchange_term,
-                    e_sigma_trace=dc.e_sigma_trace,
-                    diagnostics=dict(terms.diagnostics))
+                    e_sigma_trace=dc.e_sigma_trace)

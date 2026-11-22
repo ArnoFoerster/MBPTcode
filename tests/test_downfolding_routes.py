@@ -167,10 +167,12 @@ def test_full_rpa_quadrature_on_a_wider_window():
     low_cas = run_low_level(mf, mode='casida')
     assert abs(low_if.e_c_full - low_cas.e_c_full) < 1e-9
     a = ActiveSpace.from_counts(mf.mo_energy, low_if.nocc, 2, 2)
-    _, _, en = build_effective_hamiltonian(low_if, a)
-    _, _, en_c = build_effective_hamiltonian(low_cas, a)
+    ham = build_effective_hamiltonian(low_if, a)
+    en = ham.energies
+    ham_c = build_effective_hamiltonian(low_cas, a)
+    en_c = ham_c.energies
     assert abs(en.e0 - en_c.e0) < 1e-6
-    assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-9
+    assert abs(ham.diagnostics['ec_active_casida']['difference']) < 1e-9
 
 
 @pytest.mark.parametrize('aspace', ASPACES)
@@ -291,8 +293,10 @@ def test_e0_terms_match_casida(ref, aspace, s):
     FCI 7.4e-12."""
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     a = _aspace(low_if.mf, aspace)
-    g, space, en = build_effective_hamiltonian(low_if, a, screening=s)
-    g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    ham = build_effective_hamiltonian(low_if, a, screening=s)
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     for f in dataclasses.fields(Energies):
         if f.name not in RECORDS:
             assert abs(getattr(en, f.name) - getattr(en_c, f.name)) < 1e-6
@@ -312,14 +316,17 @@ def test_static_defect_zero_for_crpa(ref):
     mf = low_if.mf
     a = _aspace(mf, 'contiguous')
     part = a
-    _, _, en = build_effective_hamiltonian(low_if, a, screening='crpa')
-    assert en.diagnostics['static_defect'] < 1e-8
+    ham = build_effective_hamiltonian(low_if, a, screening='crpa')
+    en = ham.energies
+    assert ham.diagnostics['static_defect'] < 1e-8
     for s in ('bare', 'crpa_ph'):
-        _, _, en = build_effective_hamiltonian(low_if, a, screening=s)
-        _, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
-        assert en.diagnostics['static_defect'] > 1e-4
-        assert abs(en.diagnostics['static_defect']
-                   - en_c.diagnostics['static_defect']) < 1e-8
+        ham = build_effective_hamiltonian(low_if, a, screening=s)
+        en = ham.energies
+        ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+        en_c = ham_c.energies
+        assert ham.diagnostics['static_defect'] > 1e-4
+        assert abs(ham.diagnostics['static_defect']
+                   - ham_c.diagnostics['static_defect']) < 1e-8
     assert rpa.static_defect(low_if, ActiveSpace.from_indices(13, 5, [], []),
         np.zeros((0,) * 4)) == 0.0
 
@@ -333,30 +340,32 @@ def test_ec_active_casida_diagnostic(s):
     agreement of vtilde)."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
-    _, _, en = build_effective_hamiltonian(low, a, screening=s)
-    rec = en.diagnostics['ec_active_casida']
+    ham = build_effective_hamiltonian(low, a, screening=s)
+    en = ham.energies
+    rec = ham.diagnostics['ec_active_casida']
     assert set(rec) == {'casida', 'difference'}
     assert rec['difference'] == en.e_c_active - rec['casida']
     assert abs(rec['difference']) < 1e-9
-    _, _, en_c = build_effective_hamiltonian(_low('hf', 'casida'), a,
-                                             screening=s)
+    ham_c = build_effective_hamiltonian(_low('hf', 'casida'), a,
+                                        screening=s)
+    en_c = ham_c.energies
     assert abs(rec['casida'] - en_c.e_c_active) < 1e-8
-    assert set(en.diagnostics) == {'static_defect', 'ec_active_casida'}
-    _, _, en = build_effective_hamiltonian(low, a, screening=s,
-                                           diagnostics=('ec_active_casida',))
-    assert list(en.diagnostics) == ['ec_active_casida']
+    assert set(ham.diagnostics) == {'static_defect', 'ec_active_casida'}
+    ham = build_effective_hamiltonian(low, a, screening=s,
+                                      diagnostics=('ec_active_casida',))
+    assert list(ham.diagnostics) == ['ec_active_casida']
 
 
 def _same(a, b):
-    (g1, _, e1), (g2, _, e2) = a, b
+    (g1, e1), (g2, e2) = (a.g_eff, a.energies), (b.g_eff, b.energies)
     assert abs(g1[0] - g2[0]) < 1e-12
     assert np.abs(g1[1] - g2[1]).max() < 1e-12
     assert np.abs(g1[2] - g2[2]).max() < 1e-12
     for f in dataclasses.fields(Energies):
         if f.name not in RECORDS:
             assert abs(getattr(e1, f.name) - getattr(e2, f.name)) < 1e-12
-    assert e1.diagnostics.keys() == e2.diagnostics.keys()
-    assert e1.numerical_flags == e2.numerical_flags
+    assert a.diagnostics.keys() == b.diagnostics.keys()
+    assert a.numerical_flags == b.numerical_flags
 
 
 MOVED = 'O 0 0 0.1173; H 0 0.9 -0.55; H 0 -0.9 -0.55'
@@ -380,8 +389,9 @@ def test_a_mean_field_changed_after_the_run_is_refused(mode):
     with pytest.raises(ValueError,
                        match='mean field has changed.*run_low_level'):
         build_effective_hamiltonian(low, space)
-    _, _, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         run_low_level(mf, method='rpa', mode=mode), space)
+    en = ham.energies
     assert np.isfinite(en.e0)
 
 
@@ -438,10 +448,12 @@ def test_route_agreement_with_sigma(ref, s):
     low_if = _low_infinite_s(ref, 'imagfrequency')
     low_cas = _low_infinite_s(ref, 'casida')
     a = _aspace(low_if.mf, 'contiguous')
-    g, space, en = build_effective_hamiltonian(low_if, a, screening=s,
-                                               sigma='srg')
-    g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s,
-                                               sigma='srg')
+    ham = build_effective_hamiltonian(low_if, a, screening=s,
+                                      sigma='srg')
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(low_cas, a, screening=s,
+                                        sigma='srg')
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     assert abs(en.e_sigma_trace) > 1e-3
     for f in dataclasses.fields(Energies):
         if f.name not in RECORDS:
@@ -675,8 +687,10 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     1.9e-11."""
     low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
     a = _st_aspace(low_st.mf, aspace)
-    g, space, en = build_effective_hamiltonian(low_st, a, screening=s)
-    g_c, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    ham = build_effective_hamiltonian(low_st, a, screening=s)
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     tol = 5e-5 if s == 'crpa' else 1e-5
     for f in dataclasses.fields(Energies):
         if f.name not in RECORDS:
@@ -685,7 +699,7 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     assert np.abs(g[1] - g_c[1]).max() < tol
     assert np.abs(g[2] - g_c[2]).max() < 1e-5
     assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
-    assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-9
+    assert abs(ham.diagnostics['ec_active_casida']['difference']) < 1e-9
 
 
 @pytest.mark.parametrize('ref', ST_REFS)
@@ -699,14 +713,17 @@ def test_space_time_static_defect_zero_for_crpa(ref):
     this space, 8.6e-6 on the non-contiguous one)."""
     low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
     a = _st_aspace(low_st.mf, 'contiguous')
-    _, _, en = build_effective_hamiltonian(low_st, a, screening='crpa')
-    assert en.diagnostics['static_defect'] < 1e-8
+    ham = build_effective_hamiltonian(low_st, a, screening='crpa')
+    en = ham.energies
+    assert ham.diagnostics['static_defect'] < 1e-8
     for s in ('bare', 'crpa_ph'):
-        _, _, en = build_effective_hamiltonian(low_st, a, screening=s)
-        _, _, en_c = build_effective_hamiltonian(low_cas, a, screening=s)
-        assert en.diagnostics['static_defect'] > 1e-4
-        assert abs(en.diagnostics['static_defect']
-                   - en_c.diagnostics['static_defect']) < 1e-5
+        ham = build_effective_hamiltonian(low_st, a, screening=s)
+        en = ham.energies
+        ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+        en_c = ham_c.energies
+        assert ham.diagnostics['static_defect'] > 1e-4
+        assert abs(ham.diagnostics['static_defect']
+                   - ham_c.diagnostics['static_defect']) < 1e-5
 
 
 def test_space_time_low_reuse():
@@ -758,13 +775,14 @@ def test_space_time_refusals():
                           r".*mode='casida'") as rec:
             # this close to the poles the two Pade fits disagree as well
             warnings.simplefilter('ignore', rpa.SigmaContinuationWarning)
-            g, _, en = build_effective_hamiltonian(low, near, sigma=sigma)
+            ham = build_effective_hamiltonian(low, near, sigma=sigma)
+            g, en = ham.g_eff, ham.energies
         text = str([w.message for w in rec
                     if w.category is rpa.SigmaNearPoleWarning][0])
         assert 'orbital 4 ' not in text
         assert np.all(np.isfinite(g[1]))
         assert {'flag': 'sigma_near_pole',
-                'message': text} in en.numerical_flags
+                'message': text} in ham.numerical_flags
     part = a
     with pytest.raises(NotImplementedError,
                        match="mode='imagfrequency' or mode='space-time'"):
@@ -813,20 +831,22 @@ def test_space_time_route_agreement_with_sigma(ref, s):
     a = _st_aspace(lows[0].mf, 'contiguous')
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        (g, space, en), *others = [
+        ham, *others = [
             build_effective_hamiltonian(low, a, screening=s, sigma='srg')
             for low in lows]
+    g, space, en = ham.g_eff, ham.space, ham.energies
     assert abs(en.e_sigma_trace) > 1e-2
     e_fci = _solve(g, space)
-    for g_o, _, en_o in others:
+    for other in others:
+        g_o, en_o = other.g_eff, other.energies
         for f in dataclasses.fields(Energies):
             if f.name not in RECORDS:
                 assert abs(getattr(en, f.name) - getattr(en_o, f.name)) < 1e-4
         assert np.abs(g[1] - g_o[1]).max() < 1e-4
         assert abs(e_fci - _solve(g_o, space)) < 1e-5
-    assert en.diagnostics['sigma_continuation'].max() < 1e-4
-    poles = en.diagnostics['sigma_poles']
-    ref_poles = others[0][2].diagnostics['sigma_poles']
+    assert ham.diagnostics['sigma_continuation'].max() < 1e-4
+    poles = ham.diagnostics['sigma_poles']
+    ref_poles = others[0].diagnostics['sigma_poles']
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
     assert np.allclose(poles['window'], ref_poles['window'], atol=1e-5,
                        rtol=0)

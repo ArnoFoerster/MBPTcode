@@ -291,7 +291,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
         when it is not finite (`embedding_self_energy`). The
         names in any case and with '-' or '_' ('SRG', 'mode-a'), as
         screening; anything but None and those is refused.
-    diagnostics: the DIAGNOSTICS to record in energies.diagnostics (None:
+    diagnostics: the DIAGNOSTICS to record in the result's diagnostics (None:
         none, as ()); a name that does not apply here (on casida
         'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
         'sigma_continuation' without sigma) is skipped and absent, an

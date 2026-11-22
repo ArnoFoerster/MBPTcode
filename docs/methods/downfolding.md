@@ -31,7 +31,6 @@ from pyscf import gto, scf
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.EffectiveHamiltonian.solvers.solve import solve
 
 mol = gto.M(atom='C 0 0.6695 0; C 0 -0.6695 0; H 0.9289 1.2321 0; '
                  'H -0.9289 1.2321 0; H 0.9289 -1.2321 0; H -0.9289 -1.2321 0',
@@ -41,10 +40,9 @@ active = ActiveSpace.from_population(mf, atoms=[0, 1], ao_type='p',
                                      n_occ=1, n_virt=1)
 
 low = run_low_level(mf, method='rpa', mode='casida', df=True, numerics=None)
-g_eff, space, energies = build_effective_hamiltonian(
-    low, active, screening='crpa', sigma=None, spin_free=True)
-roots = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
-              spin_free=space['spin_free'], nroots=3)
+h = build_effective_hamiltonian(low, active, screening='crpa', sigma=None,
+                                spin_free=True)
+roots = h.solve('pyscf_fci', nroots=3)
 ```
 
 `run_low_level` solves the low-level method on the whole system once and does
@@ -59,7 +57,7 @@ object is converged again (another geometry in a scan), a build on the old
 
 **The two limits.** A (0,0) active space,
 `ActiveSpace.from_indices(norb, nocc, [], [])`, leaves everything in the
-environment: `energies.e0` is then the total energy, E_HF for `method='hf'`
+environment: `h.energies.e0` is then the total energy, E_HF for `method='hf'`
 and E_HF + E_RPA,corr for `method='rpa'` (the paper's all-environment rows).
 `solve` accepts it too: it returns `[g_eff[0]]` (E_act = 0) and warns with
 `EmptyActiveSpaceWarning`, named flag `'empty_active_space'`. Every orbital
@@ -115,8 +113,10 @@ Options of the RPA:
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 
-`g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and `space` follow the QDPT
-`build_effective_hamiltonian` contract (`n_orbs`, `n_elec_active`, `act_idx`,
+`build_effective_hamiltonian` returns one `DownfoldedHamiltonian` `h`, with
+`h.g_eff`, `h.space`, `h.energies`, `h.diagnostics` and `h.numerical_flags`;
+`h.solve(solver, ...)` solves it. `g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and
+`space` follow the QDPT `build_effective_hamiltonian` contract (`n_orbs`, `n_elec_active`, `act_idx`,
 `act_occ_idx`, `act_vir_idx`, `spin_free`, `active_space`); for a UHF/UKS
 reference `g_eff[1]` and `g_eff[2]` hold the per-spin blocks and the entries
 of `space` are pairs (see
@@ -125,8 +125,8 @@ of `space` are pairs (see
 `ActiveSpace` is the user's choice (`from_indices`, `from_counts`,
 `from_irreps`, `from_population`); nothing here selects orbitals.
 
-`energies` is a frozen record holding every term of E_0 on its own, `e0` for
-their sum, and `diagnostics`:
+`energies` is a frozen record holding every term of E_0 on its own, and `e0`
+for their sum:
 
 | field | term | sign in E_0 |
 |---|---|---|
@@ -231,7 +231,6 @@ from pyscf import gto, scf
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
-from src.EffectiveHamiltonian.solvers.solve import solve
 
 mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1)   # OH
 mf = scf.UHF(mol).run()
@@ -239,12 +238,9 @@ nocc = tuple(int((occ > 0).sum()) for occ in mf.mo_occ)            # (5, 4)
 active = unrestricted_from_counts(mf.mo_energy, nocc, 4, (3, 2))
 
 low = run_low_level(mf, method='rpa', mode='casida')
-g_eff, space, energies = build_effective_hamiltonian(
-    low, active, screening='crpa', sigma='srg')
+h = build_effective_hamiltonian(low, active, screening='crpa', sigma='srg')
 out = {}
-roots = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
-              spin_free=space['spin_free'], nroots=2, out=out,
-              spin_overlap=space['spin_overlap'])
+roots = h.solve('pyscf_fci', nroots=2, out=out)   # passes h.space['spin_overlap']
 print(roots, out['spin_square'])
 ```
 
@@ -284,8 +280,8 @@ both spins). Messages that name an orbital name its spin
 `fci.direct_uhf` at the given `(N_alpha, N_beta)`. In spin-polarized
 orbitals H_eff conserves S_z only, so the roots are the lowest states of
 that S_z of any spin, and are not spin eigenfunctions in general.
-`solve(..., out=out, spin_overlap=space['spin_overlap'])` puts <S^2> of each
-root in `out['spin_square']`: that of the whole molecule's state, the active
+`h.solve(..., out=out)`, which passes `h.space['spin_overlap']` to `solve`,
+puts <S^2> of each root in `out['spin_square']`: that of the whole molecule's state, the active
 CI vector with the inactive core determinant, from the true alpha-beta
 overlaps. (pyscf's own `spin_square` assumes alpha orbital p and beta
 orbital p are one function: for the triplet root of a broken-symmetry H2
@@ -351,7 +347,7 @@ determinant: <S^2> against S(S+1), and pyscf's internal stability analysis.
 A determinant more than 0.1 above S(S+1) (broken-symmetry H2: 0.98 against
 0), or one pyscf finds unstable, is taken with a `RuntimeWarning` and the
 named flag `'uhf_spin_contaminated'` or `'uhf_reference_unstable'` in
-`low.numerical_flags` and in `energies.numerical_flags` of every Hamiltonian
+`low.numerical_flags` and in `h.numerical_flags` of every Hamiltonian
 built on it; the numbers are in `mf.reference_diagnostics`. They are
 computed once per converged mean field, so the warning comes with the first
 run on it and the flags with every run.
@@ -597,7 +593,7 @@ reference E_0 is a well-defined working choice, not a derived one.
   `'sigma_near_pole'`); on `mode='imagfrequency'` and `'space-time'` both
   `'srg'` and `'mode_a'` do, within the wider continuation margin (see
   above). H_eff is built all the same and the flag is in
-  `energies.numerical_flags`; only a Sigma_bar that is not finite is
+  `h.numerical_flags`; only a Sigma_bar that is not finite is
   refused.
 - **Sigma^E warnings.** With `sigma` set, two checks of Sigma_bar always
   run, whatever `diagnostics` asks for, because Sigma_bar goes into H_eff
@@ -610,7 +606,7 @@ reference E_0 is a well-defined working choice, not a derived one.
 - **Named flags in the result.** A warning that is a named flag also leaves
   a `{'flag': name, 'message': text}` entry in the result, so a script can
   test for it without catching warnings: `low.numerical_flags` holds the
-  flags of `run_low_level`, and `energies.numerical_flags` those plus the
+  flags of `run_low_level`, and `h.numerical_flags` those plus the
   ones raised by `build_effective_hamiltonian` for this active space. Both
   are empty lists for a clean calculation.
 
@@ -620,7 +616,7 @@ not apply to the call is skipped, so one tuple works across a loop. A
 diagnostic that applies but is exactly zero (an empty active space, no
 environment, no particle-hole pair) is recorded as 0.0; one that does not
 apply is absent. Results are in
-`energies.diagnostics`, keyed by name. On the casida route two apply; on
+`h.diagnostics`, keyed by name. On the casida route two apply; on
 imagfrequency and space-time all four:
 
 - `'static_defect'`: the largest element of W(0) - W^A[v_eff](0) on the

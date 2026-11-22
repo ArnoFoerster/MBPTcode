@@ -594,7 +594,8 @@ def test_reference_determinant_energy_mrpa(wat_df):
     E_HF + E_c[v] - E_c^A[v_eff]; vtilde has no (kk|ll) or (kl|lk) element,
     so E_HF,ee[vtilde] = 0. Measured 5.7e-14 (tolerance 1e-9)."""
     mf, low, aspace = wat_df
-    g, _, en = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    ham = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    g, en = ham.g_eff, ham.energies
     assert abs(reference_energy(g, 2)
                - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
     assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
@@ -608,9 +609,11 @@ def test_sigma_with_mrpa(wat_df, sigma):
     the reference determinant. Measured 0.0 for both forms (tolerance
     1e-9); Sigma_trace -0.0777."""
     mf, low, aspace = wat_df
-    g_plain, _, _ = build_effective_hamiltonian(low, aspace, screening='mrpa')
-    g, _, en = build_effective_hamiltonian(low, aspace, screening='mrpa',
-                                           sigma=sigma)
+    ham_plain = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    g_plain = ham_plain.g_eff
+    ham = build_effective_hamiltonian(low, aspace, screening='mrpa',
+                                      sigma=sigma)
+    g, en = ham.g_eff, ham.energies
     assert en.e_exchange_term == 0.0 and abs(en.e_sigma_trace) > 1e-3
     assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
     assert np.array_equal(g[2], g_plain[2])

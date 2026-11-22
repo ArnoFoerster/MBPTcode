@@ -285,13 +285,14 @@ def test_near_pole_space(wat, low_exact):
     assert np.abs(mode_a - sigma_mode_a(eri, eps, nocc, part)).max() < 1e-8
     assert rec[0].filename == __file__
     with pytest.warns(rpa.SigmaNearPoleWarning) as rec:
-        g, _, en = build_effective_hamiltonian(
+        ham = build_effective_hamiltonian(
             low_exact, _high_virtual(eps, nocc), sigma='mode_a',
             diagnostics=())
+        g, en = ham.g_eff, ham.energies
     # the warning points at the line that asked for the Hamiltonian
     assert rec[0].filename == __file__
     assert np.all(np.isfinite(g[1]))
-    assert en.numerical_flags == [{'flag': 'sigma_near_pole',
+    assert ham.numerical_flags == [{'flag': 'sigma_near_pole',
                                    'message': text}]
     with warnings.catch_warnings():
         warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
@@ -325,9 +326,10 @@ def test_undamped_srg_warns_near_a_pole(wat, low_infinite_s):
     assert np.abs(np.diag(found['srg'])
                   - np.diag(found['mode_a'])).max() < 1e-12
     with pytest.warns(rpa.SigmaNearPoleWarning, match="'srg' at srg_s = None"):
-        _, _, en = build_effective_hamiltonian(low_infinite_s, aspace,
-                                               sigma='srg', diagnostics=())
-    assert [entry['flag'] for entry in en.numerical_flags] == [
+        ham = build_effective_hamiltonian(low_infinite_s, aspace,
+                                          sigma='srg', diagnostics=())
+        en = ham.energies
+    assert [entry['flag'] for entry in ham.numerical_flags] == [
         'sigma_near_pole']
 
 
@@ -445,25 +447,29 @@ def test_the_settings_of_sigma_can_change_per_hamiltonian(wat, low_exact):
     fresh = run_low_level(mf, method='rpa', df=False, numerics=other)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', rpa.SigmaDampingWarning)
-        g, _, en = build_effective_hamiltonian(low_exact, aspace,
-                                               sigma='srg', numerics=other)
-        g_new, _, en_new = build_effective_hamiltonian(fresh, aspace,
-                                                       sigma='srg')
-        g_own, _, en_own = build_effective_hamiltonian(low_exact, aspace,
-                                                       sigma='srg')
+        ham = build_effective_hamiltonian(low_exact, aspace,
+                                          sigma='srg', numerics=other)
+        g, en = ham.g_eff, ham.energies
+        ham_new = build_effective_hamiltonian(fresh, aspace,
+                                              sigma='srg')
+        g_new, en_new = ham_new.g_eff, ham_new.energies
+        ham_own = build_effective_hamiltonian(low_exact, aspace,
+                                              sigma='srg')
+        g_own, en_own = ham_own.g_eff, ham_own.energies
     assert g[0] == g_new[0] and np.array_equal(g[1], g_new[1])
-    poles, poles_new = (e.diagnostics['sigma_poles'] for e in (en, en_new))
+    poles, poles_new = (h.diagnostics['sigma_poles'] for h in (ham, ham_new))
     assert poles['srg_s'] == poles_new['srg_s'] == 50.0
     assert poles['srg_damping'] == poles_new['srg_damping']
-    assert en_own.diagnostics['sigma_poles']['srg_s'] == DOWNFOLDING_SRG_S
+    assert ham_own.diagnostics['sigma_poles']['srg_s'] == DOWNFOLDING_SRG_S
     assert np.abs(g[1] - g_own[1]).max() > 1e-4
     assert low_exact.numerics is None
     derived = Numerics().derive('a second srg_s',
                                 downfolding={'srg_s': 50.0})
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', rpa.SigmaDampingWarning)
-        g_derived, _, _ = build_effective_hamiltonian(
+        ham_derived = build_effective_hamiltonian(
             low_exact, aspace, sigma='srg', numerics=derived)
+        g_derived = ham_derived.g_eff
     assert np.array_equal(g_derived[1], g[1])
     assert np.array_equal(
         rpa.embedding_self_energy(low_exact, part, 'srg', numerics=other),
@@ -472,17 +478,19 @@ def test_the_settings_of_sigma_can_change_per_hamiltonian(wat, low_exact):
     near = ActiveSpace.from_indices(13, 5, [3, 4], [5, 6, 12])
     low_if = run_low_level(mf, method='rpa', mode='imagfrequency')
     with pytest.warns(rpa.SigmaNearPoleWarning, match=r'orbital 12 \('):
-        g_warned, _, _ = build_effective_hamiltonian(low_if, near,
-                                                     sigma='srg')
+        ham_warned = build_effective_hamiltonian(low_if, near,
+                                                 sigma='srg')
+        g_warned = ham_warned.g_eff
     quiet = Numerics(downfolding={'pole_margin': 0.0,
                                   'continuation_margin': 0.0})
     with warnings.catch_warnings():
         warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
-        g_quiet, _, en_quiet = build_effective_hamiltonian(
+        ham_quiet = build_effective_hamiltonian(
             low_if, near, sigma='srg', numerics=quiet)
+        g_quiet, en_quiet = ham_quiet.g_eff, ham_quiet.energies
     assert np.array_equal(g_quiet[1], g_warned[1])
     assert 'sigma_near_pole' not in [f['flag']
-                                     for f in en_quiet.numerical_flags]
+                                     for f in ham_quiet.numerical_flags]
 
     for wrong in (Numerics(quadrature={'npade': 12}),
                   Numerics(downfolding={'srg_s': 50.0},
@@ -550,9 +558,9 @@ def test_srg_kernel_blocked_over_excitations(wat, low_exact, monkeypatch):
 
 
 def _poles(low, aspace, sigma='srg', **opts):
-    """energies.diagnostics['sigma_poles'] of `aspace` on `low` (crpa)."""
+    """The 'sigma_poles' diagnostic of `aspace` on `low` (crpa)."""
     return build_effective_hamiltonian(low, aspace, sigma=sigma,
-                                       **opts)[2].diagnostics['sigma_poles']
+                                       **opts).diagnostics['sigma_poles']
 
 
 @pytest.mark.parametrize('space', [_contiguous_44, _high_virtual],
@@ -611,9 +619,10 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
     assert np.all((poles['z'] > 0) & (poles['z'] <= 1))
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter('always', RuntimeWarning)
-        _, _, en = build_effective_hamiltonian(low_exact, aspace,
-                                               sigma='srg', diagnostics=())
-    assert en.diagnostics == {}
+        ham = build_effective_hamiltonian(low_exact, aspace,
+                                          sigma='srg', diagnostics=())
+        en = ham.energies
+    assert ham.diagnostics == {}
     damped = [r for r in rec if r.category is rpa.SigmaDampingWarning]
     assert len(damped) == (1 if near else 0)
     assert not [r for r in rec if issubclass(r.category, RuntimeWarning)
@@ -833,11 +842,12 @@ def test_near_pole_warning_points_to_casida(wat):
         assert "mode='casida'" in text and 'orbital 5 ' not in text
         assert np.all(np.isfinite(got))
         with pytest.warns(rpa.SigmaNearPoleWarning, match="mode='casida'"):
-            g, _, en = build_effective_hamiltonian(
+            ham = build_effective_hamiltonian(
                 low, _high_virtual(eps, nocc), sigma=sigma)
+            g, en = ham.g_eff, ham.energies
         assert np.all(np.isfinite(g[1]))
         assert {'flag': 'sigma_near_pole',
-                'message': text} in en.numerical_flags
+                'message': text} in ham.numerical_flags
         with warnings.catch_warnings():
             warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
             ok = rpa.embedding_self_energy(low, _contiguous_44(eps, nocc),
@@ -891,32 +901,37 @@ def test_continuation_diagnostic_present(wat):
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        _, _, en = build_effective_hamiltonian(low, a, sigma='srg')
-    spread = en.diagnostics['sigma_continuation']
+        ham = build_effective_hamiltonian(low, a, sigma='srg')
+        en = ham.energies
+    spread = ham.diagnostics['sigma_continuation']
     assert spread.shape == (4, 4)
     assert np.all(spread >= 0) and spread.max() < 1e-4
-    poles = en.diagnostics['sigma_poles']
-    _, _, en_c = build_effective_hamiltonian(
+    poles = ham.diagnostics['sigma_poles']
+    ham_c = build_effective_hamiltonian(
         run_low_level(mf, method='rpa', mode='casida'), a, sigma='srg')
-    assert 'sigma_continuation' not in en_c.diagnostics
-    ref = en_c.diagnostics['sigma_poles']
+    en_c = ham_c.energies
+    assert 'sigma_continuation' not in ham_c.diagnostics
+    ref = ham_c.diagnostics['sigma_poles']
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
     assert np.allclose(poles['window'], ref['window'], atol=1e-8, rtol=0)
     assert np.abs(poles['z'] - ref['z']).max() < 1e-4
     every = ActiveSpace.from_counts(eps, nocc, nocc, len(eps) - nocc)
-    _, _, en = build_effective_hamiltonian(low, every, sigma='mode_a')
-    assert not en.diagnostics['sigma_continuation'].any()
+    ham = build_effective_hamiltonian(low, every, sigma='mode_a')
+    en = ham.energies
+    assert not ham.diagnostics['sigma_continuation'].any()
     assert not rpa.embedding_self_energy(low, every,
                                          'srg').any()
     coarse = run_low_level(mf, method='rpa', mode='imagfrequency',
                            numerics=Numerics(quadrature={'npade': 4}))
     with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
-        _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg')
-    assert en.diagnostics['sigma_continuation'].max() > 1e-4
+        ham = build_effective_hamiltonian(coarse, a, sigma='srg')
+        en = ham.energies
+    assert ham.diagnostics['sigma_continuation'].max() > 1e-4
     with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
-        _, _, en = build_effective_hamiltonian(coarse, a, sigma='srg',
-                                               diagnostics=())
-    assert en.diagnostics == {}
+        ham = build_effective_hamiltonian(coarse, a, sigma='srg',
+                                          diagnostics=())
+        en = ham.energies
+    assert ham.diagnostics == {}
 
 
 def _scaled_water(scale):
@@ -990,8 +1005,9 @@ def test_continuation_margin_near_the_edge(wat):
     low = run_low_level(mf, method='rpa', mode='imagfrequency', numerics=bare)
     with warnings.catch_warnings():
         warnings.simplefilter('error', RuntimeWarning)
-        _, _, en = build_effective_hamiltonian(low, a, sigma='srg')
-    assert en.diagnostics['sigma_continuation'].max() < 1e-4
+        ham = build_effective_hamiltonian(low, a, sigma='srg')
+        en = ham.energies
+    assert ham.diagnostics['sigma_continuation'].max() < 1e-4
     want = rpa.embedding_self_energy(run_low_level(
         mf, method='rpa', mode='casida', numerics=bare), part, 'srg')
     quiet = rpa.embedding_self_energy(low, part, 'srg')
@@ -1163,9 +1179,10 @@ def test_omega_min_falls_back_to_the_gap_bound(wat, monkeypatch):
     true = run_low_level(mf, method='rpa', mode='casida').omega.min()
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        g_ok, _, en_ok = build_effective_hamiltonian(
+        ham_ok = build_effective_hamiltonian(
             run_low_level(mf, method='rpa', mode='imagfrequency'), space,
             sigma='srg')
+        g_ok, en_ok = ham_ok.g_eff, ham_ok.energies
     monkeypatch.setattr(rpa, 'eigsh', _no_convergence)
     low = run_low_level(mf, method='rpa', mode='imagfrequency')
     with pytest.warns(rpa.SigmaNearPoleWarning,
@@ -1177,16 +1194,18 @@ def test_omega_min_falls_back_to_the_gap_bound(wat, monkeypatch):
     fresh = run_low_level(mf, method='rpa', mode='imagfrequency')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        g, _, en = build_effective_hamiltonian(fresh, space, sigma='srg')
-        _, _, again = build_effective_hamiltonian(fresh, space, sigma='srg')
-    names = [f['flag'] for f in en.numerical_flags]
+        ham = build_effective_hamiltonian(fresh, space, sigma='srg')
+        g, en = ham.g_eff, ham.energies
+        ham_again = build_effective_hamiltonian(fresh, space, sigma='srg')
+        again = ham_again.energies
+    names = [f['flag'] for f in ham.numerical_flags]
     assert 'sigma_pole_window_bound' in names
-    assert [f['flag'] for f in again.numerical_flags] == names
+    assert [f['flag'] for f in ham_again.numerical_flags] == names
     assert 'sigma_pole_window_bound' not in [
-        f['flag'] for f in en_ok.numerical_flags]
+        f['flag'] for f in ham_ok.numerical_flags]
     assert np.array_equal(g[1], g_ok[1])
-    (lo, hi), (lo_ok, hi_ok) = (e.diagnostics['sigma_poles']['window']
-                                for e in (en, en_ok))
+    (lo, hi), (lo_ok, hi_ok) = (h.diagnostics['sigma_poles']['window']
+                                for h in (ham, ham_ok))
     assert lo_ok < lo and hi < hi_ok
 
 
@@ -1263,21 +1282,24 @@ def test_sigma_warnings_are_named_flags_in_the_energies(wat, low_exact):
     mf, _, eps, nocc = wat
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter('always', rpa.SigmaDampingWarning)
-        _, _, en = build_effective_hamiltonian(
+        ham = build_effective_hamiltonian(
             low_exact, _high_virtual(eps, nocc), sigma='srg', diagnostics=())
-    flags = en.numerical_flags
+        en = ham.energies
+    flags = ham.numerical_flags
     assert [f['flag'] for f in flags] == ['sigma_srg_damping']
     assert flags[0]['message'] == str(rec[-1].message)
     assert rec[-1].filename == __file__
-    _, _, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         low_exact, _contiguous_44(eps, nocc), sigma='srg')
-    assert en.numerical_flags == []
+    en = ham.energies
+    assert ham.numerical_flags == []
     coarse = run_low_level(mf, method='rpa', mode='imagfrequency',
                            numerics=Numerics(quadrature={'npade': 4}))
     with pytest.warns(rpa.SigmaContinuationWarning):
-        _, _, en = build_effective_hamiltonian(
+        ham = build_effective_hamiltonian(
             coarse, _contiguous_44(eps, nocc), sigma='srg')
-    assert [f['flag'] for f in en.numerical_flags] == [
+        en = ham.energies
+    assert [f['flag'] for f in ham.numerical_flags] == [
         'sigma_continuation_spread']
 
 
@@ -1299,14 +1321,17 @@ def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
     monkeypatch.setattr(rpa, '_build_screening_grid', flagged)
     probe = {'flag': 'probe_grid', 'message': 'raised while building W'}
     with pytest.warns(RuntimeWarning, match='raised while building W'):
-        _, _, first = build_effective_hamiltonian(
+        ham_first = build_effective_hamiltonian(
             low, _contiguous_44(eps, nocc), sigma='srg')
-    assert first.numerical_flags == [probe]
+        first = ham_first.energies
+    assert ham_first.numerical_flags == [probe]
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        _, _, later = build_effective_hamiltonian(
+        ham_later = build_effective_hamiltonian(
             low, _contiguous_44(eps, nocc), sigma='mode_a')
-    assert later.numerical_flags == [probe] and len(built) == 1
+        later = ham_later.energies
+    assert ham_later.numerical_flags == [probe] and len(built) == 1
     assert low.numerical_flags == []
-    _, _, without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc))
-    assert without.numerical_flags == []
+    ham_without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc))
+    without = ham_without.energies
+    assert ham_without.numerical_flags == []

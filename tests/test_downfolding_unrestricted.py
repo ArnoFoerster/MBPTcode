@@ -193,7 +193,8 @@ def test_hf_matches_ucasci(request, name, n_act, nelec):
     the last place of each energy."""
     mf = request.getfixturevalue(name)
     spaces = unrestricted_from_counts(mf.mo_energy, _nocc(mf), n_act, nelec)
-    g_eff, space, energies = _hf(mf, spaces)
+    ham = _hf(mf, spaces)
+    g_eff, space, energies = ham.g_eff, ham.space, ham.energies
     assert space['n_elec_active'] == nelec and space['n_orbs'] == n_act
     assert g_eff[0] == energies.e0
     ref = mcscf.UCASCI(mf, n_act, nelec)
@@ -215,7 +216,8 @@ def test_hf_all_active_is_fci(request, name):
     restricted.conv_tol = 1e-11
     restricted.verbose = 0
     restricted.kernel()
-    g_eff, space, energies = _hf(mf, _all_active(mf))
+    ham = _hf(mf, _all_active(mf))
+    g_eff, space, energies = ham.g_eff, ham.space, ham.energies
     assert (energies.e_core, energies.e_hartree, energies.e_exchange) == (0, 0, 0)
     assert space['n_elec_active'] == mf.mol.nelec
     assert abs(_solve(g_eff, space)[0] - fci.FCI(restricted).kernel()[0]) < 1e-9
@@ -226,7 +228,8 @@ def test_hf_none_active_is_uhf(oh):
     reference the HF energy expression on the Kohn-Sham determinant.
     Measured: 1.4e-14 for both; the HF expression on the PBE0 determinant is
     0.265 Ha above the UKS energy."""
-    g_eff, space, energies = _hf(oh, _none_active(oh))
+    ham = _hf(oh, _none_active(oh))
+    g_eff, space, energies = ham.g_eff, ham.space, ham.energies
     assert abs(energies.e0 - oh.e_tot) < 1e-10
     assert space['n_elec_active'] == (0, 0) and space['n_orbs'] == 0
     assert [h.shape for h in g_eff[1]] == [(0, 0)] * 2
@@ -237,7 +240,8 @@ def test_hf_none_active_is_uhf(oh):
     uks = unrestricted(OH, 1, xc='pbe0')
     hf_expression = scf.UHF(uks.mol).energy_tot(dm=uks.make_rdm1())
     assert abs(hf_expression - uks.e_tot) > 1e-2
-    _, _, energies = _hf(uks, _none_active(uks))
+    ham = _hf(uks, _none_active(uks))
+    energies = ham.energies
     assert abs(energies.e0 - hf_expression) < 1e-10
 
 
@@ -248,7 +252,8 @@ def test_hf_blocks_against_spin_orbital_oracle(oh):
     blocks 2.9e-15, two-body blocks 6.2e-16, energy terms at most 2.8e-14,
     reference determinant 4.3e-14; h_alpha and h_beta differ by 0.45."""
     spaces = _asymmetric(oh)
-    g_eff, space, energies = _hf(oh, spaces)
+    ham = _hf(oh, spaces)
+    g_eff, space, energies = ham.g_eff, ham.space, ham.energies
     nmo = oh.mo_coeff.shape[-1]
     n = space['n_orbs']
     assert n == 4 and space['n_elec_active'] == (2, 1)
@@ -284,8 +289,10 @@ def test_closed_shell_limit_hf():
     uhf = rhf.to_uhf()
     nmo = len(rhf.mo_energy)
     one = ActiveSpace.from_indices(nmo, 5, [2, 4], [5, 7])
-    g_r, space_r, en_r = _hf(rhf, one)
-    g_u, space_u, en_u = _hf(uhf, (one, one))
+    ham_r = _hf(rhf, one)
+    g_r, space_r, en_r = ham_r.g_eff, ham_r.space, ham_r.energies
+    ham_u = _hf(uhf, (one, one))
+    g_u, space_u, en_u = ham_u.g_eff, ham_u.space, ham_u.energies
     assert isinstance(g_u[1], tuple) and len(g_u[1]) == 2 and len(g_u[2]) == 3
     assert all(np.max(np.abs(h - g_r[1])) < 1e-12 for h in g_u[1])
     assert all(np.max(np.abs(v - g_r[2])) < 1e-12 for v in g_u[2])
@@ -304,8 +311,10 @@ def test_spin_orbital_form_matches_blocks(oh):
     at 2p + 1) and antisymmetrized, element by element, for N^A = (2, 1).
     Measured: 0 in both arrays."""
     spaces = _asymmetric(oh)
-    g_blocks, space, _ = _hf(oh, spaces)
-    g_so, space_so, _ = _hf(oh, spaces, spin_free=False)
+    ham_blocks = _hf(oh, spaces)
+    g_blocks, space = ham_blocks.g_eff, ham_blocks.space
+    ham_so = _hf(oh, spaces, spin_free=False)
+    g_so, space_so = ham_so.g_eff, ham_so.space
     ref = _spin_orbital(g_blocks)
     assert g_so[0] == ref[0]
     assert g_so[1].shape == (8, 8) and g_so[2].shape == (8,) * 4
@@ -322,8 +331,10 @@ def test_unequal_cores_against_second_solver(oh):
     spin-orbital form give the same lowest roots. Measured: 5.7e-14 over
     three roots; the reference determinant has the UHF energy to 4.3e-14."""
     spaces = _unequal_cores(oh)
-    g_blocks, space, _ = _hf(oh, spaces)
-    g_so, space_so, _ = _hf(oh, spaces, spin_free=False)
+    ham_blocks = _hf(oh, spaces)
+    g_blocks, space = ham_blocks.g_eff, ham_blocks.space
+    ham_so = _hf(oh, spaces, spin_free=False)
+    g_so, space_so = ham_so.g_eff, ham_so.space
     assert space['n_elec_active'] == (2, 2)
     blocks = _solve(g_blocks, space, nroots=3)
     dets = solve('openfermion', g_so, space_so['n_orbs'],
@@ -439,7 +450,8 @@ def test_spin_overlap_in_space(oh):
     active the one state is the UHF determinant and <S^2> is the UHF value
     (0.753774; measured difference 2.2e-16, energy 2.8e-14)."""
     spaces = _asymmetric(oh)
-    _, space, _ = _hf(oh, spaces)
+    ham = _hf(oh, spaces)
+    space = ham.space
     overlap = oh.mo_coeff[0].T @ oh.get_ovlp() @ oh.mo_coeff[1]
     rows = {'core': spaces[0].env_occ, 'active': spaces[0].act}
     cols = {'core': spaces[1].env_occ, 'active': spaces[1].act}
@@ -458,7 +470,8 @@ def test_spin_overlap_in_space(oh):
     nmo = oh.mo_coeff.shape[-1]
     occupied = (ActiveSpace.from_indices(nmo, 5, [3, 4], []),
                 ActiveSpace.from_indices(nmo, 4, [2, 3], []))
-    g_eff, space, _ = _hf(oh, occupied)
+    ham = _hf(oh, occupied)
+    g_eff, space = ham.g_eff, ham.space
     out = {}
     with warnings.catch_warnings():
         warnings.simplefilter('error')
@@ -1038,10 +1051,12 @@ def test_closed_shell_limit_rpa(closed_shell, screening, sigma, df):
     rhf, lows = closed_shell
     low_r, low_u = lows[df]
     one = ActiveSpace.from_indices(len(rhf.mo_energy), 5, [2, 4], [5, 7])
-    g_r, _, en_r = _quiet(build_effective_hamiltonian, low_r, one,
-                          screening=screening, sigma=sigma)
-    g_u, space, en_u = _quiet(build_effective_hamiltonian, low_u, (one, one),
-                              screening=screening, sigma=sigma)
+    ham_r = _quiet(build_effective_hamiltonian, low_r, one,
+                   screening=screening, sigma=sigma)
+    g_r, en_r = ham_r.g_eff, ham_r.energies
+    ham_u = _quiet(build_effective_hamiltonian, low_u, (one, one),
+                   screening=screening, sigma=sigma)
+    g_u, space, en_u = ham_u.g_eff, ham_u.space, ham_u.energies
     assert abs(low_u.e_c_full - low_r.e_c_full) < 1e-10
     for h in g_u[1]:
         assert np.max(np.abs(h - g_r[1])) < 1e-10
@@ -1049,13 +1064,13 @@ def test_closed_shell_limit_rpa(closed_shell, screening, sigma, df):
         assert np.max(np.abs(v - g_r[2])) < 1e-10
     for name in ENERGY_TERMS:
         assert abs(getattr(en_u, name) - getattr(en_r, name)) < 1e-10, name
-    assert abs(en_u.diagnostics['static_defect']
-               - en_r.diagnostics['static_defect']) < 1e-10
+    assert abs(ham_u.diagnostics['static_defect']
+               - ham_r.diagnostics['static_defect']) < 1e-10
     e_r = solve('pyscf_fci', g_r, 4, 4, spin_free=True)[0]
     assert abs(_solve(g_u, space)[0] - e_r) < 1e-9
     if sigma is not None:
-        wide, narrow = (en_r.diagnostics['sigma_poles']['window'],
-                        en_u.diagnostics['sigma_poles']['window'])
+        wide, narrow = (ham_r.diagnostics['sigma_poles']['window'],
+                        ham_u.diagnostics['sigma_poles']['window'])
         assert narrow[0] == narrow[1]
         assert narrow[0][0] > wide[0] and narrow[0][1] < wide[1]
 
@@ -1073,8 +1088,9 @@ def test_reference_determinant_identity(oh, oh_low, space, screening, sigma,
     7.1e-14 over the 72 builds, with Tr[Sigma_bar gamma] of 0.02 to 0.07 Ha
     where Sigma^E is on."""
     spaces = SPACES[space](oh)
-    g_eff, sp, en = _quiet(build_effective_hamiltonian, oh_low[df], spaces,
-                           screening=screening, sigma=sigma)
+    ham = _quiet(build_effective_hamiltonian, oh_low[df], spaces,
+                 screening=screening, sigma=sigma)
+    g_eff, sp, en = ham.g_eff, ham.space, ham.energies
     assert len(g_eff[1]) == 2 and len(g_eff[2]) == 3
     assert en.e_c_full == oh_low[df].e_c_full
     assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
@@ -1100,8 +1116,9 @@ def test_h_eff_against_oracle(oh, oh_low, screening, sigma, space):
     so = _spin_orbitals(oh, parts)
     eri_so, _, _, act_so = so
     nmo, n = oh.mo_coeff.shape[-1], parts[0].n_act
-    g_eff, sp, _ = _quiet(build_effective_hamiltonian, oh_low[True], spaces,
-                          screening=screening, sigma=sigma)
+    ham = _quiet(build_effective_hamiltonian, oh_low[True], spaces,
+                 screening=screening, sigma=sigma)
+    g_eff, sp = ham.g_eff, ham.space
     vt = vtilde_crpa_uhf(*so)
     if screening == 'crpa_ph':
         vt = tuple(x * m for x, m in zip(vt, (
@@ -1144,11 +1161,13 @@ def test_all_active_is_fci_rpa(request, name):
     e_fci = fci.FCI(restricted).kernel()[0]
     low = run_low_level(mf, method='rpa')
     assert low.e_c_full < -1e-3
-    hf, _, _ = _hf(mf, _all_active(mf))
+    ham_hf = _hf(mf, _all_active(mf))
+    hf = ham_hf.g_eff
     for screening in SCREENINGS_RPA:
         for sigma in SIGMAS_RPA:
-            g_eff, space, en = build_effective_hamiltonian(
+            ham = build_effective_hamiltonian(
                 low, _all_active(mf), screening=screening, sigma=sigma)
+            g_eff, space, en = ham.g_eff, ham.space, ham.energies
             assert abs(en.ec) < 1e-10 and abs(en.e0 - mf.energy_nuc()) < 1e-10
             for ours, bare in zip(g_eff[1] + g_eff[2], hf[1] + hf[2]):
                 assert np.max(np.abs(ours - bare)) < 1e-10
@@ -1161,8 +1180,9 @@ def test_none_active_is_uhf_plus_ec(oh, oh_low):
     for df in (False, True):
         low = oh_low[df]
         for sigma in SIGMAS_RPA:
-            g_eff, space, en = build_effective_hamiltonian(
+            ham = build_effective_hamiltonian(
                 low, _none_active(oh), sigma=sigma)
+            g_eff, space, en = ham.g_eff, ham.space, ham.energies
             assert abs(en.e0 - (oh.e_tot + low.e_c_full)) < 1e-10
             assert en.e_c_active == 0.0 and space['n_elec_active'] == (0, 0)
             assert [h.shape for h in g_eff[1]] == [(0, 0)] * 2
@@ -1190,9 +1210,10 @@ def test_reference_diagnostics_are_flags_of_the_result(h2_bs, monkeypatch):
         for low in lows:
             assert [entry['flag'] for entry in low.numerical_flags] == [
                 'uhf_spin_contaminated']
-            _, _, en = build_effective_hamiltonian(low, _all_active(mf))
+            ham = build_effective_hamiltonian(low, _all_active(mf))
+            en = ham.energies
             assert 'uhf_spin_contaminated' in [
-                entry['flag'] for entry in en.numerical_flags]
+                entry['flag'] for entry in ham.numerical_flags]
 
     oh = unrestricted(OH, 1)
     monkeypatch.setattr(pyscf_interface.scf_stability, 'uhf_internal',
@@ -1225,14 +1246,16 @@ def test_uks_reference():
     low = run_low_level(uks, method='rpa', df=False)
     e_c = drpa_so(*_molecule_so(uks))[0]
     assert abs(low.e_c_full - e_c) < 1e-9
-    _, _, en = build_effective_hamiltonian(low, _none_active(uks))
+    ham = build_effective_hamiltonian(low, _none_active(uks))
+    en = ham.energies
     assert abs(en.e0 - (e_hf + e_c)) < 1e-9
     assert abs(e_hf - uks.e_tot) > 1e-2
 
     spaces = _unequal_cores(uks)
     parts = _parts(uks, spaces)
     so = _spin_orbitals(uks, parts)
-    g_eff, sp, en = build_effective_hamiltonian(low, spaces, screening='crpa')
+    ham = build_effective_hamiltonian(low, spaces, screening='crpa')
+    g_eff, sp, en = ham.g_eff, ham.space, ham.energies
     eri_so, _, _, act_so = so
     v = spin_blocks(eri_so[np.ix_(act_so, act_so, act_so, act_so)],
                     parts[0].n_act)
@@ -1240,7 +1263,7 @@ def test_uks_reference():
         assert np.max(np.abs(ours.transpose(0, 2, 1, 3) - bare - corr)) < 1e-9
     assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
                - (e_hf + en.e_c_full - en.e_c_active)) < 1e-9
-    assert en.diagnostics['static_defect'] < 1e-10
+    assert ham.diagnostics['static_defect'] < 1e-10
 
 
 def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
@@ -1257,13 +1280,14 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
     so = _spin_orbitals(oh, parts)
     n = parts[0].n_act
     with pytest.warns(rpa.SigmaNearPoleWarning, match='beta orbital 6') as rec:
-        _, _, en = build_effective_hamiltonian(low, spaces, sigma='mode_a')
+        ham = build_effective_hamiltonian(low, spaces, sigma='mode_a')
+        en = ham.energies
     near = [w for w in rec if w.category is rpa.SigmaNearPoleWarning]
     assert len(near) == 1 and near[0].filename == __file__
     assert {'flag': 'sigma_near_pole',
-            'message': str(near[0].message)} in en.numerical_flags
-    poles = en.diagnostics['sigma_poles']
-    assert isinstance(en.diagnostics['static_defect'], float)
+            'message': str(near[0].message)} in ham.numerical_flags
+    poles = ham.diagnostics['sigma_poles']
+    assert isinstance(ham.diagnostics['static_defect'], float)
     assert poles['window'] == rpa.pole_window(low, parts)
     assert len(poles['pole_distance']) == len(poles['z']) == 2
     for dist, z in zip(poles['pole_distance'], poles['z']):
@@ -1279,19 +1303,21 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
 
     with pytest.warns(rpa.SigmaDampingWarning,
                       match=r'beta orbital 6 \(') as rec:
-        _, _, en = build_effective_hamiltonian(low, spaces, sigma='srg')
+        ham = build_effective_hamiltonian(low, spaces, sigma='srg')
+        en = ham.energies
     damping = [w for w in rec if w.category is rpa.SigmaDampingWarning]
     assert len(damping) == 1 and damping[0].filename == __file__
     assert 'alpha orbital' not in str(damping[0].message)
-    assert [f['flag'] for f in en.numerical_flags] == ['sigma_srg_damping']
-    poles = en.diagnostics['sigma_poles']
+    assert [f['flag'] for f in ham.numerical_flags] == ['sigma_srg_damping']
+    poles = ham.diagnostics['sigma_poles']
     damped = sigma_srg_uhf(*so, DOWNFOLDING_SRG_S)
     undamped = sigma_srg_uhf(*so, None)
     moved = max(np.max(np.abs(x - y)) for x, y in zip(damped, undamped))
     assert poles['srg_s'] == DOWNFOLDING_SRG_S
     assert abs(poles['srg_damping'] - moved) < 1e-9
-    _, _, en = build_effective_hamiltonian(low, spaces, diagnostics=None)
-    assert en.diagnostics == {}
+    ham = build_effective_hamiltonian(low, spaces, diagnostics=None)
+    en = ham.energies
+    assert ham.diagnostics == {}
 
 
 # --- mRPA: the interaction that keeps the zeroth moment ------------------------
@@ -1410,10 +1436,12 @@ def test_mrpa_closed_shell_limit(closed_shell, df):
         assert np.max(np.abs(block - ref)) < 1e-9
     assert np.max(np.abs(ref)) > 1e-3
     for sigma in SIGMAS_RPA:
-        g_r, _, en_r = _quiet(build_effective_hamiltonian, low_r, one,
-                              screening='mrpa', sigma=sigma)
-        g_u, space, en_u = _quiet(build_effective_hamiltonian, low_u,
-                                  (one, one), screening='mrpa', sigma=sigma)
+        ham_r = _quiet(build_effective_hamiltonian, low_r, one,
+                       screening='mrpa', sigma=sigma)
+        g_r, en_r = ham_r.g_eff, ham_r.energies
+        ham_u = _quiet(build_effective_hamiltonian, low_u,
+                       (one, one), screening='mrpa', sigma=sigma)
+        g_u, space, en_u = ham_u.g_eff, ham_u.space, ham_u.energies
         for h in g_u[1]:
             assert np.max(np.abs(h - g_r[1])) < 1e-9
         for v in g_u[2]:
@@ -1431,13 +1459,14 @@ def test_mrpa_reference_determinant_identity(oh, oh_low, space, sigma):
     the energy E_UHF + E_c - E_c^A; a particle-hole-only vtilde leaves the
     mean-field energy of the active space alone (E_HF,ee[vtilde] = 0).
     Measured: 5.7e-14 over the 12 builds."""
-    g_eff, sp, en = _quiet(build_effective_hamiltonian, oh_low[True],
-                           SPACES[space](oh), screening='mrpa', sigma=sigma)
+    ham = _quiet(build_effective_hamiltonian, oh_low[True],
+                 SPACES[space](oh), screening='mrpa', sigma=sigma)
+    g_eff, sp, en = ham.g_eff, ham.space, ham.energies
     assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
                - (oh.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
     assert en.e_hartree_dc == 0.0 and en.e_exchange_dc == 0.0
     assert en.e_exchange_term == 0.0
-    assert isinstance(en.diagnostics['static_defect'], float)
+    assert isinstance(ham.diagnostics['static_defect'], float)
 
 
 def test_mrpa_is_casida_only_whatever_the_reference(oh):
@@ -1504,10 +1533,11 @@ def test_density_fitted_uhf_through_the_driver():
         # E_c^A and the defect are on the fitted v, the v of the full RPA
         e_ref, defect_ref = _oracle_active_rpa(
             so, tuple(x + y for x, y in zip(v_fit, vt)))
-        g_eff, sp, en = build_effective_hamiltonian(low, spaces,
-                                                    screening=screening)
+        ham = build_effective_hamiltonian(low, spaces,
+                                          screening=screening)
+        g_eff, sp, en = ham.g_eff, ham.space, ham.energies
         assert abs(en.e_c_active - e_ref) < 1e-9
-        assert abs(en.diagnostics['static_defect'] - defect_ref) < 1e-9
+        assert abs(ham.diagnostics['static_defect'] - defect_ref) < 1e-9
         # H_eff carries the exact bare v
         for block, bare, corr in zip(g_eff[2], v_exact, vt):
             assert np.max(np.abs(block.transpose(0, 2, 1, 3) - bare
@@ -1515,7 +1545,7 @@ def test_density_fitted_uhf_through_the_driver():
         assert abs(reference_energy_uhf(g_eff, sp['n_elec_active'])
                    - (e_hf + en.e_c_full - en.e_c_active)) < 1e-9
         if screening == 'crpa':
-            assert en.diagnostics['static_defect'] < 1e-10
+            assert ham.diagnostics['static_defect'] < 1e-10
             # on the exact v instead, the crpa defect is the fitting error
             mixed = tuple(x + y for x, y in zip(v_exact, vt))
             assert rpa.static_defect(low, parts, mixed) > 1e-7
@@ -1533,8 +1563,9 @@ def test_density_fitted_uhf_through_the_driver():
 
     # h_eff with Sigma^E: the exact f, the Hartree double counting of the
     # fitted vtilde, and Sigma_bar on the fitted W
-    g_eff, sp, en = _quiet(build_effective_hamiltonian, low, spaces,
-                           screening='crpa', sigma='srg')
+    ham2 = _quiet(build_effective_hamiltonian, low, spaces,
+                  screening='crpa', sigma='srg')
+    g_eff, sp, en = ham2.g_eff, ham2.space, ham2.energies
     h_so, _ = spin_orbital_integrals(mf.mol, *mf.mo_coeff)
     occ_env = list(spaces[0].env_occ) + list(nmo + spaces[1].env_occ)
     occ_act = list(range(sp['n_elec_active'][0])) + [
@@ -1569,23 +1600,26 @@ def test_a_reference_without_any_pair(df):
     assert rpa.lowest_excitation(low) is None
     spaces = (ActiveSpace.from_indices(2, 2, [0, 1], []),
               ActiveSpace.from_indices(2, 0, [], [0, 1]))
-    bare, _, _ = _hf(mf, spaces)
+    ham_bare = _hf(mf, spaces)
+    bare = ham_bare.g_eff
     for screening in SCREENINGS_RPA + ('mrpa',):
         for sigma in SIGMAS_RPA:
             with warnings.catch_warnings():
                 warnings.simplefilter('error')
-                g_eff, space, en = build_effective_hamiltonian(
+                ham = build_effective_hamiltonian(
                     low, spaces, screening=screening, sigma=sigma)
+                g_eff, space, en = ham.g_eff, ham.space, ham.energies
             assert en.e_c_full == en.e_c_active == 0.0
-            assert en.diagnostics['static_defect'] == 0.0
+            assert ham.diagnostics['static_defect'] == 0.0
             for ours, hf in zip(g_eff[1] + g_eff[2], bare[1] + bare[2]):
                 assert np.max(np.abs(ours - hf)) < 1e-12
             assert space['n_elec_active'] == (2, 0)
             assert abs(_solve(g_eff, space)[0] - mf.e_tot) < 1e-10
             if sigma is not None:
-                assert en.diagnostics['sigma_poles']['window'] == (
+                assert ham.diagnostics['sigma_poles']['window'] == (
                     (-np.inf, np.inf), (-np.inf, np.inf))
-    _, _, en = build_effective_hamiltonian(low, _none_active(mf))
+    ham = build_effective_hamiltonian(low, _none_active(mf))
+    en = ham.energies
     assert abs(en.e0 - mf.e_tot) < 1e-10
     for mode in ('imagfrequency', 'space-time'):
         with pytest.raises(NotImplementedError,
@@ -1598,8 +1632,9 @@ def test_a_reference_without_any_pair(df):
     he.kernel()
     low = run_low_level(he, method='rpa', df=df)
     assert low.e_c_full == 0.0 and low.omega.shape == (0,)
-    g_eff, space, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         low, ActiveSpace.from_indices(1, 1, [0], []), sigma='srg')
+    g_eff, space, en = ham.g_eff, ham.space, ham.energies
     assert abs(solve('pyscf_fci', g_eff, 1, 2, spin_free=True)[0]
                - he.e_tot) < 1e-10
     for mode in ('imagfrequency', 'space-time'):
@@ -1637,10 +1672,27 @@ def test_a_spin_without_occupied_orbitals_runs_on_casida(df):
         assert np.max(np.abs(ours - exact)) < 1e-9
     for screening in SCREENINGS_RPA + ('mrpa',):
         for sigma in SIGMAS_RPA:
-            g_eff, space, en = _quiet(build_effective_hamiltonian, low,
-                                      spaces, screening=screening,
-                                      sigma=sigma)
+            ham = _quiet(build_effective_hamiltonian, low,
+                         spaces, screening=screening,
+                         sigma=sigma)
+            g_eff, space, en = ham.g_eff, ham.space, ham.energies
             assert space['n_elec_active'] == (1, 0)
             assert abs(reference_energy_uhf(g_eff, (1, 0))
                        - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
             assert np.isfinite(_solve(g_eff, space)[0])
+
+
+def test_the_record_solves_itself_with_its_spin_overlap(oh):
+    """For an unrestricted reference h.solve also passes the record's
+    spin_overlap, so <S^2> is reported without the caller handing it in."""
+    nmo = oh.mo_coeff.shape[-1]
+    occupied = (ActiveSpace.from_indices(nmo, 5, [3, 4], []),
+                ActiveSpace.from_indices(nmo, 4, [2, 3], []))
+    h = build_effective_hamiltonian(run_low_level(oh, method='hf'), occupied)
+    out, want = {}, {}
+    e = h.solve('pyscf_fci', out=out)
+    e_want = _solve(h.g_eff, h.space, out=want,
+                    spin_overlap=h.space['spin_overlap'])
+    assert np.array_equal(e, e_want)
+    assert out['spin_square'] == want['spin_square']
+    assert abs(out['spin_square'][0] - oh.spin_square()[0]) < 1e-10

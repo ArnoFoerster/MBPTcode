@@ -42,7 +42,6 @@ from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
-from src.EffectiveHamiltonian.solvers.solve import solve
 
 METHODS = (('HF (UCASCI)', 'hf', {}),
            ('RPA bare', 'rpa', {'screening': 'bare'}),
@@ -81,12 +80,9 @@ print(f'{"method":<13}{"E_core":>12}{"E_h":>12}{"E_x":>11}{"E_c":>10}'
       f'{"-TrSig":>10}{"E_0":>12}{"E(1)":>12}{"<S^2>":>8}{"split eV":>10}'
       f'{"<S^2>":>8}')
 for label, method, opts in METHODS:
-    g_eff, space, en = build_effective_hamiltonian(lows[method], active,
-                                                   **opts)
-    out = {}
-    roots = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
-                  spin_free=space['spin_free'], nroots=2, out=out,
-                  spin_overlap=space['spin_overlap'])
+    h = build_effective_hamiltonian(lows[method], active, **opts)
+    en, out = h.energies, {}
+    roots = h.solve('pyscf_fci', nroots=2, out=out)
     s2 = out['spin_square']
     print(f'{label:<13}{en.e_core:12.6f}{en.eh:12.6f}{en.ex:11.6f}'
           f'{en.ec:10.6f}{0.0 - en.e_sigma_trace:10.6f}{en.e0:12.6f}'

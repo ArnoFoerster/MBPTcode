@@ -161,9 +161,11 @@ def _ours(case):
     if (n_occ, n_virt) == (-1, -1):
         n_occ, n_virt = nocc, nmo - nocc
     aspace = ActiveSpace.from_counts(mf.mo_energy, nocc, n_occ, n_virt)
-    g_bare, _, _ = build_effective_hamiltonian(low, aspace, screening='bare')
-    g, space, en = build_effective_hamiltonian(low, aspace,
-                                               screening=case['screening'])
+    ham_bare = build_effective_hamiltonian(low, aspace, screening='bare')
+    g_bare = ham_bare.g_eff
+    ham = build_effective_hamiltonian(low, aspace,
+                                      screening=case['screening'])
+    g, space, en = ham.g_eff, ham.space, ham.energies
     n = space['n_orbs']
     if n:
         e_tot = solve('pyscf_fci', g, n, space['n_elec_active'],
@@ -286,7 +288,8 @@ def test_pbe0_orbitals_no_xc_leak():
     mf.run()
     low = run_low_level(mf, method='rpa', mode='casida', df=False)
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    g, _, en = build_effective_hamiltonian(low, aspace, screening='bare')
+    ham = build_effective_hamiltonian(low, aspace, screening='bare')
+    g, en = ham.g_eff, ham.energies
     active = reference_energy(g, 2) - g[0]
     e_hf = scf.RHF(mf.mol).energy_tot(dm=mf.make_rdm1())
     assert abs(en.e_nuc + en.e_core + en.e_hartree + en.e_exchange + active
@@ -335,8 +338,8 @@ def test_prototype_elements(molecule, screening):
     low, aspace = _pinned_low(molecule)
     mf = low.mf
     assert abs(mf.energy_tot() - c['e_scf']) < 1e-8
-    v = _pinned_build(molecule, 'bare')[0][2].transpose(0, 2, 1, 3)
-    g = _pinned_build(molecule, screening)[0]
+    v = _pinned_build(molecule, 'bare').g_eff[2].transpose(0, 2, 1, 3)
+    g = _pinned_build(molecule, screening).g_eff
     v_eff = g[2].transpose(0, 2, 1, 3)
     part = aspace
     mo, parts = (mf.mo_coeff, mf.mo_coeff), (part, part)
@@ -360,7 +363,8 @@ def test_prototype_excitations(molecule, screening):
     (spin=2); both must also be excitations of solve's spectrum, whose
     lowest root is S0. Measured 6.2e-15 (tolerance 1e-6)."""
     pin = PINS[molecule]['screenings'][screening]
-    g, space, _ = _pinned_build(molecule, screening)
+    ham = _pinned_build(molecule, screening)
+    g, space = ham.g_eff, ham.space
     n, nelec = space['n_orbs'], space['n_elec_active']
     roots = solve('pyscf_fci', g, n, nelec, spin_free=True, nroots=8)
     h1, eri = g[1], g[2].transpose(0, 2, 1, 3)
@@ -379,7 +383,8 @@ def test_total_minus_e0_is_the_prototype_cas_energy(molecule, screening):
     which leaves out the constant E_0 (h = f - t^DC, the same v_eff).
     Measured 1.8e-14 (tolerance 1e-7)."""
     pin = PINS[molecule]['screenings'][screening]
-    g, space, en = _pinned_build(molecule, screening)
+    ham = _pinned_build(molecule, screening)
+    g, space, en = ham.g_eff, ham.space, ham.energies
     root = solve('pyscf_fci', g, space['n_orbs'], space['n_elec_active'],
                  spin_free=True)[0]
     assert abs(root - en.e0 - pin['cas_ground']) < 1e-7

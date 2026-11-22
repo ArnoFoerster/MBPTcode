@@ -305,10 +305,12 @@ def test_e0_terms_match_casida(ref, which, screening):
     (CH2), all of it from E_c[v] (E_c^A 4.4e-14); h_eff 8.9e-16, v_eff
     2.2e-16."""
     spaces = _spaces(ref, which)
-    g, space, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         _low(ref, 'imagfrequency'), spaces, screening=screening)
-    g_c, _, en_c = build_effective_hamiltonian(
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(
         _low(ref, 'casida'), spaces, screening=screening)
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:
             assert abs(getattr(en, field.name)
@@ -330,17 +332,20 @@ def test_static_defect_matches_casida(ref):
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     for which in ('asymmetric', 'no_beta_pair'):
         spaces = _spaces(ref, which)
-        _, _, en = build_effective_hamiltonian(low_if, spaces,
-                                               screening='crpa')
-        assert en.diagnostics['static_defect'] < 1e-10
+        ham = build_effective_hamiltonian(low_if, spaces,
+                                          screening='crpa')
+        en = ham.energies
+        assert ham.diagnostics['static_defect'] < 1e-10
         for screening in ('bare', 'crpa_ph'):
-            _, _, en = build_effective_hamiltonian(low_if, spaces,
-                                                   screening=screening)
-            _, _, en_c = build_effective_hamiltonian(low_cas, spaces,
-                                                     screening=screening)
-            assert en.diagnostics['static_defect'] > 1e-3
-            assert abs(en.diagnostics['static_defect']
-                       - en_c.diagnostics['static_defect']) < 1e-10
+            ham = build_effective_hamiltonian(low_if, spaces,
+                                              screening=screening)
+            en = ham.energies
+            ham_c = build_effective_hamiltonian(low_cas, spaces,
+                                                screening=screening)
+            en_c = ham_c.energies
+            assert ham.diagnostics['static_defect'] > 1e-3
+            assert abs(ham.diagnostics['static_defect']
+                       - ham_c.diagnostics['static_defect']) < 1e-10
 
 
 @pytest.mark.parametrize('screening', SCREENINGS)
@@ -352,20 +357,23 @@ def test_ec_active_casida_diagnostic(ref, screening):
     (CH2). With the restricted spin factor 2 in the quadrature this test,
     the all-active one and the E_0 one fail (tried)."""
     spaces = _spaces(ref, 'asymmetric')
-    _, _, en = build_effective_hamiltonian(_low(ref, 'imagfrequency'), spaces,
-                                           screening=screening)
-    record = en.diagnostics['ec_active_casida']
+    ham = build_effective_hamiltonian(_low(ref, 'imagfrequency'), spaces,
+                                      screening=screening)
+    en = ham.energies
+    record = ham.diagnostics['ec_active_casida']
     assert set(record) == {'casida', 'difference'}
     assert record['difference'] == en.e_c_active - record['casida']
     assert abs(record['difference']) < 1e-10
-    _, _, en_c = build_effective_hamiltonian(_low(ref, 'casida'), spaces,
-                                             screening=screening)
+    ham_c = build_effective_hamiltonian(_low(ref, 'casida'), spaces,
+                                        screening=screening)
+    en_c = ham_c.energies
     assert abs(record['casida'] - en_c.e_c_active) < 1e-10
-    assert set(en.diagnostics) == {'static_defect', 'ec_active_casida'}
-    _, _, en = build_effective_hamiltonian(
+    assert set(ham.diagnostics) == {'static_defect', 'ec_active_casida'}
+    ham = build_effective_hamiltonian(
         _low(ref, 'imagfrequency'), _spaces(ref, 'occupied_only'),
         screening=screening)
-    assert en.diagnostics['ec_active_casida'] == {'casida': 0.0,
+    en = ham.energies
+    assert ham.diagnostics['ec_active_casida'] == {'casida': 0.0,
                                                   'difference': 0.0}
 
 
@@ -519,12 +527,14 @@ def test_route_agreement_with_sigma(ref, screening):
     measured, OH and CH2: every field 3.2e-8 and 2.4e-10, h_eff 6.3e-7 and
     5.7e-10, FCI 3.3e-9 and 1.6e-12 (Tr[Sigma_bar gamma] at least 0.045)."""
     spaces = _spaces(ref, 'unequal_cores')
-    g, space, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         _low_infinite_s(ref, 'imagfrequency'), spaces, screening=screening,
         sigma='srg')
-    g_c, _, en_c = build_effective_hamiltonian(
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(
         _low_infinite_s(ref, 'casida'), spaces, screening=screening,
         sigma='srg')
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     assert abs(en.e_sigma_trace) > 1e-3
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:
@@ -547,14 +557,15 @@ def test_sigma_records_of_two_spins():
     n = parts[0].n_act
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        _, _, en = build_effective_hamiltonian(low, spaces, sigma='srg')
-    assert en.numerical_flags == []
-    assert set(en.diagnostics) == {'static_defect', 'ec_active_casida',
+        ham = build_effective_hamiltonian(low, spaces, sigma='srg')
+        en = ham.energies
+    assert ham.numerical_flags == []
+    assert set(ham.diagnostics) == {'static_defect', 'ec_active_casida',
                                    'sigma_poles', 'sigma_continuation'}
-    poles = en.diagnostics['sigma_poles']
+    poles = ham.diagnostics['sigma_poles']
     assert poles['window'] == rpa.pole_window(low, parts)
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
-    spread = en.diagnostics['sigma_continuation']
+    spread = ham.diagnostics['sigma_continuation']
     assert len(spread) == len(poles['z']) == len(poles['pole_distance']) == 2
     for s, z, dist in zip(spread, poles['z'], poles['pole_distance']):
         assert s.shape == (n, n) and z.shape == dist.shape == (n,)
@@ -580,7 +591,8 @@ def test_near_pole_warning_on_imagfrequency_names_the_spin():
     for sigma in ('srg', 'mode_a'):
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always')
-            g, _, en = build_effective_hamiltonian(low, spaces, sigma=sigma)
+            ham = build_effective_hamiltonian(low, spaces, sigma=sigma)
+            g, en = ham.g_eff, ham.energies
         assert [w.category for w in rec] == [rpa.SigmaNearPoleWarning,
                                              rpa.SigmaContinuationWarning]
         assert all(w.filename == __file__ for w in rec)
@@ -589,11 +601,11 @@ def test_near_pole_warning_on_imagfrequency_names_the_spin():
         assert "mode='casida'" in near and 'alpha orbital' not in near
         assert 'beta (6, 6)' in spread and 'alpha (' not in spread
         assert all(np.all(np.isfinite(h)) for h in g[1])
-        assert len(en.numerical_flags) == 2
+        assert len(ham.numerical_flags) == 2
         assert {'flag': 'sigma_near_pole',
-                'message': near} in en.numerical_flags
+                'message': near} in ham.numerical_flags
         assert {'flag': 'sigma_continuation_spread',
-                'message': spread} in en.numerical_flags
+                'message': spread} in ham.numerical_flags
 
 
 def test_the_bound_reaches_every_build(monkeypatch):
@@ -605,13 +617,13 @@ def test_the_bound_reaches_every_build(monkeypatch):
     spaces = _spaces('oh', 'unequal_cores')
     with pytest.warns(rpa.SigmaNearPoleWarning,
                       match='smallest orbital-energy gap'):
-        _, _, first = build_effective_hamiltonian(low, spaces, sigma='srg')
+        first = build_effective_hamiltonian(low, spaces, sigma='srg')
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        _, _, second = build_effective_hamiltonian(
+        second = build_effective_hamiltonian(
             low, _spaces('oh', 'no_beta_pair'), sigma='srg')
-    for en in (first, second):
-        assert [f['flag'] for f in en.numerical_flags] == [
+    for ham in (first, second):
+        assert [f['flag'] for f in ham.numerical_flags] == [
             'sigma_pole_window_bound']
 
 
@@ -632,11 +644,13 @@ def test_imagfrequency_closed_shell_limit(sigma):
     assert abs(low_u.e_c_full - low_r.e_c_full) < 1e-10
     one = ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2)
     for screening in SCREENINGS:
-        g_r, _, en_r = build_effective_hamiltonian(low_r, one,
-                                                   screening=screening,
-                                                   sigma=sigma)
-        g_u, space, en_u = build_effective_hamiltonian(
+        ham_r = build_effective_hamiltonian(low_r, one,
+                                            screening=screening,
+                                            sigma=sigma)
+        g_r, en_r = ham_r.g_eff, ham_r.energies
+        ham_u = build_effective_hamiltonian(
             low_u, (one, one), screening=screening, sigma=sigma)
+        g_u, space, en_u = ham_u.g_eff, ham_u.space, ham_u.energies
         for h in g_u[1]:
             assert np.abs(h - g_r[1]).max() < 1e-8
         for v in g_u[2]:
@@ -945,10 +959,12 @@ def test_space_time_e0_terms_match_casida(ref, which, screening):
     quadrature against the dense E_c^A 3.7e-13, the crpa static defect
     7.8e-16, the other defects against casida 6.0e-8."""
     spaces = _st_spaces(ref, which)
-    g, space, en = build_effective_hamiltonian(_st_low(ref), spaces,
-                                               screening=screening)
-    g_c, _, en_c = build_effective_hamiltonian(_st_casida(ref), spaces,
-                                               screening=screening)
+    ham = build_effective_hamiltonian(_st_low(ref), spaces,
+                                      screening=screening)
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(_st_casida(ref), spaces,
+                                        screening=screening)
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:
             assert abs(getattr(en, field.name)
@@ -956,12 +972,12 @@ def test_space_time_e0_terms_match_casida(ref, which, screening):
     for ours, casida in zip(g[1] + g[2], g_c[1] + g_c[2]):
         assert np.abs(ours - casida).max(initial=0.0) < 5e-6
     assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-6
-    assert abs(en.diagnostics['ec_active_casida']['difference']) < 1e-10
+    assert abs(ham.diagnostics['ec_active_casida']['difference']) < 1e-10
     if screening == 'crpa':
-        assert en.diagnostics['static_defect'] < 1e-10
+        assert ham.diagnostics['static_defect'] < 1e-10
     else:
-        assert abs(en.diagnostics['static_defect']
-                   - en_c.diagnostics['static_defect']) < 1e-6
+        assert abs(ham.diagnostics['static_defect']
+                   - ham_c.diagnostics['static_defect']) < 1e-6
 
 
 @pytest.mark.parametrize('ref', REFS)
@@ -1051,10 +1067,12 @@ def test_space_time_route_agreement_with_sigma(ref, screening):
     OH and CH2: every field 4.2e-7 and 1.7e-7, h_eff 2.2e-7 and 1.2e-7,
     FCI 2.2e-8 and 1.0e-9; the continuation spread is at most 1.3e-5."""
     spaces = _st_spaces(ref, 'unequal_cores')
-    g, space, en = build_effective_hamiltonian(
+    ham = build_effective_hamiltonian(
         _st_low(ref), spaces, screening=screening, sigma='srg')
-    g_c, _, en_c = build_effective_hamiltonian(
+    g, space, en = ham.g_eff, ham.space, ham.energies
+    ham_c = build_effective_hamiltonian(
         _st_casida(ref), spaces, screening=screening, sigma='srg')
+    g_c, en_c = ham_c.g_eff, ham_c.energies
     assert abs(en.e_sigma_trace) > 1e-3
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:
@@ -1063,9 +1081,9 @@ def test_space_time_route_agreement_with_sigma(ref, screening):
     for ours, casida in zip(g[1], g_c[1]):
         assert np.abs(ours - casida).max() < 5e-6
     assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-6
-    assert en.numerical_flags == []
-    poles = en.diagnostics['sigma_poles']
-    spread = en.diagnostics['sigma_continuation']
+    assert ham.numerical_flags == []
+    poles = ham.diagnostics['sigma_poles']
+    spread = ham.diagnostics['sigma_continuation']
     assert len(poles['window']) == len(poles['z']) == len(spread) == 2
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
     assert max(s.max() for s in spread) < 1e-4
@@ -1083,7 +1101,8 @@ def test_space_time_near_pole_warning_names_the_spin():
     for sigma in ('srg', 'mode_a'):
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always')
-            g, _, en = build_effective_hamiltonian(low, spaces, sigma=sigma)
+            ham = build_effective_hamiltonian(low, spaces, sigma=sigma)
+            g, en = ham.g_eff, ham.energies
         near = [w for w in rec if w.category is rpa.SigmaNearPoleWarning]
         assert len(near) == 1 and near[0].filename == __file__
         assert all(w.category in (rpa.SigmaNearPoleWarning,
@@ -1093,7 +1112,7 @@ def test_space_time_near_pole_warning_names_the_spin():
         assert "mode='casida'" in text and 'alpha orbital' not in text
         assert all(np.all(np.isfinite(h)) for h in g[1])
         assert {'flag': 'sigma_near_pole',
-                'message': text} in en.numerical_flags
+                'message': text} in ham.numerical_flags
 
 
 @pytest.mark.parametrize('sigma', (None, 'srg'))
@@ -1118,10 +1137,12 @@ def test_space_time_closed_shell_limit(sigma):
     assert abs(low_u.e_c_full - low_r.e_c_full) < 1e-10
     one = ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2)
     for screening in SCREENINGS:
-        g_r, _, en_r = build_effective_hamiltonian(
+        ham_r = build_effective_hamiltonian(
             low_r, one, screening=screening, sigma=sigma)
-        g_u, space, en_u = build_effective_hamiltonian(
+        g_r, en_r = ham_r.g_eff, ham_r.energies
+        ham_u = build_effective_hamiltonian(
             low_u, (one, one), screening=screening, sigma=sigma)
+        g_u, space, en_u = ham_u.g_eff, ham_u.space, ham_u.energies
         for h in g_u[1]:
             assert np.abs(h - g_r[1]).max() < 1e-8
         for v in g_u[2]:
@@ -1191,10 +1212,12 @@ def test_space_time_against_casida_on_the_density_fit(ref):
         for ours, casida in zip(vt, want):
             assert np.abs(ours - casida).max() < 1e-5
     for screening in SCREENINGS:
-        g, space, en = build_effective_hamiltonian(low, spaces,
-                                                   screening=screening)
-        g_c, _, en_c = build_effective_hamiltonian(cas, spaces,
-                                                   screening=screening)
+        ham = build_effective_hamiltonian(low, spaces,
+                                          screening=screening)
+        g, space, en = ham.g_eff, ham.space, ham.energies
+        ham_c = build_effective_hamiltonian(cas, spaces,
+                                            screening=screening)
+        g_c, en_c = ham_c.g_eff, ham_c.energies
         tol = 5e-5 if screening == 'crpa' else 1e-5
         for field in dataclasses.fields(Energies):
             if field.name not in RECORDS:

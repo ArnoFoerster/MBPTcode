@@ -3,9 +3,8 @@ once, then build the effective Hamiltonian of any number of active spaces
 from it.
 
     low = run_low_level(mf, method='hf')
-    g_eff, space, energies = build_effective_hamiltonian(low, active_space)
-    e = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
-              spin_free=space['spin_free'])
+    h = build_effective_hamiltonian(low, active_space)
+    e = h.solve('pyscf_fci')          # h.g_eff, h.space, h.energies, ...
 
 The driver knows no method: it reaches them through `LOW_LEVEL` and reads
 only the `DownfoldingTerms` a method hands back. The mean-field object alone
@@ -18,10 +17,8 @@ with its own orbitals, occupied count and active space, also when the two
 coincide:
 
     low = run_low_level(uhf, method='hf')
-    g_eff, space, energies = build_effective_hamiltonian(
-        low, (space_alpha, space_beta))
-    e = solve('pyscf_fci', g_eff, space['n_orbs'], space['n_elec_active'],
-              spin_free=space['spin_free'])
+    h = build_effective_hamiltonian(low, (space_alpha, space_beta))
+    e = h.solve('pyscf_fci')
 
 The corrections are computed once each, the frozen core (core.py) and the
 double counting (double_counting.py), and the three parts of H_eff only add
@@ -29,7 +26,7 @@ them up: E_0 in zero_body.py, h_eff in one_body.py, v_eff in two_body.py.
 `pack` here writes them into the g_eff dictionary the active-space solvers
 read (src/EffectiveHamiltonian/solvers/solve.py).
 """
-from dataclasses import replace
+from dataclasses import dataclass
 
 import numpy as np
 from pyscf import scf
@@ -45,6 +42,7 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
 from src.Base.utils.parallel.mpi_grid import grid_comm
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 from .core import core_terms
 from .double_counting import double_counting
@@ -53,7 +51,7 @@ from .one_body import effective_one_body
 from .options import choice
 from .spin import SPINS
 from .two_body import effective_interaction
-from .zero_body import assemble_energies
+from .zero_body import Energies, assemble_energies
 
 WHO = 'Downfolding'
 
@@ -112,6 +110,38 @@ def _active_spaces(active_space, eps, nocc):
     return spaces
 
 
+@dataclass(frozen=True)
+class DownfoldedHamiltonian:
+    """One effective Hamiltonian, as `build_effective_hamiltonian` returns it.
+
+    g_eff: {0: E_0, 1: h_eff, 2: v_eff}, the input of the active-space
+        solvers. space: the active space in QDPT's form (n_orbs,
+        n_elec_active, the index arrays, spin_free, active_space, and for an
+        unrestricted reference spin_overlap). energies: the `Energies`, every
+        term of E_0. diagnostics: the low-level method's checks, keyed by
+        name. numerical_flags: the named flags behind this Hamiltonian
+        (src.Base.numerical_flags), each {'flag': name, 'message': text};
+        empty for a clean result.
+    """
+    g_eff: dict
+    space: dict
+    energies: Energies
+    diagnostics: dict
+    numerical_flags: list
+
+    def solve(self, solver, **kwargs):
+        """The lowest energies of this Hamiltonian by `solver`
+        (src.EffectiveHamiltonian.solvers.solve.solve), E_0 included: the
+        record's g_eff, orbital and electron counts and spin_free are filled
+        in, and for an unrestricted reference its spin_overlap, so <S^2>
+        can be reported (out=...). Other kwargs go to `solve`."""
+        if 'spin_overlap' in self.space:
+            kwargs.setdefault('spin_overlap', self.space['spin_overlap'])
+        return solve(solver, self.g_eff, self.space['n_orbs'],
+                     self.space['n_elec_active'],
+                     spin_free=self.space['spin_free'], **kwargs)
+
+
 def run_low_level(mf, method='rpa', **method_opts):
     """The low-level result of `method` on the mean field `mf` (attributes
     `method` and `mf`, plus whatever the method keeps for its `terms`).
@@ -164,15 +194,17 @@ def run_low_level(mf, method='rpa', **method_opts):
 
 def build_effective_hamiltonian(low, active_space, spin_free=True,
                                 **method_opts):
-    """(g_eff, space, energies): the effective Hamiltonian of `active_space`
-    downfolded from the low-level result `low`.
+    """The `DownfoldedHamiltonian` of `active_space`, downfolded from the
+    low-level result `low`: g_eff, space, energies, diagnostics and
+    numerical_flags. `h.solve(solver)` solves it.
 
-    g_eff and space follow QDPT's build_effective_hamiltonian, so the result
-    goes straight to src.EffectiveHamiltonian.solvers.solve.solve:
-    g_eff = {0: E_0, 1: h_eff, 2: physicist v_eff}, spatial when spin_free, else over the 2 n_act
-    interleaved spin orbitals; space holds n_orbs, n_elec_active, act_idx,
-    act_occ_idx, act_vir_idx (canonical spatial indices), spin_free and
-    active_space. energies is the `Energies` record of every E_0 term.
+    g_eff and space follow QDPT's build_effective_hamiltonian, so g_eff goes
+    straight to src.EffectiveHamiltonian.solvers.solve.solve:
+    g_eff = {0: E_0, 1: h_eff, 2: physicist v_eff}, spatial when spin_free,
+    else over the 2 n_act interleaved spin orbitals; space holds n_orbs,
+    n_elec_active, act_idx, act_occ_idx, act_vir_idx (canonical spatial
+    indices), spin_free and active_space. energies is the `Energies` record
+    of every E_0 term; diagnostics are the method's, keyed by name.
 
     For an unrestricted reference (UHF/UKS) `active_space` is a pair
     (space_alpha, space_beta), one ActiveSpace per spin with independent
@@ -193,7 +225,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     supplies vtilde, Sigma_bar, the correlation-energy pair and the
     double-counting mode. method_opts go to the method's `terms`.
 
-    `energies.numerical_flags` lists every named flag behind this
+    `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run
     (`low.numerical_flags`) and those raised while building it, each
     distinct {'flag': name, 'message': text} once; empty for a clean result.
@@ -221,9 +253,10 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
         energies = assemble_energies(mf.energy_nuc(), core, dc, terms)
         g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
     inherited = list(getattr(low, 'numerical_flags', ()))
-    energies = replace(energies,
-                       numerical_flags=gathered(inherited + flags))
-    return g_eff, _space(mf, mo, spaces, spin_free), energies
+    return DownfoldedHamiltonian(
+        g_eff=g_eff, space=_space(mf, mo, spaces, spin_free),
+        energies=energies, diagnostics=dict(terms.diagnostics),
+        numerical_flags=gathered(inherited + flags))
 
 
 def _check_terms(terms, method, unrestricted):

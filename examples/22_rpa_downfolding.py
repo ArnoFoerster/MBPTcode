@@ -98,8 +98,9 @@ for name, atoms, n_pi in MOLECULES:
     print(f'{"method":<13}{"E_core":>12}{"E_h":>12}{"E_x":>11}{"E_c":>10}'
           f'{"-TrSig":>10}{"E_0":>12}{"E(S0)":>12}{"S1 (eV)":>9}{"T1 (eV)":>9}')
     for label, method, opts in METHODS:
-        g_eff, space, en = build_effective_hamiltonian(lows[method], active, **opts)
-        e_s0, s1, t1 = excitations(g_eff, space)
+        h = build_effective_hamiltonian(lows[method], active, **opts)
+        en = h.energies
+        e_s0, s1, t1 = excitations(h.g_eff, h.space)
         print(f'{label:<13}{en.e_core:12.6f}{en.eh:12.6f}{en.ex:11.6f}'
               f'{en.ec:10.6f}{0.0 - en.e_sigma_trace:10.6f}{en.e0:12.6f}'
               f'{e_s0:12.6f}{s1 * HARTREE_TO_EV:9.3f}{t1 * HARTREE_TO_EV:9.3f}')

@@ -36,7 +36,8 @@ inside it, on any thread or MPI rank, into one list of
   `{flag: [messages]}`;
 - downfolding: `run_low_level` leaves the flags of the low-level run in
   `low.numerical_flags`, and `build_effective_hamiltonian` returns those
-  together with its own in `energies.numerical_flags`.
+  together with its own in `numerical_flags` of the `DownfoldedHamiltonian`
+  it returns.
 
 A flag raised outside all of these, by a solver called on its own, is
 warned about and nothing more.
