@@ -54,6 +54,7 @@ from scipy.sparse.linalg import ArpackNoConvergence
 
 from src.Base.numerics.constants import (DOWNFOLDING_CONTINUATION_MARGIN,
                                          DOWNFOLDING_POLE_MARGIN,
+                                         DOWNFOLDING_SRG_DAMPING_WARN,
                                          DOWNFOLDING_SRG_S)
 from src.Base.numerics.numerics import (DownfoldingNumerics, Numerics,
                                         numerics_or_default)
@@ -610,7 +611,7 @@ def test_sigma_poles_diagnostic_and_warning(wat, low_exact, space):
                      - rpa.srg_self_energy(w, e_t, e_r, occ_r, omega,
                                            None)).max()
     assert poles['srg_damping'] == damping
-    assert (damping > 1e-6) == near
+    assert (damping > DOWNFOLDING_SRG_DAMPING_WARN) == near
     h = 1e-5
     slope = np.array([(sigma_env(x + h, eri, eps, nocc, part)[t, t]
                        - sigma_env(x - h, eri, eps, nocc, part)[t, t]).real
@@ -1335,3 +1336,14 @@ def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
     ham_without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc))
     without = ham_without.energies
     assert ham_without.numerical_flags == []
+
+
+def test_both_sigma_warnings_share_one_threshold():
+    """The SRG damping warning (casida) and the continuation warning
+    (imagfrequency, space-time) never fire for the same run, and both mean
+    that Sigma_bar is uncertain, or depends on a setting, at one level:
+    1e-4 Ha, the accuracy the route tests aim for. A micro-Hartree damping
+    is the regularization at work, not a warning."""
+    from src.Base.numerics import constants
+    assert (constants.DOWNFOLDING_SRG_DAMPING_WARN
+            == constants.DOWNFOLDING_SIGMA_CONTINUATION_WARN == 1e-4)

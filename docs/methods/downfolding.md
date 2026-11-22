@@ -600,9 +600,10 @@ reference E_0 is a well-defined working choice, not a derived one.
 - **Sigma^E warnings.** With `sigma` set, two checks of Sigma_bar always
   run, whatever `diagnostics` asks for, because Sigma_bar goes into H_eff
   and E_0 either way: a `SigmaDampingWarning` (casida, `'srg'`) when the
-  SRG damping moves an element by more than 1e-6 Ha, and a
+  SRG damping moves an element by more than 1e-4 Ha, and a
   `SigmaContinuationWarning` (imagfrequency, space-time) when two Pade fits
-  disagree by more than 1e-4 Ha. Both are named flags
+  disagree by more than 1e-4 Ha: one threshold for both, since they never
+  fire for the same run and both mean Sigma_bar is uncertain at that level. Both are named flags
   (`docs/warnings.md`). The `diagnostics` keyword only decides whether the
   numbers behind them are recorded.
 - **Named flags in the result.** A warning that is a named flag also leaves
@@ -631,7 +632,7 @@ imagfrequency and space-time all four:
   from the poles and small near one; `'srg_s'`, the s applied (None for
   s = infinity and for `'averaged'`); and `'srg_damping'`, the largest
   |Sigma_bar(s) - Sigma_bar(infinity)| (0 when no finite s is applied).
-  When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-6 Ha) a
+  When the damping exceeds `DOWNFOLDING_SRG_DAMPING_WARN` (1e-4 Ha) a
   `SigmaDampingWarning` names the active orbitals concerned: their
   Sigma_bar depends on `srg_s`. On imagfrequency and space-time `'z'`
   comes from the continued fraction, `'srg_s'` is None and `'srg_damping'` 0.0 (s =

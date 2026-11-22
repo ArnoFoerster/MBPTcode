@@ -284,12 +284,15 @@ DOWNFOLDING_SRG_S = 500.0
 # regularization is not needed there; closer in, the undamped terms of
 # 'averaged' (eta = 0) grow without bound.
 DOWNFOLDING_POLE_MARGIN = 3.0
-# The 'sigma_poles' diagnostic warns when the SRG damping moves an element of
+# The 'sigma_poles' check warns when the SRG damping moves an element of
 # Sigma_bar^E by more than this, in Ha: max |Sigma_bar(s) - Sigma_bar(inf)|.
-# A micro-Hartree is well below the accuracy of a one-shot static Sigma^E,
-# so below it the choice of s does not matter; above it the result depends on
-# srg_s through an active orbital near a pole of the environment self-energy.
-DOWNFOLDING_SRG_DAMPING_WARN = 1e-6
+# The damping is the regularization at work, so a small one is expected;
+# above this H_eff depends on the choice of srg_s at the level the code
+# treats as significant elsewhere: the threshold of the continuation
+# warning (DOWNFOLDING_SIGMA_CONTINUATION_WARN), which never fires for the
+# same run, and the accuracy the route tests aim for. Until 2026-11-22 it was
+# 1e-6, which fired for any active orbital within about 0.1 Ha of a pole.
+DOWNFOLDING_SRG_DAMPING_WARN = 1e-4
 # The 'sigma_continuation' diagnostic of the imaginary-axis routes warns when
 # two Pade fits of S^E on disjoint halves of the nodes (even- and
 # odd-indexed) disagree by more than this, in Ha, at an element's evaluation
