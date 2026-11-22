@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..masks import channels_of
+from ..spin import channels_of
 from ..low_level import DownfoldingTerms
 
 METHOD = 'hf'

@@ -50,10 +50,10 @@ from .methods import LOW_LEVEL
 from .one_body import (DC_MODES, core_fock, double_counting,
                        effective_one_body, inactive_jk)
 from .options import choice
+from .spin import SPINS
 from .two_body import effective_interaction
 
 WHO = 'Downfolding'
-SPINS = ('alpha', 'beta')
 
 
 def _spin_channels(mf):
@@ -288,11 +288,9 @@ def pack(h_eff, v_eff, e0, spin_free):
     """The g_eff dictionary {0: e0, 1: one-body, 2: two-body} of the solvers.
 
     h_eff and v_eff hold the one-body term and the chemist active interaction
-    (bare plus vtilde) per spin channel: (h,) and (v,) for the one channel of
-    a restricted reference, or (h_a, h_b) and (aa, ab, bb) with
-    ab[t,u,v,w] = (t_a u_a | v_b w_b). The number of channels alone decides
-    the form; two channels are never collapsed to one, also when they are
-    equal.
+    (bare plus vtilde) per spin channel, (h,) and (v,) or (h_a, h_b) and
+    (aa, ab, bb) (spin.py). The number of channels alone decides the form;
+    two channels are never collapsed to one, also when they are equal.
 
     One channel, spin-free: g_eff[1] is the spatial one-body and g_eff[2] the
     spatial physicist <pq|rs> = (pr|qs); otherwise both go through

@@ -118,9 +118,10 @@ from src.SingleReference.LinearResponse.space_time import (
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
 
-from ..masks import active_pair_mask, channels_of, ph_element_mask
+from ..masks import active_pair_mask, ph_element_mask
 from ..low_level import DownfoldingTerms
 from ..options import choice
+from ..spin import BLOCKS, SPINS, channels_of, spin_block, spin_weight
 
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
@@ -128,10 +129,6 @@ SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
                'sigma_continuation')
-SPINS = ('alpha', 'beta')
-# The spin channels (first pair, second pair) of the two-body blocks: the one
-# block of a restricted reference, or (aa, ab, bb).
-_BLOCKS = {1: ((0, 0),), 2: ((0, 0), (0, 1), (1, 1))}
 
 
 @dataclass(eq=False)
@@ -139,8 +136,8 @@ class RPALowLevel:
     """The RPA low-level result: the mean field, the full RPA, and a cache.
 
     For an unrestricted reference (`unrestricted`) eps, nocc and factors are
-    pairs (alpha, beta), eri is the three blocks (aa, ab, bb) with
-    ab[p,q,r,s] = (p_a q_a | r_b s_b), and omega and xpy are those of the
+    pairs (alpha, beta), eri is the three blocks (aa, ab, bb) (spin.py, here
+    over all orbitals), and omega and xpy are those of the
     one RPA problem on the stacked pairs of both spins, the alpha pairs in
     C order over (i, a), then the beta ones, where
     xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 2K)^-1. What follows
@@ -317,12 +314,6 @@ def _reference_channels(low):
                           None if x is None else x[s]) for s in (0, 1))
 
 
-def _spin_weight(chans):
-    """g, the electrons an occupied orbital of one channel holds: 2.0 for
-    the one channel of a restricted reference, 1.0 for each of two."""
-    return 2.0 if len(chans) == 1 else 1.0
-
-
 def _join(arrays, axis=0):
     """The arrays of the spin channels one after the other along `axis`; the
     array of one channel as it is, not a copy."""
@@ -369,22 +360,12 @@ def _two_body_blocks(v, chans):
     (n_act,)*4 array of a restricted reference, or the three (aa, ab, bb)
     of an unrestricted one. Refused when they do not fit the channels."""
     blocks = (v,) if isinstance(v, np.ndarray) else tuple(v)
-    if len(blocks) != len(_BLOCKS[len(chans)]):
+    if len(blocks) != len(BLOCKS[len(chans)]):
         raise ValueError(
             'an unrestricted reference takes the three blocks (aa, ab, bb) '
             'of the active interaction, a restricted one a single array; '
             f'got {len(blocks)} for {len(chans)} spin channel(s).')
     return blocks
-
-
-def _spin_block(blocks, s, t):
-    """The block of `blocks` ((v,) or (aa, ab, bb)) with the first pair in
-    spin channel s and the second in channel t; the beta-alpha one is the
-    alpha-beta one with its pairs exchanged."""
-    if len(blocks) == 1:
-        return blocks[0]
-    aa, ab, bb = blocks
-    return ((aa, ab), (ab.transpose(2, 3, 0, 1), bb))[s][t]
 
 
 def _delta(chan, mask=None):
@@ -409,11 +390,8 @@ def _act_factors(chan):
 
 def _eri_block(low, s, t):
     """The exact chemist (p q|r s) of low.eri with p, q in spin channel s
-    and r, s in channel t."""
-    if not low.unrestricted:
-        return low.eri
-    aa, ab, bb = low.eri
-    return ((aa, ab), (ab.transpose(2, 3, 0, 1), bb))[s][t]
+    and r, s in channel t (`spin_block`)."""
+    return spin_block(low.eri if low.unrestricted else (low.eri,), s, t)
 
 
 def _residual_integrals(low, chans, res):
@@ -710,7 +688,7 @@ def screening_correction(low, part, screening):
                 f" result is mode={low.mode!r}).")
         return _per_block(_mrpa_correction(low, _channels(low, part)))
     chans = _channels(low, part)
-    spins = _BLOCKS[len(chans)]
+    spins = BLOCKS[len(chans)]
     n = chans[0].part.n_act
     res = [~active_pair_mask(c.part) for c in chans]
     if screening == 'bare' or n == 0 or not any(r.any() for r in res):
@@ -723,7 +701,7 @@ def screening_correction(low, part, screening):
         vt = [(b_act[s].T @ w_r @ b_act[t]).reshape((n,) * 4)
               for s, t in spins]
     else:
-        g = _spin_weight(chans)
+        g = spin_weight(chans)
         k_rr, v_rt = _residual_integrals(low, chans, res)
         apb = (2.0 * g) * k_rr
         apb[np.diag_indices_from(apb)] += _join(
@@ -754,7 +732,7 @@ def _mrpa_correction(low, chans):
     has an active ph pair."""
     n = chans[0].part.n_act
     occ = [c.part.n_act_occ for c in chans]
-    spins = _BLOCKS[len(chans)]
+    spins = BLOCKS[len(chans)]
     vt = [np.zeros((n,) * 4) for _ in spins]
     if not any(0 < k < n for k in occ):
         return vt
@@ -762,7 +740,7 @@ def _mrpa_correction(low, chans):
     delta, k_ph, _ = _active_ph(chans, _active_v(low, chans))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
-    k_eff = (1.0 / (2.0 * _spin_weight(chans))) * (
+    k_eff = (1.0 / (2.0 * spin_weight(chans))) * (
         0.5 * (k_eff + k_eff.T) - np.diag(delta))
     correction = k_eff - k_ph
     # the stacked pairs of each channel: k occupied times n - k virtual
@@ -856,7 +834,7 @@ def active_polarizability_static(low, part):
         mask = active_pair_mask(chan.part)
         blocks.append((_ov_factors(chan)[:, mask],
                        frequency_factor(_delta(chan, mask), 0.0, True)))
-    return chi0_aux(blocks, _spin_weight(chans))
+    return chi0_aux(blocks, spin_weight(chans))
 
 
 def _active_v(low, chans):
@@ -869,7 +847,7 @@ def _active_v(low, chans):
     static defect take the integrals the full RPA was solved with,
     so that the double counting cancels against E_c and W."""
     n = chans[0].part.n_act
-    spins = _BLOCKS[len(chans)]
+    spins = BLOCKS[len(chans)]
     if low.mode == 'space-time' or low.factors is not None:
         if low.mode == 'space-time':
             b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
@@ -928,7 +906,7 @@ def _active_ph(chans, v_eff):
         k_rows.append([])
         cols = []
         for t, k_t in enumerate(occ):
-            block = _spin_block(v_eff, s, t)
+            block = spin_block(v_eff, s, t)
             cols.append(block[:, :, :k_t, k_t:].reshape(n * n,
                                                         delta[t].size))
             k_rows[s].append(block[:k_s, k_s:, :k_t, k_t:].reshape(
@@ -1000,7 +978,7 @@ def _active_ec_quadrature(low, chans, v_eff):
     warning and flag for a non-positive det(1 - Pi^A U))."""
     delta, k_ph, _ = _active_ph(chans, v_eff)
     eye = np.eye(delta.size)
-    g = _spin_weight(chans)
+    g = spin_weight(chans)
     if low.mode == 'space-time':
         grid = low.cache['energy_grid']
         weights = grid.omega_weights
@@ -1047,11 +1025,11 @@ def static_defect(low, part, v_eff):
     """
     chans = _channels(low, part)
     v_eff = _two_body_blocks(v_eff, chans)
-    spins = _BLOCKS[len(chans)]
+    spins = BLOCKS[len(chans)]
     n = chans[0].part.n_act
     if n == 0:
         return 0.0
-    g = _spin_weight(chans)
+    g = spin_weight(chans)
     if low.mode != 'casida':
         b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
         w_static = dyson_screening(low.cache['p0'])
@@ -1127,7 +1105,7 @@ def screened_residues(low, part, orbitals=None):
 def _residues(low, chans, orbs):
     """`screened_residues` per channel: one (nexc, n_act, n_r) array for
     each, between its active orbitals and its index array of `orbs`."""
-    scale, nexc = np.sqrt(_spin_weight(chans)), len(low.omega)
+    scale, nexc = np.sqrt(spin_weight(chans)), len(low.omega)
     out = []
     if low.factors is not None:
         rho = _join([_ov_factors(c) for c in chans], axis=1) @ low.xpy
@@ -1364,7 +1342,7 @@ def _lowest_root(low, chans):
     (DOWNFOLDING_OMEGA_LANCZOS_SEED): it has to overlap with the lowest
     root, and a vector with equal weights on degenerate pairs does not
     always. One pair is its own root."""
-    g = _spin_weight(chans)
+    g = spin_weight(chans)
     delta = _join([_delta(c) for c in chans])
     apply, apply_t = _pair_actions(low, chans)
     root = np.sqrt(delta)

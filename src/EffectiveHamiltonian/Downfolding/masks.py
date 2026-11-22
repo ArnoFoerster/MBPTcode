@@ -1,4 +1,4 @@
-"""The particle-hole masks of an active space, and its spin channels.
+"""The particle-hole masks of an active space.
 
 The downfolding reads the active space of each spin channel as an
 `ActiveSpace` (src/EffectiveHamiltonian/active_space.py). The two masks pick
@@ -7,13 +7,6 @@ indices are canonical spatial MO indices unless a function says they are
 local to the active orbitals.
 """
 import numpy as np
-
-
-def channels_of(space):
-    """The spin channels of `space` as a tuple: (space,) for one ActiveSpace,
-    the one channel of a restricted reference, or the pair (alpha, beta) of
-    an unrestricted one."""
-    return (space,) if not isinstance(space, (tuple, list)) else tuple(space)
 
 
 def active_pair_mask(space):

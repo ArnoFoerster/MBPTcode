@@ -4,31 +4,16 @@ h_eff^sigma = f^sigma - t^DC,sigma (+ Sigma_bar^sigma): the Fock operator of
 the frozen inactive core on the active orbitals, minus the double counting of
 the effective interaction vtilde with the active reference density.
 
-Every channel quantity is a tuple over the spin channels that are computed:
-ONE channel for a restricted reference, whose orbitals each hold two
-electrons, so nothing is computed twice; or two, (alpha, beta), for an
-unrestricted one. vtilde is then (v,), one spin-independent block, or
-(aa, ab, bb). `spin_weight` is the number of electrons an occupied orbital of
-a channel holds, 2 or 1, and the one-channel formulas are the two-channel
-ones with both channels equal. Active indices are local to `ActiveSpace.act`
-(occupied first), so the active occupied orbitals of a channel are its first
-n_act_occ.
+Every quantity is per spin channel, and vtilde is (v,) or (aa, ab, bb): the
+convention of spin.py.
 """
 import numpy as np
 from pyscf.scf.hf import get_jk
 
 from .options import choice
+from .spin import spin_weight
 
 DC_MODES = ('full', 'hartree')
-
-
-def spin_weight(channels):
-    """The electrons an occupied orbital of one channel holds: 2 for the one
-    channel of a restricted reference, 1 for each of (alpha, beta)."""
-    if len(channels) not in (1, 2):
-        raise ValueError(f'{len(channels)} spin channels; a restricted '
-                         f'reference has one, an unrestricted one two.')
-    return 2 if len(channels) == 1 else 1
 
 
 def inactive_jk(mol, mo, parts):

@@ -19,7 +19,7 @@ from src.EffectiveHamiltonian.Downfolding.options import choice
 
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
            / 'src' / 'EffectiveHamiltonian' / 'Downfolding')
-GENERAL = ['low_level', 'options', 'masks', 'two_body', 'one_body',
+GENERAL = ['low_level', 'options', 'spin', 'masks', 'two_body', 'one_body',
            'energy']
 KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
 METHODS = 'src.EffectiveHamiltonian.Downfolding.methods'

@@ -10,15 +10,14 @@ The HF terms of the environment are those of the inactive core alone (the
 active-environment cross terms are in the core Fock operator), and
 E_HF,ee[vtilde] enters with a plus sign so that the reference determinant of
 H_eff keeps the energy E_HF + E_c[v] - E_c^A. Every quantity is per spin
-channel, as in one_body.py: one channel for a restricted reference, with
-vtilde = (v,), or the two (alpha, beta), with vtilde = (aa, ab, bb) and
-ab[t,u,v,w] = (t_a u_a | v_b w_b); active indices occupied first.
+channel, with vtilde = (v,) or (aa, ab, bb): the convention of spin.py.
 """
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from .one_body import DC_MODES, inactive_jk, spin_weight
+from .one_body import DC_MODES, inactive_jk
+from .spin import spin_weight
 from .options import choice
 
 

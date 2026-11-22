@@ -14,14 +14,10 @@ class DownfoldingTerms:
     """What a low-level method hands the general layer.
 
     vtilde: the correction to the two-body interaction in chemist order
-        (tu|vw) on the active orbitals, occupied first, each block (n_act,)*4.
-        A restricted method hands back ONE spin-independent block, (v,); an
-        unrestricted one the three spin blocks (aa, ab, bb), the
-        opposite-spin one oriented
-        ab[t,u,v,w] = (t_alpha u_alpha | v_beta w_beta).
+        (tu|vw) on the active orbitals, each block (n_act,)*4: (v,) from a
+        restricted method, (aa, ab, bb) from an unrestricted one (spin.py).
     sigma_bar: None, or the static one-body self-energy, each block
-        (n_act, n_act): (s,) from a restricted method, (a, b) for the alpha
-        and beta spin channels of an unrestricted one.
+        (n_act, n_act), one per spin channel: (s,) or (a, b).
     e_c_full: the correlation energy of the full space.
     e_c_active: the correlation energy of the active space alone.
     dc: the double-counting convention, 'full' or 'hartree'.

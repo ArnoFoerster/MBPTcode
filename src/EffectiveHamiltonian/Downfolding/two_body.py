@@ -4,8 +4,7 @@ v_eff = v + vtilde: the bare interaction on the active orbitals, from exact
 4-centre integrals (`active_eri`), plus the correction the low-level method
 hands back (`effective_interaction`). All the physics of the screening is the
 method's; what is general is only the bare v and the sum. Spin blocks as in
-one_body.py: (v,) for the one channel of a restricted reference, or
-(aa, ab, bb).
+spin.py: (v,) or (aa, ab, bb).
 """
 import numpy as np
 from pyscf import ao2mo

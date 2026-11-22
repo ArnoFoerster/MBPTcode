@@ -11,7 +11,8 @@ genuinely different channels. Measured agreement: at most 1.2e-14 against both
 import numpy as np
 import pytest
 from src.EffectiveHamiltonian.Downfolding.one_body import (
-    core_fock, double_counting, effective_one_body, inactive_jk, spin_weight)
+    core_fock, double_counting, effective_one_body, inactive_jk)
+from src.EffectiveHamiltonian.Downfolding.spin import spin_weight
 from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from tests.downfolding_oracle import (
