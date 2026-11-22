@@ -49,7 +49,7 @@ from src.EffectiveHamiltonian.Downfolding.methods import LOW_LEVEL, rpa
 from src.EffectiveHamiltonian.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body)
 
-from src.EffectiveHamiltonian.Downfolding.terms import DownfoldingTerms
+from src.EffectiveHamiltonian.Downfolding.low_level import DownfoldingTerms
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.downfolding_oracle import (

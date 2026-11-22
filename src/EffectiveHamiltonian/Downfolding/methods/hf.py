@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..masks import channels_of
-from ..terms import DownfoldingTerms
+from ..low_level import DownfoldingTerms
 
 METHOD = 'hf'
 

@@ -119,7 +119,8 @@ from src.SingleReference.LinearResponse.space_time import (
     spin_summed, static_screening_grid)
 
 from ..masks import active_pair_mask, channels_of, ph_element_mask
-from ..terms import DownfoldingTerms, choice
+from ..low_level import DownfoldingTerms
+from ..options import choice
 
 METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')

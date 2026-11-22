@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .one_body import DC_MODES, inactive_jk, spin_weight
-from .terms import choice
+from .options import choice
 
 
 def environment_hf_energy(mol, hcore_ao, mo, parts, jk=None):

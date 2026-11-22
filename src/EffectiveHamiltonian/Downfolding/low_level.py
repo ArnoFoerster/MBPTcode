@@ -1,4 +1,5 @@
-"""The seam between the downfolding's general layer and its low-level methods.
+"""What a low-level method hands the downfolding's general layer: the seam
+between the two.
 
 A low-level method (methods/hf.py, methods/rpa.py) returns a
 `DownfoldingTerms`; the general layer turns it into the effective
@@ -32,20 +33,3 @@ class DownfoldingTerms:
     e_c_active: float
     dc: str
     diagnostics: dict = field(default_factory=dict)
-
-
-def choice(value, choices, keyword):
-    """The entry of `choices` that `value` names, refused unless there is one.
-
-    Both are compared normalized (lower case, '_' -> '-', 'imag-frequency'
-    -> 'imagfrequency'), so either spelling of a choice is accepted, and the
-    entry is returned as `choices` lists it ('crpa_ph' for 'CRPA-PH').
-    """
-    def norm(s):
-        name = str(s).lower().replace('_', '-')
-        return {'imag-frequency': 'imagfrequency'}.get(name, name)
-    listed = {norm(c): c for c in choices}
-    if norm(value) not in listed:
-        raise ValueError(f"Unknown {keyword}={value!r}; choose one of "
-                         + ', '.join(repr(c) for c in choices) + '.')
-    return listed[norm(value)]

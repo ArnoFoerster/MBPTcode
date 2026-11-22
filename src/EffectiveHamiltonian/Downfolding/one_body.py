@@ -17,7 +17,7 @@ n_act_occ.
 import numpy as np
 from pyscf.scf.hf import get_jk
 
-from .terms import choice
+from .options import choice
 
 DC_MODES = ('full', 'hartree')
 

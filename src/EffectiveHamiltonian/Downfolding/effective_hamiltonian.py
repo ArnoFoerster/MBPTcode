@@ -49,7 +49,7 @@ from .energy import assemble_energies, environment_hf_energy
 from .methods import LOW_LEVEL
 from .one_body import (DC_MODES, core_fock, double_counting,
                        effective_one_body, inactive_jk)
-from .terms import choice
+from .options import choice
 from .two_body import effective_interaction
 
 WHO = 'Downfolding'
