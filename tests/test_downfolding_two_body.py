@@ -270,9 +270,9 @@ def test_casida_pair_order_is_the_mask_order(wat, df):
     assert np.abs(np.diag(amb) - delta).max() < 1e-12
     assert not np.any(amb - np.diag(np.diag(amb)))
     assert np.abs(np.diag(A) - (delta + 2.0 * np.diag(K))).max() < 1e-10
-    aspace = ActiveSpace(len(eps), nocc, [2, 4], [6, 8])
+    active_space = ActiveSpace(len(eps), nocc, [2, 4], [6, 8])
     labels = [(i, a) for i in range(nocc) for a in range(nocc, len(eps))]
-    picked = [p for p, m in zip(labels, active_pair_mask(aspace))
+    picked = [p for p, m in zip(labels, active_pair_mask(active_space))
               if m]
     assert picked == [(2, 6), (2, 8), (4, 6), (4, 8)]
 
@@ -318,12 +318,14 @@ def test_crpa_is_the_deleted_problem(wat, low_exact, aspace):
     sum 7.5e-16 / 1.6e-15, literal zeroing 3.6e-15 / 3.4e-15,
     zero-A+B-only 0.27 / 0.82."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
-    assert v.shape == (part.n_act,) * 4
-    assert np.abs(v - vtilde_crpa(eri, eps, nocc, part)).max() < 1e-8
-    assert np.abs(v - vtilde_crpa_zeroing(eri, eps, nocc, part)).max() < 1e-8
-    assert np.abs(v - vtilde_zero_apb_only(eri, eps, nocc, part)).max() > 1e-4
+    active_space = aspace(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
+    assert v.shape == (active_space.n_act,) * 4
+    assert np.abs(v - vtilde_crpa(eri, eps, nocc, active_space)).max() < 1e-8
+    assert np.abs(v - vtilde_crpa_zeroing(eri, eps, nocc,
+                                          active_space)).max() < 1e-8
+    assert np.abs(v - vtilde_zero_apb_only(eri, eps, nocc,
+                                           active_space)).max() > 1e-4
 
 
 def test_crpa_from_factors(wat):
@@ -333,17 +335,17 @@ def test_crpa_from_factors(wat):
     max deviation 1.5e-15."""
     mf, eri, eps, nocc = wat
     low = run_low_level(mf, method='rpa', df=True)
-    part = _non_contiguous(eps, nocc)
-    v = rpa.screening_correction(low, part, 'crpa')
-    assert np.abs(v - vtilde_crpa(eri, eps, nocc, part)).max() < 1e-8
+    active_space = _non_contiguous(eps, nocc)
+    v = rpa.screening_correction(low, active_space, 'crpa')
+    assert np.abs(v - vtilde_crpa(eri, eps, nocc, active_space)).max() < 1e-8
 
 
 def test_crpa_reduces_the_diagonal(wat, low_exact):
     """v_tu,tu = -4 x^T [(delta + 4K)_rr]^-1 x <= 0 with x_jb = (jb|tu): the
     screening only weakens the bare interaction."""
     _, _, eps, nocc = wat
-    part = _contiguous_44(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
+    active_space = _contiguous_44(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
     diag = np.einsum('tutu->tu', v)
     assert diag.max() <= 0.0 and diag.min() < -1e-2
 
@@ -353,8 +355,8 @@ def test_crpa_reduces_the_diagonal(wat, low_exact):
 def test_crpa_symmetry(wat, low_exact, aspace):
     """(tu|vw) = (ut|vw) = (vw|tu) for real orbitals."""
     _, _, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
+    active_space = aspace(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
     assert np.abs(v - v.transpose(1, 0, 2, 3)).max() < 1e-10
     assert np.abs(v - v.transpose(2, 3, 0, 1)).max() < 1e-10
 
@@ -363,18 +365,18 @@ def test_crpa_ph_is_the_masked_crpa(wat, low_exact):
     """crpa_ph keeps the cRPA correction on the particle-hole elements and
     nothing elsewhere, where cRPA itself is not zero."""
     _, _, eps, nocc = wat
-    part = _non_contiguous(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
-    v_ph = rpa.screening_correction(low_exact, part, 'crpa_ph')
-    mask = ph_element_mask(part)
+    active_space = _non_contiguous(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
+    v_ph = rpa.screening_correction(low_exact, active_space, 'crpa_ph')
+    mask = ph_element_mask(active_space)
     assert np.array_equal(v_ph, v * mask)
     assert np.abs(v[~mask]).max() > 1e-3
 
 
 def test_bare_is_zero(wat, low_exact):
     _, _, eps, nocc = wat
-    part = _non_contiguous(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'Bare')
+    active_space = _non_contiguous(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'Bare')
     assert v.shape == (4,) * 4 and not np.any(v)
 
 
@@ -383,13 +385,13 @@ def test_all_active_gives_zero(monkeypatch):
     correction is zero for every screening, without a solve."""
     mf = h2()
     low = run_low_level(mf, method='rpa', df=False)
-    part = ActiveSpace(4, 1, [0], [1, 2, 3])
+    active_space = ActiveSpace(4, 1, [0], [1, 2, 3])
 
     def no_solve(*args, **kwargs):
         raise AssertionError('a solve on an empty residual space')
     monkeypatch.setattr(rpa, 'cho_factor', no_solve)
     for screening in ('bare', 'crpa', 'crpa_ph'):
-        v = rpa.screening_correction(low, part, screening)
+        v = rpa.screening_correction(low, active_space, screening)
         assert v.shape == (4,) * 4 and not np.any(v)
 
 
@@ -401,16 +403,17 @@ def test_no_active_virtual(wat, low_exact, occ, virt):
     screened W(0) - v on those orbitals (oracle pole sum over every pair).
     Measured max deviation 2.4e-15 / 3.6e-16."""
     mf, eri, eps, nocc = wat
-    part = ActiveSpace(len(eps), nocc, occ, virt)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
-    assert np.abs(v - w0_minus_v(eri, eps, nocc, part.act)).max() < 1e-8
+    active_space = ActiveSpace(len(eps), nocc, occ, virt)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
+    assert np.abs(v - w0_minus_v(eri, eps, nocc,
+                                 active_space.act)).max() < 1e-8
 
 
 def test_screening_refusals(wat, low_exact):
     _, _, eps, nocc = wat
-    part = _contiguous_44(eps, nocc)
+    active_space = _contiguous_44(eps, nocc)
     with pytest.raises(ValueError, match="'crpa'"):
-        rpa.screening_correction(low_exact, part, 'rpa')
+        rpa.screening_correction(low_exact, active_space, 'rpa')
 
 
 @pytest.mark.parametrize('aspace', [_contiguous_44, _non_contiguous],
@@ -421,22 +424,24 @@ def test_crpa_is_the_spin_orbital_crpa(wat, low_exact, aspace):
     -2 V (A+B)_so,rr^-1 V^T), its alpha-alpha block. Measured max deviation
     (contiguous / non-contiguous): 2.6e-16 / 1.9e-16."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'crpa')
-    assert np.abs(v - vtilde_crpa_so(eri, eps, nocc, part)).max() < 1e-8
+    active_space = aspace(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'crpa')
+    assert np.abs(v - vtilde_crpa_so(eri, eps, nocc,
+                                     active_space)).max() < 1e-8
 
 
-def _v_eff(eri, part, screening, low):
-    a = part.act
+def _v_eff(eri, active_space, screening, low):
+    a = active_space.act
     return (eri[np.ix_(a, a, a, a)]
-            + rpa.screening_correction(low, part, screening))
+            + rpa.screening_correction(low, active_space, screening))
 
 
-def _active_w_static(v_eff, eps, part):
+def _active_w_static(v_eff, eps, active_space):
     """W^A[v_eff](0) of the oracle: the restricted direct RPA of v_eff alone,
     on the active orbitals (occupied first) and their orbital energies."""
-    n = part.n_act
-    return v_eff + w0_minus_v(v_eff, eps[part.act], part.n_act_occ,
+    n = active_space.n_act
+    return v_eff + w0_minus_v(v_eff, eps[active_space.act],
+                              active_space.n_act_occ,
                               np.arange(n))
 
 
@@ -449,10 +454,10 @@ def test_active_correlation_energy(wat, low_exact, aspace, screening):
     the active orbitals. Measured deviation 0.0 for every case listed (both
     run the same eigensolve of delta^1/2 (delta + 4K) delta^1/2)."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v_eff = _v_eff(eri, part, screening, low_exact)
-    e = rpa.active_correlation_energy(low_exact, part, v_eff)
-    ref = rpa_energy(v_eff, eps[part.act], part.n_act_occ)
+    active_space = aspace(eps, nocc)
+    v_eff = _v_eff(eri, active_space, screening, low_exact)
+    e = rpa.active_correlation_energy(low_exact, active_space, v_eff)
+    ref = rpa_energy(v_eff, eps[active_space.act], active_space.n_act_occ)
     assert e < 0.0 and abs(e - ref) < 1e-8
 
 
@@ -466,11 +471,11 @@ def test_static_defect(wat, low_exact, aspace, screening):
     (contiguous / non-contiguous): crpa 2.9e-15 / 2.0e-15, bare 0.143 /
     0.163, crpa_ph 0.142 / 0.163; deviation from the oracle at most 1.1e-15."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v_eff = _v_eff(eri, part, screening, low_exact)
-    d = rpa.static_defect(low_exact, part, v_eff)
-    ref = np.abs(w_static_active(eri, eps, nocc, part)
-                 - _active_w_static(v_eff, eps, part)).max()
+    active_space = aspace(eps, nocc)
+    v_eff = _v_eff(eri, active_space, screening, low_exact)
+    d = rpa.static_defect(low_exact, active_space, v_eff)
+    ref = np.abs(w_static_active(eri, eps, nocc, active_space)
+                 - _active_w_static(v_eff, eps, active_space)).max()
     assert abs(d - ref) < 1e-8
     if screening == 'crpa':
         assert d < 1e-8
@@ -484,10 +489,10 @@ def test_no_active_pair_correlation_and_defect(wat, low_exact, occ, virt):
     """No active ph pair: E_c^A = 0 and W^A = v_eff, so the crpa defect is
     |W(0) - v - vtilde| with vtilde the fully screened W(0) - v: zero."""
     mf, eri, eps, nocc = wat
-    part = ActiveSpace(len(eps), nocc, occ, virt)
-    v_eff = _v_eff(eri, part, 'crpa', low_exact)
-    assert rpa.active_correlation_energy(low_exact, part, v_eff) == 0.0
-    assert rpa.static_defect(low_exact, part, v_eff) < 1e-8
+    active_space = ActiveSpace(len(eps), nocc, occ, virt)
+    v_eff = _v_eff(eri, active_space, 'crpa', low_exact)
+    assert rpa.active_correlation_energy(low_exact, active_space, v_eff) == 0.0
+    assert rpa.static_defect(low_exact, active_space, v_eff) < 1e-8
 
 
 # --- mRPA (Scott and Booth, PRL 132, 076401, Eq. 5) --------------------------
@@ -507,10 +512,10 @@ def test_mrpa_against_the_spin_orbital_oracle(wat, aspace, df):
     """
     mf, eri, eps, nocc = wat
     low = run_low_level(mf, method='rpa', df=df)
-    part = aspace(eps, nocc)
-    v = rpa.screening_correction(low, part, 'mrpa')
-    aa, _ = vtilde_mrpa(eri, eps, nocc, part)
-    assert v.shape == (part.n_act,) * 4
+    active_space = aspace(eps, nocc)
+    v = rpa.screening_correction(low, active_space, 'mrpa')
+    aa, _ = vtilde_mrpa(eri, eps, nocc, active_space)
+    assert v.shape == (active_space.n_act,) * 4
     assert np.abs(v - aa).max() < 1e-8
     assert np.abs(aa).max() > 1e-3
 
@@ -524,8 +529,8 @@ def test_mrpa_is_spin_independent(wat, aspace):
     carry one interaction for every spin block. Measured 3.9e-14 / 3.7e-14
     (contiguous / non-contiguous)."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    aa, ab = vtilde_mrpa(eri, eps, nocc, part)
+    active_space = aspace(eps, nocc)
+    aa, ab = vtilde_mrpa(eri, eps, nocc, active_space)
     assert np.abs(aa - ab).max() < 1e-10
 
 
@@ -535,9 +540,9 @@ def test_mrpa_only_touches_ph_elements(wat, low_exact):
     is exactly zero on every other element. Measured symmetry deviation
     4.7e-17, max |vt| 6.7e-3."""
     _, _, eps, nocc = wat
-    part = _non_contiguous(eps, nocc)
-    v = rpa.screening_correction(low_exact, part, 'mrpa')
-    mask = ph_element_mask(part)
+    active_space = _non_contiguous(eps, nocc)
+    v = rpa.screening_correction(low_exact, active_space, 'mrpa')
+    mask = ph_element_mask(active_space)
     assert not np.any(v[~mask])
     assert np.abs(v[mask]).max() > 1e-3
     for perm in ((1, 0, 2, 3), (0, 1, 3, 2), (2, 3, 0, 1)):
@@ -555,16 +560,17 @@ def test_active_rpa_with_mrpa_reproduces_the_moments(wat, low_exact, aspace):
     non-contiguous): 4.8e-14 / 2.1e-13; the bare v misses by 1.6e-2 /
     6.1e-3."""
     mf, eri, eps, nocc = wat
-    part = aspace(eps, nocc)
-    v_eff = _v_eff(eri, part, 'mrpa', low_exact)
+    active_space = aspace(eps, nocc)
+    v_eff = _v_eff(eri, active_space, 'mrpa', low_exact)
     _, xpy = drpa(eri, eps, nocc)
-    mask = active_pair_mask(part)
+    mask = active_pair_mask(active_space)
     eta0 = (xpy @ xpy.T)[np.ix_(mask, mask)]
-    _, xpy_a = drpa(v_eff, eps[part.act], part.n_act_occ)
+    _, xpy_a = drpa(v_eff, eps[active_space.act], active_space.n_act_occ)
     assert np.abs(xpy_a @ xpy_a.T - eta0).max() < 1e-8
     # the bare v does not: the moments are what the correction is for
-    _, xpy_v = drpa(_v_eff(eri, part, 'bare', low_exact), eps[part.act],
-                    part.n_act_occ)
+    _, xpy_v = drpa(_v_eff(eri, active_space, 'bare', low_exact),
+                    eps[active_space.act],
+                    active_space.n_act_occ)
     assert np.abs(xpy_v @ xpy_v.T - eta0).max() > 1e-4
 
 
@@ -575,8 +581,8 @@ def test_all_active_mrpa_is_bare():
     2.4e-16."""
     mf = h2()
     low = run_low_level(mf, method='rpa', df=False)
-    part = ActiveSpace(4, 1, [0], [1, 2, 3])
-    v = rpa.screening_correction(low, part, 'mrpa')
+    active_space = ActiveSpace(4, 1, [0], [1, 2, 3])
+    v = rpa.screening_correction(low, active_space, 'mrpa')
     assert v.shape == (4,) * 4 and np.abs(v).max() < 1e-9
 
 
@@ -593,8 +599,8 @@ def test_reference_determinant_energy_mrpa(wat_df):
     """As for the other screenings: the reference determinant of H_eff is
     E_HF + E_c[v] - E_c^A[v_eff]; vtilde has no (kk|ll) or (kl|lk) element,
     so E_HF,ee[vtilde] = 0. Measured 5.7e-14 (tolerance 1e-9)."""
-    mf, low, aspace = wat_df
-    ham = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    mf, low, active_space = wat_df
+    ham = build_effective_hamiltonian(low, active_space, screening='mrpa')
     g, en = ham.g_eff, ham.energies
     assert abs(reference_energy(g, 2)
                - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
@@ -608,10 +614,11 @@ def test_sigma_with_mrpa(wat_df, sigma):
     energy term is exactly 0, and switching Sigma^E on keeps the energy of
     the reference determinant. Measured 0.0 for both forms (tolerance
     1e-9); Sigma_trace -0.0777."""
-    mf, low, aspace = wat_df
-    ham_plain = build_effective_hamiltonian(low, aspace, screening='mrpa')
+    mf, low, active_space = wat_df
+    ham_plain = build_effective_hamiltonian(low, active_space,
+                                            screening='mrpa')
     g_plain = ham_plain.g_eff
-    ham = build_effective_hamiltonian(low, aspace, screening='mrpa',
+    ham = build_effective_hamiltonian(low, active_space, screening='mrpa',
                                       sigma=sigma)
     g, en = ham.g_eff, ham.energies
     assert en.e_exchange_term == 0.0 and abs(en.e_sigma_trace) > 1e-3
@@ -687,7 +694,7 @@ def test_active_ov_only_for_the_casida_static_defect(monkeypatch):
     and on imagfrequency it is not built at all; (tu|vw) alone is."""
     from tests.downfolding_oracle import water
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     built = []
     real = rpa._active_ov
 
@@ -701,13 +708,13 @@ def test_active_ov_only_for_the_casida_static_defect(monkeypatch):
         low = cas if df else run_low_level(mf, method='rpa', df=False)
         for screening in ('crpa', 'mrpa'):
             built.clear()
-            build_effective_hamiltonian(low, aspace, screening=screening)
+            build_effective_hamiltonian(low, active_space, screening=screening)
             assert built == ['casida']
             built.clear()
-            build_effective_hamiltonian(low, aspace, screening=screening,
+            build_effective_hamiltonian(low, active_space, screening=screening,
                                         diagnostics=())
             assert built == []
     built.clear()
     build_effective_hamiltonian(
-        run_low_level(mf, method='rpa', mode='imagfrequency'), aspace)
+        run_low_level(mf, method='rpa', mode='imagfrequency'), active_space)
     assert built == []

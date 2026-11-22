@@ -41,14 +41,14 @@ def run(mf, **opts):
     return HFLowLevel(mf=mf)
 
 
-def terms(low, part, **opts):
+def terms(low, active_space, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
-    `part`, one block for the ActiveSpace of a restricted reference and the
-    three (aa, ab, bb) for the pair of an unrestricted one; no static
+    `active_space`, one block for the ActiveSpace of a restricted reference and
+    the three (aa, ab, bb) for the pair of an unrestricted one; no static
     self-energy, both correlation energies zero, and the full double counting
     (of a zero vtilde). HF takes no options."""
     _no_options(opts)
-    parts = channels_of(part)
+    parts = channels_of(active_space)
     n_act = parts[0].n_act
     blocks = 1 if len(parts) == 1 else 3
     return DownfoldingTerms(

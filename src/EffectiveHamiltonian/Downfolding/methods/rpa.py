@@ -260,14 +260,15 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
 
 
-def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
+def terms(low, active_space, screening='crpa', sigma=None,
+          diagnostics=DIAGNOSTICS,
           numerics=None, **opts):
-    """The DownfoldingTerms of the RPA on the active space `part`.
+    """The DownfoldingTerms of the RPA on the active space `active_space`.
 
-    `part` is one ActiveSpace for a restricted low-level result, and the terms
-    are those of one spin channel: vtilde = (v,), sigma_bar = (s,). For an
-    unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab, bb),
-    sigma_bar = (alpha, beta); the correlation energies and the static
+    `active_space` is one ActiveSpace for a restricted low-level result, and
+    the terms are those of one spin channel: vtilde = (v,), sigma_bar = (s,).
+    For an unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab,
+    bb), sigma_bar = (alpha, beta); the correlation energies and the static
     defect are those of both spins together, and in the diagnostics what
     belongs to one spin (the pole-free window, the pole distances, Z) is a
     pair.
@@ -332,15 +333,17 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     names = _diagnostic_names(diagnostics)
     screening = choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
-    chans = _channels(low, part)
-    vt = _two_body_blocks(screening_correction(low, part, screening), chans)
+    chans = _channels(low, active_space)
+    vt = _two_body_blocks(screening_correction(low, active_space, screening),
+                          chans)
     v_eff = tuple(v + t for v, t in zip(_active_v(low, chans), vt))
     recorded = {}
     if 'static_defect' in names:
-        recorded['static_defect'] = static_defect(low, part, v_eff)
-    e_c_active = active_correlation_energy(low, part, v_eff)
+        recorded['static_defect'] = static_defect(low, active_space, v_eff)
+    e_c_active = active_correlation_energy(low, active_space, v_eff)
     if 'ec_active_casida' in names and low.mode != 'casida':
-        pairs = any(0 < c.part.n_act_occ < c.part.n_act for c in chans)
+        pairs = any(0 < c.active_space.n_act_occ < c.active_space.n_act
+                    for c in chans)
         dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
         recorded['ec_active_casida'] = {'casida': dense,
                                         'difference': e_c_active - dense}
@@ -348,7 +351,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
     if sigma is not None:
         # stacklevel 4: the near-pole warning points at the caller of
         # build_effective_hamiltonian, as the method's other warnings do
-        s_bars, kept = _embedding(low, part, sigma, with_undamped=True,
+        s_bars, kept = _embedding(low, active_space, sigma, with_undamped=True,
                                   stacklevel=4)
         sigma_bar, dc = tuple(s_bars), 'hartree'
         # the two checks of Sigma_bar always run and warn; `diagnostics`
@@ -376,13 +379,13 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
 # static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
 
 
-def screening_correction(low, part, screening):
+def screening_correction(low, active_space, screening):
     """The static screening correction vt = W^r(0) - v on the active orbitals.
 
-    Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
-    For an unrestricted result `part` is the pair of ActiveSpaces (alpha, beta)
-    and the three blocks (aa, ab, bb) are returned (spin.py), on the casida
-    route:
+    Returns (n_act,)*4, chemist order (tu|vw), on active_space.act (occupied
+    first). For an unrestricted result `active_space` is the pair of
+    ActiveSpaces (alpha, beta) and the three blocks (aa, ab, bb) are returned
+    (spin.py), on the casida route:
         vt^{ss'}_tu,vw = -2 sum_{r,r'} (t_s u_s|r) [(delta + 2K)_rr^-1]_rr' (r'|v_s' w_s'),
     r, r' over the stacked pairs of both spins that are not active, one
     operator W^r - v between each spin's own active orbitals. 'crpa_ph'
@@ -447,17 +450,17 @@ def screening_correction(low, part, screening):
                 f"method={METHOD!r} screening='mrpa' is built on the "
                 f"Casida eigenvectors only: use mode='casida' (this low-level"
                 f" result is mode={low.mode!r}).")
-        return _per_block(_mrpa_correction(low, _channels(low, part)))
-    chans = _channels(low, part)
+        return _per_block(_mrpa_correction(low, _channels(low, active_space)))
+    chans = _channels(low, active_space)
     spins = BLOCKS[len(chans)]
-    n = chans[0].part.n_act
-    res = [~active_pair_mask(c.part) for c in chans]
+    n = chans[0].active_space.n_act
+    res = [~active_pair_mask(c.active_space) for c in chans]
     if screening == 'bare' or n == 0 or not any(r.any() for r in res):
         return _per_block([np.zeros((n,) * 4) for _ in spins])
     if low.mode != 'casida':
         b_act = [_pair_factors(low, c).reshape(-1, n * n) for c in chans]
         w_r = dyson_screening(
-            low.cache['p0'] - active_polarizability_static(low, part),
+            low.cache['p0'] - active_polarizability_static(low, active_space),
             correlation=True)
         vt = [(b_act[s].T @ w_r @ b_act[t]).reshape((n,) * 4)
               for s, t in spins]
@@ -473,7 +476,8 @@ def screening_correction(low, part, screening):
               for s, t in spins]
     if screening == 'crpa_ph':
         for (s, t), block in zip(spins, vt):
-            block *= ph_element_mask(chans[s].part, chans[t].part)
+            block *= ph_element_mask(chans[s].active_space,
+                                     chans[t].active_space)
     return _per_block(vt)
 
 
@@ -482,7 +486,7 @@ def _residual_integrals(low, chans, res):
     pairs per channel: K_ia,jb = (ia|jb) between them, and V, one array per
     channel t, V[t][ia, tu] = (ia|tu) with t, u the active orbitals of that
     channel. From the integrals of the full RPA, low.factors or low.eri."""
-    n = chans[0].part.n_act
+    n = chans[0].active_space.n_act
     if low.factors is not None:
         b_res = _join([_ov_factors(c)[:, r] for c, r in zip(chans, res)],
                       axis=1)
@@ -497,7 +501,7 @@ def _residual_integrals(low, chans, res):
             # the pair count spelt out: a channel may hold no pair at all
             k_rows[s].append(ov[:, :chan_t.nocc, chan_t.nocc:].reshape(
                 len(ov), res_t.size)[:, res_t])
-            act = chan_t.part.act
+            act = chan_t.active_space.act
             v_cols[t].append(ov[:, act][:, :, act].reshape(len(ov), n * n))
     return _square(k_rows), [_join(col) for col in v_cols]
 
@@ -516,13 +520,13 @@ def _mrpa_correction(low, chans):
     not short-cut. eta0_A is a principal block of a positive definite
     matrix, so one Cholesky factor serves both solves. Zero when no channel
     has an active ph pair."""
-    n = chans[0].part.n_act
-    occ = [c.part.n_act_occ for c in chans]
+    n = chans[0].active_space.n_act
+    occ = [c.active_space.n_act_occ for c in chans]
     spins = BLOCKS[len(chans)]
     vt = [np.zeros((n,) * 4) for _ in spins]
     if not any(0 < k < n for k in occ):
         return vt
-    xpy_a = low.xpy[_join([active_pair_mask(c.part) for c in chans])]
+    xpy_a = low.xpy[_join([active_pair_mask(c.active_space) for c in chans])]
     delta, k_ph, _ = _active_ph(chans, _active_v(low, chans))
     eta0 = cho_factor(xpy_a @ xpy_a.T)
     k_eff = cho_solve(eta0, cho_solve(eta0, np.diag(delta)).T)
@@ -543,26 +547,26 @@ def _mrpa_correction(low, chans):
     return vt
 
 
-def active_pair_factors(low, part):
+def active_pair_factors(low, active_space):
     """B[Q, t, u] (naux, n_act, n_act): the fitting factors of every active
     pair, occupied-occupied, occupied-virtual and virtual-virtual, on
-    part.act (occupied first), so (tu|vw) = sum_Q B_Q,tu B_Q,vw is the
+    active_space.act (occupied first), so (tu|vw) = sum_Q B_Q,tu B_Q,vw is the
     full RPA's fitted v on the active orbitals. vtilde needs all of them,
     not only the ov block. On space-time they are built from
     the active columns of the collocation X alone, B_Q,tu = sum_P D_PQ X_Pt
     X_Pu (low.cache['factors']), the factors chi0 is built from. For an
-    unrestricted result `part` is the pair (alpha, beta) and the pair of
-    each spin's factors is returned, both on the one auxiliary basis. A
+    unrestricted result `active_space` is the pair (alpha, beta) and the pair
+    of each spin's factors is returned, both on the one auxiliary basis. A
     casida result on the exact integrals (df=False) has no factors and is
     refused (NotImplementedError)."""
     _require_factors(low, 'active_pair_factors')
     return _per_channel([_pair_factors(low, c)
-                         for c in _channels(low, part)])
+                         for c in _channels(low, active_space)])
 
 
 def _pair_factors(low, chan):
     """`active_pair_factors` of one spin channel."""
-    act = chan.part.act
+    act = chan.active_space.act
     if low.mode == 'space-time':
         x, d = chan.collocation, low.cache['factors'][1]
         n, x_act = len(act), x[:, act]
@@ -571,7 +575,7 @@ def _pair_factors(low, chan):
     return chan.factors[:, act][:, :, act]
 
 
-def active_polarizability_static(low, part):
+def active_polarizability_static(low, active_space):
     """P^A(0) (naux, naux): the static bare response of the active ph pairs
     alone (i active occupied, a active virtual) in the normalized fitting
     basis, chi0(0) of the full P(0) restricted to those columns of B_ov,
@@ -586,14 +590,14 @@ def active_polarizability_static(low, part):
     transform of -2 sum_ia B_ia B_ia^T exp(-delta_ia tau) over the active ph
     pairs: with every orbital active it is P(0) itself, to the bit.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and P^A(0)
-    the sum of the two spins' active pairs' responses, each
+    For an unrestricted result `active_space` is the pair (alpha, beta) and
+    P^A(0) the sum of the two spins' active pairs' responses, each
     -2 sum_ia B_ia B_ia^T / delta_ia with that spin's factors and orbital
     energies: the -4 above is -2g of the one restricted channel. A casida
     result on the exact integrals (df=False) has no factors and is refused
     (NotImplementedError)."""
     _require_factors(low, 'active_polarizability_static')
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     if low.mode == 'space-time':
         # per spin, on the grid and with the mid-gap P(0) was built with;
         # the kernel carries the closed-shell factor 2, so the two spins'
@@ -601,8 +605,8 @@ def active_polarizability_static(low, part):
         d = low.cache['factors'][1]
         out = None
         for chan in chans:
-            k, act = chan.part.n_act_occ, chan.part.act
-            if k == 0 or k == chan.part.n_act:
+            k, act = chan.active_space.n_act_occ, chan.active_space.act
+            if k == 0 or k == chan.active_space.n_act:
                 continue
             mu = particle_hole_window(chan.eps, chan.nocc)[2]
             term = chi0_imaginary_frequency(
@@ -617,7 +621,7 @@ def active_polarizability_static(low, part):
         return out
     blocks = []
     for chan in chans:
-        mask = active_pair_mask(chan.part)
+        mask = active_pair_mask(chan.active_space)
         blocks.append((_ov_factors(chan)[:, mask],
                        frequency_factor(_delta(chan, mask), 0.0, True)))
     return chi0_aux(blocks, spin_weight(chans))
@@ -635,7 +639,7 @@ def _active_v(low, chans):
     Not the exact v of H_eff (`two_body.active_eri`): E_c^A, W^A and the
     static defect take the integrals the full RPA was solved with,
     so that the double counting cancels against E_c and W."""
-    n = chans[0].part.n_act
+    n = chans[0].active_space.n_act
     spins = BLOCKS[len(chans)]
     if low.mode == 'space-time' or low.factors is not None:
         if low.mode == 'space-time':
@@ -646,7 +650,7 @@ def _active_v(low, chans):
                      for s, t in spins)
     blocks = []
     for s, t in spins:
-        first, second = chans[s].part.act, chans[t].part.act
+        first, second = chans[s].active_space.act, chans[t].active_space.act
         blocks.append(_eri_block(low, s, t)[np.ix_(first, first)]
                       [:, :, second][:, :, :, second])
     return tuple(blocks)
@@ -659,13 +663,13 @@ def _active_ov(low, chans):
     from low.factors or low.eri (casida). Its cost, n^2 naux n_pair with the
     factors, is that of the whole pair space, so it is built only where it
     is read: the casida W(0) of `static_defect`."""
-    n = chans[0].part.n_act
+    n = chans[0].active_space.n_act
     if low.factors is not None:
         b_ov = _join([_ov_factors(c) for c in chans], axis=1)
         return [_act_factors(c).T @ b_ov for c in chans]
     out = []
     for s, chan_s in enumerate(chans):
-        act, cols = chan_s.part.act, []
+        act, cols = chan_s.active_space.act, []
         for t, chan_t in enumerate(chans):
             eri = _eri_block(low, s, t)
             # spelt out: n may be 0
@@ -684,11 +688,11 @@ def _active_ph(chans, v_eff):
     v_eff[i,a,j,b], and v_ph, one (n*n, n_ph) array per channel, the columns
     v_eff[:, :, i, a] with the first pair in that channel. v_eff: the blocks
     (v,) or (aa, ab, bb)."""
-    n = chans[0].part.n_act
-    occ = [c.part.n_act_occ for c in chans]
+    n = chans[0].active_space.n_act
+    occ = [c.active_space.n_act_occ for c in chans]
     delta = []
     for chan, k in zip(chans, occ):
-        eps = chan.eps[chan.part.act]
+        eps = chan.eps[chan.active_space.act]
         delta.append((eps[k:][None, :] - eps[:k][:, None]).ravel())
     k_rows, v_ph = [], []
     for s, k_s in enumerate(occ):
@@ -704,7 +708,7 @@ def _active_ph(chans, v_eff):
     return _join(delta), _square(k_rows), v_ph
 
 
-def active_correlation_energy(low, part, v_eff):
+def active_correlation_energy(low, active_space, v_eff):
     """E_c^A[v_eff], the direct RPA correlation energy of the active space
     alone: the restricted singlet dRPA on the n_A_o n_A_v active ph pairs
     with K_ia,jb = v_eff[i,a,j,b] (local indices, occupied first) and the
@@ -736,14 +740,15 @@ def active_correlation_energy(low, part, v_eff):
     pair again cancels to rounding with every orbital active. For two spin
     channels the factor is -1 per spin, -g with the spin weight g.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and v_eff
-    the three blocks (aa, ab, bb): the direct RPA on the active ph pairs of
-    both spins, stacked, with K^A_(ia s),(jb s') = v_eff^{ss'}[i,a,j,b]. It
+    For an unrestricted result `active_space` is the pair (alpha, beta) and
+    v_eff the three blocks (aa, ab, bb): the direct RPA on the active ph pairs
+    of both spins, stacked, with K^A_(ia s),(jb s') = v_eff^{ss'}[i,a,j,b]. It
     is zero only when neither channel has an active ph pair; with one in a
     single channel the problem holds that spin's pairs."""
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     v_eff = _two_body_blocks(v_eff, chans)
-    if not any(0 < c.part.n_act_occ < c.part.n_act for c in chans):
+    if not any(0 < c.active_space.n_act_occ < c.active_space.n_act
+               for c in chans):
         return 0.0
     if low.mode != 'casida':
         return _active_ec_quadrature(low, chans, v_eff)
@@ -754,8 +759,8 @@ def _active_ec_casida(low, chans, v_eff):
     """The dense dRPA E_c^A[v_eff] of the active ph pairs by the plasmon
     formula (there is at least one active ph pair); v_eff the blocks (v,)
     or (aa, ab, bb)."""
-    eps = [c.eps[c.part.act] for c in chans]
-    occ = [c.part.n_act_occ for c in chans]
+    eps = [c.eps[c.active_space.act] for c in chans]
+    occ = [c.active_space.n_act_occ for c in chans]
     if len(chans) == 1:
         return _plasmon(eps[0], occ[0], None, v_eff[0], low.numerics)[0]
     return _plasmon(tuple(eps), tuple(occ), None, v_eff, low.numerics)[0]
@@ -782,7 +787,7 @@ def _active_ec_quadrature(low, chans, v_eff):
     return float(e_c / (2.0 * np.pi))
 
 
-def static_defect(low, part, v_eff):
+def static_defect(low, active_space, v_eff):
     """max |W(0) - W^A[v_eff](0)| over the active (pq|rs): how far the
     active-space RPA of v_eff falls short of the full static screening.
 
@@ -805,17 +810,17 @@ def static_defect(low, part, v_eff):
     i.e. delta_A -> -4/pi(0) above, without which the crpa defect would be
     the transform's error and not zero.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and v_eff
-    the three blocks (aa, ab, bb). Both sides are then the two-spin ones,
+    For an unrestricted result `active_space` is the pair (alpha, beta) and
+    v_eff the three blocks (aa, ab, bb). Both sides are then the two-spin ones,
     W(0) - v = -2 V xpy diag(1/omega) xpy^T V^T on the stacked pairs and
     W^A[v_eff](0) = v_eff - 2 v_eff[:, ph] (delta_A + 2 K^A)^-1 v_eff[ph, :]
     on the active ph pairs of both spins, and the defect is the largest
     deviation over the three blocks.
     """
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     v_eff = _two_body_blocks(v_eff, chans)
     spins = BLOCKS[len(chans)]
-    n = chans[0].part.n_act
+    n = chans[0].active_space.n_act
     if n == 0:
         return 0.0
     g = spin_weight(chans)
@@ -875,10 +880,10 @@ def static_defect(low, part, v_eff):
 # times the active orbitals.
 
 
-def embedding_self_energy(low, part, sigma, numerics=None):
+def embedding_self_energy(low, active_space, sigma, numerics=None):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
-    part.act (occupied first): iG^E(W - v) with r over part.env, the full
-    RPA's W and the mean-field energies.
+    active_space.act (occupied first): iG^E(W - v) with r over
+    active_space.env, the full RPA's W and the mean-field energies.
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
     sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
@@ -902,8 +907,8 @@ def embedding_self_energy(low, part, sigma, numerics=None):
     Zero when the environment is empty. A Sigma_bar that is not finite (an
     active energy on a pole) is refused, FloatingPointError.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and the pair
-    (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
+    For an unrestricted result `active_space` is the pair (alpha, beta) and the
+    pair (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
     spin, with the residues between that spin's active and environment
     orbitals, that spin's orbital energies, and the Omega_n of the two-spin
     RPA, which both spins share. One sigma and one srg_s serve both.
@@ -912,31 +917,31 @@ def embedding_self_energy(low, part, sigma, numerics=None):
         pole_margin, continuation_margin) is used here in place of the
         run's; the rest has to be the run's (`_with_settings`).
     """
-    return _per_channel(_embedding(_with_settings(low, numerics), part,
+    return _per_channel(_embedding(_with_settings(low, numerics), active_space,
                                    sigma)[0])
 
 
-def _embedding(low, part, sigma, with_undamped=False, stacklevel=3):
+def _embedding(low, active_space, sigma, with_undamped=False, stacklevel=3):
     """`_embedding_unchecked` after the pole warning and with the result
     required finite: (Sigma_bar, kept), each a list over the spin channels
-    of `part`. stacklevel: where the pole warning points, counted from this
-    function as for warnings.warn (3: the caller of this function's
+    of `active_space`. stacklevel: where the pole warning points, counted from
+    this function as for warnings.warn (3: the caller of this function's
     caller)."""
     sigma = choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     # 'srg' at a finite s is bounded near a pole and needs no warning on
     # casida; at srg_s = None it is as undamped as 'averaged'
     if sigma == 'averaged' or low.mode != 'casida' or settings.srg_s is None:
         _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
-    sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
+    sigma_bar, kept = _embedding_unchecked(low, active_space, sigma, settings,
                                            with_undamped)
     for chan, s_bar in zip(chans, sigma_bar):
         _require_finite(s_bar, chan, sigma)
     return sigma_bar, kept
 
 
-def _embedding_unchecked(low, part, sigma, settings, with_undamped):
+def _embedding_unchecked(low, active_space, sigma, settings, with_undamped):
     """(Sigma_bar, kept) of `embedding_self_energy`, each a list over the
     spin channels; kept is what the diagnostics read without building it
     again: on casida 'args' = (w, eps_t, eps_r, occupied_r, omega) of the
@@ -947,14 +952,15 @@ def _embedding_unchecked(low, part, sigma, settings, with_undamped):
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
     if low.mode != 'casida':
-        return _embedding_imag_axis(low, part, sigma)
-    chans = _channels(low, part)
-    residues = screened_residues(low, part)
+        return _embedding_imag_axis(low, active_space, sigma)
+    chans = _channels(low, active_space)
+    residues = screened_residues(low, active_space)
     residues = [residues] if len(chans) == 1 else list(residues)
     sigma_bar, kept_per_channel = [], []
     for chan, w in zip(chans, residues):
-        env = chan.part.env
-        args = (w, chan.eps[chan.part.act], chan.eps[env], env < chan.nocc,
+        env = chan.active_space.env
+        args = (w, chan.eps[chan.active_space.act], chan.eps[env],
+                env < chan.nocc,
                 low.omega)
         kept = {'args': args, 'srg_s': settings.srg_s}
         if sigma == 'srg':
@@ -968,11 +974,11 @@ def _embedding_unchecked(low, part, sigma, settings, with_undamped):
     return sigma_bar, kept_per_channel
 
 
-def screened_residues(low, part, orbitals=None):
+def screened_residues(low, active_space, orbitals=None):
     """w (nexc, n_act, n_r): the residues of the full W between the active
-    orbitals (part.act, occupied first) and `orbitals` (default part.env,
-    the inactive then the environment virtual orbitals), one slice per RPA
-    excitation:
+    orbitals (active_space.act, occupied first) and `orbitals` (default
+    active_space.env, the inactive then the environment virtual orbitals), one
+    slice per RPA excitation:
 
         w[n, t, r] = sqrt(2) sum_ia (t r|i a) xpy_ia,n.
 
@@ -989,9 +995,10 @@ def screened_residues(low, part, orbitals=None):
     RPA, low.factors or low.eri. Casida only: the other routes keep no
     eigenvectors, and refuse (NotImplementedError).
 
-    For an unrestricted result `part` is the pair (alpha, beta), `orbitals`
-    a pair of index arrays when given, and the pair (w_alpha, w_beta) is
-    returned, each between that spin's active orbitals and its `orbitals`:
+    For an unrestricted result `active_space` is the pair (alpha, beta),
+    `orbitals` a pair of index arrays when given, and the pair (w_alpha,
+    w_beta) is returned, each between that spin's active orbitals and its
+    `orbitals`:
 
         w^s[n, t, r] = sum_{ia s'} (t_s r_s|i_s' a_s') xpy_{ia s', n},
 
@@ -1003,9 +1010,9 @@ def screened_residues(low, part, orbitals=None):
         raise NotImplementedError(
             f"screened_residues needs the Casida eigenvectors X+Y, which "
             f"mode={low.mode!r} does not keep: use mode='casida'.")
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     if orbitals is None:
-        orbs = [c.part.env for c in chans]
+        orbs = [c.active_space.env for c in chans]
     elif len(chans) == 1:
         orbs = [np.asarray(orbitals, dtype=int)]
     else:
@@ -1021,13 +1028,13 @@ def _residues(low, chans, orbs):
     if low.factors is not None:
         rho = _join([_ov_factors(c) for c in chans], axis=1) @ low.xpy
         for chan, r in zip(chans, orbs):
-            b, act = chan.factors, chan.part.act
+            b, act = chan.factors, chan.active_space.act
             n, m = len(act), len(r)
             w = rho.T @ b[:, act][:, :, r].reshape(b.shape[0], n * m)
             out.append(scale * w.reshape(nexc, n, m))
         return out
     for s, (chan_s, r) in enumerate(zip(chans, orbs)):
-        act = chan_s.part.act
+        act = chan_s.active_space.act
         n, m = len(act), len(r)
         cols = []
         for t, chan_t in enumerate(chans):
@@ -1147,37 +1154,37 @@ def averaged_self_energy(w, eps_t, eps_r, occupied_r, omega):
         return 0.5 * (half + half.T)
 
 
-def _embedding_imag_axis(low, part, sigma):
+def _embedding_imag_axis(low, active_space, sigma):
     """`_embedding_unchecked` on imagfrequency and space-time, a list over
     the spin channels each: S^E on the Pade nodes of the run's numerics
     (`pade_nodes`, on the line mu + i w, mu the channel's own mid-gap),
     fitted once per channel."""
     nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
-    chans = _channels(low, part)
-    samples = sigma_env_imag_axis(low, part, nodes)
+    chans = _channels(low, active_space)
+    samples = sigma_env_imag_axis(low, active_space, nodes)
     samples = [samples] if len(chans) == 1 else list(samples)
     sigma_bar, kept_per_channel = [], []
     for chan, sampled in zip(chans, samples):
         z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
         kept = {'z': z, 'samples': sampled, 'fit': None}
-        n = chan.part.n_act
-        if n == 0 or len(chan.part.env) == 0:
+        n = chan.active_space.n_act
+        if n == 0 or len(chan.active_space.env) == 0:
             s_bar = np.zeros((n, n))
         else:
             kept['fit'] = pade_fit_elementwise(z, sampled, symmetric=True)
             s_bar = _evaluate_continued(kept['fit'],
-                                        chan.eps[chan.part.act], sigma)
+                                        chan.eps[chan.active_space.act], sigma)
         sigma_bar.append(s_bar)
         kept_per_channel.append(kept)
     return sigma_bar, kept_per_channel
 
 
-def sigma_env_imag_axis(low, part, query_freqs):
+def sigma_env_imag_axis(low, active_space, query_freqs):
     """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
-    the correlation self-energy iG(W - v) of the full RPA's W on part.act
-    (occupied first) with the internal orbital restricted to part.env, mu
-    the whole system's mid-gap. imagfrequency and space-time
-    (NotImplementedError on casida, which has the residues instead).
+    the correlation self-energy iG(W - v) of the full RPA's W on
+    active_space.act (occupied first) with the internal orbital restricted to
+    active_space.env, mu the whole system's mid-gap. imagfrequency and
+    space-time (NotImplementedError on casida, which has the residues instead).
 
     Both routes: the GW density's `fitted_self_energy_matrix_imaginary_axis`
     on the fitting factors B[Q, t, r] (t active, r environment) and the
@@ -1194,9 +1201,9 @@ def sigma_env_imag_axis(low, part, query_freqs):
     and environment columns alone (N^3 times the active orbitals), and uses
     the W of its own chi0.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and the pair
-    of each spin's samples is returned: S^{E,s}(mu_s + i w) with that spin's
-    factors between its active and environment orbitals, its orbital
+    For an unrestricted result `active_space` is the pair (alpha, beta) and the
+    pair of each spin's samples is returned: S^{E,s}(mu_s + i w) with that
+    spin's factors between its active and environment orbitals, its orbital
     energies and its own mid-gap mu_s, on the one W of both spins.
     """
     if low.mode == 'casida':
@@ -1206,30 +1213,30 @@ def sigma_env_imag_axis(low, part, query_freqs):
             f"is mode='casida' (its self-energy is `embedding_self_energy`, "
             f"from the residues of W): use mode='imagfrequency' or "
             f"mode='space-time'.")
-    chans = _channels(low, part)
+    chans = _channels(low, active_space)
     query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
     # W and the fit's poles are fetched once, and only when a channel has
     # active and environment orbitals
     fit = None
-    if any(c.part.n_act and len(c.part.env) for c in chans):
+    if any(c.active_space.n_act and len(c.active_space.env) for c in chans):
         points, w_grid = _screening_grid(low)
         poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
         fit = (points, w_grid, poles)
     out = []
     for chan in chans:
-        n, env = chan.part.n_act, chan.part.env
+        n, env = chan.active_space.n_act, chan.active_space.env
         if n == 0 or len(env) == 0:
             out.append(np.zeros((len(query_freqs), n, n), dtype=complex))
             continue
         mu = particle_hole_window(chan.eps, chan.nocc)[2]
         if low.mode == 'space-time':
             x, d = chan.collocation, low.cache['factors'][1]
-            x_act, x_env = x[:, chan.part.act], x[:, env]
+            x_act, x_env = x[:, chan.active_space.act], x[:, env]
             pairs = (x_act[:, :, None]
                      * x_env[:, None, :]).reshape(len(x), -1)
             b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
         else:
-            b = chan.factors[:, chan.part.act][:, :, env]
+            b = chan.factors[:, chan.active_space.act][:, :, env]
         out.append(fitted_self_energy_matrix_imaginary_axis(
             b, chan.eps[env] - mu, fit[0], fit[1], query_freqs, fit[2],
             GW_DENSITY_W_FIT_TIKHONOV))
@@ -1452,7 +1459,7 @@ def _gap_bound(low, chans, failure):
     return gap
 
 
-def pole_window(low, part):
+def pole_window(low, active_space):
     """(lo, hi), the pole-free window of the environment self-energy:
     (max eps_I - Omega_min, min eps_Ev + Omega_min), Omega_min from
     `lowest_excitation`. Every pole of S^E lies at eps_i - Omega_n <= lo
@@ -1460,12 +1467,12 @@ def pole_window(low, part):
     them every D_tr is non-zero. A side without orbitals (or no excitation at
     all) is -inf or +inf; with neither side Omega_min is not computed.
 
-    For an unrestricted result `part` is the pair (alpha, beta) and the pair
-    of windows is returned, each with its own spin's orbital energies and
+    For an unrestricted result `active_space` is the pair (alpha, beta) and the
+    pair of windows is returned, each with its own spin's orbital energies and
     the one Omega_min of the two-spin problem. That Omega_min includes the
     spin-density modes, which carry no weight in W for a closed shell, so
     the windows are conservative: narrower than needed, never wider."""
-    return _per_channel(_windows(low, _channels(low, part)))
+    return _per_channel(_windows(low, _channels(low, active_space)))
 
 
 def _windows(low, chans):
@@ -1473,16 +1480,17 @@ def _windows(low, chans):
     once for all of them, and not at all when no channel has an environment
     orbital."""
     om = None
-    if any(len(c.part.env_occ) or len(c.part.env_virt) for c in chans):
+    if any(len(c.active_space.env_occ) or len(c.active_space.env_virt)
+           for c in chans):
         om = lowest_excitation(low)
     windows = []
     for chan in chans:
-        part, eps = chan.part, chan.eps
+        active_space, eps = chan.active_space, chan.eps
         lo, hi = -np.inf, np.inf
-        if om is not None and len(part.env_occ):
-            lo = float(eps[part.env_occ].max() - om)
-        if om is not None and len(part.env_virt):
-            hi = float(eps[part.env_virt].min() + om)
+        if om is not None and len(active_space.env_occ):
+            lo = float(eps[active_space.env_occ].max() - om)
+        if om is not None and len(active_space.env_virt):
+            hi = float(eps[active_space.env_virt].min() + om)
         windows.append((lo, hi))
     return windows
 
@@ -1513,7 +1521,7 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
                f"accurate")
     named, windows = [], _windows(low, chans)
     for chan, (lo, hi) in zip(chans, windows):
-        act = chan.part.act
+        act = chan.active_space.act
         eps = chan.eps[act]
         dist = np.minimum(eps - lo, hi - eps)
         bad = dist <= margin
@@ -1560,7 +1568,7 @@ def _require_finite(sigma_bar, chan, sigma):
     warning (`_warn_near_poles`); this one cannot go into H_eff."""
     bad = np.argwhere(~np.isfinite(sigma_bar))
     if len(bad):
-        act = chan.part.act
+        act = chan.active_space.act
         named = ', '.join(f'({act[t]}, {act[u]})' for t, u in bad[:8])
         more = f' and {len(bad) - 8} more' if len(bad) > 8 else ''
         raise FloatingPointError(
@@ -1627,7 +1635,7 @@ def _sigma_poles(low, chans, sigma, sigma_bar, kept):
     applied, damping = None, 0.0
     for chan, (lo, hi), s_bar, kept_s in zip(chans, windows, sigma_bar,
                                              kept):
-        act = chan.part.act
+        act = chan.active_space.act
         eps = chan.eps[act]
         dist = np.minimum(eps - lo, hi - eps)
         distances.append(dist)
@@ -1683,7 +1691,7 @@ def _sigma_continuation(low, chans, sigma, kept):
     the warning names the spin of each element."""
     spreads, named = [], []
     for chan, kept_s in zip(chans, kept):
-        n, act = chan.part.n_act, chan.part.act
+        n, act = chan.active_space.n_act, chan.active_space.act
         if kept_s['fit'] is None:
             spreads.append(np.zeros((n, n)))
             continue
@@ -1977,34 +1985,34 @@ class _Channel:
     eps: np.ndarray
     nocc: int
     factors: Optional[np.ndarray]
-    part: object
+    active_space: object
     spin: Optional[str]
     collocation: Optional[np.ndarray] = None
 
 
-def _channels(low, part):
-    """The spin channels of `low` with the active spaces of `part`: one, for a
-    restricted result and one ActiveSpace; two, for an unrestricted result and
-    the pair (alpha, beta). Anything else is refused."""
-    parts = channels_of(part)
+def _channels(low, active_space):
+    """The spin channels of `low` with the active spaces of `active_space`:
+    one, for a restricted result and one ActiveSpace; two, for an unrestricted
+    result and the pair (alpha, beta). Anything else is refused."""
+    parts = channels_of(active_space)
     if not low.unrestricted:
         if len(parts) != 1:
             raise ValueError(
                 f'a restricted low-level result takes one ActiveSpace; got '
                 f'{len(parts)}. A pair (alpha, beta) goes with an '
                 f'unrestricted (UHF/UKS) one.')
-        return (replace(_reference_channels(low)[0], part=parts[0]),)
+        return (replace(_reference_channels(low)[0], active_space=parts[0]),)
     if len(parts) != 2:
         raise ValueError(
             'an unrestricted (UHF/UKS) low-level result takes a pair of '
             'ActiveSpaces, (alpha, beta), one per spin; got one.')
-    return tuple(replace(chan, part=p)
+    return tuple(replace(chan, active_space=p)
                  for chan, p in zip(_reference_channels(low), parts))
 
 
 def _reference_channels(low):
     """The spin channels of `low` itself, without an active space (their
-    `part` is None): one for a restricted result, (alpha, beta) for an
+    `active_space` is None): one for a restricted result, (alpha, beta) for an
     unrestricted one."""
     x = low.cache['factors'][0] if low.mode == 'space-time' else None
     if not low.unrestricted:
@@ -2084,7 +2092,7 @@ def _ov_factors(chan):
 
 def _act_factors(chan):
     """B_Q,tu (naux, n_act^2) of the active orbitals of one channel."""
-    b, act = chan.factors, chan.part.act
+    b, act = chan.factors, chan.active_space.act
     return b[:, act][:, :, act].reshape(b.shape[0], len(act) ** 2)
 
 

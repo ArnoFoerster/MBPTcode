@@ -306,12 +306,12 @@ def rpa_energy(eri, eps, nocc):
     return 0.5 * omega.sum() - 0.5 * np.sum(delta + 2.0 * np.diag(K))
 
 
-def _active_pairs(eps, nocc, part):
+def _active_pairs(eps, nocc, active_space):
     """Bool mask over the (i, a) pairs in C order, True where i is an active
     occupied and a an active virtual orbital (written out here so the oracle
     does not lean on the production mask)."""
-    occ = {int(i) for i in part.occ_active}
-    virt = {int(a) for a in part.virt_active}
+    occ = {int(i) for i in active_space.occ_active}
+    virt = {int(a) for a in active_space.virt_active}
     return np.array([i in occ and a in virt for i in range(nocc)
                      for a in range(nocc, len(eps))], dtype=bool)
 
@@ -353,14 +353,14 @@ def w0_minus_v(eri, eps, nocc, act, keep=None):
     return _pole_sum(eri, nocc, act, omega, xpy, labels)
 
 
-def vtilde_crpa(eri, eps, nocc, part):
-    """The cRPA correction on part.act: the active pairs (i and a both
+def vtilde_crpa(eri, eps, nocc, active_space):
+    """The cRPA correction on active_space.act: the active pairs (i and a both
     active) deleted from the response, the rest solved and pole-summed."""
-    keep = ~_active_pairs(eps, nocc, part)
-    return w0_minus_v(eri, eps, nocc, part.act, keep=keep)
+    keep = ~_active_pairs(eps, nocc, active_space)
+    return w0_minus_v(eri, eps, nocc, active_space.act, keep=keep)
 
 
-def vtilde_crpa_zeroing(eri, eps, nocc, part):
+def vtilde_crpa_zeroing(eri, eps, nocc, active_space):
     """The cRPA correction by the paper's literal Eq. 2.14.
 
     (A+B)^R = A+B and (A-B)^R = A-B = delta, both set to zero on the block
@@ -371,7 +371,7 @@ def vtilde_crpa_zeroing(eri, eps, nocc, part):
     problem. X+Y = (A-B)^1/2 Z Omega^-1/2 as in `drpa`.
     """
     delta, K = _pair_space(eri, eps, nocc)
-    active = _active_pairs(eps, nocc, part)
+    active = _active_pairs(eps, nocc, active_space)
     apb = np.diag(delta) + 4.0 * K
     apb[np.ix_(active, active)] = 0.0
     amb = delta.copy()
@@ -382,11 +382,11 @@ def vtilde_crpa_zeroing(eri, eps, nocc, part):
     assert np.count_nonzero(~modes) == np.count_nonzero(active)
     omega = np.sqrt(omega2[modes])
     xpy = root[:, None] * Z[:, modes] / np.sqrt(omega)[None, :]
-    return _pole_sum(eri, nocc, part.act, omega, xpy,
+    return _pole_sum(eri, nocc, active_space.act, omega, xpy,
                      _pair_labels(eps, nocc))
 
 
-def vtilde_zero_apb_only(eri, eps, nocc, part):
+def vtilde_zero_apb_only(eri, eps, nocc, active_space):
     """The wrong variant: only A+B zeroed on the active block, A-B = delta
     kept, then the full-size M = delta^1/2 (A+B) delta^1/2 solved and
     pole-summed. With the cross blocks of A+B left in, M is indefinite, so
@@ -394,28 +394,29 @@ def vtilde_zero_apb_only(eri, eps, nocc, part):
     complex arithmetic, where the residue r_n r_n^T / Omega_n is
     (delta^1/2 Z)_n (delta^1/2 Z)_n^T / Omega_n^2 and real."""
     delta, K = _pair_space(eri, eps, nocc)
-    active = _active_pairs(eps, nocc, part)
+    active = _active_pairs(eps, nocc, active_space)
     apb = np.diag(delta) + 4.0 * K
     apb[np.ix_(active, active)] = 0.0
     root = np.sqrt(delta)
     omega2, Z = np.linalg.eigh(root[:, None] * apb * root[None, :])
     omega = np.sqrt(omega2.astype(complex))
     xpy = root[:, None] * Z / np.sqrt(omega)[None, :]
-    out = _pole_sum(eri, nocc, part.act, omega, xpy, _pair_labels(eps, nocc))
+    labels = _pair_labels(eps, nocc)
+    out = _pole_sum(eri, nocc, active_space.act, omega, xpy, labels)
     assert np.abs(out.imag).max() < 1e-10
     return out.real
 
 
-def w_static_active(eri, eps, nocc, part):
-    """W(0) on part.act (chemist order) of the full restricted direct RPA of
-    chemist `eri`: the bare active integrals plus the pole sum over every
-    (i, a) pair, nothing deleted."""
-    act = part.act
+def w_static_active(eri, eps, nocc, active_space):
+    """W(0) on active_space.act (chemist order) of the full restricted direct
+    RPA of chemist `eri`: the bare active integrals plus the pole sum over
+    every (i, a) pair, nothing deleted."""
+    act = active_space.act
     return (eri[np.ix_(act, act, act, act)]
             + w0_minus_v(eri, eps, nocc, act))
 
 
-def vtilde_crpa_so(eri, eps, nocc, part):
+def vtilde_crpa_so(eri, eps, nocc, active_space):
     """The cRPA correction written in spin orbitals, its alpha-alpha block.
 
     The spin-orbital direct RPA has A = delta + K and B = K with
@@ -430,7 +431,7 @@ def vtilde_crpa_so(eri, eps, nocc, part):
     factor -4 on delta + 4K independently. Spin orbitals as at the top of
     this module: p < nmo alpha, nmo + p beta."""
     nmo = len(eps)
-    active = _active_pairs(eps, nocc, part)
+    active = _active_pairs(eps, nocc, active_space)
     labels = _pair_labels(eps, nocc)
     pairs = [(s * nmo + i, s * nmo + a) for s in (0, 1)
              for (i, a), act in zip(labels, active) if not act]
@@ -445,16 +446,17 @@ def vtilde_crpa_so(eri, eps, nocc, part):
         apb[x, x] = eps[a % nmo] - eps[i % nmo]
         for y, (j, b) in enumerate(pairs):
             apb[x, y] += 2.0 * coulomb(i, a, j, b)
-    act_so = [p for p in part.act] + [nmo + p for p in part.act]
+    act = list(active_space.act)
+    act_so = act + [nmo + p for p in act]
     m = len(act_so)
     v = np.array([[coulomb(t, u, i, a) for (i, a) in pairs]
                   for t in act_so for u in act_so])
     vt = (-2.0 * v @ np.linalg.solve(apb, v.T)).reshape((m,) * 4)
-    n = len(part.act)
+    n = len(active_space.act)
     return vt[:n, :n, :n, :n]
 
 
-def vtilde_mrpa(eri, eps, nocc, part):
+def vtilde_mrpa(eri, eps, nocc, active_space):
     """The mRPA correction written in spin orbitals: (vt_aa, vt_ab).
 
     Scott and Booth, PRL 132, 076401 (2024), Eq. 5, on the spin-blocked
@@ -472,11 +474,13 @@ def vtilde_mrpa(eri, eps, nocc, part):
     (ai|bj) of the active spin orbitals (real orbitals) and is zero on every
     other element. Returned: the (n_act,)*4 chemist blocks with both pairs
     alpha (vt_aa) and with the first pair alpha, the second beta (vt_ab),
-    local indices on part.act. Spin orbitals as at the top of this module."""
+    local indices on active_space.act. Spin orbitals as at the top of this
+    module."""
     nmo = len(eps)
     labels = _pair_labels(eps, nocc)
     pairs = [(s * nmo + i, s * nmo + a) for s in (0, 1) for (i, a) in labels]
-    act_so = [p for p in part.act] + [nmo + p for p in part.act]
+    act = list(active_space.act)
+    act_so = act + [nmo + p for p in act]
     keep = [x for x, (i, a) in enumerate(pairs)
             if i in act_so and a in act_so]
     delta = np.array([eps[a % nmo] - eps[i % nmo] for (i, a) in pairs])
@@ -501,16 +505,16 @@ def vtilde_mrpa(eri, eps, nocc, part):
             for t, u in ((i, a), (a, i)):
                 for v, w in ((j, b), (b, j)):
                     vt[t, u, v, w] = vt_ph[x, y]
-    n = len(part.act)
+    n = len(active_space.act)
     return vt[:n, :n, :n, :n], vt[:n, :n, n:, n:]
 
 
-def env_residues(eri, eps, nocc, part):
+def env_residues(eri, eps, nocc, active_space):
     """(omega, w, c) of the full restricted direct RPA of chemist `eri` for
-    the environment self-energy of part.act.
+    the environment self-energy of active_space.act.
 
-    w[n, t, r] = sqrt(2) sum_ia (t r|i a) xpy_ia,n, t over part.act and r over
-    the environment orbitals (inactive, then environment virtual): the
+    w[n, t, r] = sqrt(2) sum_ia (t r|i a) xpy_ia,n, t over active_space.act and
+    r over the environment orbitals (inactive, then environment virtual): the
     spin-orbital residue of W between t and r for either spin (the restricted
     singlet mode puts xpy/sqrt(2) on both spins of each pair, see
     `_pole_sum`), so that sum_r w_tr w_ur over spatial r is the spin-orbital
@@ -520,8 +524,8 @@ def env_residues(eri, eps, nocc, part):
     """
     omega, xpy = drpa(eri, eps, nocc)
     occ, virt = zip(*_pair_labels(eps, nocc))
-    env = list(part.env_occ) + list(part.env_virt)
-    act = list(part.act)
+    env = list(active_space.env_occ) + list(active_space.env_virt)
+    act = list(active_space.act)
     v = eri[np.ix_(act, env)][:, :, list(occ), list(virt)]
     w = np.sqrt(2.0) * np.einsum('trP,Pn->ntr', v, xpy)
     sign = np.array([-1.0 if r < nocc else 1.0 for r in env])
@@ -529,12 +533,12 @@ def env_residues(eri, eps, nocc, part):
     return omega, w, c
 
 
-def sigma_env(z, eri, eps, nocc, part):
+def sigma_env(z, eri, eps, nocc, active_space):
     """S^E_tu(z) = sum_{r in E} sum_n w_tr w_ur / (z - eps_r - sgn(eps_r - eps_F) omega_n),
     the correlation part of G^E (W - v) at the complex frequency z, on
-    part.act (local indices); `env_residues` gives w and the poles."""
-    _, w, c = env_residues(eri, eps, nocc, part)
-    n = len(part.act)
+    active_space.act (local indices); `env_residues` gives w and the poles."""
+    _, w, c = env_residues(eri, eps, nocc, active_space)
+    n = len(active_space.act)
     out = np.zeros((n, n), dtype=complex)
     for t in range(n):
         for u in range(n):
@@ -542,20 +546,22 @@ def sigma_env(z, eri, eps, nocc, part):
     return out
 
 
-def sigma_mode_a(eri, eps, nocc, part):
+def sigma_mode_a(eri, eps, nocc, active_space):
     """Eq. 12 of Marie and Loos at eta = 0: 1/2 [S^E_tu(eps_t) + S^E_tu(eps_u)],
     the pole sum `sigma_env` on the real axis at the mean-field energies."""
-    act = list(part.act)
+    act = list(active_space.act)
     n = len(act)
     out = np.zeros((n, n))
     for t in range(n):
         for u in range(n):
-            out[t, u] = 0.5 * (sigma_env(eps[act[t]], eri, eps, nocc, part)[t, u]
-                               + sigma_env(eps[act[u]], eri, eps, nocc, part)[t, u]).real
+            out[t, u] = 0.5 * (sigma_env(eps[act[t]], eri, eps, nocc,
+                                         active_space)[t, u]
+                               + sigma_env(eps[act[u]], eri, eps, nocc,
+                                           active_space)[t, u]).real
     return out
 
 
-def sigma_srg(eri, eps, nocc, part, s):
+def sigma_srg(eri, eps, nocc, active_space, s):
     """Eq. 44 of Marie and Loos on the environment orbitals r:
 
         Sigma_tu = sum_rn (D_tr + D_ur) / (D_tr^2 + D_ur^2) w_tr w_ur
@@ -563,8 +569,8 @@ def sigma_srg(eri, eps, nocc, part, s):
 
     D_tr = eps_t - eps_r - sgn(eps_r - eps_F) omega_n; s = None is s = inf
     (Eq. 42), the bracket 1."""
-    _, w, c = env_residues(eri, eps, nocc, part)
-    act = list(part.act)
+    _, w, c = env_residues(eri, eps, nocc, active_space)
+    act = list(active_space.act)
     n = len(act)
     out = np.zeros((n, n))
     for t in range(n):

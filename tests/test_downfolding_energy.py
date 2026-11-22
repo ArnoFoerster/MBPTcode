@@ -93,11 +93,12 @@ def _symmetric(rng, n):
 
 def test_environment_energy_all_environment_is_hf():
     mf = water()
-    part = _water_part(mf, [], [])
-    assert len(part.env_occ) == mf.mol.nelectron // 2 and part.n_act == 0
+    active_space = _water_part(mf, [], [])
+    assert len(active_space.env_occ) == mf.mol.nelectron // 2
+    assert active_space.n_act == 0
     c = mf.mo_coeff
     e_core, e_h, e_x = core_energy(mf.mol, mf.get_hcore(), (c, c),
-                                             (part, part))
+                                             (active_space, active_space))
     assert abs(mf.energy_nuc() + e_core + e_h + e_x - mf.e_tot) < 1e-9
     # the Hartree and exchange halves, against pyscf's own J and K
     dm = mf.make_rdm1()
@@ -230,18 +231,19 @@ def test_reference_determinant_energy_is_hf_plus_correlation_pair():
     term and -Tr[Sigma_bar gamma] undo the missing exchange half and the
     added Sigma_bar."""
     mf = water()
-    part = _water_part(mf, [3, 4], [5, 6])
+    active_space = _water_part(mf, [3, 4], [5, 6])
     c = mf.mo_coeff
-    n, k = part.n_act, part.n_act_occ
+    n, k = active_space.n_act, active_space.n_act_occ
     rng = np.random.default_rng(3)
     vt = _random_vtilde(rng, n)[0]
     vtilde = (vt, vt, vt)
     sig = _symmetric(rng, n)
     _, eri = mo_integrals(mf)
-    a = part.act
+    a = active_space.act
     v_act = eri[np.ix_(a, a, a, a)]
 
-    core = core_terms(mf.mol, mf.get_hcore(), (c, c), (part, part))
+    core = core_terms(mf.mol, mf.get_hcore(), (c, c),
+                      (active_space, active_space))
     hartree, exchange = double_counting_potential(vtilde, (k, k))
     expected = mf.e_tot - 0.31 + 0.12
     for dc, sigma_bar in (('full', None), ('hartree', None),
@@ -291,8 +293,8 @@ def test_hf_method_is_casci(ref):
     Hamiltonian, whose core potential is J - K/2 on the reference orbitals
     also for a KS reference (pyscf's CASCI does not use the KS potential)."""
     mf = _water_mean_field(ref)
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham = _hf_heff(mf, active_space)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert isinstance(en, Energies) and g[0] == en.e0
     assert abs(_solve(g, space) - _casci(mf)) < 1e-8
@@ -301,8 +303,9 @@ def test_hf_method_is_casci(ref):
 def test_hf_method_non_contiguous():
     """Active orbitals 2, 4 (occupied) and 5, 7 (virtual); the core is 0, 1, 3."""
     mf = water()
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 5, [2, 4], [5, 7])
-    ham = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), 5, [2, 4], [5,
+                                                                           7])
+    ham = _hf_heff(mf, active_space)
     g, space = ham.g_eff, ham.space
     mc = mcscf.CASCI(mf, 4, 4)
     mc.verbose = 0
@@ -312,7 +315,7 @@ def test_hf_method_non_contiguous():
                              'active_space', 'n_elec_active', 'n_orbs',
                              'spin_free']
     assert (space['n_orbs'], space['n_elec_active']) == (4, 4)
-    assert space['spin_free'] is True and space['active_space'] is aspace
+    assert space['spin_free'] is True and space['active_space'] is active_space
     assert space['act_idx'].tolist() == [2, 4, 5, 7]
     assert space['act_occ_idx'].tolist() == [2, 4]
     assert space['act_vir_idx'].tolist() == [5, 7]
@@ -320,10 +323,10 @@ def test_hf_method_non_contiguous():
 
 def test_spin_orbital_g_eff_solves_the_same():
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham_sf = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham_sf = _hf_heff(mf, active_space)
     g_sf, space_sf = ham_sf.g_eff, ham_sf.space
-    ham_so = _hf_heff(mf, aspace, spin_free=False)
+    ham_so = _hf_heff(mf, active_space, spin_free=False)
     g_so, space_so = ham_so.g_eff, ham_so.space
     assert (space_so['n_orbs'], space_so['n_elec_active']) == (8, 4)
     assert space_so['spin_free'] is False
@@ -341,8 +344,8 @@ def test_density_fitted_mean_field_still_exact():
     mf.conv_tol = 1e-11
     mf.verbose = 0
     mf.run()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham = _hf_heff(mf, active_space)
     g, space = ham.g_eff, ham.space
     exact = scf.RHF(mol)
     exact.verbose = 0
@@ -353,8 +356,8 @@ def test_density_fitted_mean_field_still_exact():
 
 def test_reference_determinant_is_the_scf_energy():
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham = _hf_heff(mf, active_space)
     g, en = ham.g_eff, ham.energies
     assert abs(reference_energy(g, 2) - mf.e_tot) < 1e-8
     assert (en.e_c_full, en.e_c_active) == (0.0, 0.0)
@@ -383,15 +386,16 @@ def test_unknown_method_and_stray_options():
         run_low_level(mf, method='hf', screening='crpa')
     low = run_low_level(mf, method='hf')
     assert low.method == 'hf' and low.mf is mf
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     with pytest.raises(TypeError, match="method='hf'.*screening"):
-        build_effective_hamiltonian(low, aspace, screening='crpa')
+        build_effective_hamiltonian(low, active_space, screening='crpa')
 
 
 def test_all_orbitals_active_is_fci():
     mf = h2()
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
-    ham = _hf_heff(mf, aspace)
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2,
+                                                                        3])
+    ham = _hf_heff(mf, active_space)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert (en.e_core, en.e_hartree, en.e_exchange) == (0.0, 0.0, 0.0)
     assert abs(_solve(g, space) - fci.FCI(mf).kernel()[0]) < 1e-9
@@ -399,19 +403,19 @@ def test_all_orbitals_active_is_fci():
 
 def test_active_space_of_another_reference_is_refused():
     mf = water()
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 4, [3], [4])
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), 4, [3], [4])
     with pytest.raises(ValueError, match='occupied'):
-        _hf_heff(mf, aspace)
+        _hf_heff(mf, active_space)
 
 
 def test_sigma_bar_with_full_double_counting_is_refused(monkeypatch):
     """A static self-energy comes with the Hartree-only double counting; a
     method that hands one with dc='full' is refused by name."""
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
 
-    def terms(low, part):
-        n = part.n_act
+    def terms(low, active_space):
+        n = active_space.n_act
         z = np.zeros((n,) * 4)
         return DownfoldingTerms(vtilde=(z, z, z),
                                 sigma_bar=(np.eye(n), np.eye(n)),
@@ -422,7 +426,7 @@ def test_sigma_bar_with_full_double_counting_is_refused(monkeypatch):
     monkeypatch.setitem(LOW_LEVEL, 'probe', probe)
     low = run_low_level(mf, method='probe')
     with pytest.raises(ValueError, match="probe"):
-        build_effective_hamiltonian(low, aspace)
+        build_effective_hamiltonian(low, active_space)
 
 
 def test_mpi_rank_guard(monkeypatch):
@@ -447,9 +451,9 @@ def wat_rpa():
 
 
 def test_default_method_is_rpa(wat_rpa):
-    mf, low, aspace = wat_rpa
+    mf, low, active_space = wat_rpa
     assert low.method == 'rpa' and low.mode == 'casida' and low.df is True
-    ham = build_effective_hamiltonian(low, aspace)
+    ham = build_effective_hamiltonian(low, active_space)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert g[0] == en.e0 and en.e_c_full == low.e_c_full
     assert set(ham.diagnostics) == {'static_defect'}
@@ -459,8 +463,8 @@ def test_default_method_is_rpa(wat_rpa):
 def test_reference_determinant_energy(wat_rpa, s):
     """The reference determinant of H_eff is E_HF + E_c[v] - E_c^A[v_eff]
     for every screening. Measured 5.7e-14 for each."""
-    mf, low, aspace = wat_rpa
-    ham = build_effective_hamiltonian(low, aspace, screening=s)
+    mf, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, screening=s)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert abs(reference_energy(g, 2)
                - (mf.e_tot + en.e_c_full - en.e_c_active)) < 1e-9
@@ -475,8 +479,9 @@ def test_all_active_is_fci_and_ec_cancels(s):
     same matrices); |E - E_FCI| = 4.4e-16."""
     mf = h2()
     low = run_low_level(mf)
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
-    ham = build_effective_hamiltonian(low, aspace, screening=s)
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2,
+                                                                        3])
+    ham = build_effective_hamiltonian(low, active_space, screening=s)
     g, space, en = ham.g_eff, ham.space, ham.energies
     e = _solve(g, space)
     assert abs(en.e_c_full - en.e_c_active) < 1e-10
@@ -489,15 +494,15 @@ def test_ph_screenings_leave_the_active_mean_field(wat_rpa):
     E_HF,ee[vtilde] = 0, and the rows of h_eff of the occupied active
     orbitals are the CASCI ones. (The virtual-virtual block does change:
     the full double counting subtracts sum_k vt_ak,kb, a ph element.)"""
-    mf, low, aspace = wat_rpa
-    ham = build_effective_hamiltonian(low, aspace, screening='crpa_ph')
+    mf, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, screening='crpa_ph')
     g, en = ham.g_eff, ham.energies
-    ham_hf = _hf_heff(mf, aspace)
+    ham_hf = _hf_heff(mf, active_space)
     g_hf = ham_hf.g_eff
     assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert np.array_equal(g[1][:2], g_hf[1][:2])
     assert np.abs(g[1][2:, 2:] - g_hf[1][2:, 2:]).max() > 1e-4
-    ham_crpa = build_effective_hamiltonian(low, aspace, screening='crpa')
+    ham_crpa = build_effective_hamiltonian(low, active_space, screening='crpa')
     en_crpa = ham_crpa.energies
     assert abs(en_crpa.e_hartree_dc + en_crpa.e_exchange_dc) > 1e-3
 
@@ -505,8 +510,8 @@ def test_ph_screenings_leave_the_active_mean_field(wat_rpa):
 def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
     """'bare' is the mechanical embedding: the CASCI Hamiltonian shifted by
     E_c[v] - E_c^A[v]. Measured 0.0."""
-    mf, low, aspace = wat_rpa
-    ham = build_effective_hamiltonian(low, aspace, screening='bare')
+    mf, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, screening='bare')
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert abs(_solve(g, space)
@@ -526,58 +531,59 @@ def test_static_defect_is_zero_for_crpa(density_fit):
         mf.verbose = 0
         mf.run()
     low = run_low_level(mf)
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = build_effective_hamiltonian(low, aspace, screening='crpa')
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham = build_effective_hamiltonian(low, active_space, screening='crpa')
     en = ham.energies
-    ham_bare = build_effective_hamiltonian(low, aspace, screening='bare')
+    ham_bare = build_effective_hamiltonian(low, active_space, screening='bare')
     en_bare = ham_bare.energies
     assert ham.diagnostics['static_defect'] < 1e-8
     assert ham_bare.diagnostics['static_defect'] > 1e-4
 
 
 def test_diagnostics_keyword(wat_rpa):
-    mf, low, aspace = wat_rpa
-    ham = build_effective_hamiltonian(low, aspace, diagnostics=())
+    mf, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, diagnostics=())
     en = ham.energies
     assert ham.diagnostics == {}
     # None is no diagnostics, as (), not a TypeError
-    ham = build_effective_hamiltonian(low, aspace, sigma='srg',
+    ham = build_effective_hamiltonian(low, active_space, sigma='srg',
                                       diagnostics=None)
     en = ham.energies
     assert ham.diagnostics == {}
     with pytest.raises(ValueError, match="'static_defect', 'ec_active_casida'"):
-        build_effective_hamiltonian(low, aspace, diagnostics=('nope',))
+        build_effective_hamiltonian(low, active_space, diagnostics=('nope',))
     # names that do not apply (casida, no sigma) are skipped, not zero
     ham = build_effective_hamiltonian(
-        low, aspace, diagnostics=('sigma_poles', 'ec_active_casida',
+        low, active_space, diagnostics=('sigma_poles', 'ec_active_casida',
                                   'sigma_continuation'))
     en = ham.energies
     assert ham.diagnostics == {}
     ham = build_effective_hamiltonian(
-        low, aspace, diagnostics=['Static-Defect', 'sigma_poles'])
+        low, active_space, diagnostics=['Static-Defect', 'sigma_poles'])
     en = ham.energies
     assert list(ham.diagnostics) == ['static_defect']
-    ham = build_effective_hamiltonian(low, aspace,
+    ham = build_effective_hamiltonian(low, active_space,
                                       diagnostics='static_defect')
     assert list(ham.diagnostics) == ['static_defect']
 
 
 def test_rpa_option_refusals(wat_rpa):
-    mf, low, aspace = wat_rpa
+    mf, low, active_space = wat_rpa
     with pytest.raises(ValueError, match="'crpa'"):
-        build_effective_hamiltonian(low, aspace, screening='rpa')
+        build_effective_hamiltonian(low, active_space, screening='rpa')
     for sigma in ('None', 'none', '', 'gw', 1):
         with pytest.raises(ValueError, match="None, 'srg', 'averaged'"):
-            build_effective_hamiltonian(low, aspace, sigma=sigma)
+            build_effective_hamiltonian(low, active_space, sigma=sigma)
     # the string members in any case and either of '-', '_',
     # as screening and mode take them; None alone is no Sigma^E
     for canonical, spellings in (('srg', ('SRG', 'Srg')),
                                  ('averaged', ('AVERAGED', 'Averaged'))):
-        want = build_effective_hamiltonian(low, aspace, sigma=canonical)
+        want = build_effective_hamiltonian(low, active_space, sigma=canonical)
         for sigma in spellings:
-            _same(build_effective_hamiltonian(low, aspace, sigma=sigma), want)
+            _same(build_effective_hamiltonian(low, active_space, sigma=sigma),
+                  want)
     with pytest.raises(TypeError, match="method='rpa'.*nope"):
-        build_effective_hamiltonian(low, aspace, nope=1)
+        build_effective_hamiltonian(low, active_space, nope=1)
 
 
 def _same(a, b):
@@ -595,10 +601,11 @@ def test_one_low_serves_many_calls(wat_rpa):
     """One low-level result, used for crpa, crpa_ph, bare and a second active
     space in turn, gives each the same H_eff as a fresh one: no call leaves
     anything behind that a later call reads."""
-    mf, low, aspace = wat_rpa
+    mf, low, active_space = wat_rpa
     other = ActiveSpace.from_indices(len(mf.mo_energy), 5, [2, 4], [5, 7])
-    calls = [(aspace, 'crpa'), (aspace, 'crpa_ph'), (aspace, 'bare'),
-             (other, 'crpa'), (aspace, 'crpa')]
+    calls = [(active_space, 'crpa'), (active_space, 'crpa_ph'), (active_space,
+                                                                 'bare'),
+             (other, 'crpa'), (active_space, 'crpa')]
     shared = [build_effective_hamiltonian(low, a, screening=s)
               for a, s in calls]
     for (a, s), got in zip(calls, shared):
@@ -618,9 +625,9 @@ def test_pbe_all_active_fci_equals_hf(s):
     mf_pbe.run()
     energies = []
     for mf in (mf_hf, mf_pbe):
-        aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0],
+        active_space = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0],
                                           [1, 2, 3])
-        ham = build_effective_hamiltonian(run_low_level(mf), aspace,
+        ham = build_effective_hamiltonian(run_low_level(mf), active_space,
                                           screening=s)
         g, space = ham.g_eff, ham.space
         energies.append(_solve(g, space))
@@ -657,11 +664,11 @@ def test_reference_determinant_is_unchanged_by_sigma(wat_rpa, s, sigma):
     The switch does change H_eff (Sigma_bar and h_eff differ by more than
     1e-3), not v_eff and not the E_c pair. Measured 0.0 in all six cases
     (tolerance 1e-9): Sigma_trace -0.0777 for every screening."""
-    mf, low, aspace = wat_rpa
-    ham_plain = build_effective_hamiltonian(low, aspace,
+    mf, low, active_space = wat_rpa
+    ham_plain = build_effective_hamiltonian(low, active_space,
                                             screening=s)
     g_plain, en_plain = ham_plain.g_eff, ham_plain.energies
-    ham = build_effective_hamiltonian(low, aspace, screening=s,
+    ham = build_effective_hamiltonian(low, active_space, screening=s,
                                       sigma=sigma)
     g, en = ham.g_eff, ham.energies
     assert abs(reference_energy(g, 2) - reference_energy(g_plain, 2)) < 1e-9
@@ -680,14 +687,14 @@ def test_sigma_switch_with_zero_sigma_bar(wat_rpa, monkeypatch, s, sigma):
     energy term), and the reference determinant keeps its energy. Measured
     0.0 in all six cases (tolerance 1e-9); for crpa the switch moves h_eff by the
     exchange double counting (more than 1e-3)."""
-    mf, low, aspace = wat_rpa
-    ham_plain = build_effective_hamiltonian(low, aspace, screening=s)
+    mf, low, active_space = wat_rpa
+    ham_plain = build_effective_hamiltonian(low, active_space, screening=s)
     g_plain = ham_plain.g_eff
     monkeypatch.setattr(rpa, 'screened_residues',
-                        lambda low, part: np.zeros((len(low.omega),
-                                                    part.n_act,
-                                                    len(part.env))))
-    ham = build_effective_hamiltonian(low, aspace, screening=s,
+                        lambda low, active_space: np.zeros((len(low.omega),
+                                                    active_space.n_act,
+                                                    len(active_space.env))))
+    ham = build_effective_hamiltonian(low, active_space, screening=s,
                                       sigma=sigma)
     g, en = ham.g_eff, ham.energies
     assert en.e_sigma_trace == 0.0
@@ -704,18 +711,17 @@ def test_exchange_term_vanishes_for_ph_screening(wat_rpa, sigma):
     term is exactly 0 and h_eff = f + Sigma_bar, f the core Fock operator of
     method='hf' (nothing double counted is left). Measured 0.0 (tolerance
     1e-12); crpa's exchange term is -0.585."""
-    mf, low, aspace = wat_rpa
-    ham = build_effective_hamiltonian(low, aspace, screening='crpa_ph',
+    mf, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, screening='crpa_ph',
                                       sigma=sigma)
     g, en = ham.g_eff, ham.energies
     assert en.e_exchange_term == 0.0
-    ham_hf = _hf_heff(mf, aspace)
+    ham_hf = _hf_heff(mf, active_space)
     g_hf = ham_hf.g_eff
-    part = aspace
-    s_bar = rpa.embedding_self_energy(low, part, sigma)
+    s_bar = rpa.embedding_self_energy(low, active_space, sigma)
     assert np.abs(g[1] - (g_hf[1] + s_bar)).max() < 1e-12
     assert abs(en.e_sigma_trace - 2.0 * np.trace(s_bar[:2, :2])) < 1e-12
-    ham_crpa = build_effective_hamiltonian(low, aspace, screening='crpa',
+    ham_crpa = build_effective_hamiltonian(low, active_space, screening='crpa',
                                            sigma=sigma)
     en_crpa = ham_crpa.energies
     assert abs(en_crpa.e_exchange_term) > 1e-3
@@ -730,8 +736,9 @@ def test_all_active_sigma_is_zero(s, sigma):
     (tolerance 1e-9)."""
     mf = h2()
     low = run_low_level(mf)
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2, 3])
-    ham = build_effective_hamiltonian(low, aspace, screening=s,
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), 1, [0], [1, 2,
+                                                                        3])
+    ham = build_effective_hamiltonian(low, active_space, screening=s,
                                       sigma=sigma)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert (en.e_exchange_term, en.e_sigma_trace) == (0.0, 0.0)
@@ -757,10 +764,11 @@ def test_e0_terms_do_not_depend_on_the_form_at_infinite_s(wat_rpa, s):
     while the off-diagonal h_eff does not. Measured |Delta E_0| = 0.0 for every
     screening (tolerance 1e-12); the off-diagonal h_eff differs by up to
     1.9e-4."""
-    mf, _, aspace = wat_rpa
+    mf, _, active_space = wat_rpa
     low = run_low_level(mf, numerics=Numerics(downfolding={'srg_s': None}))
     ham_srg, ham_a = (
-        build_effective_hamiltonian(low, aspace, screening=s, sigma=sigma)
+        build_effective_hamiltonian(low, active_space, screening=s,
+                                    sigma=sigma)
         for sigma in SIGMAS_1)
     (g_srg, srg), (g_a, mode_a) = ((h.g_eff, h.energies)
                                    for h in (ham_srg, ham_a))
@@ -776,10 +784,10 @@ def test_e0_terms_do_not_depend_on_the_form_at_infinite_s(wat_rpa, s):
 def test_sigma_with_hf_is_refused():
     """method='hf' has no self-energy and takes no options."""
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     for sigma in SIGMAS_1:
         with pytest.raises(TypeError, match="method='hf'.*sigma"):
-            _hf_heff(mf, aspace, sigma=sigma)
+            _hf_heff(mf, active_space, sigma=sigma)
 
 
 # --- one restricted spin channel: nothing computed twice ---------------------
@@ -789,14 +797,14 @@ def test_one_restricted_channel_of_the_energy_terms():
     channels (tolerance 1e-11): the environment HF energy, E_HF,ee[vtilde]
     and its two halves, the exchange energy term and the Sigma_bar trace."""
     mf = water()
-    part = _water_part(mf, [2, 4], [5, 6])
+    active_space = _water_part(mf, [2, 4], [5, 6])
     c, hcore = mf.mo_coeff, mf.get_hcore()
-    n, k = part.n_act, part.n_act_occ
+    n, k = active_space.n_act, active_space.n_act_occ
     rng = np.random.default_rng(6)
     vt = _random_vtilde(rng, n)[0]
     sig = _symmetric(rng, n)
-    one = core_energy(mf.mol, hcore, (c,), (part,))
-    two = core_energy(mf.mol, hcore, (c, c), (part, part))
+    one = core_energy(mf.mol, hcore, (c,), (active_space,))
+    two = core_energy(mf.mol, hcore, (c, c), (active_space, active_space))
     assert np.allclose(one, two, rtol=0, atol=1e-11)
     assert np.allclose(double_counting_energy((vt,), (k,)),
                        double_counting_energy((vt, vt, vt), (k, k)),
@@ -839,9 +847,9 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
 
     monkeypatch.setattr(core, 'get_jk', counted_jk)
     monkeypatch.setattr(two_body.ao2mo, 'general', counted_general)
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    assert len(LOW_LEVEL[method].terms(low, aspace).vtilde) == 1
-    build_effective_hamiltonian(low, aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    assert len(LOW_LEVEL[method].terms(low, active_space).vtilde) == 1
+    build_effective_hamiltonian(low, active_space)
     assert calls == {'jk': 1, 'ao2mo': 1}
 
 
@@ -854,8 +862,8 @@ def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     seen = []
 
-    def terms(low, part, nblocks=1, nsigma=None):
-        seen.append(part)
+    def terms(low, active_space, nblocks=1, nsigma=None):
+        seen.append(active_space)
         z = np.zeros((aspace.n_act,) * 4)
         sigma = None if nsigma is None else (np.zeros((4, 4)),) * nsigma
         return DownfoldingTerms(
@@ -893,18 +901,18 @@ def test_named_flags_reach_the_results(monkeypatch):
     build does not inherit an earlier build's flags."""
     from src.Base.numerical_flags import flag
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     raise_in_terms = [True]
 
     def run(mf):
         flag('probe_run', 'raised by run', RuntimeWarning)
         return SimpleNamespace(mf=mf, method='probe')
 
-    def terms(low, part):
+    def terms(low, active_space):
         if raise_in_terms[0]:
             flag('probe_terms', 'raised by terms', RuntimeWarning)
             flag('probe_terms', 'raised by terms', RuntimeWarning)
-        z = np.zeros((part.n_act,) * 4)
+        z = np.zeros((active_space.n_act,) * 4)
         return DownfoldingTerms(vtilde=(z,), sigma_bar=None, e_c_full=0.0,
                                 e_c_active=0.0, dc='full')
 
@@ -915,12 +923,12 @@ def test_named_flags_reach_the_results(monkeypatch):
     ran = {'flag': 'probe_run', 'message': 'raised by run'}
     assert low.numerical_flags == [ran]
     with pytest.warns(RuntimeWarning, match='raised by terms'):
-        ham = build_effective_hamiltonian(low, aspace)
+        ham = build_effective_hamiltonian(low, active_space)
         en = ham.energies
     assert ham.numerical_flags == [
         ran, {'flag': 'probe_terms', 'message': 'raised by terms'}]
     raise_in_terms[0] = False
-    ham = build_effective_hamiltonian(low, aspace)
+    ham = build_effective_hamiltonian(low, active_space)
     en = ham.energies
     assert ham.numerical_flags == [ran]
     assert low.numerical_flags == [ran]
@@ -928,11 +936,12 @@ def test_named_flags_reach_the_results(monkeypatch):
 
 def test_a_clean_run_has_no_flags():
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     for method in ('hf', 'rpa'):
         low = run_low_level(mf, method=method)
         assert low.numerical_flags == []
-        assert build_effective_hamiltonian(low, aspace).numerical_flags == []
+        assert build_effective_hamiltonian(low,
+                                           active_space).numerical_flags == []
 
 
 def test_the_result_is_one_record_that_solves_itself():
@@ -941,8 +950,9 @@ def test_the_result_is_one_record_that_solves_itself():
     last two no longer on Energies; h.solve(solver) is solve() with the
     record's own g_eff, orbital and electron counts and spin_free."""
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    h = build_effective_hamiltonian(run_low_level(mf, method='rpa'), aspace)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    low = run_low_level(mf, method='rpa')
+    h = build_effective_hamiltonian(low, active_space)
     assert isinstance(h, effective_hamiltonian.DownfoldedHamiltonian)
     assert set(h.diagnostics) == {'static_defect'}
     assert h.numerical_flags == []
@@ -951,7 +961,7 @@ def test_the_result_is_one_record_that_solves_itself():
     assert h.g_eff[0] == h.energies.e0
     for spin_free in (True, False):
         h = build_effective_hamiltonian(run_low_level(mf, method='hf'),
-                                        aspace, spin_free=spin_free)
+                                        active_space, spin_free=spin_free)
         want = solve('pyscf_fci', h.g_eff, h.space['n_orbs'],
                      h.space['n_elec_active'], spin_free=spin_free,
                      nroots=2)
@@ -962,11 +972,12 @@ def test_the_averaged_form_is_named_by_what_it_does(wat_rpa):
     """sigma='averaged' is 1/2 [S_tu(eps_t) + S_tu(eps_u)] (mode A of Kotani,
     van Schilfgaarde and Faleev); the old name 'mode_a' is refused, with the
     valid names listed, and so is the old function name."""
-    mf, low, aspace = wat_rpa
-    want = build_effective_hamiltonian(low, aspace, sigma='averaged')
-    _same(build_effective_hamiltonian(low, aspace, sigma='Averaged'), want)
+    mf, low, active_space = wat_rpa
+    want = build_effective_hamiltonian(low, active_space, sigma='averaged')
+    _same(build_effective_hamiltonian(low, active_space, sigma='Averaged'),
+          want)
     with pytest.raises(ValueError, match="None, 'srg', 'averaged'"):
-        build_effective_hamiltonian(low, aspace, sigma='mode_a')
+        build_effective_hamiltonian(low, active_space, sigma='mode_a')
     assert not hasattr(rpa, 'mode_a_self_energy')
 
 
@@ -975,8 +986,9 @@ def test_two_records_compare_without_error():
     RPALowLevel does: == on two builds answers instead of raising on an
     array's truth value, and a record can be hashed."""
     mf = water()
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     low = run_low_level(mf, method='hf')
-    one, two = (build_effective_hamiltonian(low, aspace) for _ in range(2))
+    one, two = (build_effective_hamiltonian(low,
+                                            active_space) for _ in range(2))
     assert one == one and one != two
     assert len({one, two}) == 2

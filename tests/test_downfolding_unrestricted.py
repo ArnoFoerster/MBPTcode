@@ -509,9 +509,9 @@ def test_oracle_reduces_to_the_restricted_one():
     mf = water()
     eps, nocc, nmo = mf.mo_energy, 5, len(mf.mo_energy)
     _, eri = mo_integrals(mf)
-    part = ActiveSpace.from_indices(nmo, nocc, [2, 4], [5, 7])
-    so = _spin_orbitals(mf, (part, part))
-    n = part.n_act
+    active_space = ActiveSpace.from_indices(nmo, nocc, [2, 4], [5, 7])
+    so = _spin_orbitals(mf, (active_space, active_space))
+    n = active_space.n_act
 
     e_c, omega, xpy, pairs = drpa_so(*so[:3])
     assert len(pairs) == 2 * nocc * (nmo - nocc) == len(omega)
@@ -519,17 +519,17 @@ def test_oracle_reduces_to_the_restricted_one():
     assert abs(e_c - rpa_energy(eri, eps, nocc)) < 1e-10
 
     full = w0_minus_v_so(*so[:3], so[3])
-    ref = w0_minus_v(eri, eps, nocc, part.act)
+    ref = w0_minus_v(eri, eps, nocc, active_space.act)
     for block in (full[:n, :n, :n, :n], full[:n, :n, n:, n:],
                   full[n:, n:, n:, n:]):
         assert np.max(np.abs(block - ref)) < 1e-10
     assert not full[:n, n:].any() and not full[:, :, :n, n:].any()
 
-    ref = vtilde_crpa(eri, eps, nocc, part)
+    ref = vtilde_crpa(eri, eps, nocc, active_space)
     for block in vtilde_crpa_uhf(*so):
         assert np.max(np.abs(block - ref)) < 1e-10
 
-    ref_aa, ref_ab = vtilde_mrpa(eri, eps, nocc, part)
+    ref_aa, ref_ab = vtilde_mrpa(eri, eps, nocc, active_space)
     aa, ab, bb = vtilde_mrpa_uhf(*so)
     assert np.max(np.abs(aa - ref_aa)) < 1e-10
     assert np.max(np.abs(ab - ref_ab)) < 1e-10
@@ -537,10 +537,10 @@ def test_oracle_reduces_to_the_restricted_one():
     assert np.max(np.abs(aa)) > 1e-3
 
     for s in (DOWNFOLDING_SRG_S, None):
-        ref = sigma_srg(eri, eps, nocc, part, s)
+        ref = sigma_srg(eri, eps, nocc, active_space, s)
         for block in sigma_srg_uhf(*so, s):
             assert np.max(np.abs(block - ref)) < 1e-10
-    ref = sigma_mode_a(eri, eps, nocc, part)
+    ref = sigma_mode_a(eri, eps, nocc, active_space)
     for block in sigma_mode_a_uhf(*so):
         assert np.max(np.abs(block - ref)) < 1e-10
 
@@ -891,9 +891,10 @@ def test_residues_against_oracle(oh, oh_low, space, df):
     n = parts[0].n_act
     cols = [[x for x, r in enumerate(env) if (r >= nmo) == bool(spin)]
             for spin in (0, 1)]
-    for spin, part in enumerate(parts):
-        assert ours[spin].shape == (len(low.omega), n, len(part.env))
-        assert [env[x] - spin * nmo for x in cols[spin]] == list(part.env)
+    for spin, active_space in enumerate(parts):
+        assert ours[spin].shape == (len(low.omega), n, len(active_space.env))
+        assert ([env[x] - spin * nmo for x in cols[spin]]
+                == list(active_space.env))
     rows = [slice(0, n), slice(n, 2 * n)]
     for first in (0, 1):
         for second in (0, 1):
@@ -908,9 +909,10 @@ def test_residues_against_oracle(oh, oh_low, space, df):
     # any orbitals per spin, here every orbital
     every = rpa.screened_residues(low, parts,
                                   orbitals=(np.arange(nmo), np.arange(nmo)))
-    for spin, part in enumerate(parts):
+    for spin, active_space in enumerate(parts):
         assert every[spin].shape == (len(low.omega), n, nmo)
-        assert np.max(np.abs(every[spin][:, :, part.env] - ours[spin])) < 1e-12
+        on_env = every[spin][:, :, active_space.env]
+        assert np.max(np.abs(on_env - ours[spin])) < 1e-12
 
 
 @pytest.mark.parametrize('space', ['asymmetric', 'unequal_cores',
@@ -952,12 +954,12 @@ def test_pole_window_per_spin(oh, oh_low):
         parts = _parts(oh, make(oh))
         windows = rpa.pole_window(low, parts)
         assert len(windows) == 2
-        for (lo, hi), part, eps in zip(windows, parts, oh.mo_energy):
-            if len(part.env_occ):
-                assert abs(lo - (eps[part.env_occ].max() - om)) < 1e-9
+        for (lo, hi), active_space, eps in zip(windows, parts, oh.mo_energy):
+            if len(active_space.env_occ):
+                assert abs(lo - (eps[active_space.env_occ].max() - om)) < 1e-9
             else:
                 assert lo == -np.inf
-            assert abs(hi - (eps[part.env_virt].min() + om)) < 1e-9
+            assert abs(hi - (eps[active_space.env_virt].min() + om)) < 1e-9
     assert windows[0][1] != windows[1][1]
     assert rpa.pole_window(low, _parts(oh, _all_active(oh))) == (
         (-np.inf, np.inf), (-np.inf, np.inf))
@@ -1294,10 +1296,11 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
         assert dist.shape == z.shape == (n,)
         assert np.all((z > 0) & (z <= 1))
     assert poles['pole_distance'][1][2] < 0 < poles['pole_distance'][0].min()
-    for dist, (lo, hi), part, eps in zip(poles['pole_distance'],
+    for dist, (lo, hi), active_space, eps in zip(poles['pole_distance'],
                                          poles['window'], parts,
                                          oh.mo_energy):
-        own = np.minimum(eps[part.act] - lo, hi - eps[part.act])
+        own = np.minimum(eps[active_space.act] - lo,
+                         hi - eps[active_space.act])
         assert np.array_equal(dist, own)
     assert poles['srg_s'] is None and poles['srg_damping'] == 0.0
 
@@ -1430,9 +1433,10 @@ def test_mrpa_closed_shell_limit(closed_shell, df):
     rhf, lows = closed_shell
     low_r, low_u = lows[df]
     one = ActiveSpace.from_indices(len(rhf.mo_energy), 5, [2, 4], [5, 7])
-    part = one
-    ref = rpa.screening_correction(low_r, part, 'mrpa')
-    for block in rpa.screening_correction(low_u, (part, part), 'mrpa'):
+    active_space = one
+    ref = rpa.screening_correction(low_r, active_space, 'mrpa')
+    for block in rpa.screening_correction(low_u, (active_space, active_space),
+                                          'mrpa'):
         assert np.max(np.abs(block - ref)) < 1e-9
     assert np.max(np.abs(ref)) > 1e-3
     for sigma in SIGMAS_RPA:
@@ -1471,9 +1475,9 @@ def test_mrpa_reference_determinant_identity(oh, oh_low, space, sigma):
 
 def test_mrpa_is_casida_only_whatever_the_reference(oh):
     low = run_low_level(water(), method='rpa', mode='imagfrequency')
-    part = ActiveSpace.from_counts(low.eps, 5, 2, 2)
+    active_space = ActiveSpace.from_counts(low.eps, 5, 2, 2)
     with pytest.raises(NotImplementedError, match="mode='casida'"):
-        rpa.screening_correction(low, part, 'mrpa')
+        rpa.screening_correction(low, active_space, 'mrpa')
 
 
 # --- a density-fitted mean field -----------------------------------------------

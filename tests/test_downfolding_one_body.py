@@ -51,11 +51,11 @@ def _orthogonal(rng, n):
 
 def test_core_fock_restricted_matches_the_spatial_formula():
     mf = water()
-    part = _water_part(mf, [3, 4], [5, 6])
+    active_space = _water_part(mf, [3, 4], [5, 6])
     f_a, f_b = core_fock(mf.mol, mf.get_hcore(), (mf.mo_coeff, mf.mo_coeff),
-                         (part, part))
+                         (active_space, active_space))
     h, eri = mo_integrals(mf)
-    a, i = part.act, part.env_occ
+    a, i = active_space.act, active_space.env_occ
     expected = (h[np.ix_(a, a)]
                 + 2 * np.einsum('tujj->tu', eri[np.ix_(a, a, i, i)])
                 - np.einsum('tjju->tu', eri[np.ix_(a, i, i, a)]))
@@ -134,13 +134,13 @@ def test_per_spin_channels_differ():
 
 def test_ph_only_vtilde_has_no_hartree_dc():
     eps = np.array([-1.0, -0.6, -0.4, 0.3, 0.7, 1.1])
-    part = ActiveSpace.from_indices(6, 3, [1, 2], [3, 5])
-    mask = ph_element_mask(part)
+    active_space = ActiveSpace.from_indices(6, 3, [1, 2], [3, 5])
+    mask = ph_element_mask(active_space)
     rng = np.random.default_rng(0)
-    vtilde = tuple(v * mask for v in _random_vtilde(rng, part.n_act))
-    n_occ = part.n_act_occ
+    vtilde = tuple(v * mask for v in _random_vtilde(rng, active_space.n_act))
+    n_occ = active_space.n_act_occ
     hartree, exchange = double_counting_potential(vtilde, (n_occ, n_occ))
-    virt = np.arange(part.n_act) >= n_occ
+    virt = np.arange(active_space.n_act) >= n_occ
     for s in (0, 1):
         assert np.all(hartree[s] == 0.0)
         assert np.all(exchange[s][~np.outer(virt, virt)] == 0.0)
@@ -153,15 +153,15 @@ def test_one_restricted_channel_is_two_identical_channels():
     of two identical channels (measured 0.0 to 4e-15, tolerance 1e-12), and a
     J/K build handed in as `jk` is used instead of a second one."""
     mf = water()
-    part = _water_part(mf, [2, 4], [5, 6])
+    active_space = _water_part(mf, [2, 4], [5, 6])
     c, hcore = mf.mo_coeff, mf.get_hcore()
-    n, k = part.n_act, part.n_act_occ
+    n, k = active_space.n_act, active_space.n_act_occ
     rng = np.random.default_rng(4)
     vt = _random_vtilde(rng, n)[0]
     sig = rng.standard_normal((n, n))
 
-    f_one = core_fock(mf.mol, hcore, (c,), (part,))
-    f_two = core_fock(mf.mol, hcore, (c, c), (part, part))
+    f_one = core_fock(mf.mol, hcore, (c,), (active_space,))
+    f_two = core_fock(mf.mol, hcore, (c, c), (active_space, active_space))
     h_one, x_one = double_counting_potential((vt,), (k,))
     h_two, x_two = double_counting_potential((vt, vt, vt), (k, k))
     assert len(f_one) == len(h_one) == len(x_one) == 1
@@ -173,11 +173,12 @@ def test_one_restricted_channel_is_two_identical_channels():
         two = effective_one_body(f_two, h_two, x_two, dc, (sig, sig))
         assert len(one) == 1 and np.abs(one[0] - two[0]).max() < 1e-12
 
-    jk = core_jk(mf.mol, (c,), (part,))
+    jk = core_jk(mf.mol, (c,), (active_space,))
     assert jk[0].shape[0] == 1 and len(jk[2]) == 1
     marked = (jk[0], jk[1] + 1.0, jk[2])          # a J no fresh build would give
-    shifted = core_fock(mf.mol, hcore, (c,), (part,), jk=marked)[0]
-    s_act = c[:, part.act].T @ np.ones_like(hcore) @ c[:, part.act]
+    shifted = core_fock(mf.mol, hcore, (c,), (active_space,), jk=marked)[0]
+    c_act = c[:, active_space.act]
+    s_act = c_act.T @ np.ones_like(hcore) @ c_act
     assert np.abs(shifted - f_one[0] - s_act).max() < 1e-12
 
 

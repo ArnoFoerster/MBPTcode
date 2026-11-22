@@ -160,10 +160,10 @@ def _ours(case):
     n_occ, n_virt = case['n_act_occ'], case['n_act_virt']
     if (n_occ, n_virt) == (-1, -1):
         n_occ, n_virt = nocc, nmo - nocc
-    aspace = ActiveSpace.from_counts(mf.mo_energy, nocc, n_occ, n_virt)
-    ham_bare = build_effective_hamiltonian(low, aspace, screening='bare')
+    active_space = ActiveSpace.from_counts(mf.mo_energy, nocc, n_occ, n_virt)
+    ham_bare = build_effective_hamiltonian(low, active_space, screening='bare')
     g_bare = ham_bare.g_eff
-    ham = build_effective_hamiltonian(low, aspace,
+    ham = build_effective_hamiltonian(low, active_space,
                                       screening=case['screening'])
     g, space, en = ham.g_eff, ham.space, ham.energies
     n = space['n_orbs']
@@ -175,7 +175,7 @@ def _ours(case):
     v = g_bare[2].transpose(0, 2, 1, 3)
     v_eff = g[2].transpose(0, 2, 1, 3)
     vt = (v_eff - v)[:n_occ, :n_occ, :n_occ, :n_occ]
-    c_core = mf.mo_coeff[:, aspace.env_occ]
+    c_core = mf.mo_coeff[:, active_space.env_occ]
     dm = 2 * c_core @ c_core.T
     vj, vk = mf.get_jk(mf.mol, dm)
     # the record's four Hartree/exchange terms, held to an independent
@@ -287,8 +287,8 @@ def test_pbe0_orbitals_no_xc_leak():
     mf.verbose = 0
     mf.run()
     low = run_low_level(mf, method='rpa', mode='casida', df=False)
-    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = build_effective_hamiltonian(low, aspace, screening='bare')
+    active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    ham = build_effective_hamiltonian(low, active_space, screening='bare')
     g, en = ham.g_eff, ham.energies
     active = reference_energy(g, 2) - g[0]
     e_hf = scf.RHF(mf.mol).energy_tot(dm=mf.make_rdm1())
@@ -311,18 +311,18 @@ def _pinned_low(molecule):
     mf.mo_energy = np.array(c['mo_energy'])
     mf.mo_occ = np.where(np.arange(len(mf.mo_energy)) < c['nocc'], 2.0, 0.0)
     low = run_low_level(mf, method='rpa', mode='casida', df=False)
-    aspace = ActiveSpace.from_indices(len(mf.mo_energy), c['nocc'],
+    active_space = ActiveSpace.from_indices(len(mf.mo_energy), c['nocc'],
                                       np.array(c['act_occ']),
                                       np.array(c['act_virt']))
-    return low, aspace
+    return low, active_space
 
 
 @functools.lru_cache(maxsize=None)
 def _pinned_build(molecule, screening):
     """build_effective_hamiltonian of a pin's active space with the
     prototype screening name `screening` (bare, cRPA, cRPAph)."""
-    low, aspace = _pinned_low(molecule)
-    return build_effective_hamiltonian(low, aspace,
+    low, active_space = _pinned_low(molecule)
+    return build_effective_hamiltonian(low, active_space,
                                        screening=PIN_SCREENING[screening])
 
 
@@ -335,16 +335,15 @@ def test_prototype_elements(molecule, screening):
     t^DC 3.6e-16, h_eff 2.2e-16 (tolerance 1e-7)."""
     c = PINS[molecule]
     pin = c['screenings'][screening]
-    low, aspace = _pinned_low(molecule)
+    low, active_space = _pinned_low(molecule)
     mf = low.mf
     assert abs(mf.energy_tot() - c['e_scf']) < 1e-8
     v = _pinned_build(molecule, 'bare').g_eff[2].transpose(0, 2, 1, 3)
     g = _pinned_build(molecule, screening).g_eff
     v_eff = g[2].transpose(0, 2, 1, 3)
-    part = aspace
-    mo, parts = (mf.mo_coeff, mf.mo_coeff), (part, part)
+    mo, parts = (mf.mo_coeff, mf.mo_coeff), (active_space, active_space)
     f = core_fock(mf.mol, mf.get_hcore(), mo, parts)[0]
-    n_occ = (part.n_act_occ, part.n_act_occ)
+    n_occ = (active_space.n_act_occ, active_space.n_act_occ)
     hartree, exchange = double_counting_potential((v_eff - v,) * 3, n_occ)
     t_dc = hartree[0] - exchange[0]
     for ours, ref in ((v_eff, pin['v_eff']), (f, c['f']),
@@ -407,8 +406,8 @@ BENZENE_FROBENIUS_TOL = {'crpa': 2.3e-3, 'crpa_ph': 1e-3, 'mrpa': 1e-3}
 def _benzene_vtilde(screening):
     """vtilde of the benzene (6,6) pi space of the pins (canonical [16, 19,
     20] and [21, 22, 29], the prototype's orbitals), (n_act,)*4 chemist."""
-    low, aspace = _pinned_low('benzene')
-    return rpa.screening_correction(low, aspace,
+    low, active_space = _pinned_low('benzene')
+    return rpa.screening_correction(low, active_space,
                                     screening)
 
 
@@ -443,10 +442,10 @@ def test_benzene_1010_omega_r():
     pattern (measured max 2.95e-3; the geometry caveat above), so the
     tolerance is 4.5e-3 Eh, not 1e-4."""
     low, _ = _pinned_low('benzene')
-    aspace = ActiveSpace.from_counts(low.eps, low.nocc, 5, 5)
-    part = aspace
-    assert list(part.act) == list(range(16, 26))
-    omega, _ = drpa(low.eri, low.eps, low.nocc, keep=~active_pair_mask(part))
+    active_space = ActiveSpace.from_counts(low.eps, low.nocc, 5, 5)
+    assert list(active_space.act) == list(range(16, 26))
+    omega, _ = drpa(low.eri, low.eps, low.nocc,
+                    keep=~active_pair_mask(active_space))
     ref = np.array(DATA['benzene_1010_omega_r']['values'])
     assert omega.size == ref.size
     assert np.abs(np.sort(omega)[:20] - ref[:20]).max() < 4.5e-3

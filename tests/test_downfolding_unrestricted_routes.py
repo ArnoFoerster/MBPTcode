@@ -226,8 +226,9 @@ def test_active_pair_factors_and_polarizability(ref):
 
     def response(parts):
         out = np.zeros((naux, naux))
-        for b, eps, nocc, part in zip(low.factors, low.eps, low.nocc, parts):
-            mask = active_pair_mask(part)
+        for b, eps, nocc, active_space in zip(low.factors, low.eps, low.nocc,
+                                              parts):
+            mask = active_pair_mask(active_space)
             b_a = b[:, :nocc, nocc:].reshape(naux, -1)[:, mask]
             delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[mask]
             out -= 2.0 * (b_a / delta) @ b_a.T
@@ -236,8 +237,9 @@ def test_active_pair_factors_and_polarizability(ref):
     parts = _parts(ref, 'asymmetric')
     b_act = rpa.active_pair_factors(low, parts)
     assert isinstance(b_act, tuple) and len(b_act) == 2
-    for ours, b, part in zip(b_act, low.factors, parts):
-        assert np.array_equal(ours, b[:, part.act][:, :, part.act])
+    for ours, b, active_space in zip(b_act, low.factors, parts):
+        act = active_space.act
+        assert np.array_equal(ours, b[:, act][:, :, act])
     assert not np.array_equal(b_act[0], b_act[1])
     for which in ('asymmetric', 'unequal_cores', 'no_beta_pair'):
         parts = _parts(ref, which)
@@ -435,9 +437,9 @@ def test_gap_bound_when_the_lanczos_fails(monkeypatch):
     assert [entry['flag'] for entry in raised] == ['sigma_pole_window_bound']
     om = rpa.lowest_excitation(low)
     assert om == gap and 1e-3 < true - om < 0.1
-    for (lo, hi), part, eps in zip(windows, parts, mf.mo_energy):
-        assert lo == eps[part.env_occ].max() - gap
-        assert hi == eps[part.env_virt].min() + gap
+    for (lo, hi), active_space, eps in zip(windows, parts, mf.mo_energy):
+        assert lo == eps[active_space.env_occ].max() - gap
+        assert hi == eps[active_space.env_virt].min() + gap
     again = []
     with warnings.catch_warnings():
         warnings.simplefilter('error')
@@ -571,9 +573,10 @@ def test_sigma_records_of_two_spins():
         assert s.shape == (n, n) and z.shape == dist.shape == (n,)
         assert s.max() < 1e-4 and dist.min() > 0.26
         assert np.all((z > 0.9) & (z <= 1.0))
-    for dist, (lo, hi), part, eps in zip(poles['pole_distance'],
+    for dist, (lo, hi), active_space, eps in zip(poles['pole_distance'],
                                          poles['window'], parts, low.eps):
-        own = np.minimum(eps[part.act] - lo, hi - eps[part.act])
+        own = np.minimum(eps[active_space.act] - lo,
+                         hi - eps[active_space.act])
         assert np.array_equal(dist, own)
     assert not np.array_equal(*poles['pole_distance'])
 
@@ -900,8 +903,8 @@ def test_space_time_active_pair_factors_and_polarizability(ref):
 
     def response(parts):
         out = np.zeros((naux, naux))
-        for b, eps, nocc, part in zip(three, low.eps, low.nocc, parts):
-            mask = active_pair_mask(part)
+        for b, eps, nocc, active_space in zip(three, low.eps, low.nocc, parts):
+            mask = active_pair_mask(active_space)
             b_a = b[:, :nocc, nocc:].reshape(naux, -1)[:, mask]
             delta = (eps[nocc:][None, :] - eps[:nocc][:, None]).ravel()[mask]
             pi0 = -np.exp(-np.outer(delta, static.tau_points)) \
@@ -912,8 +915,9 @@ def test_space_time_active_pair_factors_and_polarizability(ref):
     parts = _st_parts(ref, 'asymmetric')
     b_act = rpa.active_pair_factors(low, parts)
     assert isinstance(b_act, tuple) and len(b_act) == 2
-    for ours, b, part in zip(b_act, three, parts):
-        assert np.abs(ours - b[:, part.act][:, :, part.act]).max() < 1e-12
+    for ours, b, active_space in zip(b_act, three, parts):
+        act = active_space.act
+        assert np.abs(ours - b[:, act][:, :, act]).max() < 1e-12
     for which in ('asymmetric', 'unequal_cores', 'no_beta_pair'):
         parts = _st_parts(ref, which)
         p_a = rpa.active_polarizability_static(low, parts)
