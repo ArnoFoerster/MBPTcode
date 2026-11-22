@@ -1271,7 +1271,7 @@ def test_diagnostics_and_flags_for_two_spins(oh, oh_low):
     whole (the static defect, the SRG damping, the largest over both spins),
     a pair (alpha, beta) for what belongs to one spin (the pole-free window,
     the pole distances, Z). The near-pole warning of 'averaged' points at the
-    caller, names the spin, and is in energies.numerical_flags; so does the
+    caller, names the spin, and is in h.numerical_flags; so does the
     damping warning of 'srg', whose number (2.5e-3 Ha here, on beta orbital
     6) equals the oracle's |Sigma(s) - Sigma(inf)| to 1.3e-14."""
     low = oh_low[True]

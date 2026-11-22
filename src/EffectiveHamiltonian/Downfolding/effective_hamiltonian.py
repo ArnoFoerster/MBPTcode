@@ -110,7 +110,7 @@ def _active_spaces(active_space, eps, nocc):
     return spaces
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class DownfoldedHamiltonian:
     """One effective Hamiltonian, as `build_effective_hamiltonian` returns it.
 

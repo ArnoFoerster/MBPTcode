@@ -359,7 +359,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
             checks['sigma_continuation'] = _sigma_continuation(
                 low, chans, sigma, kept)
         recorded.update({name: value for name, value in checks.items()
-                      if name in names})
+                         if name in names})
     return DownfoldingTerms(
         vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
         e_c_active=e_c_active, dc=dc, diagnostics=recorded)
@@ -381,8 +381,8 @@ def screening_correction(low, part, screening):
 
     Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
     For an unrestricted result `part` is the pair of ActiveSpaces (alpha, beta)
-    and the three blocks (aa, ab, bb) are returned, ab[t,u,v,w] =
-    (t_a u_a | v_b w_b), on the casida route:
+    and the three blocks (aa, ab, bb) are returned (spin.py), on the casida
+    route:
         vt^{ss'}_tu,vw = -2 sum_{r,r'} (t_s u_s|r) [(delta + 2K)_rr^-1]_rr' (r'|v_s' w_s'),
     r, r' over the stacked pairs of both spins that are not active, one
     operator W^r - v between each spin's own active orbitals. 'crpa_ph'

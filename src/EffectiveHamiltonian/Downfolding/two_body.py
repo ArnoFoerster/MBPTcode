@@ -13,8 +13,7 @@ from pyscf import ao2mo
 def active_eri(mol, mo_act):
     """The exact chemist integrals (tu|vw) of the active orbitals, each block
     (n_act,)*4: (v,) for the one channel of a restricted reference, from one
-    integral transformation, or (aa, ab, bb) for two channels, with
-    ab[t,u,v,w] = (t_a u_a | v_b w_b).
+    integral transformation, or (aa, ab, bb) for two channels (spin.py).
 
     mo_act = (C_A,) or (C_Aa, C_Ab) are the active orbital coefficients of the
     spin channels. The integrals are the exact 4-centre ones of `mol`, never

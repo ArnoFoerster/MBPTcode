@@ -105,7 +105,9 @@ class ActiveSpace:
 
     Immutable: the fields cannot be reassigned, and every index array, given
     or derived (computed once), is read-only. That holds for an ActiveSpace
-    built by its constructors; it is not written into records.
+    built by its constructors, which a record of this form reads back
+    through; an older record that stored the plain object, pickle and
+    deepcopy restore its arrays writeable.
     """
     norb: int
     nocc: int

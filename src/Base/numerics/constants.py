@@ -291,7 +291,7 @@ DOWNFOLDING_POLE_MARGIN = 3.0
 # treats as significant elsewhere: the threshold of the continuation
 # warning (DOWNFOLDING_SIGMA_CONTINUATION_WARN), which never fires for the
 # same run, and the accuracy the route tests aim for. Until 2026-11-22 it was
-# 1e-6, which fired for any active orbital within about 0.1 Ha of a pole.
+# 1e-6, a level at which the regularization itself is reported.
 DOWNFOLDING_SRG_DAMPING_WARN = 1e-4
 # The 'sigma_continuation' diagnostic of the imaginary-axis routes warns when
 # two Pade fits of S^E on disjoint halves of the nodes (even- and

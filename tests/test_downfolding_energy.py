@@ -887,7 +887,7 @@ def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
 
 def test_named_flags_reach_the_results(monkeypatch):
     """A named flag raised under `run_low_level` is in low.numerical_flags,
-    and `energies.numerical_flags` holds those plus the ones raised under
+    and `h.numerical_flags` holds those plus the ones raised under
     `build_effective_hamiltonian`, each distinct entry once, sorted, as
     {'flag': name, 'message': text} (src.Base.numerical_flags). A later
     build does not inherit an earlier build's flags."""
@@ -960,11 +960,23 @@ def test_the_result_is_one_record_that_solves_itself():
 
 def test_the_averaged_form_is_named_by_what_it_does(wat_rpa):
     """sigma='averaged' is 1/2 [S_tu(eps_t) + S_tu(eps_u)] (mode A of Kotani,
-    van Schilfgaarde and Faleev); the old name 'averaged' is refused, with the
-    valid names listed."""
+    van Schilfgaarde and Faleev); the old name 'mode_a' is refused, with the
+    valid names listed, and so is the old function name."""
     mf, low, aspace = wat_rpa
     want = build_effective_hamiltonian(low, aspace, sigma='averaged')
     _same(build_effective_hamiltonian(low, aspace, sigma='Averaged'), want)
     with pytest.raises(ValueError, match="None, 'srg', 'averaged'"):
         build_effective_hamiltonian(low, aspace, sigma='mode_a')
-    assert rpa.averaged_self_energy is not None
+    assert not hasattr(rpa, 'mode_a_self_energy')
+
+
+def test_two_records_compare_without_error():
+    """A DownfoldedHamiltonian holds arrays, so it compares by identity, as
+    RPALowLevel does: == on two builds answers instead of raising on an
+    array's truth value, and a record can be hashed."""
+    mf = water()
+    aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
+    low = run_low_level(mf, method='hf')
+    one, two = (build_effective_hamiltonian(low, aspace) for _ in range(2))
+    assert one == one and one != two
+    assert len({one, two}) == 2

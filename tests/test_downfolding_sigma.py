@@ -1275,7 +1275,7 @@ def test_space_time_continuation_margin_near_the_edge(nh3_space_time):
 
 
 def test_sigma_warnings_are_named_flags_in_the_energies(wat, low_exact):
-    """The two Sigma^E warnings reach `energies.numerical_flags`: the SRG
+    """The two Sigma^E warnings reach `h.numerical_flags`: the SRG
     damping of the near-pole space on casida ('sigma_srg_damping', its
     message the warning's), and the Pade spread of a too-coarse node set on
     imagfrequency ('sigma_continuation_spread'); also with diagnostics=().

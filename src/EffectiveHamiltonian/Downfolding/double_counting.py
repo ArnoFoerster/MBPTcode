@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .options import choice
-from .spin import spin_weight
+from .spin import spin_block, spin_weight
 
 DC_MODES = ('full', 'hartree')
 
@@ -79,21 +79,19 @@ def double_counting_potential(vtilde, n_act_occ):
 
     hartree^s_tu  = sum_{k in A_o^s} vt^{ss}_tu,kk + sum_{k in A_o^s'} vt^{ss'}_tu,kk
     exchange^s_tu = sum_{k in A_o^s} vt^{ss}_tk,ku
-    so t^DC = hartree - exchange. Two channels: vtilde = (aa, ab, bb) with
-    ab[t,u,v,w] = (t_a u_a | v_b w_b), the beta channel reading the
-    opposite-spin block as ab.transpose(2, 3, 0, 1), and n_act_occ =
-    (n_a, n_b). One restricted channel: vtilde = (v,), n_act_occ = (n,), and
-    the opposite spin sees the same block, hartree_tu = 2 sum_k vt_tu,kk.
+    so t^DC = hartree - exchange, with vtilde = (v,) or (aa, ab, bb) and
+    n_act_occ = (n,) or (n_a, n_b) (spin.py). The one restricted channel is
+    computed once: the opposite spin sees the same block, so
+    hartree_tu = 2 sum_k vt_tu,kk.
     """
     if spin_weight(n_act_occ) == 2:
         (v,), (n,) = vtilde, n_act_occ
         return ((2 * np.einsum('tukk->tu', v[:, :, :n, :n]),),
                 (np.einsum('tkku->tu', v[:, :n, :n, :]),))
-    aa, ab, bb = vtilde
-    n_a, n_b = n_act_occ
-    channels = ((aa, ab, n_a, n_b), (bb, ab.transpose(2, 3, 0, 1), n_b, n_a))
     hartree, exchange = [], []
-    for same, other, n_own, n_other in channels:
+    for s, t in ((0, 1), (1, 0)):
+        same, other = spin_block(vtilde, s, s), spin_block(vtilde, s, t)
+        n_own, n_other = n_act_occ[s], n_act_occ[t]
         hartree.append(np.einsum('tukk->tu', same[:, :, :n_own, :n_own])
                        + np.einsum('tukk->tu', other[:, :, :n_other, :n_other]))
         exchange.append(np.einsum('tkku->tu', same[:, :n_own, :n_own, :]))
@@ -108,9 +106,9 @@ def double_counting_energy(vtilde, n_act_occ):
                spin orbitals, both spin blocks and the opposite-spin pair twice;
     exchange = -1/2 sum_{tu} vt_tu,ut rho_tt rho_uu, same spin only (negative
                for a positive-definite vtilde).
-    One restricted channel, vtilde = (v,) and n_act_occ = (n,):
-    hartree = 2 sum_kl vt_kk,ll, exchange = -sum_kl vt_kl,lk. Two channels:
-    vtilde = (aa, ab, bb), n_act_occ = (n_a, n_b).
+    vtilde = (v,) or (aa, ab, bb), n_act_occ = (n,) or (n_a, n_b) (spin.py);
+    the one restricted channel, computed once: hartree = 2 sum_kl vt_kk,ll,
+    exchange = -sum_kl vt_kl,lk.
     """
     if spin_weight(n_act_occ) == 2:
         (v,), (n,) = vtilde, n_act_occ

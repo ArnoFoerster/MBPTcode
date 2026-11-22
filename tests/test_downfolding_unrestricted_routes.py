@@ -585,7 +585,7 @@ def test_near_pole_warning_on_imagfrequency_names_the_spin():
     is computed all the same. The continuation check warns too, of the
     element (6, 6) of the beta spin, where the two Pade fits differ by
     9.0e-4 Ha. Both warnings point at the caller and both flags are in
-    energies.numerical_flags."""
+    h.numerical_flags."""
     low = _low('oh', 'imagfrequency')
     spaces = _spaces('oh', 'asymmetric')
     for sigma in ('srg', 'averaged'):

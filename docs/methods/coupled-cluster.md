@@ -50,8 +50,9 @@ triplet lies lower; `'pyscf_fci'` there returns the triplet. A downfolded Hamilt
 of bare integrals. The solver takes it as it is: any real Hermitian two-body
 operator works, and nothing is averaged.
 
-The downfolding driver picks it by name: `active_space.solve('ccsdt', g_eff,
-...)` or `'ccsdtq'`. Like `'pyscf_fci'` and `'dmrg'`, it refuses a three-body
+The active-space dispatcher picks it by name:
+`solvers.solve.solve('ccsdt', g_eff, ...)` or `'ccsdtq'`, or
+`h.solve('ccsdt')` on a downfolded Hamiltonian. Like `'pyscf_fci'` and `'dmrg'`, it refuses a three-body
 vertex and a non-Hermitian `g_eff` rather than dropping either. The cost grows
 as N^8 for CCSDT and N^10 for CCSDTQ, and memory is mostly the highest
 amplitudes. If the reference or the amplitudes do not converge, the solver
