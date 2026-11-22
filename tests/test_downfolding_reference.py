@@ -83,18 +83,15 @@ would change single elements. Every compared quantity agrees to rounding
 import functools
 import json
 import pathlib
-
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
-
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.Downfolding.one_body import (core_fock,
                                                            double_counting)
-from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
-                                                            partition)
+from src.EffectiveHamiltonian.Downfolding.masks import active_pair_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.solvers.solve import solve
 from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
@@ -340,7 +337,7 @@ def test_prototype_elements(molecule, screening):
     v = _pinned_build(molecule, 'bare')[0][2].transpose(0, 2, 1, 3)
     g = _pinned_build(molecule, screening)[0]
     v_eff = g[2].transpose(0, 2, 1, 3)
-    part = partition(aspace, mf.mo_energy)
+    part = aspace
     mo, parts = (mf.mo_coeff, mf.mo_coeff), (part, part)
     f = core_fock(mf.mol, mf.get_hcore(), mo, parts)[0]
     n_occ = (part.n_act_occ, part.n_act_occ)
@@ -405,7 +402,7 @@ def _benzene_vtilde(screening):
     """vtilde of the benzene (6,6) pi space of the pins (canonical [16, 19,
     20] and [21, 22, 29], the prototype's orbitals), (n_act,)*4 chemist."""
     low, aspace = _pinned_low('benzene')
-    return rpa.screening_correction(low, partition(aspace, low.eps),
+    return rpa.screening_correction(low, aspace,
                                     screening)
 
 
@@ -441,7 +438,7 @@ def test_benzene_1010_omega_r():
     tolerance is 4.5e-3 Eh, not 1e-4."""
     low, _ = _pinned_low('benzene')
     aspace = ActiveSpace.from_counts(low.eps, low.nocc, 5, 5)
-    part = partition(aspace, low.eps)
+    part = aspace
     assert list(part.act) == list(range(16, 26))
     omega, _ = drpa(low.eri, low.eps, low.nocc, keep=~active_pair_mask(part))
     ref = np.array(DATA['benzene_1010_omega_r']['values'])

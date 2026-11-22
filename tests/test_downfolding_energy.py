@@ -35,11 +35,9 @@ E_HF + E_c[v]; at s = inf both forms give the same E_0; method='hf' refuses
 sigma.
 """
 from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from pyscf import dft, fci, gto, mcscf, scf
-
 from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   effective_hamiltonian,
@@ -50,7 +48,7 @@ from src.EffectiveHamiltonian.Downfolding.energy import (
 from src.EffectiveHamiltonian.Downfolding.methods import LOW_LEVEL, rpa
 from src.EffectiveHamiltonian.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body)
-from src.EffectiveHamiltonian.Downfolding.partition import partition
+
 from src.EffectiveHamiltonian.Downfolding.terms import DownfoldingTerms
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.EffectiveHamiltonian.solvers.solve import solve
@@ -65,7 +63,7 @@ def _water_part(mf, occ_active, virt_active):
     nocc = mf.mol.nelectron // 2
     space = ActiveSpace.from_indices(len(mf.mo_energy), nocc, occ_active,
                                      virt_active)
-    return partition(space, mf.mo_energy)
+    return space
 
 
 def _random_vtilde(rng, n):
@@ -94,7 +92,7 @@ def _symmetric(rng, n):
 def test_environment_energy_all_environment_is_hf():
     mf = water()
     part = _water_part(mf, [], [])
-    assert len(part.inactive) == mf.mol.nelectron // 2 and part.n_act == 0
+    assert len(part.env_occ) == mf.mol.nelectron // 2 and part.n_act == 0
     c = mf.mo_coeff
     e_core, e_h, e_x = environment_hf_energy(mf.mol, mf.get_hcore(), (c, c),
                                              (part, part))
@@ -132,7 +130,7 @@ def test_per_spin_energy_terms():
     hartree, exchange = active_hf_energy((aa, ab, bb), n_occ)
 
     h_so, eri_so = spin_orbital_integrals(mf.mol, c_a, c_b)
-    occ_env = list(part_a.inactive) + list(nmo + part_b.inactive)
+    occ_env = list(part_a.env_occ) + list(nmo + part_b.env_occ)
     occ_act = list(range(n_occ[0])) + list(n + np.arange(n_occ[1]))
     al, be = slice(0, n), slice(n, 2 * n)
     vt_so = np.zeros((2 * n,) * 4)
@@ -676,7 +674,7 @@ def test_exchange_term_vanishes_for_ph_screening(wat_rpa, sigma):
                                            sigma=sigma)
     assert en.e_exchange_term == 0.0
     g_hf, _, _ = _hf_heff(mf, aspace)
-    part = partition(aspace, mf.mo_energy)
+    part = aspace
     s_bar = rpa.embedding_self_energy(low, part, sigma)
     assert np.abs(g[1] - (g_hf[1] + s_bar)).max() < 1e-12
     assert abs(en.e_sigma_trace - 2.0 * np.trace(s_bar[:2, :2])) < 1e-12
@@ -797,7 +795,7 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
     monkeypatch.setattr(one_body, 'get_jk', counted_jk)
     monkeypatch.setattr(two_body.ao2mo, 'general', counted_general)
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    part = partition(aspace, mf.mo_energy)
+    part = aspace
     assert len(LOW_LEVEL[method].terms(low, part).vtilde) == 1
     build_effective_hamiltonian(low, aspace)
     assert calls == {'jk': 1, 'ao2mo': 1}
@@ -823,7 +821,7 @@ def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
     monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(terms=terms))
     low = SimpleNamespace(mf=mf, method='probe')
     build_effective_hamiltonian(low, aspace)
-    assert seen[-1].n_act == 4                    # one Partition, not a tuple
+    assert seen[-1].n_act == 4                    # one ActiveSpace, not a tuple
     with pytest.raises(ValueError, match='3 vtilde blocks.*restricted'):
         build_effective_hamiltonian(low, aspace, nblocks=3)
     with pytest.raises(ValueError, match='2 Sigma_bar blocks.*restricted'):

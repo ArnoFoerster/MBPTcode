@@ -10,7 +10,7 @@ from it.
 The driver knows no method: it reaches them through `LOW_LEVEL` and reads
 only the `DownfoldingTerms` a method hands back. The mean-field object alone
 decides the number of spin channels. A restricted reference (RHF/RKS) is ONE
-channel (the orbitals, the `Partition`, one vtilde), and everything is
+channel (the orbitals, the `ActiveSpace`, one vtilde), and everything is
 computed once: one exact J/K build of the inactive core, shared by the core
 Fock operator and the environment energy, and one integral transformation of
 the active block. An unrestricted one (UHF/UKS) is two, alpha and beta, each
@@ -49,7 +49,6 @@ from .energy import assemble_energies, environment_hf_energy
 from .methods import LOW_LEVEL
 from .one_body import (DC_MODES, core_fock, double_counting,
                        effective_one_body, inactive_jk)
-from .partition import partition
 from .terms import choice
 from .two_body import effective_interaction
 
@@ -61,7 +60,7 @@ def _spin_channels(mf):
     """(mo, eps, nocc), each a tuple over the spin channels of `mf`: one
     channel for a restricted reference, (alpha, beta) for UHF/UKS. nocc is
     the occupied count of each channel, refused unless its occupied orbitals
-    are its lowest ones: every partition takes [0, nocc) as the occupied
+    are its lowest ones: every active space takes [0, nocc) as the occupied
     block. An unrestricted reference is also refused unless every
     occupation is 0 or 1 (`unrestricted_nocc`)."""
     if not isinstance(mf, scf.uhf.UHF):
@@ -71,12 +70,13 @@ def _spin_channels(mf):
             unrestricted_nocc(mf.mo_occ))
 
 
-def _partitions(active_space, eps, nocc):
-    """(spaces, parts): the active space and the `Partition` of each spin
-    channel, one for a restricted reference and (alpha, beta) for an
-    unrestricted one, whose active space is a pair of `ActiveSpace` with the
-    same number of active orbitals. Each space must be set up for the orbital
-    and occupied counts of its own channel."""
+def _active_spaces(active_space, eps, nocc):
+    """The `ActiveSpace` of each spin channel as a tuple: one for a
+    restricted reference, (alpha, beta) for an unrestricted one, whose active
+    space is a pair with the same number of active orbitals. Each space must
+    be set up for the orbital and occupied counts of its own channel, and
+    must not cut a degenerate set of its channel's orbitals
+    (`ActiveSpace.require_no_degenerate_cut`)."""
     paired = isinstance(active_space, (tuple, list))
     if len(eps) == 1:
         if paired:
@@ -97,7 +97,6 @@ def _partitions(active_space, eps, nocc):
                 f'the alpha and beta active spaces hold {spaces[0].n_act} and '
                 f'{spaces[1].n_act} orbitals; both spins take the same number '
                 f'of active orbitals.')
-    parts = []
     for space, e, n, spin in zip(spaces, eps, nocc, names):
         if (space.norb, space.nocc) != (len(e), n):
             which, has = (('the active space', f'{n} occupied') if spin is None
@@ -107,8 +106,8 @@ def _partitions(active_space, eps, nocc):
                 f'{which} is set up for {space.nocc} occupied of '
                 f'{space.norb} orbitals; the mean field has {has} of '
                 f'{len(e)}.')
-        parts.append(partition(space, e, spin))
-    return spaces, tuple(parts)
+        space.require_no_degenerate_cut(e, spin)
+    return spaces
 
 
 def run_low_level(mf, method='rpa', **method_opts):
@@ -200,15 +199,15 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     mf = low.mf
     mol = mf.mol
     mo, eps, nocc = _spin_channels(mf)
-    spaces, parts = _partitions(active_space, eps, nocc)
-    unrestricted = len(parts) == 2
+    spaces = _active_spaces(active_space, eps, nocc)
+    unrestricted = len(spaces) == 2
     method = choice(low.method, tuple(LOW_LEVEL), 'method')
     flags = []
     with collecting(flags):
         # `terms` is called from this function itself, not from a helper:
         # the method's warnings count the frames up to the caller of this one
         terms = LOW_LEVEL[method].terms(
-            low, parts if unrestricted else parts[0], **method_opts)
+            low, spaces if unrestricted else spaces[0], **method_opts)
         dc = choice(terms.dc, DC_MODES, 'dc')
         if terms.sigma_bar is not None and dc == 'full':
             raise ValueError(
@@ -230,15 +229,15 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
                    "; a restricted reference is one spin channel: "
                    "vtilde = (v,), sigma_bar = (s,)."))
 
-        n_act_occ = tuple(p.n_act_occ for p in parts)
+        n_act_occ = tuple(p.n_act_occ for p in spaces)
         hcore = mf.get_hcore()
-        jk = inactive_jk(mol, mo, parts)
-        f = core_fock(mol, hcore, mo, parts, jk=jk)
+        jk = inactive_jk(mol, mo, spaces)
+        f = core_fock(mol, hcore, mo, spaces, jk=jk)
         hartree, exchange = double_counting(terms.vtilde, n_act_occ)
         h_eff = effective_one_body(f, hartree, exchange, dc, terms.sigma_bar)
         v_eff = effective_interaction(
-            mol, tuple(c[:, p.act] for c, p in zip(mo, parts)), terms.vtilde)
-        environment = environment_hf_energy(mol, hcore, mo, parts, jk=jk)
+            mol, tuple(c[:, p.act] for c, p in zip(mo, spaces)), terms.vtilde)
+        environment = environment_hf_energy(mol, hcore, mo, spaces, jk=jk)
         energies = assemble_energies(mf.energy_nuc(), *environment, terms,
                                      n_act_occ)
         g_eff = pack(h_eff, v_eff, energies.e0, spin_free)
@@ -246,7 +245,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     energies = replace(energies,
                        numerical_flags=gathered(inherited + flags))
 
-    n_act = parts[0].n_act
+    n_act = spaces[0].n_act
     if unrestricted:
         space = {
             'n_orbs': n_act if spin_free else 2 * n_act,
@@ -256,7 +255,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
             'act_vir_idx': tuple(s.virt_active for s in spaces),
             'spin_free': spin_free,
             'active_space': spaces,
-            'spin_overlap': _spin_overlap(mf, mo, parts),
+            'spin_overlap': _spin_overlap(mf, mo, spaces),
         }
     else:
         space = {
@@ -271,16 +270,16 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     return g_eff, space, energies
 
 
-def _spin_overlap(mf, mo, parts):
+def _spin_overlap(mf, mo, spaces):
     """The blocks of O = C_alpha^T S C_beta between the inactive ('core') and
     the active orbitals of the two spins, rows alpha and columns beta, the
     active orbitals occupied first as in H_eff: what <S^2> of an active-space
     state with its core determinant needs, since alpha orbital p and beta
     orbital p of an unrestricted reference are different functions."""
-    (c_a, c_b), (part_a, part_b) = mo, parts
+    (c_a, c_b), (space_a, space_b) = mo, spaces
     overlap = c_a.T @ mf.get_ovlp() @ c_b
-    rows = {'core': part_a.inactive, 'active': part_a.act}
-    cols = {'core': part_b.inactive, 'active': part_b.act}
+    rows = {'core': space_a.env_occ, 'active': space_a.act}
+    cols = {'core': space_b.env_occ, 'active': space_b.act}
     return {f'{left}_{right}': overlap[np.ix_(i, j)]
             for left, i in rows.items() for right, j in cols.items()}
 

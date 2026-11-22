@@ -80,7 +80,7 @@ pytest test_downfolded_seeds.py
 pytest test_downfolding_energy.py
 pytest test_downfolding_layout.py
 pytest test_downfolding_one_body.py
-pytest test_downfolding_partition.py
+pytest test_downfolding_masks.py
 pytest test_downfolding_reference.py
 pytest test_downfolding_routes.py
 pytest test_downfolding_sigma.py

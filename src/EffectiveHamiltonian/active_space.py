@@ -37,9 +37,13 @@ matrix stays diagonal and eps stays exact. (ROTATING orbitals -- localizing,
 natural orbitals, anything mixing them -- would break that assumption and is
 NOT what this module does.)
 """
+from dataclasses import dataclass
+from functools import cached_property
+
 import numpy as np
 from pyscf import symm
 
+from src.Base.numerics.constants import QP_DEGENERACY_TOL
 from src.Base.orbital_spaces import closed_shell_nocc
 
 class ReorderedMF:
@@ -82,22 +86,52 @@ class ReorderedMF:
                 f'external={len(self.mo_occ) - self.n_occ_spatial - self.n_act_spatial}>')
 
 
+@dataclass(frozen=True, eq=False)
 class ActiveSpace:
-    """Which canonical spatial MOs of a closed-shell reference are active, and every index view of that choice.
+    """Which canonical spatial MOs of one spin channel are active, and every index view of that choice.
+
+    One spin channel: the one channel of a closed-shell reference, or one
+    spin of an unrestricted one, which takes a pair (alpha, beta) of these
+    (`unrestricted_from_counts`). norb and nocc are that channel's orbital and
+    occupied counts.
 
     occ_active / virt_active are spatial MO indices in the original canonical
     order, strictly increasing, occupied in [0, nocc) and virtual in
     [nocc, norb), so two selection rules that pick the same orbitals compare
-    equal whatever route built them. No constructor here ever mixes orbitals:
-    the reference stays canonical, the Fock matrix stays diagonal, and every
-    perturbative denominator stays a sum of orbital energies.
-    """
+    equal, and hash alike, whatever route built them. No constructor here
+    ever mixes orbitals: the reference stays canonical, the Fock matrix stays
+    diagonal, and every perturbative denominator stays a sum of orbital
+    energies.
 
-    def __init__(self, norb, nocc, occ_active, virt_active):
-        self.norb, self.nocc = int(norb), int(nocc)
-        self.occ_active = _index_array(occ_active, 0, self.nocc, 'occ_active')
-        self.virt_active = _index_array(virt_active, self.nocc, self.norb,
-                                        'virt_active')
+    Immutable: the fields cannot be reassigned, and every index array, given
+    or derived (computed once), is read-only. That holds for an ActiveSpace
+    built by its constructors; it is not written into records.
+    """
+    norb: int
+    nocc: int
+    occ_active: np.ndarray
+    virt_active: np.ndarray
+
+    def __post_init__(self):
+        norb, nocc = int(self.norb), int(self.nocc)
+        object.__setattr__(self, 'norb', norb)
+        object.__setattr__(self, 'nocc', nocc)
+        object.__setattr__(self, 'occ_active', _read_only(
+            _index_array(self.occ_active, 0, nocc, 'occ_active')))
+        object.__setattr__(self, 'virt_active', _read_only(
+            _index_array(self.virt_active, nocc, norb, 'virt_active')))
+
+    def _key(self):
+        return (self.norb, self.nocc, tuple(self.occ_active.tolist()),
+                tuple(self.virt_active.tolist()))
+
+    def __eq__(self, other):
+        if not isinstance(other, ActiveSpace):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __hash__(self):
+        return hash(self._key())
 
     @classmethod
     def from_counts(cls, eps, nocc, n_occ_active, n_virt_active):
@@ -186,20 +220,26 @@ class ActiveSpace:
             picked.append(idx)
         return cls(norb, nocc, picked[0], picked[1])
 
-    @property
+    @cached_property
     def env_occ(self):
-        """Occupied orbitals outside the window (the frozen core)."""
-        return np.setdiff1d(np.arange(self.nocc), self.occ_active)
+        """Occupied orbitals outside the window: the frozen inactive core."""
+        return _read_only(np.setdiff1d(np.arange(self.nocc), self.occ_active))
 
-    @property
+    @cached_property
     def env_virt(self):
         """Virtual orbitals outside the window."""
-        return np.setdiff1d(np.arange(self.nocc, self.norb), self.virt_active)
+        return _read_only(np.setdiff1d(np.arange(self.nocc, self.norb),
+                                       self.virt_active))
 
-    @property
+    @cached_property
     def act(self):
         """Active orbitals, occupied first: the order the active-space Hamiltonian's rows are in."""
-        return np.concatenate([self.occ_active, self.virt_active])
+        return _read_only(np.concatenate([self.occ_active, self.virt_active]))
+
+    @cached_property
+    def env(self):
+        """The environment orbitals: the inactive occupied, then the environment virtual."""
+        return _read_only(np.concatenate([self.env_occ, self.env_virt]))
 
     @property
     def n_act_occ(self):
@@ -211,8 +251,35 @@ class ActiveSpace:
 
     @property
     def nelec_active(self):
-        """Electrons in the window: doubly occupied active orbitals only."""
+        """Electrons in the window of a closed-shell reference, two per active
+        occupied orbital; one spin of an unrestricted pair holds n_act_occ."""
         return 2 * self.n_act_occ
+
+    def require_no_degenerate_cut(self, eps, spin=None):
+        """Refuse a boundary that splits a degenerate set.
+
+        An active and an environment orbital of the same kind (both occupied
+        or both virtual) closer than QP_DEGENERACY_TOL would make the energy
+        denominators between the two sets vanish, so the active space has to
+        take the whole degenerate set or none of it. An occupied orbital close
+        to a virtual one is not a cut and is never compared. `eps` are the
+        orbital energies of this space's channel; `spin` ('alpha' or 'beta')
+        names that channel in the message for an unrestricted reference.
+        """
+        eps = np.asarray(eps)
+        which = 'the active space' if spin is None else f'the {spin} active space'
+        for act, env in ((self.occ_active, self.env_occ),
+                         (self.virt_active, self.env_virt)):
+            for a in act:
+                for e in env:
+                    if abs(eps[a] - eps[e]) < QP_DEGENERACY_TOL:
+                        raise ValueError(
+                            f"{which} cuts a degenerate pair: active "
+                            f"orbital {a} (eps = {eps[a]:.8f}) and environment "
+                            f"orbital {e} (eps = {eps[e]:.8f}) differ by less "
+                            f"than {QP_DEGENERACY_TOL:g}. Take the whole set, "
+                            f"e.g. with ActiveSpace.from_irreps or "
+                            f"ActiveSpace.from_population.")
 
     @property
     def is_contiguous(self):
@@ -285,9 +352,15 @@ def unrestricted_from_counts(eps, nocc, n_act, nelec_active):
     return tuple(spaces)
 
 
+def _read_only(array):
+    """`array` with its writeable flag cleared."""
+    array.flags.writeable = False
+    return array
+
+
 def _index_array(idx, lo, hi, name):
-    """A strictly increasing int index array inside [lo, hi); raises otherwise."""
-    out = np.asarray(idx, dtype=int).ravel()
+    """A copy of `idx` as a strictly increasing int array inside [lo, hi); raises otherwise."""
+    out = np.array(idx, dtype=int).ravel()   # a copy: never the caller's array
     if len(out) and (out[0] < lo or out[-1] >= hi or np.any(np.diff(out) <= 0)):
         raise ValueError(f'{name} must be strictly increasing indices in '
                          f'[{lo}, {hi}); got {out}')

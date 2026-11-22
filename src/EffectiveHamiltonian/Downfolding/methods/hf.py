@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..partition import channels_of
+from ..masks import channels_of
 from ..terms import DownfoldingTerms
 
 METHOD = 'hf'
@@ -43,7 +43,7 @@ def run(mf, **opts):
 
 def terms(low, part, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
-    `part`, one block for the Partition of a restricted reference and the
+    `part`, one block for the ActiveSpace of a restricted reference and the
     three (aa, ab, bb) for the pair of an unrestricted one; no static
     self-energy, both correlation energies zero, and the full double counting
     (of a zero vtilde). HF takes no options."""

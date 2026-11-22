@@ -10,7 +10,7 @@ electrons, so nothing is computed twice; or two, (alpha, beta), for an
 unrestricted one. vtilde is then (v,), one spin-independent block, or
 (aa, ab, bb). `spin_weight` is the number of electrons an occupied orbital of
 a channel holds, 2 or 1, and the one-channel formulas are the two-channel
-ones with both channels equal. Active indices are local to `Partition.act`
+ones with both channels equal. Active indices are local to `ActiveSpace.act`
 (occupied first), so the active occupied orbitals of a channel are its first
 n_act_occ.
 """
@@ -44,9 +44,9 @@ def inactive_jk(mol, mo, parts):
     orbital nothing is built. mo = (C,) or (C_a, C_b), parts likewise.
     """
     weight = spin_weight(mo)
-    dms = np.array([c[:, p.inactive] @ c[:, p.inactive].T
+    dms = np.array([c[:, p.env_occ] @ c[:, p.env_occ].T
                     for c, p in zip(mo, parts)])
-    if not any(len(p.inactive) for p in parts):
+    if not any(len(p.env_occ) for p in parts):
         return dms, np.zeros_like(dms[0]), tuple(np.zeros_like(d) for d in dms)
     vj, vk = get_jk(mol, dms)
     return dms, weight * sum(vj), tuple(vk)

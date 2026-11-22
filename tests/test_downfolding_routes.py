@@ -36,11 +36,9 @@ imagfrequency to the same ISDF error, and the near-pole space warns.
 import dataclasses
 import warnings
 from functools import cache
-
 import numpy as np
 import pytest
 from pyscf import dft, gto, scf
-
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
                                         rpa_quadrature)
@@ -51,7 +49,6 @@ from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.energy import Energies
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.partition import partition
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.linear_response import \
@@ -185,7 +182,7 @@ def test_vtilde_matches_casida(ref, aspace):
     at most 2.2e-16 (tolerance 1e-8)."""
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     mf = low_if.mf
-    part = partition(_aspace(mf, aspace), mf.mo_energy)
+    part = _aspace(mf, aspace)
     for s in ('crpa', 'crpa_ph'):
         vt = rpa.screening_correction(low_if, part, s)
         ref_vt = rpa.screening_correction(low_cas, part, s)
@@ -203,7 +200,7 @@ def test_active_pair_factors_and_polarizability():
     active ph pairs alone, so the full P(0) minus it is chi0 of the rest."""
     low = _low('hf', 'imagfrequency')
     mf = low.mf
-    part = partition(_aspace(mf, 'non_contiguous'), mf.mo_energy)
+    part = _aspace(mf, 'non_contiguous')
     b = low.factors
     b_act = rpa.active_pair_factors(low, part)
     assert b_act.shape == (b.shape[0], 4, 4)
@@ -213,9 +210,8 @@ def test_active_pair_factors_and_polarizability():
     b_a = b[:, occ][:, :, vir].reshape(b.shape[0], -1)
     d_a = (low.eps[vir][None, :] - low.eps[occ][:, None]).ravel()
     assert np.abs(p_a - (-4.0 * (b_a / d_a) @ b_a.T)).max() < 1e-14
-    all_act = partition(ActiveSpace.from_indices(len(mf.mo_energy), 5,
-                                                 range(5), range(5, 13)),
-                        mf.mo_energy)
+    all_act = ActiveSpace.from_indices(len(mf.mo_energy), 5,
+                                                 range(5), range(5, 13))
     assert np.abs(rpa.active_polarizability_static(low, all_act)
                   - low.cache['p0']).max() < 1e-12
 
@@ -226,7 +222,7 @@ def test_pair_factor_functions_need_the_three_index_factors():
     active_polarizability_static refuse it by name and point to df=True."""
     mf = _mean_field('hf')
     low = run_low_level(mf, method='rpa', mode='casida', df=False)
-    part = partition(_aspace(mf, 'contiguous'), mf.mo_energy)
+    part = _aspace(mf, 'contiguous')
     for function in (rpa.active_pair_factors,
                      rpa.active_polarizability_static):
         with pytest.raises(NotImplementedError,
@@ -240,7 +236,7 @@ def test_naive_w_difference_is_wrong():
     while P - P^A and Dyson hit it."""
     low = _low('hf', 'imagfrequency')
     mf = low.mf
-    part = partition(_aspace(mf, 'contiguous'), mf.mo_energy)
+    part = _aspace(mf, 'contiguous')
     naux, n = low.factors.shape[0], part.n_act
     b_act = rpa.active_pair_factors(low, part).reshape(naux, n * n)
     eye = np.eye(naux)
@@ -258,8 +254,7 @@ def test_all_active_ec_pair_cancels(s):
     full energy by slogdet in the auxiliary basis, the active one in the ph
     basis)."""
     low = run_low_level(h2(), mode='imagfrequency')
-    part = partition(ActiveSpace.from_indices(4, 1, [0], [1, 2, 3]),
-                     low.eps)
+    part = ActiveSpace.from_indices(4, 1, [0], [1, 2, 3])
     t = rpa.terms(low, part, s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-10
     assert np.abs(t.vtilde[0]).max() == 0.0
@@ -278,8 +273,7 @@ def test_all_active_ec_pair_cancels_on_a_coarse_grid(s):
                         numerics=Numerics(quadrature={'nfreq_rpa': 6}))
     assert len(low.cache['grid'][0]) == 6
     assert abs(low.e_c_full - _low('hf', 'casida').e_c_full) > 1e-7
-    part = partition(ActiveSpace.from_indices(13, 5, range(5), range(5, 13)),
-                     low.eps)
+    part = ActiveSpace.from_indices(13, 5, range(5), range(5, 13))
     t = rpa.terms(low, part, s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-12
 
@@ -317,7 +311,7 @@ def test_static_defect_zero_for_crpa(ref):
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     mf = low_if.mf
     a = _aspace(mf, 'contiguous')
-    part = partition(a, mf.mo_energy)
+    part = a
     _, _, en = build_effective_hamiltonian(low_if, a, screening='crpa')
     assert en.diagnostics['static_defect'] < 1e-8
     for s in ('bare', 'crpa_ph'):
@@ -326,8 +320,7 @@ def test_static_defect_zero_for_crpa(ref):
         assert en.diagnostics['static_defect'] > 1e-4
         assert abs(en.diagnostics['static_defect']
                    - en_c.diagnostics['static_defect']) < 1e-8
-    assert rpa.static_defect(low_if, partition(
-        ActiveSpace.from_indices(13, 5, [], []), mf.mo_energy),
+    assert rpa.static_defect(low_if, ActiveSpace.from_indices(13, 5, [], []),
         np.zeros((0,) * 4)) == 0.0
 
 
@@ -427,7 +420,7 @@ def test_sigma_bar_matches_casida(ref, aspace, sigma):
     tests/test_downfolding_sigma.py.)"""
     low_if = _low_infinite_s(ref, 'imagfrequency')
     low_cas = _low_infinite_s(ref, 'casida')
-    part = partition(_aspace(low_if.mf, aspace), low_if.eps)
+    part = _aspace(low_if.mf, aspace)
     got = rpa.embedding_self_energy(low_if, part, sigma)
     want = rpa.embedding_self_energy(low_cas, part, sigma)
     assert np.abs(want).max() > 1e-3
@@ -467,7 +460,7 @@ def test_mrpa_refused_here():
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         build_effective_hamiltonian(low, a, screening='mrpa')
     with pytest.raises(NotImplementedError, match="mode='casida'"):
-        rpa.screened_residues(low, partition(a, low.eps))
+        rpa.screened_residues(low, a)
     with pytest.raises(ValueError, match="df=False.*mode='casida'"):
         run_low_level(low.mf, mode='imagfrequency', df=False)
 
@@ -527,8 +520,8 @@ def _st_aspace(mf, which):
 
 def _all_active(low):
     n = len(low.eps)
-    return partition(ActiveSpace.from_indices(n, low.nocc, range(low.nocc),
-                                              range(low.nocc, n)), low.eps)
+    return ActiveSpace.from_indices(n, low.nocc, range(low.nocc),
+                                              range(low.nocc, n))
 
 
 def test_space_time_full_rpa():
@@ -597,7 +590,7 @@ def test_space_time_active_pair_factors_and_polarizability():
     exp(-delta_ia tau) over the active ph pairs (3.8e-17 against the pair
     sum), whose pi(0) is -4/delta to the transform's 2.0e-6 (relative)."""
     low = _st_low('HF', 'space-time')
-    part = partition(_st_aspace(low.mf, 'non_contiguous'), low.eps)
+    part = _st_aspace(low.mf, 'non_contiguous')
     x, d = low.cache['factors']
     act = part.act
     b_act = rpa.active_pair_factors(low, part)
@@ -653,7 +646,7 @@ def test_space_time_vtilde_matches_casida(ref, aspace):
     tau quadrature's (unchanged from 14 to 30 tau points)."""
     low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
     mf = low_st.mf
-    part = partition(_st_aspace(mf, aspace), mf.mo_energy)
+    part = _st_aspace(mf, aspace)
     for s in ('crpa', 'crpa_ph'):
         vt = rpa.screening_correction(low_st, part, s)
         ref_vt = rpa.screening_correction(low_cas, part, s)
@@ -772,7 +765,7 @@ def test_space_time_refusals():
         assert np.all(np.isfinite(g[1]))
         assert {'flag': 'sigma_near_pole',
                 'message': text} in en.numerical_flags
-    part = partition(a, low.eps)
+    part = a
     with pytest.raises(NotImplementedError,
                        match="mode='imagfrequency' or mode='space-time'"):
         rpa.sigma_env_imag_axis(_st_low('HF', 'casida'), part, [1.0])
@@ -793,7 +786,7 @@ def test_space_time_sigma_bar_matches_casida(ref, aspace, sigma):
     so the residual is the ISDF fit's, as for vtilde."""
     low_st = _st_low(ref, 'space-time', downfolding=INFINITE_S)
     low_cas = _st_low(ref, 'casida', downfolding=INFINITE_S)
-    part = partition(_st_aspace(low_st.mf, aspace), low_st.eps)
+    part = _st_aspace(low_st.mf, aspace)
     got = rpa.embedding_self_energy(low_st, part, sigma)
     want = rpa.embedding_self_energy(low_cas, part, sigma)
     assert np.array_equal(got, got.T)
@@ -848,8 +841,7 @@ def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
     copy of it."""
     from src.SingleReference.GW import imaginary_axis
     mf = water()
-    part = partition(ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2),
-                     mf.mo_energy)
+    part = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     shared = imaginary_axis.screening_fit_grid
     calls, fitted = [], []
 

@@ -118,7 +118,7 @@ from src.SingleReference.LinearResponse.space_time import (
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
 
-from ..partition import active_pair_mask, channels_of, ph_element_mask
+from ..masks import active_pair_mask, channels_of, ph_element_mask
 from ..terms import DownfoldingTerms, choice
 
 METHOD = 'rpa'
@@ -273,7 +273,7 @@ def _refuse_options(opts, which):
 class _Channel:
     """One spin channel of an active-space request: the orbital energies,
     the occupied count and the three-index factors (None without) of that
-    spin, its Partition, its name, 'alpha' or 'beta' (None for the one
+    spin, its ActiveSpace, its name, 'alpha' or 'beta' (None for the one
     channel of a restricted reference), and on space-time its collocation
     X (M, nmo) in the MO basis (None on the other routes)."""
     eps: np.ndarray
@@ -285,21 +285,21 @@ class _Channel:
 
 
 def _channels(low, part):
-    """The spin channels of `low` with the partitions of `part`: one, for a
-    restricted result and one Partition; two, for an unrestricted result and
+    """The spin channels of `low` with the active spaces of `part`: one, for a
+    restricted result and one ActiveSpace; two, for an unrestricted result and
     the pair (alpha, beta). Anything else is refused."""
     parts = channels_of(part)
     if not low.unrestricted:
         if len(parts) != 1:
             raise ValueError(
-                f'a restricted low-level result takes one Partition; got '
+                f'a restricted low-level result takes one ActiveSpace; got '
                 f'{len(parts)}. A pair (alpha, beta) goes with an '
                 f'unrestricted (UHF/UKS) one.')
         return (replace(_reference_channels(low)[0], part=parts[0]),)
     if len(parts) != 2:
         raise ValueError(
             'an unrestricted (UHF/UKS) low-level result takes a pair of '
-            'Partitions, (alpha, beta), one per spin; got one.')
+            'ActiveSpaces, (alpha, beta), one per spin; got one.')
     return tuple(replace(chan, part=p)
                  for chan, p in zip(_reference_channels(low), parts))
 
@@ -640,14 +640,14 @@ def screening_correction(low, part, screening):
     """The static screening correction vt = W^r(0) - v on the active orbitals.
 
     Returns (n_act,)*4, chemist order (tu|vw), on part.act (occupied first).
-    For an unrestricted result `part` is the pair of Partitions (alpha, beta)
+    For an unrestricted result `part` is the pair of ActiveSpaces (alpha, beta)
     and the three blocks (aa, ab, bb) are returned, ab[t,u,v,w] =
     (t_a u_a | v_b w_b), on the casida route:
         vt^{ss'}_tu,vw = -2 sum_{r,r'} (t_s u_s|r) [(delta + 2K)_rr^-1]_rr' (r'|v_s' w_s'),
     r, r' over the stacked pairs of both spins that are not active, one
     operator W^r - v between each spin's own active orbitals. 'crpa_ph'
     keeps the elements with a particle-hole pair on both sides, each side
-    in its own spin's partition. 'mrpa' is Eq. 5 as it stands in spin
+    in its own spin's active space. 'mrpa' is Eq. 5 as it stands in spin
     orbitals, on the active ph pairs of both spins, stacked:
         (ia|jb)_eff = 1/2 [eta0_A^-1 delta_A eta0_A^-1 - delta_A],
     eta0_A the active block of eta0 = xpy xpy^T of the two-spin RPA. Its
@@ -1432,14 +1432,14 @@ def _windows(low, chans):
     once for all of them, and not at all when no channel has an environment
     orbital."""
     om = None
-    if any(len(c.part.inactive) or len(c.part.env_virt) for c in chans):
+    if any(len(c.part.env_occ) or len(c.part.env_virt) for c in chans):
         om = lowest_excitation(low)
     windows = []
     for chan in chans:
         part, eps = chan.part, chan.eps
         lo, hi = -np.inf, np.inf
-        if om is not None and len(part.inactive):
-            lo = float(eps[part.inactive].max() - om)
+        if om is not None and len(part.env_occ):
+            lo = float(eps[part.env_occ].max() - om)
         if om is not None and len(part.env_virt):
             hi = float(eps[part.env_virt].min() + om)
         windows.append((lo, hi))
@@ -1975,7 +1975,7 @@ def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
           numerics=None, **opts):
     """The DownfoldingTerms of the RPA on the active space `part`.
 
-    `part` is one Partition for a restricted low-level result, and the terms
+    `part` is one ActiveSpace for a restricted low-level result, and the terms
     are those of one spin channel: vtilde = (v,), sigma_bar = (s,). For an
     unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab, bb),
     sigma_bar = (alpha, beta); the correlation energies and the static

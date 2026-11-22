@@ -33,19 +33,16 @@ ones).
 import copy
 import warnings
 from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from pyscf import fci, gto, mcscf, scf
 from pyscf.gw import urpa
-
 from src.Base.numerics.constants import DOWNFOLDING_SRG_S
 from src.Base.pyscf import pyscf_interface
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.partition import (partition,
-                                                            ph_element_mask)
+from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
 from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                  unrestricted_from_counts)
 from src.EffectiveHamiltonian.solvers.solve import (
@@ -167,7 +164,7 @@ SPACES = {'asymmetric': _asymmetric, 'unequal_cores': _unequal_cores,
 
 
 def _parts(mf, spaces):
-    return tuple(partition(space, eps)
+    return tuple(space
                  for space, eps in zip(spaces, mf.mo_energy))
 
 
@@ -499,7 +496,7 @@ def test_oracle_reduces_to_the_restricted_one():
     mf = water()
     eps, nocc, nmo = mf.mo_energy, 5, len(mf.mo_energy)
     _, eri = mo_integrals(mf)
-    part = partition(ActiveSpace.from_indices(nmo, nocc, [2, 4], [5, 7]), eps)
+    part = ActiveSpace.from_indices(nmo, nocc, [2, 4], [5, 7])
     so = _spin_orbitals(mf, (part, part))
     n = part.n_act
 
@@ -727,16 +724,15 @@ def test_a_mean_field_changed_after_the_run_is_refused():
 
 
 def test_partition_form_must_fit_the_low_level_result(oh, oh_low):
-    """The functions of the RPA method take one Partition with a restricted
+    """The functions of the RPA method take one ActiveSpace with a restricted
     result and the pair (alpha, beta) with an unrestricted one."""
     parts = _parts(oh, _asymmetric(oh))
     with pytest.raises(ValueError, match='pair'):
         rpa.screening_correction(oh_low[True], parts[0], 'crpa')
     rhf = water()
-    one = partition(ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2),
-                    rhf.mo_energy)
+    one = ActiveSpace.from_counts(rhf.mo_energy, 5, 2, 2)
     low = run_low_level(rhf, method='rpa')
-    with pytest.raises(ValueError, match='one Partition'):
+    with pytest.raises(ValueError, match='one ActiveSpace'):
         rpa.screening_correction(low, (one, one), 'crpa')
     assert isinstance(rpa.screening_correction(low, one, 'crpa'), np.ndarray)
 
@@ -944,8 +940,8 @@ def test_pole_window_per_spin(oh, oh_low):
         windows = rpa.pole_window(low, parts)
         assert len(windows) == 2
         for (lo, hi), part, eps in zip(windows, parts, oh.mo_energy):
-            if len(part.inactive):
-                assert abs(lo - (eps[part.inactive].max() - om)) < 1e-9
+            if len(part.env_occ):
+                assert abs(lo - (eps[part.env_occ].max() - om)) < 1e-9
             else:
                 assert lo == -np.inf
             assert abs(hi - (eps[part.env_virt].min() + om)) < 1e-9
@@ -1408,7 +1404,7 @@ def test_mrpa_closed_shell_limit(closed_shell, df):
     rhf, lows = closed_shell
     low_r, low_u = lows[df]
     one = ActiveSpace.from_indices(len(rhf.mo_energy), 5, [2, 4], [5, 7])
-    part = partition(one, rhf.mo_energy)
+    part = one
     ref = rpa.screening_correction(low_r, part, 'mrpa')
     for block in rpa.screening_correction(low_u, (part, part), 'mrpa'):
         assert np.max(np.abs(block - ref)) < 1e-9
@@ -1446,7 +1442,7 @@ def test_mrpa_reference_determinant_identity(oh, oh_low, space, sigma):
 
 def test_mrpa_is_casida_only_whatever_the_reference(oh):
     low = run_low_level(water(), method='rpa', mode='imagfrequency')
-    part = partition(ActiveSpace.from_counts(low.eps, 5, 2, 2), low.eps)
+    part = ActiveSpace.from_counts(low.eps, 5, 2, 2)
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         rpa.screening_correction(low, part, 'mrpa')
 

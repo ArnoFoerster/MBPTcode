@@ -49,12 +49,10 @@ import dataclasses
 import re
 import warnings
 from functools import cache
-
 import numpy as np
 import pytest
 from pyscf import gto, scf
 from scipy.sparse.linalg import ArpackNoConvergence
-
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting
 from src.Base.numerics.numerics import (Numerics, numerics_or_default,
@@ -66,8 +64,7 @@ from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.energy import Energies
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.partition import (active_pair_mask,
-                                                            partition)
+from src.EffectiveHamiltonian.Downfolding.masks import active_pair_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import CasidaSolver
@@ -180,8 +177,8 @@ def test_full_rpa_is_the_imaginary_axis_energy(ref):
 
 
 def _parts(ref, which):
-    """The pair of Partitions of SPACES[ref][which]."""
-    return tuple(partition(space, eps) for space, eps in zip(
+    """The pair of ActiveSpaces of SPACES[ref][which]."""
+    return tuple(space for space, eps in zip(
         _spaces(ref, which), _mean_field(ref).mo_energy))
 
 
@@ -250,7 +247,7 @@ def test_active_pair_factors_and_polarizability(ref):
     none = rpa.active_polarizability_static(low, _parts(ref, 'occupied_only'))
     assert none.shape == (naux, naux) and not none.any()
     mf = _mean_field(ref)
-    every = tuple(partition(space, eps) for space, eps in zip(
+    every = tuple(space for space, eps in zip(
         _all_active(ref), mf.mo_energy))
     assert np.abs(rpa.active_polarizability_static(low, every)
                   - low.cache['p0']).max() < 1e-13
@@ -270,7 +267,7 @@ def test_all_active_ec_pair_cancels(ref, screening):
     same grid, so E_c^A = E_c[v] and vtilde = 0. Measured: 7.3e-14 (OH,
     E_c = -0.1057), 1.1e-14 (CH2, E_c = -0.0768)."""
     low = _low(ref, 'imagfrequency')
-    every = tuple(partition(space, eps) for space, eps in zip(
+    every = tuple(space for space, eps in zip(
         _all_active(ref), _mean_field(ref).mo_energy))
     terms = rpa.terms(low, every, screening)
     assert terms.e_c_full < -1e-2
@@ -290,7 +287,7 @@ def test_all_active_ec_pair_cancels_on_a_coarse_grid(screening):
                         numerics=Numerics(quadrature={'nfreq_rpa': 6}))
     assert len(low.cache['grid'][0]) == 6
     assert abs(low.e_c_full - _low('oh', 'casida').e_c_full) > 1e-7
-    every = tuple(partition(space, eps) for space, eps in zip(
+    every = tuple(space for space, eps in zip(
         _all_active('oh'), mf.mo_energy))
     terms = rpa.terms(low, every, screening)
     assert abs(terms.e_c_full - terms.e_c_active) < 1e-12
@@ -431,7 +428,7 @@ def test_gap_bound_when_the_lanczos_fails(monkeypatch):
     om = rpa.lowest_excitation(low)
     assert om == gap and 1e-3 < true - om < 0.1
     for (lo, hi), part, eps in zip(windows, parts, mf.mo_energy):
-        assert lo == eps[part.inactive].max() - gap
+        assert lo == eps[part.env_occ].max() - gap
         assert hi == eps[part.env_virt].min() + gap
     again = []
     with warnings.catch_warnings():
@@ -760,7 +757,7 @@ def _st_spaces(ref, which):
 
 
 def _st_parts(ref, which):
-    return tuple(partition(space, eps) for space, eps in zip(
+    return tuple(space for space, eps in zip(
         _st_spaces(ref, which), _st_mean_field(ref).mo_energy))
 
 
@@ -833,8 +830,7 @@ def test_space_time_refusals_of_the_run():
 def _st_all_active(ref):
     mf = _st_mean_field(ref)
     nmo = mf.mo_coeff.shape[-1]
-    return tuple(partition(
-        ActiveSpace.from_indices(nmo, n, range(n), range(n, nmo)), eps)
+    return tuple(ActiveSpace.from_indices(nmo, n, range(n), range(n, nmo))
         for n, eps in zip((int(np.count_nonzero(occ)) for occ in mf.mo_occ),
                           mf.mo_energy))
 

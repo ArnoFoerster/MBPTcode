@@ -310,8 +310,8 @@ def _active_pairs(eps, nocc, part):
     """Bool mask over the (i, a) pairs in C order, True where i is an active
     occupied and a an active virtual orbital (written out here so the oracle
     does not lean on the production mask)."""
-    occ = {int(i) for i in part.act_occ}
-    virt = {int(a) for a in part.act_virt}
+    occ = {int(i) for i in part.occ_active}
+    virt = {int(a) for a in part.virt_active}
     return np.array([i in occ and a in virt for i in range(nocc)
                      for a in range(nocc, len(eps))], dtype=bool)
 
@@ -520,7 +520,7 @@ def env_residues(eri, eps, nocc, part):
     """
     omega, xpy = drpa(eri, eps, nocc)
     occ, virt = zip(*_pair_labels(eps, nocc))
-    env = list(part.inactive) + list(part.env_virt)
+    env = list(part.env_occ) + list(part.env_virt)
     act = list(part.act)
     v = eri[np.ix_(act, env)][:, :, list(occ), list(virt)]
     w = np.sqrt(2.0) * np.einsum('trP,Pn->ntr', v, xpy)

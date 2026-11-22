@@ -10,11 +10,9 @@ genuinely different channels. Measured agreement: at most 1.2e-14 against both
 """
 import numpy as np
 import pytest
-
 from src.EffectiveHamiltonian.Downfolding.one_body import (
     core_fock, double_counting, effective_one_body, inactive_jk, spin_weight)
-from src.EffectiveHamiltonian.Downfolding.partition import (partition,
-                                                            ph_element_mask)
+from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
 from src.EffectiveHamiltonian.active_space import ActiveSpace
 from tests.downfolding_oracle import (
     mo_integrals, spin_orbital_integrals, spin_orbital_one_body, water)
@@ -26,7 +24,7 @@ def _water_part(mf, occ_active, virt_active):
     nocc = mf.mol.nelectron // 2
     space = ActiveSpace.from_indices(len(mf.mo_energy), nocc, occ_active,
                                      virt_active)
-    return partition(space, mf.mo_energy)
+    return space
 
 
 def _random_vtilde(rng, n):
@@ -53,7 +51,7 @@ def test_core_fock_restricted_matches_the_spatial_formula():
     f_a, f_b = core_fock(mf.mol, mf.get_hcore(), (mf.mo_coeff, mf.mo_coeff),
                          (part, part))
     h, eri = mo_integrals(mf)
-    a, i = part.act, part.inactive
+    a, i = part.act, part.env_occ
     expected = (h[np.ix_(a, a)]
                 + 2 * np.einsum('tujj->tu', eri[np.ix_(a, a, i, i)])
                 - np.einsum('tjju->tu', eri[np.ix_(a, i, i, a)]))
@@ -103,7 +101,7 @@ def test_per_spin_channels_differ():
     hartree, exchange = double_counting((aa, ab, bb), (n_occ, n_occ))
 
     h_so, eri_so = spin_orbital_integrals(mf.mol, c_a, c_b)
-    occ_env = list(part_a.inactive) + list(nmo + part_b.inactive)
+    occ_env = list(part_a.env_occ) + list(nmo + part_b.env_occ)
     act = list(part_a.act) + list(nmo + part_b.act)
     occ_act = list(range(n_occ)) + list(n + np.arange(n_occ))
     vt_so = np.zeros((2 * n,) * 4)
@@ -132,7 +130,7 @@ def test_per_spin_channels_differ():
 
 def test_ph_only_vtilde_has_no_hartree_dc():
     eps = np.array([-1.0, -0.6, -0.4, 0.3, 0.7, 1.1])
-    part = partition(ActiveSpace.from_indices(6, 3, [1, 2], [3, 5]), eps)
+    part = ActiveSpace.from_indices(6, 3, [1, 2], [3, 5])
     mask = ph_element_mask(part)
     rng = np.random.default_rng(0)
     vtilde = tuple(v * mask for v in _random_vtilde(rng, part.n_act))
