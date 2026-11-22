@@ -1,76 +1,23 @@
 """The direct RPA as the low-level method of the downfolding.
 
 `run` solves the RPA of the whole system once, before any active space is
-known, and keeps what every later active space needs: on the casida route
-the excitation energies Omega, the amplitudes X+Y, the full correlation
-energy E_RPA,corr = 1/2 (sum Omega - Tr A), and the integrals the Casida
-matrices were built from. For a restricted closed-shell reference the
-response is the singlet one (A = delta + 2K, B = 2K, K_ia,jb = (ia|jb));
-triplet modes contribute nothing to the direct RPA.
+known, on one of three routes: 'casida' (dense, every pole), 'imagfrequency'
+(density fitted, imaginary frequency, N^4) or 'space-time' (separable ISDF
+factors, imaginary time, N^3). `terms` then gives the DownfoldingTerms of
+any active space from that one result: the screening correction vtilde, the
+correlation-energy pair and, with `sigma`, the static environment
+self-energy Sigma_bar^E.
 
-An unrestricted reference (UHF/UKS) is two spin channels, each with its own
-orbitals, orbital energies and occupied count, and one RPA problem over the
-particle-hole pairs of both spins, stacked: the alpha pairs in C order over
-(i, a), then the beta ones, with A = delta + K, B = K and
-K_(ia s),(jb s') = (i_s a_s | j_s' b_s'). Every formula below is written
-once with the spin weight g, the number of electrons an occupied orbital of
-one channel holds: g = 2 for the one channel of a restricted reference,
-g = 1 for each of two. A + B = delta + 2g K, the static response is
--2g [(A+B)^-1], and W is one spin-independent operator.
-
-`screening_correction` gives the static (omega = 0) screening correction of an
-active space on the casida route: the active pairs deleted from A+B and one
-Cholesky solve, or for 'mrpa' (casida only) the interaction that keeps the
-full RPA's zeroth moment eta0 = (X+Y)(X+Y)^T on the active ph pairs
-(Scott and Booth's Eq. 5, from the kept X+Y). `terms` assembles an active
-space's DownfoldingTerms from it: vtilde, the correlation-energy pair
-E_c[v] - E_c^A[v_eff] (both by the plasmon formula, on the same v) and the
-static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
-
-On the imagfrequency route (density fitted, N^4) `run` keeps the existing
-imaginary-axis energy, its minimax frequency grid and the static
-polarizability P(0) of the whole system in the normalized fitting basis.
-The screening correction is P - P^A and one Dyson step, with P^A the active
-ph pairs' part of P(0) (`active_polarizability_static`), projected on the
-factors of every active pair (`active_pair_factors`): the casida route's
-deletion written another way, equal to rounding on the same three-index
-object. E_c^A[v_eff] is the same quadrature on the same grid with the bare
-response of the active ph pairs, so the E_c pair is one formula on both
-sides; the dense-Casida E_c^A is kept as the 'ec_active_casida' diagnostic.
-
-The space-time route (separable ISDF factors (X, D), imaginary time, N^3,
-serial) is the same on its own machinery: `run` keeps the factors, the static
-tau grid with P(0) on it, and the energy of `rpa_correlation_energy_space_time`
-with its time-frequency grid. P^A(0) is built as P(0) was, with the active
-columns of X on the same grid, so with every orbital active P - P^A is zero
-to the bit; E_c^A takes the active ph pairs' exp(-delta tau) through the
-energy's own tau -> omega transform.
-
-`embedding_self_energy` gives the static environment self-energy
-Sigma_bar^E on the casida route: the residues of the full W
-between the active and the environment orbitals (`screened_residues`) and
-the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
-by mode A at eta = 0 (Eq. 12, 'mode_a', which warns near the poles,
-`pole_window`). `terms(..., sigma=...)` hands it to the general layer in
-both spin channels with the Hartree-only double counting (dc='hartree'), and
-records the 'sigma_poles' diagnostic.
-
-On imagfrequency there are no residues: S^E(mu + i w) comes from the
-Lorentzian fit of W on the minimax W grid with the internal orbital
-restricted to the environment (`sigma_env_imag_axis`, W cached on the first
-request), is continued by one Pade fit per element, and each element is
-evaluated at its own point (`continued_self_energy`): Eq. 42, Re S^E_tu(z_tu),
-for 'srg' (s = inf; srg_s enters the pole check alone), the real axis for
-'mode_a'. Both warn near the poles and point to casida; Omega_min of the
-window is the lowest root of the same Casida problem (`lowest_excitation`).
-The 'sigma_continuation' diagnostic is the spread of two Pade fits on the
-even and the odd nodes. Space-time samples S^E the same way, on its own
-objects: W on the same minimax grid from chi0 of the ISDF factors, and the
-active-environment fitting factors B_Q,tr = sum_P D_PQ X_Pt X_Pr. Sampling
-the space-time GW self-energy through its imaginary-time quadrature instead
-left about 1e-7 of noise on the nodes, which the continuation amplified to
-1e-4 and more for orbitals far from the gap; the fit's samples are an exact
-rational function and continue cleanly, at N^3 times the active orbitals.
+After the constants and warnings, the file reads top-down: the low-level
+result with its two entry points (`RPALowLevel`, `run`, `terms`), then the
+sections in the order `terms` uses them, each opened by what holds on each
+route:
+  1. the screening correction (vtilde)
+  2. the active correlation energy and the static defect
+  3. the environment self-energy Sigma^E
+  4. the checks of Sigma^E
+  5. the routes of `run`
+  6. shared helpers
 """
 from dataclasses import dataclass, field, replace
 from typing import Optional
@@ -129,6 +76,45 @@ SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'mode_a')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
                'sigma_continuation')
+
+
+class SigmaNearPoleWarning(RuntimeWarning):
+    """An active orbital energy lies within the margin of an edge of the
+    pole-free window of the environment self-energy, or outside the window:
+    Sigma_bar^E is computed all the same, undamped ('mode_a', and 'srg' at
+    srg_s = None, on casida) or
+    continued from the imaginary axis (imagfrequency, space-time), and is
+    unreliable on that orbital."""
+
+class SigmaDampingWarning(RuntimeWarning):
+    """The SRG damping of Sigma_bar^E is not negligible: an active orbital
+    energy lies within a few 1/sqrt(2 s) of a pole of the environment
+    self-energy, so 'srg' there depends on srg_s."""
+
+class SigmaContinuationWarning(RuntimeWarning):
+    """Two Pade fits of S^E on disjoint halves of the nodes disagree by more
+    than DOWNFOLDING_SIGMA_CONTINUATION_WARN at an element's evaluation
+    point: the continuation of Sigma_bar^E is not to be trusted there."""
+
+
+# -------------------------------------------------------- the low-level result
+# `run` solves the RPA of the whole system once, before any active space is
+# known, and keeps what every later active space needs: on the casida route
+# the excitation energies Omega, the amplitudes X+Y, the full correlation
+# energy E_RPA,corr = 1/2 (sum Omega - Tr A), and the integrals the Casida
+# matrices were built from. For a restricted closed-shell reference the
+# response is the singlet one (A = delta + 2K, B = 2K, K_ia,jb = (ia|jb));
+# triplet modes contribute nothing to the direct RPA.
+#
+# An unrestricted reference (UHF/UKS) is two spin channels, each with its own
+# orbitals, orbital energies and occupied count, and one RPA problem over the
+# particle-hole pairs of both spins, stacked: the alpha pairs in C order over
+# (i, a), then the beta ones, with A = delta + K, B = K and
+# K_(ia s),(jb s') = (i_s a_s | j_s' b_s'). Every formula below is written
+# once with the spin weight g, the number of electrons an occupied orbital of
+# one channel holds: g = 2 for the one channel of a restricted reference,
+# g = 1 for each of two. A + B = delta + 2g K, the static response is
+# -2g [(A+B)^-1], and W is one spin-independent operator.
 
 
 @dataclass(eq=False)
@@ -198,225 +184,6 @@ class RPALowLevel:
     def unrestricted(self):
         """True for a UHF/UKS reference: two spin channels."""
         return isinstance(self.nocc, tuple)
-
-
-def _require_current_mean_field(low):
-    """Refuse (ValueError) a low-level result whose mean field has changed
-    since the run: the orbital energies or the occupied counts of low.mf
-    are no longer those the result holds. `build_effective_hamiltonian`
-    reads the orbitals, the core Hamiltonian and E_nuc from low.mf itself,
-    so H_eff would mix them with the screening, the self-energy and E_c of
-    the orbitals of the run."""
-    mf = low.mf
-    if low.unrestricted:
-        now = (get_orbital_energies(mf), unrestricted_nocc(mf.mo_occ))
-        same = (all(np.array_equal(a, b) for a, b in zip(low.eps, now[0]))
-                and tuple(low.nocc) == tuple(now[1]))
-    else:
-        same = (np.array_equal(low.eps, get_orbital_energies(mf))
-                and low.nocc == closed_shell_nocc(mf.mo_occ))
-    if not same:
-        raise ValueError(
-            f"method={METHOD!r}: the mean field has changed since "
-            f"run_low_level (its orbital energies or occupations are no "
-            f"longer those of this low-level result), so the screening, "
-            f"the self-energy and E_c kept here belong to other orbitals "
-            f"than the ones the Hamiltonian would be built from. Call "
-            f"run_low_level again on the mean field as it is now.")
-
-
-def _with_settings(low, numerics):
-    """`low` under the Sigma^E settings of `numerics`, its downfolding
-    section (srg_s, pole_margin, continuation_margin), in place of the
-    run's: the same result, sharing its cache; `low` itself for None. The
-    settings act after the RPA, so they can change from one Hamiltonian to
-    the next without a new run. Every other section was used by the run
-    and has to be the run's: a difference is refused (NumericsMismatch, a
-    ValueError), naming the fields."""
-    if numerics is None:
-        return low
-    held, asked = numerics_or_default(low.numerics).values(), numerics.values()
-    differ = [f'{section}.{name}' for section in held
-              if section != 'downfolding' for name in held[section]
-              if held[section][name] != asked[section][name]]
-    if differ:
-        raise NumericsMismatch(
-            f"method={METHOD!r}: the numerics of a build can differ from "
-            f"those of the low-level run in numerics.downfolding alone "
-            f"(srg_s, pole_margin, continuation_margin, the settings of "
-            f"Sigma^E, which act after the RPA); these differ in "
-            f"{', '.join(differ)}, which the run used. Derive the build's "
-            f"numerics from the run's, or call run_low_level with them.")
-    return replace(low, numerics=numerics)
-
-
-def _require_factors(low, who):
-    """Refuse (NotImplementedError) a low-level result without three-index
-    factors for `who`: casida on the exact four-index integrals (df=False).
-    Space-time builds its factors from (X, D) and is let through."""
-    if low.mode != 'space-time' and low.factors is None:
-        raise NotImplementedError(
-            f"{who} needs the three-index factors B, which a df=False "
-            f"low-level result (the exact four-index integrals) does not "
-            f"keep: use df=True.")
-
-
-def _refuse_options(opts, which):
-    if opts:
-        raise TypeError(f"method={METHOD!r} {which} does not take "
-                        + ', '.join(sorted(opts)) + '.')
-
-
-@dataclass(frozen=True)
-class _Channel:
-    """One spin channel of an active-space request: the orbital energies,
-    the occupied count and the three-index factors (None without) of that
-    spin, its ActiveSpace, its name, 'alpha' or 'beta' (None for the one
-    channel of a restricted reference), and on space-time its collocation
-    X (M, nmo) in the MO basis (None on the other routes)."""
-    eps: np.ndarray
-    nocc: int
-    factors: Optional[np.ndarray]
-    part: object
-    spin: Optional[str]
-    collocation: Optional[np.ndarray] = None
-
-
-def _channels(low, part):
-    """The spin channels of `low` with the active spaces of `part`: one, for a
-    restricted result and one ActiveSpace; two, for an unrestricted result and
-    the pair (alpha, beta). Anything else is refused."""
-    parts = channels_of(part)
-    if not low.unrestricted:
-        if len(parts) != 1:
-            raise ValueError(
-                f'a restricted low-level result takes one ActiveSpace; got '
-                f'{len(parts)}. A pair (alpha, beta) goes with an '
-                f'unrestricted (UHF/UKS) one.')
-        return (replace(_reference_channels(low)[0], part=parts[0]),)
-    if len(parts) != 2:
-        raise ValueError(
-            'an unrestricted (UHF/UKS) low-level result takes a pair of '
-            'ActiveSpaces, (alpha, beta), one per spin; got one.')
-    return tuple(replace(chan, part=p)
-                 for chan, p in zip(_reference_channels(low), parts))
-
-
-def _reference_channels(low):
-    """The spin channels of `low` itself, without an active space (their
-    `part` is None): one for a restricted result, (alpha, beta) for an
-    unrestricted one."""
-    x = low.cache['factors'][0] if low.mode == 'space-time' else None
-    if not low.unrestricted:
-        return (_Channel(low.eps, low.nocc, low.factors, None, None, x),)
-    factors = (None, None) if low.factors is None else low.factors
-    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], None, SPINS[s],
-                          None if x is None else x[s]) for s in (0, 1))
-
-
-def _join(arrays, axis=0):
-    """The arrays of the spin channels one after the other along `axis`; the
-    array of one channel as it is, not a copy."""
-    return arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=axis)
-
-
-def _square(rows):
-    """The matrix of the blocks rows[s][t] over the spin channels; the one
-    block of one channel as it is."""
-    return rows[0][0] if len(rows) == 1 else np.block(rows)
-
-
-def _per_channel(values):
-    """What a public function returns for a quantity of each spin channel:
-    the one value of a restricted reference, the pair (alpha, beta) of an
-    unrestricted one."""
-    return values[0] if len(values) == 1 else tuple(values)
-
-
-def _orbital(chan):
-    """How a message names an orbital of the channel: 'orbital', or
-    'alpha orbital' / 'beta orbital' for an unrestricted reference."""
-    return 'orbital' if chan.spin is None else f'{chan.spin} orbital'
-
-
-def _window_text(chans, windows):
-    """'window (lo, hi)' or, for two channels, 'windows alpha (lo, hi) and
-    beta (lo, hi)', for the messages."""
-    if len(chans) == 1:
-        return 'window ({:.6f}, {:.6f})'.format(*windows[0])
-    return 'windows ' + ' and '.join(
-        f'{c.spin} ({lo:.6f}, {hi:.6f})' for c, (lo, hi) in zip(chans, windows))
-
-
-def _per_block(blocks):
-    """What a public function returns for the two-body blocks: the one array
-    of a restricted reference, the tuple (aa, ab, bb) of an unrestricted
-    one."""
-    return blocks[0] if len(blocks) == 1 else tuple(blocks)
-
-
-def _two_body_blocks(v, chans):
-    """The two-body blocks a public function is handed, as a tuple: the one
-    (n_act,)*4 array of a restricted reference, or the three (aa, ab, bb)
-    of an unrestricted one. Refused when they do not fit the channels."""
-    blocks = (v,) if isinstance(v, np.ndarray) else tuple(v)
-    if len(blocks) != len(BLOCKS[len(chans)]):
-        raise ValueError(
-            'an unrestricted reference takes the three blocks (aa, ab, bb) '
-            'of the active interaction, a restricted one a single array; '
-            f'got {len(blocks)} for {len(chans)} spin channel(s).')
-    return blocks
-
-
-def _delta(chan, mask=None):
-    """eps_a - eps_i of the (i, a) pairs of one channel in C order, those of
-    the bool mask when given."""
-    delta = (chan.eps[chan.nocc:][None, :]
-             - chan.eps[:chan.nocc][:, None]).ravel()
-    return delta if mask is None else delta[mask]
-
-
-def _ov_factors(chan):
-    """B_Q,ia (naux, n_pair) of one channel, the (i, a) pairs in C order."""
-    b = chan.factors
-    return b[:, :chan.nocc, chan.nocc:].reshape(b.shape[0], -1)
-
-
-def _act_factors(chan):
-    """B_Q,tu (naux, n_act^2) of the active orbitals of one channel."""
-    b, act = chan.factors, chan.part.act
-    return b[:, act][:, :, act].reshape(b.shape[0], len(act) ** 2)
-
-
-def _eri_block(low, s, t):
-    """The exact chemist (p q|r s) of low.eri with p, q in spin channel s
-    and r, s in channel t (`spin_block`)."""
-    return spin_block(low.eri if low.unrestricted else (low.eri,), s, t)
-
-
-def _residual_integrals(low, chans, res):
-    """(K, V) on the stacked pairs of `res`, one bool mask over the (i, a)
-    pairs per channel: K_ia,jb = (ia|jb) between them, and V, one array per
-    channel t, V[t][ia, tu] = (ia|tu) with t, u the active orbitals of that
-    channel. From the integrals of the full RPA, low.factors or low.eri."""
-    n = chans[0].part.n_act
-    if low.factors is not None:
-        b_res = _join([_ov_factors(c)[:, r] for c, r in zip(chans, res)],
-                      axis=1)
-        return b_res.T @ b_res, [b_res.T @ _act_factors(c) for c in chans]
-    k_rows, v_cols = [], [[] for _ in chans]
-    for s, (chan_s, res_s) in enumerate(zip(chans, res)):
-        k_rows.append([])
-        for t, (chan_t, res_t) in enumerate(zip(chans, res)):
-            eri = _eri_block(low, s, t)
-            ov = eri[:chan_s.nocc, chan_s.nocc:].reshape(
-                res_s.size, *eri.shape[2:])[res_s]
-            # the pair count spelt out: a channel may hold no pair at all
-            k_rows[s].append(ov[:, :chan_t.nocc, chan_t.nocc:].reshape(
-                len(ov), res_t.size)[:, res_t])
-            act = chan_t.part.act
-            v_cols[t].append(ov[:, act][:, :, act].reshape(len(ov), n * n))
-    return _square(k_rows), [_join(col) for col in v_cols]
 
 
 def run(mf, mode='casida', df=True, numerics=None, **opts):
@@ -493,126 +260,120 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
 
 
-def _imaginary_axis(eps, nocc, factors, numerics):
-    """(E_c, cache) of the direct RPA on the imaginary axis:
-    E_c by `rpa_correlation_energy_imaginary_axis` (minimax grid), and the
-    cache with 'grid', the points and weights that energy integrates on
-    (`imaginary_axis_energy_grid`, the function it calls), and 'p0',
-    P(0) = 1 - W(0)^-1 in the normalized fitting basis. The active E_c^A is
-    integrated on this grid so that the E_c pair is one quadrature. For two
-    spin channels (eps, nocc and factors pairs) the response is the sum of
-    the two spins' and the grid covers the transitions of both."""
-    spin_mode = 'unrestricted' if isinstance(nocc, tuple) else 'restricted'
-    lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode=spin_mode)
-    e_c = rpa_correlation_energy_imaginary_axis(lr, nocc, numerics)
-    grid = imaginary_axis_energy_grid(eps, nocc, numerics)
-    p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]
-    return float(e_c), {'grid': grid, 'p0': p0}
+def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
+          numerics=None, **opts):
+    """The DownfoldingTerms of the RPA on the active space `part`.
+
+    `part` is one ActiveSpace for a restricted low-level result, and the terms
+    are those of one spin channel: vtilde = (v,), sigma_bar = (s,). For an
+    unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab, bb),
+    sigma_bar = (alpha, beta); the correlation energies and the static
+    defect are those of both spins together, and in the diagnostics what
+    belongs to one spin (the pole-free window, the pole distances, Z) is a
+    pair.
+
+    screening: 'bare' | 'crpa' | 'crpa_ph' | 'mrpa' (casida only, refused
+        on imagfrequency and space-time); vtilde is its static correction
+        (`screening_correction`), the same in every spin block (restricted).
+    sigma: None, the paper's scheme: full double counting, no Sigma_bar.
+        'srg' or 'mode_a': the static environment self-energy
+        (`embedding_self_energy`), one block for the restricted reference,
+        with dc='hartree',
+        the Hartree-only double counting that goes with it; E_0 then gains
+        the exchange energy term and -Tr[Sigma_bar gamma^A,0].
+        Allowed with every screening; the third term of the
+        embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
+        exact only for 'crpa' in the static limit. On imagfrequency and
+        space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
+        computed with a SigmaNearPoleWarning ('mode_a', and 'srg' at
+        srg_s = None, on casida; both forms on the other routes, pointing
+        to casida), and refused only
+        when it is not finite (`embedding_self_energy`). The
+        names in any case and with '-' or '_' ('SRG', 'mode-a'), as
+        screening; anything but None and those is refused.
+    diagnostics: the DIAGNOSTICS to record in energies.diagnostics (None:
+        none, as ()); a name that does not apply here (on casida
+        'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
+        'sigma_continuation' without sigma) is skipped and absent, an
+        unknown name refused. One that applies is recorded even when it is
+        exactly zero (an empty space, no environment, no ph pair: 0.0).
+        'sigma_poles' (`_sigma_poles`): the window, pole distances, Z and
+        the SRG damping. 'sigma_continuation' (imagfrequency, space-time,
+        `_sigma_continuation`): per element the spread of two Pade fits on
+        the even and the odd nodes. Their two warnings do not depend on
+        this keyword: with sigma set, a SigmaDampingWarning (casida, the
+        SRG damping not negligible) and a SigmaContinuationWarning (the
+        spread above DOWNFOLDING_SIGMA_CONTINUATION_WARN) are always
+        checked and raised, since Sigma_bar goes into H_eff either way;
+        the keyword only decides whether the numbers are recorded.
+        'ec_active_casida' (imagfrequency, space-time): {'casida': the
+        dense-Casida E_c^A on the same v_eff, 'difference': the route's
+        quadrature value minus it}.
+    numerics: None, the settings of Sigma^E are those of the low-level run
+        (low.numerics); or a Numerics whose downfolding section (srg_s,
+        pole_margin, continuation_margin) is used for this Hamiltonian
+        instead. They act after the RPA, so one low-level result serves any
+        number of them; `low` itself keeps its own. Every other section has
+        to equal the run's, which used it (NumericsMismatch otherwise).
+
+    E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
+    pairs with v_eff = v + vtilde, v the same integrals as the full RPA
+    (low.factors or low.eri), not the exact v of H_eff. 'bare'
+    keeps E_c[v] - E_c^A[v], the mechanical embedding.
+
+    Refused (ValueError) when the mean field of `low` has changed since the
+    run, e.g. the same object converged at another geometry: the driver
+    reads the orbitals from the mean field, and they would no longer be
+    those of the screening kept here.
+    """
+    _refuse_options(opts, 'terms')
+    low = _with_settings(low, numerics)
+    _require_current_mean_field(low)
+    names = _diagnostic_names(diagnostics)
+    screening = choice(screening, SCREENINGS, 'screening')
+    sigma = _sigma_name(sigma)
+    chans = _channels(low, part)
+    vt = _two_body_blocks(screening_correction(low, part, screening), chans)
+    v_eff = tuple(v + t for v, t in zip(_active_v(low, chans), vt))
+    recorded = {}
+    if 'static_defect' in names:
+        recorded['static_defect'] = static_defect(low, part, v_eff)
+    e_c_active = active_correlation_energy(low, part, v_eff)
+    if 'ec_active_casida' in names and low.mode != 'casida':
+        pairs = any(0 < c.part.n_act_occ < c.part.n_act for c in chans)
+        dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
+        recorded['ec_active_casida'] = {'casida': dense,
+                                        'difference': e_c_active - dense}
+    sigma_bar, dc = None, 'full'
+    if sigma is not None:
+        # stacklevel 4: the near-pole warning points at the caller of
+        # build_effective_hamiltonian, as the method's other warnings do
+        s_bars, kept = _embedding(low, part, sigma, with_undamped=True,
+                                  stacklevel=4)
+        sigma_bar, dc = tuple(s_bars), 'hartree'
+        # the two checks of Sigma_bar always run and warn; `diagnostics`
+        # only decides whether their numbers are kept
+        checks = {'sigma_poles': _sigma_poles(low, chans, sigma, s_bars,
+                                              kept)}
+        if low.mode != 'casida':
+            checks['sigma_continuation'] = _sigma_continuation(
+                low, chans, sigma, kept)
+        recorded.update({name: value for name, value in checks.items()
+                      if name in names})
+    return DownfoldingTerms(
+        vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
+        e_c_active=e_c_active, dc=dc, diagnostics=recorded)
 
 
-def _space_time(mf, eps, nocc, numerics):
-    """(E_c, cache) of the direct RPA in imaginary time, serial,
-    on the separable factors (X, D) of `separable_factors` on
-    numerics.isdf's grid (refused, ValueError, when it names none):
-
-    'factors': (X, D), X (M, nmo) the MO collocation, D (M, naux), so the
-        fitted v is (pq|rs) = sum_Q B_Q,pq B_Q,rs with B_Q,pq = sum_P D_PQ
-        X_Pp X_Pq.
-    'static_grid': the one-frequency (omega = 0) minimax grid of a static
-        screening (`static_screening_grid` at quadrature.ntau_w, as the BSE's
-        W), and 'p0' P(0) = chi0(0) on it (`chi0_imaginary_frequency`), the
-        chi0 `static_screening_matrix` inverts: 1 - W(0)^-1, built directly.
-    'energy_grid': the TimeFrequencyGrid of E_c, built as the RPA
-        ground-state chain builds its own: minimax tau (quadrature.ntau_rpa,
-        else ntau_w, else the minimax count of the window at tau_target)
-        transformed onto a Gauss-Legendre frequency axis
-        (quadrature.nfreq_rpa, else RPA_ENERGY_NFREQ; `rpa_quadrature`)
-        scaled to the gap. The chain takes its counts from the chain before
-        it where there is one, and always the default tau target, so the
-        two do not share one function.
-
-    E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
-    E_c^A are built on these same grids and transforms, so the active part
-    cancels to rounding with every orbital active.
-
-    For an unrestricted reference (eps and nocc pairs) X is (2, M, nmo), one
-    collocation per spin X_s = X_ao C_s on the one D; the grids cover the
-    transitions of both spins (the smallest gap and the largest span), P(0)
-    is chi0_alpha(0) + chi0_beta(0) (`spin_summed`), and E_c the two-spin
-    energy. The 'rows' realization of the fit builds one collocation and is
-    refused there."""
-    num = numerics_or_default(numerics)
-    if not num.isdf.grid_named():
-        raise ValueError(
-            f"method={METHOD!r} mode='space-time' builds separable (ISDF) "
-            f"factors on the grid numerics.isdf names, and this run's names "
-            f"none: pass numerics with numerics.isdf.level (e.g. 'G1') or "
-            f"counts.")
-    two_spin = isinstance(nocc, tuple)
-    if two_spin and num.isdf.fit == 'rows':
-        raise NotImplementedError(
-            f"method={METHOD!r} mode='space-time' on an unrestricted "
-            f"reference needs one collocation per spin, which the 'rows' "
-            f"realization of the ISDF fit does not build: use "
-            f"numerics.isdf.fit='replicated' (the default).")
-    x, d = unpack_factors(separable_factors(mf, mf.mol, numerics=numerics,
-                                            comm=None))[:2]
-    q = num.quadrature
-    static_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
-                                        tau_target=q.tau_target)
-    tile_gb = layout_tile_gb(numerics)
-    ntau, nfreq = rpa_quadrature(num)
-    if two_spin:
-        p0 = spin_summed(chi0_imaginary_frequency, x, d, eps, nocc,
-                         static_grid, tile_memory_gb=tile_gb)[0]
-        e_min, e_max = transition_range(eps, nocc)
-        w0 = gap_scaled_w0(gap=e_min)
-    else:
-        p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
-                                      tile_memory_gb=tile_gb)[0]
-        e_min, e_max, _ = particle_hole_window(eps, nocc)
-        w0 = gap_scaled_w0(eps, nocc)
-    if ntau is None:
-        ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
-    nu, wt = gauss_legendre_grid(nfreq, w0)
-    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
-                                           with_sine=False,
-                                           with_inverse=False)
-    e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid,
-                                            tile_gb=tile_gb, comm=None)
-    return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
-                        'p0': p0, 'energy_grid': grid}
-
-
-def _plasmon(eps, nocc, factors, eri, numerics):
-    """(E_c, omega, X+Y) of the direct RPA on the integrals `factors`
-    (three-index) or `eri` (chemist), by the plasmon formula
-    E_c = 1/2 (sum omega - Tr A): the restricted singlet problem for one
-    channel, and for two (eps, nocc and factors pairs, eri the blocks
-    (aa, ab, bb)) the problem on the stacked pairs of both spins. A and B
-    are freed by the solver, so Tr A is taken before it. The full RPA and
-    the active one go through here, so the E_c pair is the same formula on
-    the same solver. A reference without any particle-hole pair (no
-    virtual, or no occupied, orbital in every channel) has no excitation and
-    no correlation: (0.0, an empty omega, an empty X+Y)."""
-    if isinstance(nocc, tuple):
-        # the solver takes the three blocks as (aa, bb, ab)
-        blocks = None if eri is None else (eri[0], eri[2], eri[1])
-        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=blocks,
-                                  spin_mode='unrestricted')
-    else:
-        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
-                                  spin_mode='restricted')
-    A, B = lr.build_casida_matrices(nocc, lBSE=False)
-    if A.size == 0:
-        return 0.0, np.zeros(0), np.zeros((0, 0))
-    trace_a = np.trace(A)
-    solver = CasidaSolver(A, B)
-    del A, B
-    omega, xpy, y = solver.solve(numerics=numerics)
-    xpy += y
-    del y
-    return float(0.5 * (np.sum(omega) - trace_a)), omega, xpy
+# ---------------------------------------- 1. the screening correction (vtilde)
+# `screening_correction` gives the static (omega = 0) screening correction of
+# an active space on the casida route: the active pairs deleted from A+B and
+# one Cholesky solve, or for 'mrpa' (casida only) the interaction that keeps
+# the full RPA's zeroth moment eta0 = (X+Y)(X+Y)^T on the active ph pairs
+# (Scott and Booth's Eq. 5, from the kept X+Y). `terms` assembles an active
+# space's DownfoldingTerms from it: vtilde, the correlation-energy pair
+# E_c[v] - E_c^A[v_eff] (both by the plasmon formula, on the same v) and the
+# static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
 
 
 def screening_correction(low, part, screening):
@@ -714,6 +475,31 @@ def screening_correction(low, part, screening):
         for (s, t), block in zip(spins, vt):
             block *= ph_element_mask(chans[s].part, chans[t].part)
     return _per_block(vt)
+
+
+def _residual_integrals(low, chans, res):
+    """(K, V) on the stacked pairs of `res`, one bool mask over the (i, a)
+    pairs per channel: K_ia,jb = (ia|jb) between them, and V, one array per
+    channel t, V[t][ia, tu] = (ia|tu) with t, u the active orbitals of that
+    channel. From the integrals of the full RPA, low.factors or low.eri."""
+    n = chans[0].part.n_act
+    if low.factors is not None:
+        b_res = _join([_ov_factors(c)[:, r] for c, r in zip(chans, res)],
+                      axis=1)
+        return b_res.T @ b_res, [b_res.T @ _act_factors(c) for c in chans]
+    k_rows, v_cols = [], [[] for _ in chans]
+    for s, (chan_s, res_s) in enumerate(zip(chans, res)):
+        k_rows.append([])
+        for t, (chan_t, res_t) in enumerate(zip(chans, res)):
+            eri = _eri_block(low, s, t)
+            ov = eri[:chan_s.nocc, chan_s.nocc:].reshape(
+                res_s.size, *eri.shape[2:])[res_s]
+            # the pair count spelt out: a channel may hold no pair at all
+            k_rows[s].append(ov[:, :chan_t.nocc, chan_t.nocc:].reshape(
+                len(ov), res_t.size)[:, res_t])
+            act = chan_t.part.act
+            v_cols[t].append(ov[:, act][:, :, act].reshape(len(ov), n * n))
+    return _square(k_rows), [_join(col) for col in v_cols]
 
 
 def _mrpa_correction(low, chans):
@@ -835,6 +621,9 @@ def active_polarizability_static(low, part):
         blocks.append((_ov_factors(chan)[:, mask],
                        frequency_factor(_delta(chan, mask), 0.0, True)))
     return chi0_aux(blocks, spin_weight(chans))
+
+
+# ---------------------- 2. the active correlation energy and the static defect
 
 
 def _active_v(low, chans):
@@ -1057,6 +846,128 @@ def static_defect(low, part, v_eff):
                for full, act in zip(w_full, w_act))
 
 
+# -------------------------------------- 3. the environment self-energy Sigma^E
+# `embedding_self_energy` gives the static environment self-energy
+# Sigma_bar^E on the casida route: the residues of the full W
+# between the active and the environment orbitals (`screened_residues`) and
+# the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
+# by mode A at eta = 0 (Eq. 12, 'mode_a', which warns near the poles,
+# `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
+# both spin channels with the Hartree-only double counting (dc='hartree'), and
+# records the 'sigma_poles' diagnostic.
+#
+# On imagfrequency there are no residues: S^E(mu + i w) comes from the
+# Lorentzian fit of W on the minimax W grid with the internal orbital
+# restricted to the environment (`sigma_env_imag_axis`, W cached on the first
+# request), is continued by one Pade fit per element, and each element is
+# evaluated at its own point (`continued_self_energy`): Eq. 42, Re
+# S^E_tu(z_tu), for 'srg' (s = inf; srg_s enters the pole check alone), the
+# real axis for 'mode_a'. Both warn near the poles and point to casida;
+# Omega_min of the window is the lowest root of the same Casida problem
+# (`lowest_excitation`). The 'sigma_continuation' diagnostic is the spread of
+# two Pade fits on the even and the odd nodes. Space-time samples S^E the same
+# way, on its own objects: W on the same minimax grid from chi0 of the ISDF
+# factors, and the active-environment fitting factors B_Q,tr = sum_P D_PQ X_Pt
+# X_Pr. Sampling the space-time GW self-energy through its imaginary-time
+# quadrature instead left about 1e-7 of noise on the nodes, which the
+# continuation amplified to 1e-4 and more for orbitals far from the gap; the
+# fit's samples are an exact rational function and continue cleanly, at N^3
+# times the active orbitals.
+
+
+def embedding_self_energy(low, part, sigma, numerics=None):
+    """Sigma_bar^E (n_act, n_act), the static environment self-energy on
+    part.act (occupied first): iG^E(W - v) with r over part.env, the full
+    RPA's W and the mean-field energies.
+
+    casida: the residues of W (`screened_residues`) and the RPA's Omega.
+    sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
+        everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
+        (SigmaNearPoleWarning, naming the orbitals) when an active energy
+        is within pole_margin/sqrt(2 s) of the pole-free window's edge or
+        outside it (`pole_window`), and is computed all the same. At
+        srg_s = None 'srg' is Eq. 42, undamped like 'mode_a' and with its
+        diagonal, and warns the same way.
+    imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
+        continued once and evaluated per element (`continued_self_energy`):
+        'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
+        (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
+        + S^E_tu(eps_u)]. Both warn near the poles as 'mode_a' does on
+        casida, within the larger of pole_margin/sqrt(2 s) and
+        numerics.downfolding.continuation_margin, pointing to mode='casida';
+        the continuation is inaccurate there (constants.py,
+        DOWNFOLDING_CONTINUATION_MARGIN).
+    space-time: the same, with S^E(mu + i w) sampled as on imagfrequency
+        on the route's own ISDF factors (`sigma_env_imag_axis`).
+    Zero when the environment is empty. A Sigma_bar that is not finite (an
+    active energy on a pole) is refused, FloatingPointError.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and the pair
+    (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
+    spin, with the residues between that spin's active and environment
+    orbitals, that spin's orbital energies, and the Omega_n of the two-spin
+    RPA, which both spins share. One sigma and one srg_s serve both.
+
+    numerics: None, or a Numerics whose downfolding section (srg_s,
+        pole_margin, continuation_margin) is used here in place of the
+        run's; the rest has to be the run's (`_with_settings`).
+    """
+    return _per_channel(_embedding(_with_settings(low, numerics), part,
+                                   sigma)[0])
+
+
+def _embedding(low, part, sigma, with_undamped=False, stacklevel=3):
+    """`_embedding_unchecked` after the pole warning and with the result
+    required finite: (Sigma_bar, kept), each a list over the spin channels
+    of `part`. stacklevel: where the pole warning points, counted from this
+    function as for warnings.warn (3: the caller of this function's
+    caller)."""
+    sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    settings = numerics_or_default(low.numerics).downfolding
+    chans = _channels(low, part)
+    # 'srg' at a finite s is bounded near a pole and needs no warning on
+    # casida; at srg_s = None it is as undamped as 'mode_a'
+    if sigma == 'mode_a' or low.mode != 'casida' or settings.srg_s is None:
+        _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
+    sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
+                                           with_undamped)
+    for chan, s_bar in zip(chans, sigma_bar):
+        _require_finite(s_bar, chan, sigma)
+    return sigma_bar, kept
+
+
+def _embedding_unchecked(low, part, sigma, settings, with_undamped):
+    """(Sigma_bar, kept) of `embedding_self_energy`, each a list over the
+    spin channels; kept is what the diagnostics read without building it
+    again: on casida 'args' = (w, eps_t, eps_r, occupied_r, omega) of the
+    environment, 'srg_s', the s applied
+    by 'srg', and, with with_undamped and sigma 'srg', 'srg_inf', Sigma_bar at
+    s = inf from the same block loop (`_srg_pair`; the damping diagnostic's
+    reference); on imagfrequency and space-time 'z' and 'samples', the Pade
+    nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
+    (None without an environment)."""
+    if low.mode != 'casida':
+        return _embedding_imag_axis(low, part, sigma)
+    chans = _channels(low, part)
+    residues = screened_residues(low, part)
+    residues = [residues] if len(chans) == 1 else list(residues)
+    sigma_bar, kept_per_channel = [], []
+    for chan, w in zip(chans, residues):
+        env = chan.part.env
+        args = (w, chan.eps[chan.part.act], chan.eps[env], env < chan.nocc,
+                low.omega)
+        kept = {'args': args, 'srg_s': settings.srg_s}
+        if sigma == 'srg':
+            s_bar, kept['srg_inf'] = _srg_pair(
+                *args, settings.srg_s, _sigma_tile_gb(low.numerics),
+                with_undamped)
+        else:
+            s_bar = mode_a_self_energy(*args)
+        sigma_bar.append(s_bar)
+        kept_per_channel.append(kept)
+    return sigma_bar, kept_per_channel
+
+
 def screened_residues(low, part, orbitals=None):
     """w (nexc, n_act, n_r): the residues of the full W between the active
     orbitals (part.act, occupied first) and `orbitals` (default part.env,
@@ -1161,19 +1072,20 @@ def _sigma_tile_gb(numerics):
 
 
 def _srg_pair(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None,
-              infinite=False):
+              with_undamped=False):
     """(Sigma(s), Sigma(inf) or None) of `srg_self_energy`, both from one
     loop over blocks of excitations (`_excitation_blocks` at tile_gb, None:
     DOWNFOLDING_SIGMA_TILE_GB): the four-index kernel of a block is built,
     contracted and dropped, so the working set is tile_gb and not
-    (nexc, n_act, n_act, n_r). infinite: also Sigma at s = inf from the
+    (nexc, n_act, n_act, n_r). with_undamped: also Sigma at s = inf from the
     same block's kernel before its damping, the damping diagnostic's
     reference, the very numbers a separate s = None call gives."""
     tile_gb = DOWNFOLDING_SIGMA_TILE_GB if tile_gb is None else tile_gb
     d = _denominators(eps_t, eps_r, occupied_r, omega)
     n_act = d.shape[1]
     out = np.zeros((n_act, n_act))
-    out_inf = np.zeros((n_act, n_act)) if infinite and s is not None else None
+    out_inf = (np.zeros((n_act, n_act)) if with_undamped and s is not None
+               else None)
     for blk in _excitation_blocks(len(d), n_act, d.shape[2], tile_gb):
         a, b = d[blk, :, None, :], d[blk, None, :, :]
         lam = a * a + b * b
@@ -1187,7 +1099,7 @@ def _srg_pair(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None,
     out = 0.5 * (out + out.T)
     if out_inf is not None:
         return out, 0.5 * (out_inf + out_inf.T)
-    return out, (out if infinite else None)
+    return out, (out if with_undamped else None)
 
 
 def srg_self_energy(w, eps_t, eps_r, occupied_r, omega, s, tile_gb=None):
@@ -1233,6 +1145,174 @@ def mode_a_self_energy(w, eps_t, eps_r, occupied_r, omega):
         return 0.5 * (half + half.T)
 
 
+def _embedding_imag_axis(low, part, sigma):
+    """`_embedding_unchecked` on imagfrequency and space-time, a list over
+    the spin channels each: S^E on the Pade nodes of the run's numerics
+    (`pade_nodes`, on the line mu + i w, mu the channel's own mid-gap),
+    fitted once per channel."""
+    nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
+    chans = _channels(low, part)
+    samples = sigma_env_imag_axis(low, part, nodes)
+    samples = [samples] if len(chans) == 1 else list(samples)
+    sigma_bar, kept_per_channel = [], []
+    for chan, sampled in zip(chans, samples):
+        z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
+        kept = {'z': z, 'samples': sampled, 'fit': None}
+        n = chan.part.n_act
+        if n == 0 or len(chan.part.env) == 0:
+            s_bar = np.zeros((n, n))
+        else:
+            kept['fit'] = pade_fit_elementwise(z, sampled, symmetric=True)
+            s_bar = _evaluate_continued(kept['fit'],
+                                        chan.eps[chan.part.act], sigma)
+        sigma_bar.append(s_bar)
+        kept_per_channel.append(kept)
+    return sigma_bar, kept_per_channel
+
+
+def sigma_env_imag_axis(low, part, query_freqs):
+    """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
+    the correlation self-energy iG(W - v) of the full RPA's W on part.act
+    (occupied first) with the internal orbital restricted to part.env, mu
+    the whole system's mid-gap. imagfrequency and space-time
+    (NotImplementedError on casida, which has the residues instead).
+
+    Both routes: the GW density's `fitted_self_energy_matrix_imaginary_axis`
+    on the fitting factors B[Q, t, r] (t active, r environment) and the
+    environment's eps_r - mu: the Lorentzian fit of W - 1 on
+    `_screening_grid` with the poles of `screening_fit_grid` and the GW
+    regularization (GW_DENSITY_W_FIT_TIKHONOV),
+    whose one-pole convolution with G_r is exact; the full system's mu and
+    fit range, so only the internal sum changes. The samples are an exact
+    rational function of the frequency, which is what lets the Pade
+    continuation reach orbitals far from the gap.
+
+    imagfrequency slices B from the three-index factors. space-time builds
+    it from the ISDF factors, B_Q,tr = sum_P D_PQ X_Pt X_Pr, for the active
+    and environment columns alone (N^3 times the active orbitals), and uses
+    the W of its own chi0.
+
+    For an unrestricted result `part` is the pair (alpha, beta) and the pair
+    of each spin's samples is returned: S^{E,s}(mu_s + i w) with that spin's
+    factors between its active and environment orbitals, its orbital
+    energies and its own mid-gap mu_s, on the one W of both spins.
+    """
+    if low.mode == 'casida':
+        raise NotImplementedError(
+            f"sigma_env_imag_axis samples the screened interaction of the "
+            f"numerical routes on the imaginary axis; this low-level result "
+            f"is mode='casida' (its self-energy is `embedding_self_energy`, "
+            f"from the residues of W): use mode='imagfrequency' or "
+            f"mode='space-time'.")
+    chans = _channels(low, part)
+    query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
+    # W and the fit's poles are fetched once, and only when a channel has
+    # active and environment orbitals
+    fit = None
+    if any(c.part.n_act and len(c.part.env) for c in chans):
+        points, w_grid = _screening_grid(low)
+        poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
+        fit = (points, w_grid, poles)
+    out = []
+    for chan in chans:
+        n, env = chan.part.n_act, chan.part.env
+        if n == 0 or len(env) == 0:
+            out.append(np.zeros((len(query_freqs), n, n), dtype=complex))
+            continue
+        mu = particle_hole_window(chan.eps, chan.nocc)[2]
+        if low.mode == 'space-time':
+            x, d = chan.collocation, low.cache['factors'][1]
+            x_act, x_env = x[:, chan.part.act], x[:, env]
+            pairs = (x_act[:, :, None]
+                     * x_env[:, None, :]).reshape(len(x), -1)
+            b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
+        else:
+            b = chan.factors[:, chan.part.act][:, :, env]
+        out.append(fitted_self_energy_matrix_imaginary_axis(
+            b, chan.eps[env] - mu, fit[0], fit[1], query_freqs, fit[2],
+            GW_DENSITY_W_FIT_TIKHONOV))
+    return _per_channel(out)
+
+
+def _screening_grid(low):
+    """(points, W): the full RPA's screened interaction W(i w) =
+    [1 - chi0(i w)]^-1 in the normalized fitting basis, on the minimax grid of
+    numerics.imagfreq.nfreq points over the particle-hole window
+    (`screening_fit_grid`, shared with the GW density's
+    `self_energy_matrix_imaginary_axis`), built on the first request and
+    kept in low.cache['w_grid'].
+
+    imagfrequency: chi0 from the three-index factors, exact at each point.
+    space-time: chi0 of the ISDF factors (X, D) on those same points, through
+    a minimax tau axis with as many points as the static grid's
+    (`chi0_imaginary_frequency`, the mid-gap mu), then the same Dyson step."""
+    return _cached(low, 'w_grid', lambda: _build_screening_grid(low))
+
+
+def _build_screening_grid(low):
+    """The (points, W) of `_screening_grid`, computed. For an unrestricted
+    result W is the one screened interaction of both spins, [1 - chi0_alpha
+    - chi0_beta]^-1, on the grid over the transitions of both."""
+    points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        ntau = len(low.cache['static_grid'].tau_points)
+        tile_gb = layout_tile_gb(low.numerics)
+        if low.unrestricted:
+            e_min, e_max = transition_range(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = spin_summed(chi0_imaginary_frequency, x, d, low.eps,
+                            low.nocc, grid, tile_memory_gb=tile_gb)
+        else:
+            e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = chi0_imaginary_frequency(x, d, low.eps, low.nocc, grid,
+                                         mu=mu, tile_memory_gb=tile_gb)
+        for k in range(len(w)):
+            w[k] = dyson_screening(w[k])
+        return points, w
+    spin_mode = 'unrestricted' if low.unrestricted else 'restricted'
+    lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                              spin_mode=spin_mode)
+    return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
+
+
+def _evaluate_continued(fit, eps_act, sigma):
+    """The static reduction of a `pade_fit_elementwise` fit (Z, A) of S^E:
+    'srg', Re S_tu(z_tu) with z_tu = (eps_t + eps_u)/2 + i |eps_u - eps_t|/2
+    (Eq. 42; S(z*) = S(z)*, so the half plane of the fit's nodes serves both
+    t, u and u, t); 'mode_a', 1/2 Re[S_tu(eps_t) + S_tu(eps_u)]."""
+    e = np.asarray(eps_act, dtype=float)
+    n = len(e)
+    if sigma == 'srg':
+        z = 0.5 * (e[:, None] + e[None, :]) + 0.5j * np.abs(e[None, :]
+                                                            - e[:, None])
+        at = pade_eval_elementwise(z.ravel(), *fit).reshape((n,) * 4)
+        return np.einsum('tutu->tu', at).real
+    half = np.einsum('ttu->tu', pade_eval_elementwise(e, *fit)).real
+    return 0.5 * (half + half.T)
+
+
+def continued_self_energy(z, samples, eps_act, sigma):
+    """Sigma_bar (n_act, n_act) from S^E sampled at the complex frequencies z
+    (samples (nz, n_act, n_act), symmetric): one Thiele-Pade fit per element
+    (`pade_fit_elementwise`, greedy order, the upper triangle), then each
+    element at its own point, Re S_tu(z_tu) for 'srg' (Eq. 42, s = inf) or
+    1/2 Re[S_tu(eps_t) + S_tu(eps_u)] for 'mode_a', eps_act the active
+    orbitals' energies."""
+    if len(eps_act) == 0:
+        return np.zeros((0, 0))
+    fit = pade_fit_elementwise(z, samples, symmetric=True)
+    return _evaluate_continued(fit, eps_act, sigma)
+
+
+# ---------------------------------------------------- 4. the checks of Sigma^E
+
+
 def lowest_excitation(low):
     """Omega_min, the lowest excitation energy of the full RPA (None without
     a particle-hole pair), the one number the pole-free window needs.
@@ -1259,26 +1339,6 @@ def lowest_excitation(low):
             return _gap_bound(low, chans, failure)
 
     return _cached(low, 'omega_min', solved)
-
-
-def _cached(low, key, build):
-    """low.cache[key], built by `build()` on the first request.
-
-    One low-level result serves any number of active spaces, and only the
-    first request builds the value. The named flags raised while building it
-    (src.Base.numerical_flags) are therefore kept beside it, in
-    low.cache['flags'][key], and handed to the collecting block of every
-    later request too: each Hamiltonian that uses the value has them in its
-    record. The warning itself is issued once, by the build."""
-    if key not in low.cache:
-        raised = []
-        with collecting(raised):
-            low.cache[key] = build()
-        low.cache.setdefault('flags', {})[key] = raised
-        return low.cache[key]
-    with collecting([]) as again:
-        again.extend(low.cache.get('flags', {}).get(key, ()))
-    return low.cache[key]
 
 
 def _pair_actions(low, chans):
@@ -1425,15 +1485,6 @@ def _windows(low, chans):
     return windows
 
 
-class SigmaNearPoleWarning(RuntimeWarning):
-    """An active orbital energy lies within the margin of an edge of the
-    pole-free window of the environment self-energy, or outside the window:
-    Sigma_bar^E is computed all the same, undamped ('mode_a', and 'srg' at
-    srg_s = None, on casida) or
-    continued from the imaginary axis (imagfrequency, space-time), and is
-    unreliable on that orbital."""
-
-
 def _warn_near_poles(low, chans, settings, sigma, stacklevel):
     """Warn (SigmaNearPoleWarning, the named flag 'sigma_near_pole') of an
     active orbital whose energy is within the margin of an edge of
@@ -1517,275 +1568,6 @@ def _require_finite(sigma_bar, chan, sigma):
             f"such a Sigma_bar cannot go into H_eff. Use sigma='srg' on "
             f"mode='casida', which is finite everywhere, or move the orbital "
             f"out of the active space.")
-
-
-def embedding_self_energy(low, part, sigma, numerics=None):
-    """Sigma_bar^E (n_act, n_act), the static environment self-energy on
-    part.act (occupied first): iG^E(W - v) with r over part.env, the full
-    RPA's W and the mean-field energies.
-
-    casida: the residues of W (`screened_residues`) and the RPA's Omega.
-    sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
-        everywhere; 'mode_a', Eq. 12 at eta = 0, which warns
-        (SigmaNearPoleWarning, naming the orbitals) when an active energy
-        is within pole_margin/sqrt(2 s) of the pole-free window's edge or
-        outside it (`pole_window`), and is computed all the same. At
-        srg_s = None 'srg' is Eq. 42, undamped like 'mode_a' and with its
-        diagonal, and warns the same way.
-    imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
-        continued once and evaluated per element (`continued_self_energy`):
-        'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
-        (srg_s enters the pole check alone), 'mode_a' 1/2 Re[S^E_tu(eps_t)
-        + S^E_tu(eps_u)]. Both warn near the poles as 'mode_a' does on
-        casida, within the larger of pole_margin/sqrt(2 s) and
-        numerics.downfolding.continuation_margin, pointing to mode='casida';
-        the continuation is inaccurate there (constants.py,
-        DOWNFOLDING_CONTINUATION_MARGIN).
-    space-time: the same, with S^E(mu + i w) sampled as on imagfrequency
-        on the route's own ISDF factors (`sigma_env_imag_axis`).
-    Zero when the environment is empty. A Sigma_bar that is not finite (an
-    active energy on a pole) is refused, FloatingPointError.
-
-    For an unrestricted result `part` is the pair (alpha, beta) and the pair
-    (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
-    spin, with the residues between that spin's active and environment
-    orbitals, that spin's orbital energies, and the Omega_n of the two-spin
-    RPA, which both spins share. One sigma and one srg_s serve both.
-
-    numerics: None, or a Numerics whose downfolding section (srg_s,
-        pole_margin, continuation_margin) is used here in place of the
-        run's; the rest has to be the run's (`_with_settings`).
-    """
-    return _per_channel(_embedding(_with_settings(low, numerics), part,
-                                   sigma)[0])
-
-
-def _embedding(low, part, sigma, infinite=False, stacklevel=3):
-    """`_embedding_unchecked` after the pole warning and with the result
-    required finite: (Sigma_bar, kept), each a list over the spin channels
-    of `part`. stacklevel: where the pole warning points, counted from this
-    function as for warnings.warn (3: the caller of this function's
-    caller)."""
-    sigma = choice(sigma, SIGMAS[1:], 'sigma')
-    settings = numerics_or_default(low.numerics).downfolding
-    chans = _channels(low, part)
-    # 'srg' at a finite s is bounded near a pole and needs no warning on
-    # casida; at srg_s = None it is as undamped as 'mode_a'
-    if sigma == 'mode_a' or low.mode != 'casida' or settings.srg_s is None:
-        _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
-    sigma_bar, kept = _embedding_unchecked(low, part, sigma, settings,
-                                           infinite)
-    for chan, s_bar in zip(chans, sigma_bar):
-        _require_finite(s_bar, chan, sigma)
-    return sigma_bar, kept
-
-
-def _embedding_unchecked(low, part, sigma, settings, infinite):
-    """(Sigma_bar, kept) of `embedding_self_energy`, each a list over the
-    spin channels; kept is what the diagnostics read without building it
-    again: on casida 'args' = (w, eps_t, eps_r, occupied_r, omega) of the
-    environment, 'srg_s', the s applied
-    by 'srg', and, with infinite and sigma 'srg', 'srg_inf', Sigma_bar at
-    s = inf from the same block loop (`_srg_pair`; the damping diagnostic's
-    reference); on imagfrequency and space-time 'z' and 'samples', the Pade
-    nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
-    (None without an environment)."""
-    if low.mode != 'casida':
-        return _embedding_imag_axis(low, part, sigma)
-    chans = _channels(low, part)
-    residues = screened_residues(low, part)
-    residues = [residues] if len(chans) == 1 else list(residues)
-    sigma_bar, kepts = [], []
-    for chan, w in zip(chans, residues):
-        env = chan.part.env
-        args = (w, chan.eps[chan.part.act], chan.eps[env], env < chan.nocc,
-                low.omega)
-        kept = {'args': args, 'srg_s': settings.srg_s}
-        if sigma == 'srg':
-            s_bar, kept['srg_inf'] = _srg_pair(
-                *args, settings.srg_s, _sigma_tile_gb(low.numerics), infinite)
-        else:
-            s_bar = mode_a_self_energy(*args)
-        sigma_bar.append(s_bar)
-        kepts.append(kept)
-    return sigma_bar, kepts
-
-
-def _screening_grid(low):
-    """(points, W): the full RPA's screened interaction W(i w) =
-    [1 - chi0(i w)]^-1 in the normalized fitting basis, on the minimax grid of
-    numerics.imagfreq.nfreq points over the particle-hole window
-    (`screening_fit_grid`, shared with the GW density's
-    `self_energy_matrix_imaginary_axis`), built on the first request and
-    kept in low.cache['w_grid'].
-
-    imagfrequency: chi0 from the three-index factors, exact at each point.
-    space-time: chi0 of the ISDF factors (X, D) on those same points, through
-    a minimax tau axis with as many points as the static grid's
-    (`chi0_imaginary_frequency`, the mid-gap mu), then the same Dyson step."""
-    return _cached(low, 'w_grid', lambda: _build_screening_grid(low))
-
-
-def _build_screening_grid(low):
-    """The (points, W) of `_screening_grid`, computed. For an unrestricted
-    result W is the one screened interaction of both spins, [1 - chi0_alpha
-    - chi0_beta]^-1, on the grid over the transitions of both."""
-    points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
-    if low.mode == 'space-time':
-        x, d = low.cache['factors']
-        ntau = len(low.cache['static_grid'].tau_points)
-        tile_gb = layout_tile_gb(low.numerics)
-        if low.unrestricted:
-            e_min, e_max = transition_range(low.eps, low.nocc)
-            grid = TimeFrequencyGrid.minimax_split(
-                ntau, e_min, e_max, points, weights, with_sine=False,
-                with_inverse=False)
-            w = spin_summed(chi0_imaginary_frequency, x, d, low.eps,
-                            low.nocc, grid, tile_memory_gb=tile_gb)
-        else:
-            e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
-            grid = TimeFrequencyGrid.minimax_split(
-                ntau, e_min, e_max, points, weights, with_sine=False,
-                with_inverse=False)
-            w = chi0_imaginary_frequency(x, d, low.eps, low.nocc, grid,
-                                         mu=mu, tile_memory_gb=tile_gb)
-        for k in range(len(w)):
-            w[k] = dyson_screening(w[k])
-        return points, w
-    spin_mode = 'unrestricted' if low.unrestricted else 'restricted'
-    lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                              spin_mode=spin_mode)
-    return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
-
-
-def sigma_env_imag_axis(low, part, query_freqs):
-    """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
-    the correlation self-energy iG(W - v) of the full RPA's W on part.act
-    (occupied first) with the internal orbital restricted to part.env, mu
-    the whole system's mid-gap. imagfrequency and space-time
-    (NotImplementedError on casida, which has the residues instead).
-
-    Both routes: the GW density's `fitted_self_energy_matrix_imaginary_axis`
-    on the fitting factors B[Q, t, r] (t active, r environment) and the
-    environment's eps_r - mu: the Lorentzian fit of W - 1 on
-    `_screening_grid` with the poles of `screening_fit_grid` and the GW
-    regularization (GW_DENSITY_W_FIT_TIKHONOV),
-    whose one-pole convolution with G_r is exact; the full system's mu and
-    fit range, so only the internal sum changes. The samples are an exact
-    rational function of the frequency, which is what lets the Pade
-    continuation reach orbitals far from the gap.
-
-    imagfrequency slices B from the three-index factors. space-time builds
-    it from the ISDF factors, B_Q,tr = sum_P D_PQ X_Pt X_Pr, for the active
-    and environment columns alone (N^3 times the active orbitals), and uses
-    the W of its own chi0.
-
-    For an unrestricted result `part` is the pair (alpha, beta) and the pair
-    of each spin's samples is returned: S^{E,s}(mu_s + i w) with that spin's
-    factors between its active and environment orbitals, its orbital
-    energies and its own mid-gap mu_s, on the one W of both spins.
-    """
-    if low.mode == 'casida':
-        raise NotImplementedError(
-            f"sigma_env_imag_axis samples the screened interaction of the "
-            f"numerical routes on the imaginary axis; this low-level result "
-            f"is mode='casida' (its self-energy is `embedding_self_energy`, "
-            f"from the residues of W): use mode='imagfrequency' or "
-            f"mode='space-time'.")
-    chans = _channels(low, part)
-    query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
-    # W and the fit's poles are fetched once, and only when a channel has
-    # active and environment orbitals
-    fit = None
-    if any(c.part.n_act and len(c.part.env) for c in chans):
-        points, w_grid = _screening_grid(low)
-        poles = screening_fit_grid(low.eps, low.nocc, low.numerics)[2]
-        fit = (points, w_grid, poles)
-    out = []
-    for chan in chans:
-        n, env = chan.part.n_act, chan.part.env
-        if n == 0 or len(env) == 0:
-            out.append(np.zeros((len(query_freqs), n, n), dtype=complex))
-            continue
-        mu = particle_hole_window(chan.eps, chan.nocc)[2]
-        if low.mode == 'space-time':
-            x, d = chan.collocation, low.cache['factors'][1]
-            x_act, x_env = x[:, chan.part.act], x[:, env]
-            pairs = (x_act[:, :, None]
-                     * x_env[:, None, :]).reshape(len(x), -1)
-            b = (d.T @ pairs).reshape(d.shape[1], n, len(env))
-        else:
-            b = chan.factors[:, chan.part.act][:, :, env]
-        out.append(fitted_self_energy_matrix_imaginary_axis(
-            b, chan.eps[env] - mu, fit[0], fit[1], query_freqs, fit[2],
-            GW_DENSITY_W_FIT_TIKHONOV))
-    return _per_channel(out)
-
-
-def _evaluate_continued(fit, eps_act, sigma):
-    """The static reduction of a `pade_fit_elementwise` fit (Z, A) of S^E:
-    'srg', Re S_tu(z_tu) with z_tu = (eps_t + eps_u)/2 + i |eps_u - eps_t|/2
-    (Eq. 42; S(z*) = S(z)*, so the half plane of the fit's nodes serves both
-    t, u and u, t); 'mode_a', 1/2 Re[S_tu(eps_t) + S_tu(eps_u)]."""
-    e = np.asarray(eps_act, dtype=float)
-    n = len(e)
-    if sigma == 'srg':
-        z = 0.5 * (e[:, None] + e[None, :]) + 0.5j * np.abs(e[None, :]
-                                                            - e[:, None])
-        at = pade_eval_elementwise(z.ravel(), *fit).reshape((n,) * 4)
-        return np.einsum('tutu->tu', at).real
-    half = np.einsum('ttu->tu', pade_eval_elementwise(e, *fit)).real
-    return 0.5 * (half + half.T)
-
-
-def continued_self_energy(z, samples, eps_act, sigma):
-    """Sigma_bar (n_act, n_act) from S^E sampled at the complex frequencies z
-    (samples (nz, n_act, n_act), symmetric): one Thiele-Pade fit per element
-    (`pade_fit_elementwise`, greedy order, the upper triangle), then each
-    element at its own point, Re S_tu(z_tu) for 'srg' (Eq. 42, s = inf) or
-    1/2 Re[S_tu(eps_t) + S_tu(eps_u)] for 'mode_a', eps_act the active
-    orbitals' energies."""
-    if len(eps_act) == 0:
-        return np.zeros((0, 0))
-    fit = pade_fit_elementwise(z, samples, symmetric=True)
-    return _evaluate_continued(fit, eps_act, sigma)
-
-
-def _embedding_imag_axis(low, part, sigma):
-    """`_embedding_unchecked` on imagfrequency and space-time, a list over
-    the spin channels each: S^E on the Pade nodes of the run's numerics
-    (`pade_nodes`, on the line mu + i w, mu the channel's own mid-gap),
-    fitted once per channel."""
-    nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
-    chans = _channels(low, part)
-    samples = sigma_env_imag_axis(low, part, nodes)
-    samples = [samples] if len(chans) == 1 else list(samples)
-    sigma_bar, kepts = [], []
-    for chan, sampled in zip(chans, samples):
-        z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
-        kept = {'z': z, 'samples': sampled, 'fit': None}
-        n = chan.part.n_act
-        if n == 0 or len(chan.part.env) == 0:
-            s_bar = np.zeros((n, n))
-        else:
-            kept['fit'] = pade_fit_elementwise(z, sampled, symmetric=True)
-            s_bar = _evaluate_continued(kept['fit'],
-                                        chan.eps[chan.part.act], sigma)
-        sigma_bar.append(s_bar)
-        kepts.append(kept)
-    return sigma_bar, kepts
-
-
-class SigmaDampingWarning(RuntimeWarning):
-    """The SRG damping of Sigma_bar^E is not negligible: an active orbital
-    energy lies within a few 1/sqrt(2 s) of a pole of the environment
-    self-energy, so 'srg' there depends on srg_s."""
-
-
-class SigmaContinuationWarning(RuntimeWarning):
-    """Two Pade fits of S^E on disjoint halves of the nodes disagree by more
-    than DOWNFOLDING_SIGMA_CONTINUATION_WARN at an element's evaluation
-    point: the continuation of Sigma_bar^E is not to be trusted there."""
 
 
 def _pole_weights(w, eps_t, eps_r, occupied_r, omega):
@@ -1924,6 +1706,219 @@ def _sigma_continuation(low, chans, sigma, kept):
     return _per_channel(spreads)
 
 
+# -------------------------------------------------------- 5. the routes of run
+# On the imagfrequency route (density fitted, N^4) `run` keeps the existing
+# imaginary-axis energy, its minimax frequency grid and the static
+# polarizability P(0) of the whole system in the normalized fitting basis.
+# The screening correction is P - P^A and one Dyson step, with P^A the active
+# ph pairs' part of P(0) (`active_polarizability_static`), projected on the
+# factors of every active pair (`active_pair_factors`): the casida route's
+# deletion written another way, equal to rounding on the same three-index
+# object. E_c^A[v_eff] is the same quadrature on the same grid with the bare
+# response of the active ph pairs, so the E_c pair is one formula on both
+# sides; the dense-Casida E_c^A is kept as the 'ec_active_casida' diagnostic.
+#
+# The space-time route (separable ISDF factors (X, D), imaginary time, N^3,
+# serial) is the same on its own machinery: `run` keeps the factors, the static
+# tau grid with P(0) on it, and the energy of
+# `rpa_correlation_energy_space_time` with its time-frequency grid. P^A(0) is
+# built as P(0) was, with the active columns of X on the same grid, so with
+# every orbital active P - P^A is zero to the bit; E_c^A takes the active ph
+# pairs' exp(-delta tau) through the energy's own tau -> omega transform.
+
+
+def _imaginary_axis(eps, nocc, factors, numerics):
+    """(E_c, cache) of the direct RPA on the imaginary axis:
+    E_c by `rpa_correlation_energy_imaginary_axis` (minimax grid), and the
+    cache with 'grid', the points and weights that energy integrates on
+    (`imaginary_axis_energy_grid`, the function it calls), and 'p0',
+    P(0) = 1 - W(0)^-1 in the normalized fitting basis. The active E_c^A is
+    integrated on this grid so that the E_c pair is one quadrature. For two
+    spin channels (eps, nocc and factors pairs) the response is the sum of
+    the two spins' and the grid covers the transitions of both."""
+    spin_mode = 'unrestricted' if isinstance(nocc, tuple) else 'restricted'
+    lr = LinearResponseSolver(eps, coeff_df=factors, spin_mode=spin_mode)
+    e_c = rpa_correlation_energy_imaginary_axis(lr, nocc, numerics)
+    grid = imaginary_axis_energy_grid(eps, nocc, numerics)
+    p0 = solve_polarizability_imaginary_axis(lr, nocc, [0.0])[0]
+    return float(e_c), {'grid': grid, 'p0': p0}
+
+
+def _space_time(mf, eps, nocc, numerics):
+    """(E_c, cache) of the direct RPA in imaginary time, serial,
+    on the separable factors (X, D) of `separable_factors` on
+    numerics.isdf's grid (refused, ValueError, when it names none):
+
+    'factors': (X, D), X (M, nmo) the MO collocation, D (M, naux), so the
+        fitted v is (pq|rs) = sum_Q B_Q,pq B_Q,rs with B_Q,pq = sum_P D_PQ
+        X_Pp X_Pq.
+    'static_grid': the one-frequency (omega = 0) minimax grid of a static
+        screening (`static_screening_grid` at quadrature.ntau_w, as the BSE's
+        W), and 'p0' P(0) = chi0(0) on it (`chi0_imaginary_frequency`), the
+        chi0 `static_screening_matrix` inverts: 1 - W(0)^-1, built directly.
+    'energy_grid': the TimeFrequencyGrid of E_c, built as the RPA
+        ground-state chain builds its own: minimax tau (quadrature.ntau_rpa,
+        else ntau_w, else the minimax count of the window at tau_target)
+        transformed onto a Gauss-Legendre frequency axis
+        (quadrature.nfreq_rpa, else RPA_ENERGY_NFREQ; `rpa_quadrature`)
+        scaled to the gap. The chain takes its counts from the chain before
+        it where there is one, and always the default tau target, so the
+        two do not share one function.
+
+    E_c = `rpa_correlation_energy_space_time` on 'energy_grid'. P^A(0) and
+    E_c^A are built on these same grids and transforms, so the active part
+    cancels to rounding with every orbital active.
+
+    For an unrestricted reference (eps and nocc pairs) X is (2, M, nmo), one
+    collocation per spin X_s = X_ao C_s on the one D; the grids cover the
+    transitions of both spins (the smallest gap and the largest span), P(0)
+    is chi0_alpha(0) + chi0_beta(0) (`spin_summed`), and E_c the two-spin
+    energy. The 'rows' realization of the fit builds one collocation and is
+    refused there."""
+    num = numerics_or_default(numerics)
+    if not num.isdf.grid_named():
+        raise ValueError(
+            f"method={METHOD!r} mode='space-time' builds separable (ISDF) "
+            f"factors on the grid numerics.isdf names, and this run's names "
+            f"none: pass numerics with numerics.isdf.level (e.g. 'G1') or "
+            f"counts.")
+    two_spin = isinstance(nocc, tuple)
+    if two_spin and num.isdf.fit == 'rows':
+        raise NotImplementedError(
+            f"method={METHOD!r} mode='space-time' on an unrestricted "
+            f"reference needs one collocation per spin, which the 'rows' "
+            f"realization of the ISDF fit does not build: use "
+            f"numerics.isdf.fit='replicated' (the default).")
+    x, d = unpack_factors(separable_factors(mf, mf.mol, numerics=numerics,
+                                            comm=None))[:2]
+    q = num.quadrature
+    static_grid = static_screening_grid(eps, nocc, ntau=q.ntau_w,
+                                        tau_target=q.tau_target)
+    tile_gb = layout_tile_gb(numerics)
+    ntau, nfreq = rpa_quadrature(num)
+    if two_spin:
+        p0 = spin_summed(chi0_imaginary_frequency, x, d, eps, nocc,
+                         static_grid, tile_memory_gb=tile_gb)[0]
+        e_min, e_max = transition_range(eps, nocc)
+        w0 = gap_scaled_w0(gap=e_min)
+    else:
+        p0 = chi0_imaginary_frequency(x, d, eps, nocc, static_grid,
+                                      tile_memory_gb=tile_gb)[0]
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
+        w0 = gap_scaled_w0(eps, nocc)
+    if ntau is None:
+        ntau = minimax_points_for_accuracy(e_min, e_max, q.tau_target)[0]
+    nu, wt = gauss_legendre_grid(nfreq, w0)
+    grid = TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, nu, wt,
+                                           with_sine=False,
+                                           with_inverse=False)
+    e_c = rpa_correlation_energy_space_time(x, d, eps, nocc, grid,
+                                            tile_gb=tile_gb, comm=None)
+    return float(e_c), {'factors': (x, d), 'static_grid': static_grid,
+                        'p0': p0, 'energy_grid': grid}
+
+
+def _plasmon(eps, nocc, factors, eri, numerics):
+    """(E_c, omega, X+Y) of the direct RPA on the integrals `factors`
+    (three-index) or `eri` (chemist), by the plasmon formula
+    E_c = 1/2 (sum omega - Tr A): the restricted singlet problem for one
+    channel, and for two (eps, nocc and factors pairs, eri the blocks
+    (aa, ab, bb)) the problem on the stacked pairs of both spins. A and B
+    are freed by the solver, so Tr A is taken before it. The full RPA and
+    the active one go through here, so the E_c pair is the same formula on
+    the same solver. A reference without any particle-hole pair (no
+    virtual, or no occupied, orbital in every channel) has no excitation and
+    no correlation: (0.0, an empty omega, an empty X+Y)."""
+    if isinstance(nocc, tuple):
+        # the solver takes the three blocks as (aa, bb, ab)
+        blocks = None if eri is None else (eri[0], eri[2], eri[1])
+        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=blocks,
+                                  spin_mode='unrestricted')
+    else:
+        lr = LinearResponseSolver(eps, coeff_df=factors, eri_chemist=eri,
+                                  spin_mode='restricted')
+    A, B = lr.build_casida_matrices(nocc, lBSE=False)
+    if A.size == 0:
+        return 0.0, np.zeros(0), np.zeros((0, 0))
+    trace_a = np.trace(A)
+    solver = CasidaSolver(A, B)
+    del A, B
+    omega, xpy, y = solver.solve(numerics=numerics)
+    xpy += y
+    del y
+    return float(0.5 * (np.sum(omega) - trace_a)), omega, xpy
+
+
+# ----------------------------------------------------------- 6. shared helpers
+
+
+def _require_current_mean_field(low):
+    """Refuse (ValueError) a low-level result whose mean field has changed
+    since the run: the orbital energies or the occupied counts of low.mf
+    are no longer those the result holds. `build_effective_hamiltonian`
+    reads the orbitals, the core Hamiltonian and E_nuc from low.mf itself,
+    so H_eff would mix them with the screening, the self-energy and E_c of
+    the orbitals of the run."""
+    mf = low.mf
+    if low.unrestricted:
+        now = (get_orbital_energies(mf), unrestricted_nocc(mf.mo_occ))
+        same = (all(np.array_equal(a, b) for a, b in zip(low.eps, now[0]))
+                and tuple(low.nocc) == tuple(now[1]))
+    else:
+        same = (np.array_equal(low.eps, get_orbital_energies(mf))
+                and low.nocc == closed_shell_nocc(mf.mo_occ))
+    if not same:
+        raise ValueError(
+            f"method={METHOD!r}: the mean field has changed since "
+            f"run_low_level (its orbital energies or occupations are no "
+            f"longer those of this low-level result), so the screening, "
+            f"the self-energy and E_c kept here belong to other orbitals "
+            f"than the ones the Hamiltonian would be built from. Call "
+            f"run_low_level again on the mean field as it is now.")
+
+
+def _with_settings(low, numerics):
+    """`low` under the Sigma^E settings of `numerics`, its downfolding
+    section (srg_s, pole_margin, continuation_margin), in place of the
+    run's: the same result, sharing its cache; `low` itself for None. The
+    settings act after the RPA, so they can change from one Hamiltonian to
+    the next without a new run. Every other section was used by the run
+    and has to be the run's: a difference is refused (NumericsMismatch, a
+    ValueError), naming the fields."""
+    if numerics is None:
+        return low
+    held, asked = numerics_or_default(low.numerics).values(), numerics.values()
+    differ = [f'{section}.{name}' for section in held
+              if section != 'downfolding' for name in held[section]
+              if held[section][name] != asked[section][name]]
+    if differ:
+        raise NumericsMismatch(
+            f"method={METHOD!r}: the numerics of a build can differ from "
+            f"those of the low-level run in numerics.downfolding alone "
+            f"(srg_s, pole_margin, continuation_margin, the settings of "
+            f"Sigma^E, which act after the RPA); these differ in "
+            f"{', '.join(differ)}, which the run used. Derive the build's "
+            f"numerics from the run's, or call run_low_level with them.")
+    return replace(low, numerics=numerics)
+
+
+def _require_factors(low, who):
+    """Refuse (NotImplementedError) a low-level result without three-index
+    factors for `who`: casida on the exact four-index integrals (df=False).
+    Space-time builds its factors from (X, D) and is let through."""
+    if low.mode != 'space-time' and low.factors is None:
+        raise NotImplementedError(
+            f"{who} needs the three-index factors B, which a df=False "
+            f"low-level result (the exact four-index integrals) does not "
+            f"keep: use df=True.")
+
+
+def _refuse_options(opts, which):
+    if opts:
+        raise TypeError(f"method={METHOD!r} {which} does not take "
+                        + ', '.join(sorted(opts)) + '.')
+
+
 def _sigma_name(sigma):
     """None, or the SIGMAS entry the string `sigma` names, in any case and
     with '-' or '_' (`choice`, as screening and mode); refused (ValueError)
@@ -1950,104 +1945,148 @@ def _diagnostic_names(diagnostics):
     return {choice(d, DIAGNOSTICS, 'diagnostics') for d in diagnostics}
 
 
-def terms(low, part, screening='crpa', sigma=None, diagnostics=DIAGNOSTICS,
-          numerics=None, **opts):
-    """The DownfoldingTerms of the RPA on the active space `part`.
+def _cached(low, key, build):
+    """low.cache[key], built by `build()` on the first request.
 
-    `part` is one ActiveSpace for a restricted low-level result, and the terms
-    are those of one spin channel: vtilde = (v,), sigma_bar = (s,). For an
-    unrestricted one it is the pair (alpha, beta), and vtilde = (aa, ab, bb),
-    sigma_bar = (alpha, beta); the correlation energies and the static
-    defect are those of both spins together, and in the diagnostics what
-    belongs to one spin (the pole-free window, the pole distances, Z) is a
-    pair.
+    One low-level result serves any number of active spaces, and only the
+    first request builds the value. The named flags raised while building it
+    (src.Base.numerical_flags) are therefore kept beside it, in
+    low.cache['flags'][key], and handed to the collecting block of every
+    later request too: each Hamiltonian that uses the value has them in its
+    record. The warning itself is issued once, by the build."""
+    if key not in low.cache:
+        raised = []
+        with collecting(raised):
+            low.cache[key] = build()
+        low.cache.setdefault('flags', {})[key] = raised
+        return low.cache[key]
+    with collecting([]) as again:
+        again.extend(low.cache.get('flags', {}).get(key, ()))
+    return low.cache[key]
 
-    screening: 'bare' | 'crpa' | 'crpa_ph' | 'mrpa' (casida only, refused
-        on imagfrequency and space-time); vtilde is its static correction
-        (`screening_correction`), the same in every spin block (restricted).
-    sigma: None, the paper's scheme: full double counting, no Sigma_bar.
-        'srg' or 'mode_a': the static environment self-energy
-        (`embedding_self_energy`), one block for the restricted reference,
-        with dc='hartree',
-        the Hartree-only double counting that goes with it; E_0 then gains
-        the exchange energy term and -Tr[Sigma_bar gamma^A,0].
-        Allowed with every screening; the third term of the
-        embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
-        exact only for 'crpa' in the static limit. On imagfrequency and
-        space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
-        computed with a SigmaNearPoleWarning ('mode_a', and 'srg' at
-        srg_s = None, on casida; both forms on the other routes, pointing
-        to casida), and refused only
-        when it is not finite (`embedding_self_energy`). The
-        names in any case and with '-' or '_' ('SRG', 'mode-a'), as
-        screening; anything but None and those is refused.
-    diagnostics: the DIAGNOSTICS to record in energies.diagnostics (None:
-        none, as ()); a name that does not apply here (on casida
-        'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
-        'sigma_continuation' without sigma) is skipped and absent, an
-        unknown name refused. One that applies is recorded even when it is
-        exactly zero (an empty space, no environment, no ph pair: 0.0).
-        'sigma_poles' (`_sigma_poles`): the window, pole distances, Z and
-        the SRG damping. 'sigma_continuation' (imagfrequency, space-time,
-        `_sigma_continuation`): per element the spread of two Pade fits on
-        the even and the odd nodes. Their two warnings do not depend on
-        this keyword: with sigma set, a SigmaDampingWarning (casida, the
-        SRG damping not negligible) and a SigmaContinuationWarning (the
-        spread above DOWNFOLDING_SIGMA_CONTINUATION_WARN) are always
-        checked and raised, since Sigma_bar goes into H_eff either way;
-        the keyword only decides whether the numbers are recorded.
-        'ec_active_casida' (imagfrequency, space-time): {'casida': the
-        dense-Casida E_c^A on the same v_eff, 'difference': the route's
-        quadrature value minus it}.
-    numerics: None, the settings of Sigma^E are those of the low-level run
-        (low.numerics); or a Numerics whose downfolding section (srg_s,
-        pole_margin, continuation_margin) is used for this Hamiltonian
-        instead. They act after the RPA, so one low-level result serves any
-        number of them; `low` itself keeps its own. Every other section has
-        to equal the run's, which used it (NumericsMismatch otherwise).
 
-    E_c[v] is the full RPA's; E_c^A[v_eff] is the dRPA of the active ph
-    pairs with v_eff = v + vtilde, v the same integrals as the full RPA
-    (low.factors or low.eri), not the exact v of H_eff. 'bare'
-    keeps E_c[v] - E_c^A[v], the mechanical embedding.
+@dataclass(frozen=True)
+class _Channel:
+    """One spin channel of an active-space request: the orbital energies,
+    the occupied count and the three-index factors (None without) of that
+    spin, its ActiveSpace, its name, 'alpha' or 'beta' (None for the one
+    channel of a restricted reference), and on space-time its collocation
+    X (M, nmo) in the MO basis (None on the other routes)."""
+    eps: np.ndarray
+    nocc: int
+    factors: Optional[np.ndarray]
+    part: object
+    spin: Optional[str]
+    collocation: Optional[np.ndarray] = None
 
-    Refused (ValueError) when the mean field of `low` has changed since the
-    run, e.g. the same object converged at another geometry: the driver
-    reads the orbitals from the mean field, and they would no longer be
-    those of the screening kept here.
-    """
-    _refuse_options(opts, 'terms')
-    low = _with_settings(low, numerics)
-    _require_current_mean_field(low)
-    names = _diagnostic_names(diagnostics)
-    screening = choice(screening, SCREENINGS, 'screening')
-    sigma = _sigma_name(sigma)
-    chans = _channels(low, part)
-    vt = _two_body_blocks(screening_correction(low, part, screening), chans)
-    v_eff = tuple(v + t for v, t in zip(_active_v(low, chans), vt))
-    found = {}
-    if 'static_defect' in names:
-        found['static_defect'] = static_defect(low, part, v_eff)
-    e_c_active = active_correlation_energy(low, part, v_eff)
-    if 'ec_active_casida' in names and low.mode != 'casida':
-        pairs = any(0 < c.part.n_act_occ < c.part.n_act for c in chans)
-        dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
-        found['ec_active_casida'] = {'casida': dense,
-                                     'difference': e_c_active - dense}
-    sigma_bar, dc = None, 'full'
-    if sigma is not None:
-        s_bars, kepts = _embedding(low, part, sigma, infinite=True,
-                                   stacklevel=4)
-        sigma_bar, dc = tuple(s_bars), 'hartree'
-        # the two checks of Sigma_bar always run and warn; `diagnostics`
-        # only decides whether their numbers are kept
-        checks = {'sigma_poles': _sigma_poles(low, chans, sigma, s_bars,
-                                              kepts)}
-        if low.mode != 'casida':
-            checks['sigma_continuation'] = _sigma_continuation(
-                low, chans, sigma, kepts)
-        found.update({name: value for name, value in checks.items()
-                      if name in names})
-    return DownfoldingTerms(
-        vtilde=vt, sigma_bar=sigma_bar, e_c_full=low.e_c_full,
-        e_c_active=e_c_active, dc=dc, diagnostics=found)
+
+def _channels(low, part):
+    """The spin channels of `low` with the active spaces of `part`: one, for a
+    restricted result and one ActiveSpace; two, for an unrestricted result and
+    the pair (alpha, beta). Anything else is refused."""
+    parts = channels_of(part)
+    if not low.unrestricted:
+        if len(parts) != 1:
+            raise ValueError(
+                f'a restricted low-level result takes one ActiveSpace; got '
+                f'{len(parts)}. A pair (alpha, beta) goes with an '
+                f'unrestricted (UHF/UKS) one.')
+        return (replace(_reference_channels(low)[0], part=parts[0]),)
+    if len(parts) != 2:
+        raise ValueError(
+            'an unrestricted (UHF/UKS) low-level result takes a pair of '
+            'ActiveSpaces, (alpha, beta), one per spin; got one.')
+    return tuple(replace(chan, part=p)
+                 for chan, p in zip(_reference_channels(low), parts))
+
+
+def _reference_channels(low):
+    """The spin channels of `low` itself, without an active space (their
+    `part` is None): one for a restricted result, (alpha, beta) for an
+    unrestricted one."""
+    x = low.cache['factors'][0] if low.mode == 'space-time' else None
+    if not low.unrestricted:
+        return (_Channel(low.eps, low.nocc, low.factors, None, None, x),)
+    factors = (None, None) if low.factors is None else low.factors
+    return tuple(_Channel(low.eps[s], low.nocc[s], factors[s], None, SPINS[s],
+                          None if x is None else x[s]) for s in (0, 1))
+
+
+def _join(arrays, axis=0):
+    """The arrays of the spin channels one after the other along `axis`; the
+    array of one channel as it is, not a copy."""
+    return arrays[0] if len(arrays) == 1 else np.concatenate(arrays, axis=axis)
+
+
+def _square(rows):
+    """The matrix of the blocks rows[s][t] over the spin channels; the one
+    block of one channel as it is."""
+    return rows[0][0] if len(rows) == 1 else np.block(rows)
+
+
+def _per_channel(values):
+    """What a public function returns for a quantity of each spin channel:
+    the one value of a restricted reference, the pair (alpha, beta) of an
+    unrestricted one."""
+    return values[0] if len(values) == 1 else tuple(values)
+
+
+def _per_block(blocks):
+    """What a public function returns for the two-body blocks: the one array
+    of a restricted reference, the tuple (aa, ab, bb) of an unrestricted
+    one."""
+    return blocks[0] if len(blocks) == 1 else tuple(blocks)
+
+
+def _two_body_blocks(v, chans):
+    """The two-body blocks a public function is handed, as a tuple: the one
+    (n_act,)*4 array of a restricted reference, or the three (aa, ab, bb)
+    of an unrestricted one. Refused when they do not fit the channels."""
+    blocks = (v,) if isinstance(v, np.ndarray) else tuple(v)
+    if len(blocks) != len(BLOCKS[len(chans)]):
+        raise ValueError(
+            'an unrestricted reference takes the three blocks (aa, ab, bb) '
+            'of the active interaction, a restricted one a single array; '
+            f'got {len(blocks)} for {len(chans)} spin channel(s).')
+    return blocks
+
+
+def _orbital(chan):
+    """How a message names an orbital of the channel: 'orbital', or
+    'alpha orbital' / 'beta orbital' for an unrestricted reference."""
+    return 'orbital' if chan.spin is None else f'{chan.spin} orbital'
+
+
+def _window_text(chans, windows):
+    """'window (lo, hi)' or, for two channels, 'windows alpha (lo, hi) and
+    beta (lo, hi)', for the messages."""
+    if len(chans) == 1:
+        return 'window ({:.6f}, {:.6f})'.format(*windows[0])
+    return 'windows ' + ' and '.join(
+        f'{c.spin} ({lo:.6f}, {hi:.6f})' for c, (lo, hi) in zip(chans, windows))
+
+
+def _delta(chan, mask=None):
+    """eps_a - eps_i of the (i, a) pairs of one channel in C order, those of
+    the bool mask when given."""
+    delta = (chan.eps[chan.nocc:][None, :]
+             - chan.eps[:chan.nocc][:, None]).ravel()
+    return delta if mask is None else delta[mask]
+
+
+def _ov_factors(chan):
+    """B_Q,ia (naux, n_pair) of one channel, the (i, a) pairs in C order."""
+    b = chan.factors
+    return b[:, :chan.nocc, chan.nocc:].reshape(b.shape[0], -1)
+
+
+def _act_factors(chan):
+    """B_Q,tu (naux, n_act^2) of the active orbitals of one channel."""
+    b, act = chan.factors, chan.part.act
+    return b[:, act][:, :, act].reshape(b.shape[0], len(act) ** 2)
+
+
+def _eri_block(low, s, t):
+    """The exact chemist (p q|r s) of low.eri with p, q in spin channel s
+    and r, s in channel t (`spin_block`)."""
+    return spin_block(low.eri if low.unrestricted else (low.eri,), s, t)
