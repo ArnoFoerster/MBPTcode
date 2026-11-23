@@ -150,8 +150,8 @@ for their sum:
 | `e_hartree_dc`, `e_exchange_dc` | Hartree and exchange halves of E_HF,ee[v~]: the double-counting correction of the mean-field energy. Zero unless v~ has occupied-occupied elements, so nonzero for `crpa` only | + |
 | `e_c_full` | correlation energy of the whole system, E_c[v] | + |
 | `e_c_active` | correlation energy of the active space, E_c^A[v_eff]: the double-counting correction of the correlation energy | - |
-| `e_exchange_term` | the exchange term that comes with Sigma^E (-2 `e_exchange_dc`); zero without `sigma` | + |
-| `e_sigma_trace` | Tr[Sigma_bar gamma^A,0]; zero without `sigma` | - |
+| `e_exchange_term` | the exchange term that comes with Sigma^E (-2 `e_exchange_dc`); zero with `sigma=None` | + |
+| `e_sigma_trace` | Tr[Sigma_bar gamma^A,0]; zero with `sigma=None` | - |
 
 Three properties give the sums per kind, `eh = e_hartree + e_hartree_dc`,
 `ex = e_exchange + e_exchange_dc + e_exchange_term` and
@@ -371,7 +371,8 @@ the UHF determinant, and its states inherit what that determinant breaks.
 For the OH radical, whose 2-Pi ground state is doubly degenerate, the two
 lowest states of the (5,4) H_eff are the two components, and they are split
 by 0.97 eV with `method='hf'`, 0.90 eV with `crpa_ph` and `mrpa`, 3.6 eV
-with `crpa`, and 0.02 eV with `crpa` and `sigma='srg'` (cc-pVDZ; the
+with `crpa` and `sigma=None`, and 0.02 eV with `crpa` and `sigma='srg'`
+(cc-pVDZ; the
 example below prints them).
 
 ## Where the code differs from the printed paper
@@ -608,7 +609,7 @@ space-time, every root counts).
 QP energies of the active orbitals instead of the mean-field ones; the poles
 of G^E stay at the mean-field energies, and the pole checks and the
 `'sigma_poles'` record use the same energies. Refused without `low.qp`,
-without `sigma`, and when an active orbital has no QP root or its root is
+with `sigma=None`, and when an active orbital has no QP root or its root is
 no quasiparticle (`low.qp.quasiparticle` False). The
 `'qp_energies'` diagnostic records the active orbitals' QP energies and Z
 whenever `low.qp` is set.

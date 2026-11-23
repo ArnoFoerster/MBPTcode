@@ -294,7 +294,7 @@ def downfold(low, active_space, screening='crpa', sigma='srg',
     sigma_energies: 'mf' | 'qp', the energies eps_t of the active orbitals
         at which Sigma_bar^E is evaluated (both forms, every route): the
         mean-field ones, or the run's G0W0 QP energies (low.qp, from
-        run_low_level(..., qp=True); refused without them, without sigma,
+        run_low_level(..., qp=True); refused without them, with sigma=None,
         and when an active orbital has no QP root or its root is no
         quasiparticle, low.qp.quasiparticle False). Only the active
         energies change; the poles of G^E stay at the mean-field energies.
@@ -302,7 +302,7 @@ def downfold(low, active_space, screening='crpa', sigma='srg',
     diagnostics: the DIAGNOSTICS to record in the result's diagnostics (None:
         none, as ()); a name that does not apply here (on casida
         'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
-        'sigma_continuation' without sigma) is skipped and absent, an
+        'sigma_continuation' with sigma=None) is skipped and absent, an
         unknown name refused. One that applies is recorded even when it is
         exactly zero (an empty space, no environment, no ph pair: 0.0).
         'sigma_poles' (`_sigma_poles`): the window, pole distances, Z and

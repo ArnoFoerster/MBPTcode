@@ -167,9 +167,9 @@ def test_full_rpa_quadrature_on_a_wider_window():
     low_cas = run_low_level(mf, mode='casida')
     assert abs(low_if.e_c_full - low_cas.e_c_full) < 1e-9
     a = ActiveSpace.from_counts(mf.mo_energy, low_if.nocc, 2, 2)
-    ham = build_effective_hamiltonian(low_if, a)
+    ham = build_effective_hamiltonian(low_if, a, sigma=None)
     en = ham.energies
-    ham_c = build_effective_hamiltonian(low_cas, a)
+    ham_c = build_effective_hamiltonian(low_cas, a, sigma=None)
     en_c = ham_c.energies
     assert abs(en.e0 - en_c.e0) < 1e-6
     assert abs(ham.diagnostics['ec_active_casida']['difference']) < 1e-9

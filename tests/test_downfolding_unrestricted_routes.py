@@ -1216,10 +1216,10 @@ def test_space_time_against_casida_on_the_density_fit(ref):
             assert np.abs(ours - casida).max() < 1e-5
     for screening in SCREENINGS:
         ham = build_effective_hamiltonian(low, spaces,
-                                          screening=screening)
+                                          screening=screening, sigma=None)
         g, space, en = ham.g_eff, ham.space, ham.energies
         ham_c = build_effective_hamiltonian(cas, spaces,
-                                            screening=screening)
+                                            screening=screening, sigma=None)
         g_c, en_c = ham_c.g_eff, ham_c.energies
         tol = 5e-5 if screening == 'crpa' else 1e-5
         for field in dataclasses.fields(Energies):
