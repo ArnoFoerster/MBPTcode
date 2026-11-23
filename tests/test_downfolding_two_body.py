@@ -615,8 +615,9 @@ def test_sigma_with_mrpa(wat_df, sigma):
     1e-9); Sigma_trace -0.0777."""
     mf, low, active_space = wat_df
     ham_plain = build_effective_hamiltonian(low, active_space,
-                                            screening='mrpa')
+                                            screening='mrpa', sigma=None)
     g_plain = ham_plain.g_eff
+    assert 'sigma_poles' not in ham_plain.diagnostics   # without Sigma^E
     ham = build_effective_hamiltonian(low, active_space, screening='mrpa',
                                       sigma=sigma)
     g, en = ham.g_eff, ham.energies

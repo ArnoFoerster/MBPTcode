@@ -695,8 +695,10 @@ def test_sigma_switch_with_zero_sigma_bar(wat_rpa, monkeypatch, s, sigma):
     0.0 in all six cases (tolerance 1e-9); for crpa the switch moves h_eff by the
     exchange double counting (more than 1e-3)."""
     mf, low, active_space = wat_rpa
-    ham_plain = build_effective_hamiltonian(low, active_space, screening=s)
+    ham_plain = build_effective_hamiltonian(low, active_space, screening=s,
+                                            sigma=None)
     g_plain = ham_plain.g_eff
+    assert 'sigma_poles' not in ham_plain.diagnostics   # without Sigma^E
     monkeypatch.setattr(rpa, 'screened_residues',
                         lambda low, active_space: np.zeros((len(low.omega),
                                                     active_space.n_act,
