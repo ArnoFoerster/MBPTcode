@@ -433,8 +433,8 @@ def test_sigma_bar_matches_casida(ref, aspace, sigma):
     low_if = _low_infinite_s(ref, 'imagfrequency')
     low_cas = _low_infinite_s(ref, 'casida')
     active_space = _aspace(low_if.mf, aspace)
-    got = rpa.embedding_self_energy(low_if, active_space, sigma)
-    want = rpa.embedding_self_energy(low_cas, active_space, sigma)
+    got = rpa.environment_self_energy(low_if, active_space, sigma)
+    want = rpa.environment_self_energy(low_cas, active_space, sigma)
     assert np.abs(want).max() > 1e-3
     assert np.abs(got - want).max() < 1e-4
 
@@ -788,7 +788,8 @@ def test_space_time_refusals():
     active_space = a
     with pytest.raises(NotImplementedError,
                        match="mode='imagfrequency' or mode='space-time'"):
-        rpa.sigma_env_imag_axis(_st_low('HF', 'casida'), active_space, [1.0])
+        rpa.environment_self_energy_samples(_st_low('HF', 'casida'),
+                                            active_space, [1.0])
 
 
 @pytest.mark.parametrize('sigma', ('srg', 'averaged'))
@@ -807,8 +808,8 @@ def test_space_time_sigma_bar_matches_casida(ref, aspace, sigma):
     low_st = _st_low(ref, 'space-time', downfolding=INFINITE_S)
     low_cas = _st_low(ref, 'casida', downfolding=INFINITE_S)
     active_space = _st_aspace(low_st.mf, aspace)
-    got = rpa.embedding_self_energy(low_st, active_space, sigma)
-    want = rpa.embedding_self_energy(low_cas, active_space, sigma)
+    got = rpa.environment_self_energy(low_st, active_space, sigma)
+    want = rpa.environment_self_energy(low_cas, active_space, sigma)
     assert np.array_equal(got, got.T)
     assert np.abs(want).max() > 1e-2
     assert np.abs(got - want).max() < 1e-4
@@ -883,7 +884,7 @@ def test_sigma_uses_the_gw_screening_fit_grid(monkeypatch):
     coarse = Numerics(imagfreq={'nfreq': 26})
     low = run_low_level(mf, method='rpa', mode='imagfrequency',
                         numerics=coarse)
-    rpa.sigma_env_imag_axis(low, active_space, [0.5])
+    rpa.environment_self_energy_samples(low, active_space, [0.5])
     # W's points, then the fit's poles, both on the run's numerics
     assert calls == [coarse, coarse]
     points, _, poles = shared(low.eps, low.nocc, coarse)

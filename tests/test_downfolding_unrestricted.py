@@ -927,7 +927,7 @@ def test_sigma_against_oracle(oh, oh_low, space, df):
     low = oh_low[df]
     parts = _parts(oh, SPACES[space](oh))
     so = _spin_orbitals(oh, parts)
-    srg = rpa.embedding_self_energy(low, parts, 'srg')
+    srg = rpa.environment_self_energy(low, parts, 'srg')
     assert isinstance(srg, tuple) and len(srg) == 2
     for ours, ref in zip(srg, sigma_srg_uhf(*so, DOWNFOLDING_SRG_S)):
         assert ours.shape == (parts[0].n_act,) * 2
@@ -937,7 +937,7 @@ def test_sigma_against_oracle(oh, oh_low, space, df):
         assert np.max(np.abs(srg[0] - srg[1])) > 1e-3
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', rpa.SigmaNearPoleWarning)
-        mode_a = rpa.embedding_self_energy(low, parts, 'averaged')
+        mode_a = rpa.environment_self_energy(low, parts, 'averaged')
     for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
         assert np.max(np.abs(ours - ref)) < 1e-9
 
@@ -976,19 +976,19 @@ def test_near_pole_warning_names_the_spin(oh, oh_low):
     parts = _parts(oh, _asymmetric(oh))
     with pytest.warns(rpa.SigmaNearPoleWarning,
                       match=r'beta orbital 6 \(.*beta orbital 7 \(') as rec:
-        rpa.embedding_self_energy(low, parts, 'averaged')
+        rpa.environment_self_energy(low, parts, 'averaged')
     assert rec[0].filename == __file__
     text = str(rec[0].message)
     assert 'alpha orbital' not in text
     assert 'windows alpha (' in text and ' and beta (' in text
     with warnings.catch_warnings(record=True) as rec:
         warnings.simplefilter('always')
-        rpa.embedding_self_energy(low, parts, 'srg')
+        rpa.environment_self_energy(low, parts, 'srg')
     assert [r.category for r in rec] == [rpa.SigmaDampingWarning]
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        rpa.embedding_self_energy(low, _parts(oh, _unequal_cores(oh)),
-                                  'averaged')
+        rpa.environment_self_energy(low, _parts(oh, _unequal_cores(oh)),
+                                    'averaged')
 
 
 def test_a_sigma_that_is_not_finite_names_the_spin(oh, oh_low, monkeypatch):
@@ -1009,7 +1009,7 @@ def test_a_sigma_that_is_not_finite_names_the_spin(oh, oh_low, monkeypatch):
     with pytest.raises(FloatingPointError,
                        match=rf"\({act[-1]}, {act[-1]}\) \(beta orbital "
                              rf"pairs\).*sigma='srg'"):
-        rpa.embedding_self_energy(oh_low[True], parts, 'averaged')
+        rpa.environment_self_energy(oh_low[True], parts, 'averaged')
 
 
 # --- the driver with method='rpa' (casida) on an unrestricted reference --------
@@ -1560,12 +1560,12 @@ def test_density_fitted_uhf_through_the_driver():
 
     exact_so = (eri_exact, eps_so, occ_so, act_so)
     for ours, ref, other in zip(
-            rpa.embedding_self_energy(low, parts, 'srg'),
+            rpa.environment_self_energy(low, parts, 'srg'),
             sigma_srg_uhf(*so, DOWNFOLDING_SRG_S),
             sigma_srg_uhf(*exact_so, DOWNFOLDING_SRG_S)):
         assert np.max(np.abs(ours - ref)) < 1e-9
         assert np.max(np.abs(ours - other)) > 1e-8
-    mode_a = _quiet(rpa.embedding_self_energy, low, parts, 'averaged')
+    mode_a = _quiet(rpa.environment_self_energy, low, parts, 'averaged')
     for ours, ref in zip(mode_a, sigma_mode_a_uhf(*so)):
         assert np.max(np.abs(ours - ref)) < 1e-9
 

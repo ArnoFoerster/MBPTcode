@@ -719,7 +719,7 @@ def test_exchange_term_vanishes_for_ph_screening(wat_rpa, sigma):
     assert en.e_exchange_term == 0.0
     ham_hf = _hf_heff(mf, active_space)
     g_hf = ham_hf.g_eff
-    s_bar = rpa.embedding_self_energy(low, active_space, sigma)
+    s_bar = rpa.environment_self_energy(low, active_space, sigma)
     assert np.abs(g[1] - (g_hf[1] + s_bar)).max() < 1e-12
     assert abs(en.e_sigma_trace - 2.0 * np.trace(s_bar[:2, :2])) < 1e-12
     ham_crpa = build_effective_hamiltonian(low, active_space, screening='crpa',

@@ -471,7 +471,7 @@ def test_sigma_env_samples_against_the_pole_sum(ref):
            for eps, nocc in zip(low.eps, low.nocc)]
     assert abs(mus[0] - mus[1]) > 1e-2
     assert 'w_grid' not in low.cache
-    got = rpa.sigma_env_imag_axis(low, parts, nodes)
+    got = rpa.environment_self_energy_samples(low, parts, nodes)
     assert isinstance(got, tuple) and len(got) == 2
     w_grid = low.cache['w_grid']
     assert w_grid[1].shape[1:] == (low.factors[0].shape[0],) * 2
@@ -490,7 +490,7 @@ def test_sigma_env_samples_against_the_pole_sum(ref):
         other = sigma_env_uhf(mus[1 - spin] + 1j * nodes[0], eri_fit, eps_so,
                               occ_so, act_so)[blocks[spin], blocks[spin]]
         assert np.abs(got[spin][0] - other).max() > 5e-5
-    rpa.sigma_env_imag_axis(low, parts, nodes)
+    rpa.environment_self_energy_samples(low, parts, nodes)
     assert low.cache['w_grid'] is w_grid
 
 
@@ -510,8 +510,8 @@ def test_sigma_bar_matches_casida(ref, which, sigma):
     parts = _parts(ref, which)
     with warnings.catch_warnings():
         warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
-        got = rpa.embedding_self_energy(low_if, parts, sigma)
-    want = rpa.embedding_self_energy(low_cas, parts, sigma)
+        got = rpa.environment_self_energy(low_if, parts, sigma)
+    want = rpa.environment_self_energy(low_cas, parts, sigma)
     assert isinstance(got, tuple) and len(got) == 2
     for ours, casida in zip(got, want):
         assert np.abs(casida).max() > 1e-3
@@ -673,7 +673,7 @@ def test_mrpa_and_residues_stay_casida_only():
     with pytest.raises(NotImplementedError, match="mode='casida'"):
         rpa.screened_residues(low, parts)
     with pytest.raises(NotImplementedError, match='imagfrequency'):
-        rpa.sigma_env_imag_axis(_low('oh', 'casida'), parts, [0.5])
+        rpa.environment_self_energy_samples(_low('oh', 'casida'), parts, [0.5])
 
 
 def test_numerical_routes_refuse_a_spin_without_occupied_or_virtual_orbitals():
@@ -1015,7 +1015,7 @@ def test_space_time_sigma_env_samples_against_the_pole_sum(ref):
     mus = [particle_hole_window(eps, nocc)[2]
            for eps, nocc in zip(low.eps, low.nocc)]
     assert 'w_grid' not in low.cache
-    got = rpa.sigma_env_imag_axis(low, parts, nodes)
+    got = rpa.environment_self_energy_samples(low, parts, nodes)
     assert isinstance(got, tuple) and len(got) == 2
     three = _isdf_three_index(low)
     eri_so = np.zeros((2 * nmo,) * 4)
@@ -1036,7 +1036,7 @@ def test_space_time_sigma_env_samples_against_the_pole_sum(ref):
             assert np.abs(exact).max() > 1e-4
             assert np.abs(got[spin][k] - exact).max() < 1e-6
     w_grid = low.cache['w_grid']
-    rpa.sigma_env_imag_axis(low, parts, nodes)
+    rpa.environment_self_energy_samples(low, parts, nodes)
     assert low.cache['w_grid'] is w_grid
 
 
@@ -1052,8 +1052,8 @@ def test_space_time_sigma_bar_matches_casida(ref, which, sigma):
     parts = _st_parts(ref, which)
     with warnings.catch_warnings():
         warnings.simplefilter('error', rpa.SigmaNearPoleWarning)
-        got = rpa.embedding_self_energy(low, parts, sigma)
-    want = rpa.embedding_self_energy(cas, parts, sigma)
+        got = rpa.environment_self_energy(low, parts, sigma)
+    want = rpa.environment_self_energy(cas, parts, sigma)
     assert isinstance(got, tuple) and len(got) == 2
     for ours, casida in zip(got, want):
         assert np.abs(casida).max() > 1e-3
@@ -1232,8 +1232,8 @@ def test_space_time_against_casida_on_the_density_fit(ref):
             assert np.abs(ours - casida).max() < 1e-5
         assert abs(_solve(g, space) - _solve(g_c, space)) < 1e-5
     for sigma in ('srg', 'averaged'):
-        got = rpa.embedding_self_energy(low, parts, sigma)
-        want = rpa.embedding_self_energy(cas, parts, sigma)
+        got = rpa.environment_self_energy(low, parts, sigma)
+        want = rpa.environment_self_energy(cas, parts, sigma)
         for ours, casida in zip(got, want):
             assert np.abs(casida).max() > 1e-3
             assert np.abs(ours - casida).max() < 1e-4

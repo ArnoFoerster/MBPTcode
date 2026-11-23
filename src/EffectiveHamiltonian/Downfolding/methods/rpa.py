@@ -16,7 +16,8 @@ route:
   2. the active correlation energy and the static defect
   3. the environment self-energy Sigma^E
   4. the checks of Sigma^E
-  5. the routes of `run`
+  5. the routes of `run`, with the shared W grid of the imaginary-axis
+     routes (`_screening_grid`: Sigma^E and the QP spectrum use it)
   6. the quasiparticle spectrum of `run` (qp=True)
   7. shared helpers
 """
@@ -266,18 +267,18 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         (`screening_correction`), the same in every spin block (restricted).
     sigma: None, the paper's scheme: full double counting, no Sigma_bar.
         'srg' or 'averaged': the static environment self-energy
-        (`embedding_self_energy`), one block for the restricted reference,
+        (`environment_self_energy`), one block for the restricted reference,
         with dc='hartree',
         the Hartree-only double counting that goes with it; E_0 then gains
         the exchange energy term and -Tr[Sigma_bar gamma^A,0].
         Allowed with every screening; the third term of the
-        embedding self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
+        downfolded self-energy, iG^A(W - W^A[v_eff]), is dropped, which is
         exact only for 'crpa' in the static limit. On imagfrequency and
         space-time 'srg' is s = inf (Eq. 42). Near the poles Sigma_bar is
         computed with a SigmaNearPoleWarning ('averaged', and 'srg' at
         srg_s = None, on casida; both forms on the other routes, pointing
         to casida), and refused only
-        when it is not finite (`embedding_self_energy`). The
+        when it is not finite (`environment_self_energy`). The
         names in any case and with '-' or '_' ('SRG', 'Averaged'), as
         screening; anything but None and those is refused.
     sigma_energies: 'mf' | 'qp', the energies eps_t of the active orbitals
@@ -857,36 +858,42 @@ def static_defect(low, active_space, v_eff):
 
 
 # -------------------------------------- 3. the environment self-energy Sigma^E
-# `embedding_self_energy` gives the static environment self-energy
-# Sigma_bar^E on the casida route: the residues of the full W
-# between the active and the environment orbitals (`screened_residues`) and
-# the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
-# by Kotani's mode A at eta = 0 (Eq. 12, 'averaged', which warns near the
-# poles, `pole_window`). `downfold(..., sigma=...)` hands it to the general
-# layer in both spin channels with the Hartree-only double counting
-# (dc='hartree'), and records the 'sigma_poles' diagnostic.
+# `environment_self_energy` gives the static environment self-energy
+# Sigma_bar^E. Both it and `downfold(..., sigma=...)` go through
+# `_environment_self_energy`: the active energies (`_active_energies`, 'mf'
+# or 'qp'), one builder per form of Sigma^E, each returning a `_SigmaE` per
+# spin channel, then every check (`_check_sigma`, section 4), so both entry
+# points warn and refuse alike. `downfold` hands Sigma_bar to the general
+# layer with the Hartree-only double counting (dc='hartree') and keeps the
+# records ('sigma_poles', 'sigma_continuation') `diagnostics` asks for.
 #
-# On imagfrequency there are no residues: S^E(mu + i w) comes from the
-# Lorentzian fit of W on the minimax W grid with the internal orbital
-# restricted to the environment (`sigma_env_imag_axis`, W cached on the first
-# request), is continued by one Pade fit per element, and each element is
-# evaluated at its own point (`continued_self_energy`): Eq. 42, Re
-# S^E_tu(z_tu), for 'srg' (s = inf; srg_s enters the pole check alone), the
-# real axis for 'averaged'. Both warn near the poles and point to casida;
-# Omega_min of the window is the lowest root of the same Casida problem
-# (`lowest_excitation`). The 'sigma_continuation' diagnostic is the spread of
-# two Pade fits on the even and the odd nodes. Space-time samples S^E the same
-# way, on its own objects: W on the same minimax grid from chi0 of the ISDF
-# factors, and the active-environment fitting factors B_Q,tr = sum_P D_PQ X_Pt
-# X_Pr. Sampling the space-time GW self-energy through its imaginary-time
-# quadrature instead left about 1e-7 of noise on the nodes, which the
-# continuation amplified to 1e-4 and more for orbitals far from the gap; the
-# fit's samples are an exact rational function and continue cleanly, at N^3
-# times the active orbitals.
+# The pole sum (`_sigma_pole_sum`, casida): the residues of the full W
+# between the active and the environment orbitals (`screened_residues`),
+# reduced by Marie and Loos's SRG (Eq. 44, 'srg') or by Kotani's mode A at
+# eta = 0 (Eq. 12, 'averaged', which warns near the poles, `pole_window`).
+#
+# The continuation (`_sigma_continued`, imagfrequency and space-time): there
+# are no residues; S^E(mu + i w) comes from the Lorentzian fit of W on the
+# minimax W grid with the internal orbital restricted to the environment
+# (`environment_self_energy_samples`), is continued by one Pade fit per
+# element, and each element is evaluated at its own point
+# (`continued_self_energy`): Eq. 42, Re S^E_tu(z_tu), for 'srg' (s = inf;
+# srg_s enters the pole check alone), the real axis for 'averaged'. Both warn
+# near the poles and point to casida; Omega_min of the window is the lowest
+# root of the same Casida problem (`lowest_excitation`). The
+# 'sigma_continuation' diagnostic is the spread of two Pade fits on the even
+# and the odd nodes. The two routes differ only below the builder: in chi0
+# of W on the shared grid (`_screening_grid`, section 5; space-time from the
+# ISDF factors) and in the active-environment fitting factors (space-time:
+# B_Q,tr = sum_P D_PQ X_Pt X_Pr). Sampling the space-time GW self-energy
+# through its imaginary-time quadrature instead left about 1e-7 of noise on
+# the nodes, which the continuation amplified to 1e-4 and more for orbitals
+# far from the gap; the fit's samples are an exact rational function and
+# continue cleanly, at N^3 times the active orbitals.
 
 
-def embedding_self_energy(low, active_space, sigma, numerics=None,
-                          sigma_energies='mf'):
+def environment_self_energy(low, active_space, sigma, numerics=None,
+                            sigma_energies='mf'):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
     active_space.act (occupied first): iG^E(W - v) with r over
     active_space.env, the full RPA's W and the mean-field energies, the
@@ -900,8 +907,9 @@ def embedding_self_energy(low, active_space, sigma, numerics=None,
         outside it (`pole_window`), and is computed all the same. At
         srg_s = None 'srg' is Eq. 42, undamped like 'averaged' and with its
         diagonal, and warns the same way.
-    imagfrequency: S^E(mu + i w) on the Pade nodes (`sigma_env_imag_axis`),
-        continued once and evaluated per element (`continued_self_energy`):
+    imagfrequency: S^E(mu + i w) on the Pade nodes
+        (`environment_self_energy_samples`), continued once and evaluated
+        per element (`continued_self_energy`):
         'srg' is Eq. 42, Re S^E_tu(z_tu), at s = inf whatever srg_s is
         (srg_s enters the pole check alone), 'averaged' 1/2 Re[S^E_tu(eps_t)
         + S^E_tu(eps_u)]. Both warn near the poles as 'averaged' does on
@@ -910,7 +918,7 @@ def embedding_self_energy(low, active_space, sigma, numerics=None,
         the continuation is inaccurate there (constants.py,
         DOWNFOLDING_CONTINUATION_MARGIN).
     space-time: the same, with S^E(mu + i w) sampled as on imagfrequency
-        on the route's own ISDF factors (`sigma_env_imag_axis`).
+        on the route's own ISDF factors (`environment_self_energy_samples`).
     Zero when the environment is empty. A Sigma_bar that is not finite (an
     active energy on a pole) is refused, FloatingPointError.
 
@@ -1226,9 +1234,9 @@ def averaged_self_energy(w, eps_t, eps_r, occupied_r, omega):
 
     S the pole sum of iG(W - v) over the internal orbitals r, arguments as
     in `srg_self_energy`. Undamped: a D_tr near zero makes it grow without
-    bound, of which `embedding_self_energy` warns; with a D_tr exactly zero
+    bound, of which `environment_self_energy` warns; with a D_tr exactly zero
     the element is not finite (inf or nan, without a numpy warning), which
-    `embedding_self_energy` refuses. Its temporaries are the size of w (one
+    `environment_self_energy` refuses. Its temporaries are the size of w (one
     denominator per t, r), so unlike Eq. 44 it needs no blocks.
     """
     d = _denominators(eps_t, eps_r, occupied_r, omega)
@@ -1242,9 +1250,9 @@ def _sigma_continued(low, active_space, chans, sigma, eps_act):
     list: S^E on the Pade nodes of the run's numerics (`pade_nodes`, on the
     line mu + i w, mu the channel's own mid-gap), fitted once per channel
     and evaluated at eps_act (`_evaluate_continued`). The two routes differ
-    below this, in the samples (`sigma_env_imag_axis`)."""
+    below this, in the samples (`environment_self_energy_samples`)."""
     nodes = pade_nodes(numerics_or_default(low.numerics).quadrature)
-    samples = sigma_env_imag_axis(low, active_space, nodes)
+    samples = environment_self_energy_samples(low, active_space, nodes)
     samples = [samples] if len(chans) == 1 else list(samples)
     out = []
     for chan, sampled, e_act in zip(chans, samples, eps_act):
@@ -1259,7 +1267,7 @@ def _sigma_continued(low, active_space, chans, sigma, eps_act):
     return out
 
 
-def sigma_env_imag_axis(low, active_space, query_freqs):
+def environment_self_energy_samples(low, active_space, query_freqs):
     """S^E_tu(mu + i w) (nquery, n_act, n_act) complex, at w = query_freqs:
     the correlation self-energy iG(W - v) of the full RPA's W on
     active_space.act (occupied first) with the internal orbital restricted to
@@ -1288,11 +1296,11 @@ def sigma_env_imag_axis(low, active_space, query_freqs):
     """
     if low.mode == 'casida':
         raise NotImplementedError(
-            f"sigma_env_imag_axis samples the screened interaction of the "
-            f"numerical routes on the imaginary axis; this low-level result "
-            f"is mode='casida' (its self-energy is `embedding_self_energy`, "
-            f"from the residues of W): use mode='imagfrequency' or "
-            f"mode='space-time'.")
+            f"environment_self_energy_samples samples the screened "
+            f"interaction of the numerical routes on the imaginary axis; "
+            f"this low-level result is mode='casida' (its self-energy is "
+            f"`environment_self_energy`, from the residues of W): use "
+            f"mode='imagfrequency' or mode='space-time'.")
     chans = _channels(low, active_space)
     query_freqs = np.atleast_1d(np.asarray(query_freqs, dtype=float))
     # W and the fit's poles are fetched once, and only when a channel has
@@ -1321,53 +1329,6 @@ def sigma_env_imag_axis(low, active_space, query_freqs):
             b, chan.eps[env] - mu, fit[0], fit[1], query_freqs, fit[2],
             GW_DENSITY_W_FIT_TIKHONOV))
     return _per_channel(out)
-
-
-def _screening_grid(low):
-    """(points, W): the full RPA's screened interaction W(i w) =
-    [1 - chi0(i w)]^-1 in the normalized fitting basis, on the minimax grid of
-    numerics.imagfreq.nfreq points over the particle-hole window
-    (`screening_fit_grid`, shared with the GW density's
-    `self_energy_matrix_imaginary_axis`), built on the first request and
-    kept in low.cache['w_grid'].
-
-    imagfrequency: chi0 from the three-index factors, exact at each point.
-    space-time: chi0 of the ISDF factors (X, D) on those same points, through
-    a minimax tau axis with as many points as the static grid's
-    (`chi0_imaginary_frequency`, the mid-gap mu), then the same Dyson step."""
-    return _cached(low, 'w_grid', lambda: _build_screening_grid(low))
-
-
-def _build_screening_grid(low):
-    """The (points, W) of `_screening_grid`, computed. For an unrestricted
-    result W is the one screened interaction of both spins, [1 - chi0_alpha
-    - chi0_beta]^-1, on the grid over the transitions of both."""
-    points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
-    if low.mode == 'space-time':
-        x, d = low.cache['factors']
-        ntau = len(low.cache['static_grid'].tau_points)
-        tile_gb = layout_tile_gb(low.numerics)
-        if low.unrestricted:
-            e_min, e_max = transition_range(low.eps, low.nocc)
-            grid = TimeFrequencyGrid.minimax_split(
-                ntau, e_min, e_max, points, weights, with_sine=False,
-                with_inverse=False)
-            w = spin_summed(chi0_imaginary_frequency, x, d, low.eps,
-                            low.nocc, grid, tile_memory_gb=tile_gb)
-        else:
-            e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
-            grid = TimeFrequencyGrid.minimax_split(
-                ntau, e_min, e_max, points, weights, with_sine=False,
-                with_inverse=False)
-            w = chi0_imaginary_frequency(x, d, low.eps, low.nocc, grid,
-                                         mu=mu, tile_memory_gb=tile_gb)
-        for k in range(len(w)):
-            w[k] = dyson_screening(w[k])
-        return points, w
-    spin_mode = 'unrestricted' if low.unrestricted else 'restricted'
-    lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
-                              spin_mode=spin_mode)
-    return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
 
 
 def _evaluate_continued(fit, eps_act, sigma):
@@ -1837,6 +1798,12 @@ def _sigma_continuation(low, chans, sigma, sigmas, stacklevel):
 # built as P(0) was, with the active columns of X on the same grid, so with
 # every orbital active P - P^A is zero to the bit; E_c^A takes the active ph
 # pairs' exp(-delta tau) through the energy's own tau -> omega transform.
+#
+# Both imaginary-axis routes also build, on first request, the full W(i w) on
+# one minimax frequency grid over the particle-hole window (`_screening_grid`,
+# low.cache['w_grid']; chi0 per route, then the same Dyson step), which the
+# environment self-energy (section 3) and the imagfrequency QP spectrum
+# (section 6) share.
 
 
 def _reference(mf):
@@ -2031,6 +1998,53 @@ def _plasmon(eps, nocc, factors, eri, numerics):
     xpy += y
     del y
     return float(0.5 * (np.sum(omega) - trace_a)), omega, xpy
+
+
+def _screening_grid(low):
+    """(points, W): the full RPA's screened interaction W(i w) =
+    [1 - chi0(i w)]^-1 in the normalized fitting basis, on the minimax grid of
+    numerics.imagfreq.nfreq points over the particle-hole window
+    (`screening_fit_grid`, shared with the GW density's
+    `self_energy_matrix_imaginary_axis`), built on the first request and
+    kept in low.cache['w_grid'].
+
+    imagfrequency: chi0 from the three-index factors, exact at each point.
+    space-time: chi0 of the ISDF factors (X, D) on those same points, through
+    a minimax tau axis with as many points as the static grid's
+    (`chi0_imaginary_frequency`, the mid-gap mu), then the same Dyson step."""
+    return _cached(low, 'w_grid', lambda: _build_screening_grid(low))
+
+
+def _build_screening_grid(low):
+    """The (points, W) of `_screening_grid`, computed. For an unrestricted
+    result W is the one screened interaction of both spins, [1 - chi0_alpha
+    - chi0_beta]^-1, on the grid over the transitions of both."""
+    points, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
+    if low.mode == 'space-time':
+        x, d = low.cache['factors']
+        ntau = len(low.cache['static_grid'].tau_points)
+        tile_gb = layout_tile_gb(low.numerics)
+        if low.unrestricted:
+            e_min, e_max = transition_range(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = spin_summed(chi0_imaginary_frequency, x, d, low.eps,
+                            low.nocc, grid, tile_memory_gb=tile_gb)
+        else:
+            e_min, e_max, mu = particle_hole_window(low.eps, low.nocc)
+            grid = TimeFrequencyGrid.minimax_split(
+                ntau, e_min, e_max, points, weights, with_sine=False,
+                with_inverse=False)
+            w = chi0_imaginary_frequency(x, d, low.eps, low.nocc, grid,
+                                         mu=mu, tile_memory_gb=tile_gb)
+        for k in range(len(w)):
+            w[k] = dyson_screening(w[k])
+        return points, w
+    spin_mode = 'unrestricted' if low.unrestricted else 'restricted'
+    lr = LinearResponseSolver(low.eps, coeff_df=low.factors,
+                              spin_mode=spin_mode)
+    return points, lr.solve_rpa_screening(points, low.nocc, is_imaginary=True)
 
 
 # ------------------------------ 6. the quasiparticle spectrum of run (qp=True)

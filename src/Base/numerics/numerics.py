@@ -30,7 +30,7 @@ The fields:
     layout      memory and tiling: recorded, not in the identity
     adc         the excitation-energy ADC solve of a state model
     properties  the spin-orbit operator of the properties pass
-    downfolding the static embedding self-energy of the RPA downfolding
+    downfolding the static environment self-energy of the RPA downfolding
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -511,8 +511,8 @@ class GWDensityNumerics:
 
 @dataclass(frozen=True)
 class DownfoldingNumerics:
-    """The static embedding self-energy of the RPA downfolding
-    (`EffectiveHamiltonian.Downfolding.methods.rpa.embedding_self_energy`):
+    """The static environment self-energy of the RPA downfolding
+    (`EffectiveHamiltonian.Downfolding.methods.rpa.environment_self_energy`):
     srg_s, the SRG flow parameter s of sigma='srg', Hartree^-2, None for
     s = inf (Eq. 42, no damping); pole_margin, how close, in units of
     1/sqrt(2 s), an active orbital energy may come to the edge of the
