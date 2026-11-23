@@ -211,54 +211,14 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     _refuse_options(opts, 'run')
     mode = require_choice(mode, MODES, 'mode')
     df = bool(df)
-    if mode != 'casida' and not df:
-        how = ('density fitted' if mode == 'imagfrequency'
-               else 'ISDF fitted (separable factors)')
-        raise ValueError(
-            f"method={METHOD!r} mode={mode!r} is {how}; df=False (the exact "
-            f"4-centre screening) is mode='casida' only.")
-    if isinstance(mf, scf.uhf.UHF):
-        eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
-        nocc = unrestricted_nocc(mf.mo_occ)
-        channels = [(f' in both spins: the {spin} channel', eps_s, nocc_s)
-                    for spin, eps_s, nocc_s in zip(SPINS, eps, nocc)]
-    else:
-        eps = np.asarray(get_orbital_energies(mf))
-        nocc = closed_shell_nocc(mf.mo_occ)
-        channels = [(': the reference', eps, nocc)]
-    if mode != 'casida':
-        for which, eps_s, nocc_s in channels:
-            if not 0 < nocc_s < len(eps_s):
-                raise NotImplementedError(
-                    f"method={METHOD!r} mode={mode!r} needs occupied and "
-                    f"virtual orbitals{which} has {nocc_s} occupied of "
-                    f"{len(eps_s)} orbitals, so no "
-                    f"transition and no mid-gap, which the frequency grids "
-                    f"and the self-energy of this route are built on. Use "
-                    f"mode='casida'.")
-    if mode == 'space-time':
-        e_c, cache = _space_time(mf, eps, nocc, numerics)
-        return RPALowLevel(
-            mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
-            e_c_full=e_c, omega=None, xpy=None, factors=None, eri=None,
-            cache=cache)
-    mol = mf.mol
-    if df:
-        factors = get_density_fitting_coefficients(mol, mf, 'spatial')
-        eri = None
-    else:
-        factors = None
-        eri = get_two_electron_integrals_chemist(mol, mf, 'spatial')
-    if mode == 'imagfrequency':
-        e_c, cache = _imaginary_axis(eps, nocc, factors, numerics)
-        return RPALowLevel(
-            mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
-            e_c_full=e_c, omega=None, xpy=None, factors=factors, eri=None,
-            cache=cache)
-    e_c, omega, xpy = _plasmon(eps, nocc, factors, eri, numerics)
-    return RPALowLevel(
-        mf=mf, mode=mode, df=df, numerics=numerics, eps=eps, nocc=nocc,
-        e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
+    eps, nocc, channels = _reference(mf)
+    _require_route(mode, df, channels)
+    route = {'casida': _casida_fields,
+             'imagfrequency': _imaginary_axis_fields,
+             'space-time': _space_time_fields}[mode]
+    fields = route(mf, eps, nocc, df, numerics)
+    return RPALowLevel(mf=mf, mode=mode, df=df, numerics=numerics, eps=eps,
+                       nocc=nocc, **fields)
 
 
 def downfold(low, active_space, screening='crpa', sigma=None,
@@ -1736,6 +1696,78 @@ def _sigma_continuation(low, chans, sigma, kept):
 # built as P(0) was, with the active columns of X on the same grid, so with
 # every orbital active P - P^A is zero to the bit; E_c^A takes the active ph
 # pairs' exp(-delta tau) through the energy's own tau -> omega transform.
+
+
+def _reference(mf):
+    """(eps, nocc, channels) of the mean field: the orbital energies and the
+    occupied count, pairs (alpha, beta) for a UHF/UKS reference, and per spin
+    channel (where, eps, nocc) for the messages of `_require_route`."""
+    if isinstance(mf, scf.uhf.UHF):
+        eps = tuple(np.asarray(e) for e in get_orbital_energies(mf))
+        nocc = unrestricted_nocc(mf.mo_occ)
+        channels = [(f' in both spins: the {spin} channel', eps_s, nocc_s)
+                    for spin, eps_s, nocc_s in zip(SPINS, eps, nocc)]
+    else:
+        eps = np.asarray(get_orbital_energies(mf))
+        nocc = closed_shell_nocc(mf.mo_occ)
+        channels = [(': the reference', eps, nocc)]
+    return eps, nocc, channels
+
+
+def _require_route(mode, df, channels):
+    """Refuse what `mode` cannot do: df=False off casida, and on the
+    imaginary-axis routes a spin channel without occupied or without
+    virtual orbitals (no transition and no mid-gap to build a grid on)."""
+    if mode != 'casida' and not df:
+        how = ('density fitted' if mode == 'imagfrequency'
+               else 'ISDF fitted (separable factors)')
+        raise ValueError(
+            f"method={METHOD!r} mode={mode!r} is {how}; df=False (the exact "
+            f"4-centre screening) is mode='casida' only.")
+    if mode != 'casida':
+        for which, eps_s, nocc_s in channels:
+            if not 0 < nocc_s < len(eps_s):
+                raise NotImplementedError(
+                    f"method={METHOD!r} mode={mode!r} needs occupied and "
+                    f"virtual orbitals{which} has {nocc_s} occupied of "
+                    f"{len(eps_s)} orbitals, so no "
+                    f"transition and no mid-gap, which the frequency grids "
+                    f"and the self-energy of this route are built on. Use "
+                    f"mode='casida'.")
+
+
+def _integrals(mf, df):
+    """(factors, eri): the density-fitted three-index factors when df, else
+    the exact chemist MO integrals; the other is None."""
+    if df:
+        return get_density_fitting_coefficients(mf.mol, mf, 'spatial'), None
+    return None, get_two_electron_integrals_chemist(mf.mol, mf, 'spatial')
+
+
+def _casida_fields(mf, eps, nocc, df, numerics):
+    """The RPALowLevel fields of the casida route: the integrals, and Omega,
+    X+Y and E_c of one dense Casida solve (`_plasmon`)."""
+    factors, eri = _integrals(mf, df)
+    e_c, omega, xpy = _plasmon(eps, nocc, factors, eri, numerics)
+    return dict(e_c_full=e_c, omega=omega, xpy=xpy, factors=factors,
+                eri=eri)
+
+
+def _imaginary_axis_fields(mf, eps, nocc, df, numerics):
+    """The RPALowLevel fields of the imagfrequency route: the density
+    fit, and E_c with its grid and P(0) in the cache (`_imaginary_axis`)."""
+    factors, _ = _integrals(mf, df)
+    e_c, cache = _imaginary_axis(eps, nocc, factors, numerics)
+    return dict(e_c_full=e_c, omega=None, xpy=None, factors=factors,
+                eri=None, cache=cache)
+
+
+def _space_time_fields(mf, eps, nocc, df, numerics):
+    """The RPALowLevel fields of the space-time route: E_c, and the ISDF
+    factors, grids and P(0) in the cache (`_space_time`)."""
+    e_c, cache = _space_time(mf, eps, nocc, numerics)
+    return dict(e_c_full=e_c, omega=None, xpy=None, factors=None, eri=None,
+                cache=cache)
 
 
 def _imaginary_axis(eps, nocc, factors, numerics):
