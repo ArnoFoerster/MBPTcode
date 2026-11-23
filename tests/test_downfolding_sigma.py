@@ -1365,3 +1365,33 @@ def test_both_sigma_warnings_share_one_threshold():
     from src.Base.numerics import constants
     assert (constants.DOWNFOLDING_SRG_DAMPING_WARN
             == constants.DOWNFOLDING_SIGMA_CONTINUATION_WARN == 1e-4)
+
+
+@pytest.mark.parametrize('mode', ['casida', 'imagfrequency'])
+def test_empty_environment_or_active_space_gives_zero_on_every_route(
+        wat, low_exact, mode):
+    """Every orbital active (no environment) or no orbital active: each spin
+    channel's record holds a zero Sigma_bar, on imagfrequency without a Pade
+    fit, and nothing warns of the continuation. Space-time takes the same
+    path as imagfrequency once its samples are zero."""
+    mf, _, eps, nocc = wat
+    low = (low_exact if mode == 'casida'
+           else run_low_level(mf, method='rpa', mode=mode))
+    for space in (ActiveSpace.from_counts(eps, nocc, nocc, len(eps) - nocc),
+                  ActiveSpace(len(eps), nocc, [], [])):
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always', RuntimeWarning)
+            records = rpa._embedding(low, space, 'averaged')
+        assert [type(r) for r in records] == [rpa._SigmaE]
+        (record,) = records
+        n = space.n_act
+        assert record.sigma_bar.shape == (n, n)
+        assert not record.sigma_bar.any()
+        assert np.array_equal(record.eps_act, eps[space.act])
+        if mode == 'casida':
+            assert isinstance(record.evaluation, rpa._PoleSum)
+        else:
+            assert isinstance(record.evaluation, rpa._Continued)
+            assert record.evaluation.fit is None
+        assert not [r for r in rec
+                    if r.category is rpa.SigmaContinuationWarning]
