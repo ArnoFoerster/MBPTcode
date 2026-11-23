@@ -586,14 +586,18 @@ named in the flag `'qp_no_root'`; a root kept with Z outside (0, 1] is
 named in `'qp_z_outside'`. A satellite is not NaN: on casida the pole sum has
 a root between every pair of poles, and the root of largest weight is kept,
 as calc_qp_energy keeps it, even when its Z is small (O 1s and high virtuals
-of PBE water: Z = 0.29-0.42). `low.qp.z` shows which roots are
-quasiparticles.
+of PBE water: Z = 0.29-0.42). `low.qp.quasiparticle` marks the roots that
+are quasiparticles by the root finder's own test, Z in
+(`QP_WINDOW_Z_MIN` = 0.5, 1] (`quasiparticle_weight`), and the flag
+`'qp_satellite'` names the others (where Z is not known, unrestricted
+space-time, every root counts).
 
 `sigma_energies='qp'` then evaluates Sigma^E (`'srg'` or `'averaged'`) at the
 QP energies of the active orbitals instead of the mean-field ones; the poles
 of G^E stay at the mean-field energies, and the pole checks and the
 `'sigma_poles'` record use the same energies. Refused without `low.qp`,
-without `sigma`, and when an active orbital has no QP root. The
+without `sigma`, and when an active orbital has no QP root or its root is
+no quasiparticle (`low.qp.quasiparticle` False). The
 `'qp_energies'` diagnostic records the active orbitals' QP energies and Z
 whenever `low.qp` is set.
 

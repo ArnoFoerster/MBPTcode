@@ -33,6 +33,7 @@ from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting, flag
 from src.Base.numerics.constants import (BYTES_PER_GB,
                                          DEFAULT_BROADENING_ETA,
+                                         QP_WINDOW_Z_MIN,
                                          DOWNFOLDING_OMEGA_LANCZOS_SEED,
                                          DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SIGMA_TILE_GB,
@@ -78,6 +79,7 @@ from src.SingleReference.LinearResponse.space_time import (
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
 from src.Solvers.qp_equation import (QPNoRoot, QPWeightOutside,
+                                     quasiparticle_weight,
                                      solve_qp_equation_pole_strength)
 
 from ..low_level import DownfoldingTerms
@@ -282,7 +284,8 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         at which Sigma_bar^E is evaluated (both forms, every route): the
         mean-field ones, or the run's G0W0 QP energies (low.qp, from
         run_low_level(..., qp=True); refused without them, without sigma,
-        and when an active orbital has no QP root). Only the active
+        and when an active orbital has no QP root or its root is no
+        quasiparticle, low.qp.quasiparticle False). Only the active
         energies change; the poles of G^E stay at the mean-field energies.
         The pole checks and the 'sigma_poles' record use the same eps_t.
     diagnostics: the DIAGNOSTICS to record in the result's diagnostics (None:
@@ -980,6 +983,15 @@ def _active_energies(low, chans, sigma_energies):
                 f"sigma_energies='qp': no QP root for the active "
                 f"{_orbital(c)} {missing.tolist()} (NaN in low.qp); choose "
                 f"another active space or sigma_energies='mf'.")
+        satellite = act[~low.qp.quasiparticle[i][act]]
+        if satellite.size:
+            z = low.qp.z[i][satellite]
+            raise ValueError(
+                f"sigma_energies='qp': the QP root of the active "
+                f"{_orbital(c)} {satellite.tolist()} is no quasiparticle "
+                f"(Z = {np.round(z, 3).tolist()}, outside (QP_WINDOW_Z_MIN "
+                f"= {QP_WINDOW_Z_MIN}, 1]); choose another active space or "
+                f"sigma_energies='mf'.")
         energies.append(low.qp.energies[i][act])
     return energies
 
@@ -1998,6 +2010,13 @@ class QuasiParticles:
     energies: the QP energies, Hartree; NaN where the equation has no root.
     z: the pole strength 1/(1 - dRe Sigma_c,pp/dw) at the root; NaN there.
     converged: True where a root was found.
+    quasiparticle (derived): True where the root is a quasiparticle's by the
+        root finder's own test, Z in (QP_WINDOW_Z_MIN, 1]
+        (`quasiparticle_weight`). On casida the root of largest weight is
+        kept for a satellite too (a pole sum has a root between any two
+        poles), so a root can be converged and no quasiparticle. Where Z is
+        not known (NaN with a root: unrestricted space-time) every root
+        counts.
     """
     energies: tuple
     z: tuple
@@ -2012,6 +2031,17 @@ class QuasiParticles:
                 arrays.append(a)
             object.__setattr__(self, name, tuple(arrays))
 
+    @property
+    def quasiparticle(self):
+        masks = []
+        for ok, z in zip(self.converged, self.z):
+            mask = np.array([bool(c) and (not np.isfinite(w)
+                                          or quasiparticle_weight(w))
+                             for c, w in zip(ok, z)], dtype=bool)
+            mask.flags.writeable = False
+            masks.append(mask)
+        return tuple(masks)
+
 
 def quasiparticles(low):
     """The `QuasiParticles` of the low-level result `low`, on its route."""
@@ -2025,11 +2055,15 @@ def quasiparticles(low):
     qp = QuasiParticles(energies=tuple(energies), z=tuple(z),
                         converged=tuple(np.isfinite(e) for e in energies))
     spins = _spin_names(low)
-    _flag('qp_no_root', 'no quasiparticle root (NaN in low.qp)',
-                   spins, [~ok for ok in qp.converged])
-    _flag('qp_z_outside', 'a root kept with Z outside (0, 1]',
-                   spins, [np.isfinite(zs) & ((zs <= 0) | (zs > 1))
-                           for zs in qp.z])
+    _flag('qp_no_root', 'no quasiparticle root (NaN in low.qp)', spins,
+          [~ok for ok in qp.converged])
+    _flag('qp_z_outside', 'a root kept with Z outside (0, 1]', spins,
+          [np.isfinite(zs) & ((zs <= 0) | (zs > 1)) for zs in qp.z])
+    _flag('qp_satellite',
+          'a root of Z in (0, QP_WINDOW_Z_MIN], a satellite and no '
+          'quasiparticle (low.qp.quasiparticle False)', spins,
+          [ok & np.isfinite(zs) & (zs > 0) & ~qpart
+           for ok, zs, qpart in zip(qp.converged, qp.z, qp.quasiparticle)])
     return qp
 
 

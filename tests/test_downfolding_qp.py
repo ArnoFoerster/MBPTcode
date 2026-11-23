@@ -337,16 +337,20 @@ def test_imagfrequency_qp_builds_w_once(monkeypatch):
 
 # --- fixes of the final review ------------------------------------------------
 
-def test_casida_qp_matches_calc_qp_energy_on_a_ks_reference():
-    """On a KS reference <Sigma_x - v_xc> is not zero: the root search is
-    centred on eps_p, as calc_qp_energy's (review: a search centred on
-    eps_p + <Sigma_x - v_xc> found another root for O 1s)."""
+def _pbe_water():
     from pyscf import dft
     mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
                 basis='6-31g', cart=False, verbose=0)
     mf = dft.RKS(mol, xc='pbe')
     mf.conv_tol = 1e-11
-    mf.run()
+    return mf.run()
+
+
+def test_casida_qp_matches_calc_qp_energy_on_a_ks_reference():
+    """On a KS reference <Sigma_x - v_xc> is not zero: the root search is
+    centred on eps_p, as calc_qp_energy's (review: a search centred on
+    eps_p + <Sigma_x - v_xc> found another root for O 1s)."""
+    mf = _pbe_water()
     nmo = mf.mo_coeff.shape[1]
     low = run_low_level(mf, method='rpa', mode='casida', qp=True)
     ref = _calc(mf, nmo, mode='casida')
@@ -371,6 +375,8 @@ def test_space_time_qp_unrestricted():
             low.qp.energies[s],
             _calc(mf, nmo, mode='space-time', numerics=num,
                   spin_channel=spin), 1e-10)
+        # no Z there: every root counts as a quasiparticle
+        assert np.array_equal(low.qp.quasiparticle[s], low.qp.converged[s])
 
 
 def test_space_time_unrestricted_failed_orbital_is_nan(monkeypatch):
@@ -394,3 +400,34 @@ def test_space_time_unrestricted_failed_orbital_is_nan(monkeypatch):
         assert np.isnan(low.qp.energies[s][3])
         assert np.isfinite(low.qp.energies[s][2])
     assert 'qp_no_root' in [f['flag'] for f in low.numerical_flags]
+
+
+def test_quasiparticle_mask_follows_the_root_finder():
+    """A root is a quasiparticle when the root finder's own test passes,
+    Z in (QP_WINDOW_Z_MIN, 1] (`quasiparticle_weight`); casida keeps a
+    largest-weight root for satellites too (PBE water: O 1s, Z ~ 0.3), which
+    the mask and the flag 'qp_satellite' name."""
+    from src.Solvers.qp_equation import quasiparticle_weight
+    mf = _pbe_water()
+    low = run_low_level(mf, method='rpa', mode='casida', qp=True)
+    qp = low.qp
+    expected = np.array([ok and quasiparticle_weight(z)
+                         for ok, z in zip(qp.converged[0], qp.z[0])])
+    assert np.array_equal(qp.quasiparticle[0], expected)
+    assert qp.converged[0][0] and not qp.quasiparticle[0][0]       # O 1s
+    nocc = mf.mol.nelectron // 2
+    assert qp.quasiparticle[0][nocc - 1:nocc + 2].all()
+    assert 'qp_satellite' in [f['flag'] for f in low.numerical_flags]
+
+
+def test_qp_refuses_a_satellite_active_orbital():
+    _, low, aspace = _water_qp()
+    t = int(aspace.act[0])
+    z = low.qp.z[0].copy()
+    z[t] = 0.3
+    low.qp = rpa.QuasiParticles(energies=low.qp.energies, z=(z,),
+                                converged=low.qp.converged)
+    assert not low.qp.quasiparticle[0][t]
+    with pytest.raises(ValueError, match='quasiparticle'):
+        rpa.downfold(low, aspace, sigma='srg', sigma_energies='qp')
+    _quiet(rpa.downfold, low, aspace, sigma='srg')            # 'mf' is fine
