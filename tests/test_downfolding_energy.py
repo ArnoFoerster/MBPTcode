@@ -457,7 +457,8 @@ def test_default_method_is_rpa(wat_rpa):
     ham = build_effective_hamiltonian(low, active_space)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert g[0] == en.e0 and en.e_c_full == low.e_c_full
-    assert set(ham.diagnostics) == {'static_defect'}
+    # the default sigma='srg' adds its 'sigma_poles' record
+    assert set(ham.diagnostics) == {'static_defect', 'sigma_poles'}
 
 
 @pytest.mark.parametrize('s', SCREENINGS_1)
@@ -496,14 +497,16 @@ def test_ph_screenings_leave_the_active_mean_field(wat_rpa):
     orbitals are the CASCI ones. (The virtual-virtual block does change:
     the full double counting subtracts sum_k vt_ak,kb, a ph element.)"""
     mf, low, active_space = wat_rpa
-    ham = build_effective_hamiltonian(low, active_space, screening='crpa_ph')
+    ham = build_effective_hamiltonian(low, active_space, screening='crpa_ph',
+                                      sigma=None)
     g, en = ham.g_eff, ham.energies
     ham_hf = _hf_heff(mf, active_space)
     g_hf = ham_hf.g_eff
     assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert np.array_equal(g[1][:2], g_hf[1][:2])
     assert np.abs(g[1][2:, 2:] - g_hf[1][2:, 2:]).max() > 1e-4
-    ham_crpa = build_effective_hamiltonian(low, active_space, screening='crpa')
+    ham_crpa = build_effective_hamiltonian(low, active_space, screening='crpa',
+                                           sigma=None)
     en_crpa = ham_crpa.energies
     assert abs(en_crpa.e_hartree_dc + en_crpa.e_exchange_dc) > 1e-3
 
@@ -512,7 +515,8 @@ def test_bare_is_casci_plus_the_rpa_pair(wat_rpa):
     """'bare' is the mechanical embedding: the CASCI Hamiltonian shifted by
     E_c[v] - E_c^A[v]. Measured 0.0."""
     mf, low, active_space = wat_rpa
-    ham = build_effective_hamiltonian(low, active_space, screening='bare')
+    ham = build_effective_hamiltonian(low, active_space, screening='bare',
+                                      sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert (en.e_hartree_dc, en.e_exchange_dc) == (0.0, 0.0)
     assert abs(_solve(g, space)
@@ -555,12 +559,14 @@ def test_diagnostics_keyword(wat_rpa):
         build_effective_hamiltonian(low, active_space, diagnostics=('nope',))
     # names that do not apply (casida, no sigma) are skipped, not zero
     ham = build_effective_hamiltonian(
-        low, active_space, diagnostics=('sigma_poles', 'ec_active_casida',
-                                  'sigma_continuation'))
+        low, active_space, sigma=None,
+        diagnostics=('sigma_poles', 'ec_active_casida',
+                     'sigma_continuation'))
     en = ham.energies
     assert ham.diagnostics == {}
     ham = build_effective_hamiltonian(
-        low, active_space, diagnostics=['Static-Defect', 'sigma_poles'])
+        low, active_space, diagnostics=['Static-Defect', 'sigma_poles'],
+        sigma=None)
     en = ham.energies
     assert list(ham.diagnostics) == ['static_defect']
     ham = build_effective_hamiltonian(low, active_space,
@@ -667,7 +673,7 @@ def test_reference_determinant_is_unchanged_by_sigma(wat_rpa, s, sigma):
     (tolerance 1e-9): Sigma_trace -0.0777 for every screening."""
     mf, low, active_space = wat_rpa
     ham_plain = build_effective_hamiltonian(low, active_space,
-                                            screening=s)
+                                            screening=s, sigma=None)
     g_plain, en_plain = ham_plain.g_eff, ham_plain.energies
     ham = build_effective_hamiltonian(low, active_space, screening=s,
                                       sigma=sigma)
@@ -955,7 +961,7 @@ def test_the_result_is_one_record_that_solves_itself():
     low = run_low_level(mf, method='rpa')
     h = build_effective_hamiltonian(low, active_space)
     assert isinstance(h, effective_hamiltonian.DownfoldedHamiltonian)
-    assert set(h.diagnostics) == {'static_defect'}
+    assert set(h.diagnostics) == {'static_defect', 'sigma_poles'}
     assert h.numerical_flags == []
     assert not hasattr(h.energies, 'diagnostics')
     assert not hasattr(h.energies, 'numerical_flags')
@@ -993,3 +999,68 @@ def test_two_records_compare_without_error():
                                             active_space) for _ in range(2))
     assert one == one and one != two
     assert len({one, two}) == 2
+
+
+def _identical(a, b):
+    """Two DownfoldedHamiltonians bit for bit: g_eff, every energy field,
+    the diagnostics' names."""
+    for k in (0, 1, 2):
+        ga, gb = a.g_eff[k], b.g_eff[k]
+        if isinstance(ga, tuple):
+            assert all(np.array_equal(x, y) for x, y in zip(ga, gb))
+        else:
+            assert np.array_equal(ga, gb)
+    assert a.energies == b.energies
+    assert a.diagnostics.keys() == b.diagnostics.keys()
+
+
+@pytest.mark.parametrize('mode', ['casida', 'imagfrequency'])
+def test_the_default_sigma_is_srg(wat_rpa, mode):
+    """Without sigma the RPA downfolding includes the static environment
+    self-energy: build_effective_hamiltonian(low, a) is the one with
+    sigma='srg' bit for bit, with its 'sigma_poles' record and a nonzero
+    Tr[Sigma_bar gamma]; on casida and imagfrequency, and for the pair of
+    an unrestricted reference (OH, casida)."""
+    import warnings
+    from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
+    from tests.downfolding_oracle import OH, unrestricted
+    mf, low, active_space = wat_rpa
+    if mode != 'casida':
+        low = run_low_level(mf, mode=mode)
+    default = build_effective_hamiltonian(low, active_space)
+    _identical(default, build_effective_hamiltonian(low, active_space,
+                                                    sigma='srg'))
+    assert 'sigma_poles' in default.diagnostics
+    assert default.energies.e_sigma_trace != 0.0
+    if mode == 'casida':
+        uhf = unrestricted(OH, 1)
+        nocc = tuple(int(np.count_nonzero(o)) for o in uhf.mo_occ)
+        pair = unrestricted_from_counts(uhf.mo_energy, nocc, 4, (2, 1))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            low_u = run_low_level(uhf)
+            default = build_effective_hamiltonian(low_u, pair)
+            explicit = build_effective_hamiltonian(low_u, pair, sigma='srg')
+        _identical(default, explicit)
+        assert default.energies.e_sigma_trace != 0.0
+
+
+def test_sigma_none_is_the_papers_scheme(wat_rpa):
+    """sigma=None, asked for explicitly: no Sigma_bar, full double
+    counting, no 'sigma_poles' record."""
+    _, low, active_space = wat_rpa
+    ham = build_effective_hamiltonian(low, active_space, sigma=None)
+    assert ham.energies.e_sigma_trace == 0.0
+    assert ham.energies.e_exchange_term == 0.0
+    assert 'sigma_poles' not in ham.diagnostics
+
+
+def test_qp_energies_need_no_sigma_keyword(wat_rpa):
+    """sigma_energies='qp' alone is Sigma^E ('srg', the default) at the QP
+    energies: the same as with sigma='srg' named."""
+    mf, _, active_space = wat_rpa
+    low = run_low_level(mf, qp=True)
+    _identical(build_effective_hamiltonian(low, active_space,
+                                           sigma_energies='qp'),
+               build_effective_hamiltonian(low, active_space, sigma='srg',
+                                           sigma_energies='qp'))

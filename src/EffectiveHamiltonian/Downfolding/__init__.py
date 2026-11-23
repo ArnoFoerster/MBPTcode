@@ -28,10 +28,10 @@ build_effective_hamiltonian(low, active_space, spin_free, **method_opts)
     screening   'crpa' | 'bare' | 'crpa_ph' | 'mrpa': cRPA W^r | the bare v
                 | W^r on the particle-hole elements only | Scott and Booth's
                 moment-conserving interaction (casida only)
-    sigma       None | 'srg' | 'averaged': no Sigma_bar, full double
-                counting | the static environment self-energy in the SRG
-                form | in the averaged form; both with the Hartree-only
-                double counting
+    sigma       'srg' | 'averaged' | None: the static environment
+                self-energy in the SRG form | in the averaged form, both
+                with the Hartree-only double counting | no Sigma_bar, full
+                double counting (the paper's scheme)
     sigma_energies  'mf' | 'qp': Sigma_bar^E at the mean-field or at the QP
                 energies of the active orbitals ('qp' needs qp=True)
     diagnostics all of rpa.DIAGNOSTICS | a subset | None

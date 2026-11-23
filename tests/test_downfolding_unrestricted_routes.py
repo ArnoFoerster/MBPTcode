@@ -307,10 +307,10 @@ def test_e0_terms_match_casida(ref, which, screening):
     2.2e-16."""
     spaces = _spaces(ref, which)
     ham = build_effective_hamiltonian(
-        _low(ref, 'imagfrequency'), spaces, screening=screening)
+        _low(ref, 'imagfrequency'), spaces, screening=screening, sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
     ham_c = build_effective_hamiltonian(
-        _low(ref, 'casida'), spaces, screening=screening)
+        _low(ref, 'casida'), spaces, screening=screening, sigma=None)
     g_c, en_c = ham_c.g_eff, ham_c.energies
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:
@@ -359,20 +359,20 @@ def test_ec_active_casida_diagnostic(ref, screening):
     the all-active one and the E_0 one fail (tried)."""
     spaces = _spaces(ref, 'asymmetric')
     ham = build_effective_hamiltonian(_low(ref, 'imagfrequency'), spaces,
-                                      screening=screening)
+                                      screening=screening, sigma=None)
     en = ham.energies
     record = ham.diagnostics['ec_active_casida']
     assert set(record) == {'casida', 'difference'}
     assert record['difference'] == en.e_c_active - record['casida']
     assert abs(record['difference']) < 1e-10
     ham_c = build_effective_hamiltonian(_low(ref, 'casida'), spaces,
-                                        screening=screening)
+                                        screening=screening, sigma=None)
     en_c = ham_c.energies
     assert abs(record['casida'] - en_c.e_c_active) < 1e-10
     assert set(ham.diagnostics) == {'static_defect', 'ec_active_casida'}
     ham = build_effective_hamiltonian(
         _low(ref, 'imagfrequency'), _spaces(ref, 'occupied_only'),
-        screening=screening)
+        screening=screening, sigma=None)
     en = ham.energies
     assert ham.diagnostics['ec_active_casida'] == {'casida': 0.0,
                                                   'difference': 0.0}
@@ -963,10 +963,10 @@ def test_space_time_e0_terms_match_casida(ref, which, screening):
     7.8e-16, the other defects against casida 6.0e-8."""
     spaces = _st_spaces(ref, which)
     ham = build_effective_hamiltonian(_st_low(ref), spaces,
-                                      screening=screening)
+                                      screening=screening, sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
     ham_c = build_effective_hamiltonian(_st_casida(ref), spaces,
-                                        screening=screening)
+                                        screening=screening, sigma=None)
     g_c, en_c = ham_c.g_eff, ham_c.energies
     for field in dataclasses.fields(Energies):
         if field.name not in RECORDS:

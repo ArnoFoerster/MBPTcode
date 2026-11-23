@@ -1353,7 +1353,8 @@ def test_flags_of_a_cached_quantity_reach_every_active_space(wat, monkeypatch):
         later = ham_later.energies
     assert ham_later.numerical_flags == [probe] and len(built) == 1
     assert low.numerical_flags == []
-    ham_without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc))
+    ham_without = build_effective_hamiltonian(low, _contiguous_44(eps, nocc),
+                                              sigma=None)
     without = ham_without.energies
     assert ham_without.numerical_flags == []
 

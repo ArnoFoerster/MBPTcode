@@ -295,9 +295,9 @@ def test_e0_terms_match_casida(ref, aspace, s):
     FCI 7.4e-12."""
     low_if, low_cas = _low(ref, 'imagfrequency'), _low(ref, 'casida')
     a = _aspace(low_if.mf, aspace)
-    ham = build_effective_hamiltonian(low_if, a, screening=s)
+    ham = build_effective_hamiltonian(low_if, a, screening=s, sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
-    ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    ham_c = build_effective_hamiltonian(low_cas, a, screening=s, sigma=None)
     g_c, en_c = ham_c.g_eff, ham_c.energies
     for f in dataclasses.fields(Energies):
         if f.name not in RECORDS:
@@ -342,19 +342,20 @@ def test_ec_active_casida_diagnostic(s):
     agreement of vtilde)."""
     low = _low('hf', 'imagfrequency')
     a = _aspace(low.mf, 'contiguous')
-    ham = build_effective_hamiltonian(low, a, screening=s)
+    ham = build_effective_hamiltonian(low, a, screening=s, sigma=None)
     en = ham.energies
     rec = ham.diagnostics['ec_active_casida']
     assert set(rec) == {'casida', 'difference'}
     assert rec['difference'] == en.e_c_active - rec['casida']
     assert abs(rec['difference']) < 1e-9
     ham_c = build_effective_hamiltonian(_low('hf', 'casida'), a,
-                                        screening=s)
+                                        screening=s, sigma=None)
     en_c = ham_c.energies
     assert abs(rec['casida'] - en_c.e_c_active) < 1e-8
     assert set(ham.diagnostics) == {'static_defect', 'ec_active_casida'}
     ham = build_effective_hamiltonian(low, a, screening=s,
-                                      diagnostics=('ec_active_casida',))
+                                      diagnostics=('ec_active_casida',),
+                                      sigma=None)
     assert list(ham.diagnostics) == ['ec_active_casida']
 
 
@@ -408,11 +409,12 @@ def test_low_reuse():
     other = _aspace(mf, 'non_contiguous')
     calls = [(a, 'crpa'), (a, 'crpa_ph'), (a, 'bare'), (other, 'crpa'),
              (a, 'crpa')]
-    shared = [build_effective_hamiltonian(low, x, screening=s)
+    shared = [build_effective_hamiltonian(low, x, screening=s, sigma=None)
               for x, s in calls]
     for (x, s), got in zip(calls, shared):
         fresh = run_low_level(mf, mode='imagfrequency')
-        _same(got, build_effective_hamiltonian(fresh, x, screening=s))
+        _same(got, build_effective_hamiltonian(fresh, x, screening=s,
+                                               sigma=None))
     assert set(low.cache) == {'grid', 'p0'}
     assert np.array_equal(low.cache['p0'], p0)
 
@@ -689,9 +691,9 @@ def test_space_time_e0_terms_match_casida(ref, aspace, s):
     1.9e-11."""
     low_st, low_cas = _st_low(ref, 'space-time'), _st_low(ref, 'casida')
     a = _st_aspace(low_st.mf, aspace)
-    ham = build_effective_hamiltonian(low_st, a, screening=s)
+    ham = build_effective_hamiltonian(low_st, a, screening=s, sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
-    ham_c = build_effective_hamiltonian(low_cas, a, screening=s)
+    ham_c = build_effective_hamiltonian(low_cas, a, screening=s, sigma=None)
     g_c, en_c = ham_c.g_eff, ham_c.energies
     tol = 5e-5 if s == 'crpa' else 1e-5
     for f in dataclasses.fields(Energies):
@@ -740,11 +742,12 @@ def test_space_time_low_reuse():
     other = _st_aspace(mf, 'non_contiguous')
     calls = [(a, 'crpa'), (a, 'crpa_ph'), (a, 'bare'), (other, 'crpa'),
              (a, 'crpa')]
-    shared = [build_effective_hamiltonian(low, x, screening=s)
+    shared = [build_effective_hamiltonian(low, x, screening=s, sigma=None)
               for x, s in calls]
     for (x, s), got in zip(calls, shared):
         fresh = run_low_level(mf, mode='space-time', numerics=numerics)
-        _same(got, build_effective_hamiltonian(fresh, x, screening=s))
+        _same(got, build_effective_hamiltonian(fresh, x, screening=s,
+                                               sigma=None))
     assert set(low.cache) == {'factors', 'static_grid', 'p0', 'energy_grid'}
     assert np.array_equal(low.cache['p0'], p0)
 

@@ -160,10 +160,11 @@ def _ours(case):
     if (n_occ, n_virt) == (-1, -1):
         n_occ, n_virt = nocc, nmo - nocc
     active_space = ActiveSpace.from_counts(mf.mo_energy, nocc, n_occ, n_virt)
-    ham_bare = build_effective_hamiltonian(low, active_space, screening='bare')
+    ham_bare = build_effective_hamiltonian(low, active_space, screening='bare',
+                                           sigma=None)
     g_bare = ham_bare.g_eff
     ham = build_effective_hamiltonian(low, active_space,
-                                      screening=case['screening'])
+                                      screening=case['screening'], sigma=None)
     g, space, en = ham.g_eff, ham.space, ham.energies
     n = space['n_orbs']
     if n:
@@ -287,7 +288,8 @@ def test_pbe0_orbitals_no_xc_leak():
     mf.run()
     low = run_low_level(mf, method='rpa', mode='casida', df=False)
     active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    ham = build_effective_hamiltonian(low, active_space, screening='bare')
+    ham = build_effective_hamiltonian(low, active_space, screening='bare',
+                                      sigma=None)
     g, en = ham.g_eff, ham.energies
     active = reference_energy(g, 2) - g[0]
     e_hf = scf.RHF(mf.mol).energy_tot(dm=mf.make_rdm1())
@@ -322,7 +324,8 @@ def _pinned_build(molecule, screening):
     prototype screening name `screening` (bare, cRPA, cRPAph)."""
     low, active_space = _pinned_low(molecule)
     return build_effective_hamiltonian(low, active_space,
-                                       screening=PIN_SCREENING[screening])
+                                       screening=PIN_SCREENING[screening],
+                                       sigma=None)
 
 
 @pytest.mark.parametrize('molecule, screening', PIN_CASES)

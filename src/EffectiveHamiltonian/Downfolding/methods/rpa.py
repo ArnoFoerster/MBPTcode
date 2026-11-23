@@ -258,7 +258,7 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     return low
 
 
-def downfold(low, active_space, screening='crpa', sigma=None,
+def downfold(low, active_space, screening='crpa', sigma='srg',
              sigma_energies='mf', diagnostics=DIAGNOSTICS, numerics=None,
              **opts):
     """The DownfoldingTerms of the RPA on the active space `active_space`.
@@ -274,10 +274,9 @@ def downfold(low, active_space, screening='crpa', sigma=None,
     screening: 'bare' | 'crpa' | 'crpa_ph' | 'mrpa' (casida only, refused
         on imagfrequency and space-time); vtilde is its static correction
         (`screening_correction`), the same in every spin block (restricted).
-    sigma: None, the paper's scheme: full double counting, no Sigma_bar.
-        'srg' or 'averaged': the static environment self-energy
-        (`environment_self_energy`), one block for the restricted reference,
-        with dc='hartree',
+    sigma: 'srg' (default) or 'averaged': the static environment
+        self-energy (`environment_self_energy`), one block for the
+        restricted reference, with dc='hartree',
         the Hartree-only double counting that goes with it; E_0 then gains
         the exchange energy term and -Tr[Sigma_bar gamma^A,0].
         Allowed with every screening; the third term of the
@@ -287,7 +286,9 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         computed with a SigmaNearPoleWarning ('averaged', and 'srg' at
         srg_s = None, on casida; both forms on the other routes, pointing
         to casida), and refused only
-        when it is not finite (`environment_self_energy`). The
+        when it is not finite (`environment_self_energy`). None, asked
+        for explicitly: the paper's scheme, full double counting and no
+        Sigma_bar. The
         names in any case and with '-' or '_' ('SRG', 'Averaged'), as
         screening; anything but None and those is refused.
     sigma_energies: 'mf' | 'qp', the energies eps_t of the active orbitals
