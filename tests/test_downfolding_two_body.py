@@ -48,12 +48,11 @@ from src.Base.pyscf.pyscf_interface import get_density_fitting_coefficients
 from src.EffectiveHamiltonian.Downfolding.effective_hamiltonian import (
     build_effective_hamiltonian, run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.masks import (
-    active_pair_mask, ph_element_mask)
 from src.EffectiveHamiltonian.Downfolding.effective_hamiltonian import pack
 from src.EffectiveHamiltonian.Downfolding.two_body import (
     active_eri, effective_interaction)
-from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import (
+    ActiveSpace, active_pair_mask, ph_element_mask)
 from src.SingleReference.LinearResponse.linear_response import \
     LinearResponseSolver
 from src.SingleReference.LinearResponse.rpa_energy import \

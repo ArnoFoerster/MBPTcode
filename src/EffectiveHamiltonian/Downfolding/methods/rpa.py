@@ -43,12 +43,15 @@ from src.Base.orbital_spaces import (closed_shell_nocc, particle_hole_window,
 from src.Base.pyscf.pyscf_interface import (get_density_fitting_coefficients,
                                             get_orbital_energies,
                                             get_two_electron_integrals_chemist)
+from src.Base.utils.choices import require_choice
 from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
                                                         pade_fit_elementwise,
                                                         pade_nodes)
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
+from src.EffectiveHamiltonian.active_space import (active_pair_mask,
+                                                   ph_element_mask)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
 from src.SingleReference.GW.space_time import separable_factors
@@ -65,9 +68,7 @@ from src.SingleReference.LinearResponse.space_time import (
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
 
-from ..masks import active_pair_mask, ph_element_mask
 from ..low_level import DownfoldingTerms
-from ..options import choice
 from ..spin import BLOCKS, SPINS, channels_of, spin_block, spin_weight
 
 METHOD = 'rpa'
@@ -208,7 +209,7 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
     on space-time from `rpa_correlation_energy_space_time` (`_space_time`).
     """
     _refuse_options(opts, 'run')
-    mode = choice(mode, MODES, 'mode')
+    mode = require_choice(mode, MODES, 'mode')
     df = bool(df)
     if mode != 'casida' and not df:
         how = ('density fitted' if mode == 'imagfrequency'
@@ -331,7 +332,7 @@ def terms(low, active_space, screening='crpa', sigma=None,
     low = _with_settings(low, numerics)
     _require_current_mean_field(low)
     names = _diagnostic_names(diagnostics)
-    screening = choice(screening, SCREENINGS, 'screening')
+    screening = require_choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
     chans = _channels(low, active_space)
     vt = _two_body_blocks(screening_correction(low, active_space, screening),
@@ -443,7 +444,7 @@ def screening_correction(low, active_space, screening):
     the same Dyson step on the ISDF factors, P(0) and P^A(0) both on the
     static tau grid (low.cache['static_grid']).
     """
-    screening = choice(screening, SCREENINGS, 'screening')
+    screening = require_choice(screening, SCREENINGS, 'screening')
     if screening == 'mrpa':
         if low.mode != 'casida':
             raise NotImplementedError(
@@ -927,7 +928,7 @@ def _embedding(low, active_space, sigma, with_undamped=False, stacklevel=3):
     of `active_space`. stacklevel: where the pole warning points, counted from
     this function as for warnings.warn (3: the caller of this function's
     caller)."""
-    sigma = choice(sigma, SIGMAS[1:], 'sigma')
+    sigma = require_choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
     chans = _channels(low, active_space)
     # 'srg' at a finite s is bounded near a pole and needs no warning on
@@ -1931,14 +1932,15 @@ def _refuse_options(opts, which):
 
 def _sigma_name(sigma):
     """None, or the SIGMAS entry the string `sigma` names, in any case and
-    with '-' or '_' (`choice`, as screening and mode); refused (ValueError)
-    otherwise. None is kept apart, not passed through `choice`, which would
-    read it as 'none' and so accept the string 'None'."""
+    with '-' or '_' (`require_choice`, as screening and mode); refused
+    (ValueError) otherwise. None is kept apart, not passed through
+    `require_choice`, which would read it as 'none' and so accept the string
+    'None'."""
     if sigma is None:
         return None
     if isinstance(sigma, str):
         try:
-            return choice(sigma, SIGMAS[1:], 'sigma')
+            return require_choice(sigma, SIGMAS[1:], 'sigma')
         except ValueError:
             pass
     raise ValueError(f"Unknown sigma={sigma!r}; choose one of "
@@ -1952,7 +1954,7 @@ def _diagnostic_names(diagnostics):
         return set()
     if isinstance(diagnostics, str):
         diagnostics = (diagnostics,)
-    return {choice(d, DIAGNOSTICS, 'diagnostics') for d in diagnostics}
+    return {require_choice(d, DIAGNOSTICS, 'diagnostics') for d in diagnostics}
 
 
 def _cached(low, key, build):

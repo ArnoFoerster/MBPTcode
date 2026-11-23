@@ -6,8 +6,9 @@ counting of the effective interaction vtilde with the active reference
 density (double_counting.py), plus the method's static self-energy when it
 hands one back. Every quantity is per spin channel (spin.py).
 """
+from src.Base.utils.choices import require_choice
+
 from .double_counting import DC_MODES
-from .options import choice
 
 
 def effective_one_body(f, hartree, exchange, dc, sigma_bar=None):
@@ -18,7 +19,7 @@ def effective_one_body(f, hartree, exchange, dc, sigma_bar=None):
     that goes with the static self-energy Sigma_bar (which then carries the
     exchange). sigma_bar, one array per channel when given, is added.
     """
-    dc = choice(dc, DC_MODES, 'dc')
+    dc = require_choice(dc, DC_MODES, 'dc')
     h = []
     for s in range(len(f)):
         h_s = f[s] - hartree[s]

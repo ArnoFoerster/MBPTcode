@@ -1,26 +1,28 @@
 """The downfolding package keeps its general layer free of method code.
 
-`src/EffectiveHamiltonian/Downfolding/` is a method-agnostic layer (`terms`,
-`partition`, `two_body`, `one_body`, `energy`, and the driver
-`effective_hamiltonian`) plus one file per low-level method under `methods/`.
-The two sides meet only in `DownfoldingTerms`, and the driver reaches the
-methods only through the `LOW_LEVEL` registry. Both rules are read off the
-source by AST, so no module is imported to check them. Every import is
-checked by its module and by each module.name it takes (`from . import
-methods` reaches the methods as surely as `from .methods import rpa`). Every
-module named here exists: a renamed or missing one fails, it is not skipped.
+`src/EffectiveHamiltonian/Downfolding/` is a method-agnostic layer
+(`low_level`, `spin`, `core`, `double_counting`, `zero_body`, `one_body`,
+`two_body`, and the driver `effective_hamiltonian`) plus one file per
+low-level method under `methods/`. The two sides meet only in
+`DownfoldingTerms`, and the driver reaches the methods only through the
+`LOW_LEVEL` registry. Both rules are read off the source by AST, so no module
+is imported to check them. Every import is checked by its module and by each
+module.name it takes (`from . import methods` reaches the methods as surely
+as `from .methods import rpa`). Every module named here exists: a renamed or
+missing one fails, it is not skipped. The keyword check every option goes
+through, `require_choice`, is in src/Base/utils/choices.py and is tested here.
 """
 import ast
 import pathlib
 
 import pytest
 
-from src.EffectiveHamiltonian.Downfolding.options import choice
+from src.Base.utils.choices import require_choice
 
 PACKAGE = (pathlib.Path(__file__).resolve().parent.parent
            / 'src' / 'EffectiveHamiltonian' / 'Downfolding')
-GENERAL = ['low_level', 'options', 'spin', 'masks', 'core', 'double_counting',
-           'zero_body', 'one_body', 'two_body']
+GENERAL = ['low_level', 'spin', 'core', 'double_counting', 'zero_body',
+           'one_body', 'two_body']
 KERNELS = ('src.SingleReference.LinearResponse', 'src.SingleReference.GW')
 METHODS = 'src.EffectiveHamiltonian.Downfolding.methods'
 FORBIDDEN = KERNELS + (METHODS,)
@@ -81,12 +83,14 @@ def test_driver_imports_only_the_registry():
                     f'{module}: {names}')
 
 
-def test_choice_refuses_and_normalizes():
-    assert choice('Imag_Frequency', ('casida', 'imagfrequency'),
-                  'mode') == 'imagfrequency'
+def test_require_choice_refuses_and_normalizes():
+    assert require_choice('Imag_Frequency', ('casida', 'imagfrequency'),
+                          'mode') == 'imagfrequency'
     # a choice spelt with '_' is matched in either spelling and returned as listed
     for value in ('crpa_ph', 'CRPA-PH'):
-        assert choice(value, ('crpa', 'crpa_ph'), 'screening') == 'crpa_ph'
-    assert choice('Space_Time', ('space-time',), 'mode') == 'space-time'
+        assert require_choice(value, ('crpa', 'crpa_ph'),
+                              'screening') == 'crpa_ph'
+    assert require_choice('Space_Time', ('space-time',),
+                          'mode') == 'space-time'
     with pytest.raises(ValueError, match="mode"):
-        choice('x', ('casida',), 'mode')
+        require_choice('x', ('casida',), 'mode')

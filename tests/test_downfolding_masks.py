@@ -7,9 +7,8 @@ the class, in test_active_space.py.
 """
 import numpy as np
 
-from src.EffectiveHamiltonian.Downfolding.masks import (
-    active_pair_mask, ph_element_mask)
-from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import (
+    ActiveSpace, active_pair_mask, ph_element_mask)
 
 
 def test_masks():

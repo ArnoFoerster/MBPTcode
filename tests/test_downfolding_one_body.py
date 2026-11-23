@@ -14,10 +14,9 @@ import pytest
 from src.EffectiveHamiltonian.Downfolding.core import core_fock, core_jk
 from src.EffectiveHamiltonian.Downfolding.double_counting import (
     double_counting_potential)
-from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
 from src.EffectiveHamiltonian.Downfolding.one_body import effective_one_body
 from src.EffectiveHamiltonian.Downfolding.spin import spin_weight
-from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace, ph_element_mask
 from tests.downfolding_oracle import (
     mo_integrals, spin_orbital_integrals, spin_orbital_one_body, water)
 

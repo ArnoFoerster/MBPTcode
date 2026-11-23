@@ -42,9 +42,8 @@ from src.Base.pyscf import pyscf_interface
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
-from src.EffectiveHamiltonian.Downfolding.masks import ph_element_mask
-from src.EffectiveHamiltonian.active_space import (ActiveSpace,
-                                                 unrestricted_from_counts)
+from src.EffectiveHamiltonian.active_space import (
+    ActiveSpace, ph_element_mask, unrestricted_from_counts)
 from src.EffectiveHamiltonian.solvers.solve import (
     EmptyActiveSpaceWarning, solve)
 from tests.downfolding_oracle import (CH2, NH, OH, active_pairs_so, drpa_so,

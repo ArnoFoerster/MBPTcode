@@ -40,6 +40,7 @@ from src.Base.pyscf.pyscf_interface import (get_antisymmetrized_integrals,
                                             spin_orbital_one_body,
                                             unrestricted_reference_diagnostics)
 from src.Base.utils.parallel.mpi_grid import grid_comm
+from src.Base.utils.choices import require_choice
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
 from src.EffectiveHamiltonian.solvers.solve import solve
@@ -48,7 +49,6 @@ from .core import core_terms
 from .double_counting import double_counting
 from .methods import LOW_LEVEL
 from .one_body import effective_one_body
-from .options import choice
 from .spin import SPINS
 from .two_body import effective_interaction
 from .zero_body import Energies, assemble_energies
@@ -182,7 +182,7 @@ def run_low_level(mf, method='rpa', **method_opts):
         # whose occupations are fractional or whose occupied orbitals are
         # not its lowest
         _spin_channels(mf)
-    method = choice(method, tuple(LOW_LEVEL), 'method')
+    method = require_choice(method, tuple(LOW_LEVEL), 'method')
     flags = []
     with collecting(flags):
         unrestricted_reference_diagnostics(mf, WHO,
@@ -235,7 +235,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     mo, eps, nocc = _spin_channels(mf)
     spaces = _active_spaces(active_space, eps, nocc)
     unrestricted = len(spaces) == 2
-    method = choice(low.method, tuple(LOW_LEVEL), 'method')
+    method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
     flags = []
     with collecting(flags):
         # `terms` is called from this function itself, not from a helper:

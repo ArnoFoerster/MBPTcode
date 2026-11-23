@@ -18,7 +18,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .options import choice
+from src.Base.utils.choices import require_choice
+
 from .spin import spin_block, spin_weight
 
 DC_MODES = ('full', 'hartree')
@@ -53,7 +54,7 @@ def double_counting(terms, n_act_occ):
     so it comes with dc='hartree', which also sets the double counting and
     E_0 to match.
     """
-    mode = choice(terms.dc, DC_MODES, 'dc')
+    mode = require_choice(terms.dc, DC_MODES, 'dc')
     if terms.sigma_bar is not None and mode == 'full':
         raise ValueError(
             "the low-level method returned a static self-energy with "

@@ -92,8 +92,7 @@ from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.EffectiveHamiltonian.Downfolding.core import core_fock
 from src.EffectiveHamiltonian.Downfolding.double_counting import (
     double_counting_potential)
-from src.EffectiveHamiltonian.Downfolding.masks import active_pair_mask
-from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.active_space import ActiveSpace, active_pair_mask
 from src.EffectiveHamiltonian.solvers.solve import solve
 from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 from tests.downfolding_oracle import drpa, reference_energy, water
