@@ -146,6 +146,15 @@ class RPALowLevel:
     xpy diag(1/omega) xpy^T = (A+B)^-1 = (delta + 2K)^-1. What follows
     describes the one channel of a restricted reference.
 
+    mf: the mean field the run was made on (RHF/RKS, or UHF/UKS).
+    mode: the route, 'casida', 'imagfrequency' or 'space-time' (MODES).
+    df: True for fitted integrals (the density fit's three-index factors;
+        on space-time the ISDF factors), False for the exact 4-centre
+        integrals, casida only (`run`).
+    numerics: the run's Numerics (None: the defaults); its downfolding
+        section (the Sigma^E settings) is what `downfold` uses unless it is
+        given its own (`_with_settings`).
+    method: 'rpa', the key of this method in LOW_LEVEL.
     eps, nocc: the orbital energies and the occupied count of `mf`.
     e_c_full: E_RPA,corr of the whole system: on casida 1/2 (sum omega -
         Tr A), on imagfrequency the minimax quadrature of
