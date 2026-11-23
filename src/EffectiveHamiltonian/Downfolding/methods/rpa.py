@@ -57,10 +57,12 @@ from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    active_pair_mask,
                                                    ph_element_mask)
 from src.SingleReference.GW.imaginary_axis import (
-    fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
+    fitted_self_energy_matrix_imaginary_axis, screening_fit_grid,
+    solve_qp_energy_imaginary_axis)
 from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
 from src.SingleReference.GW.self_energy import SigmaEvaluator
-from src.SingleReference.GW.space_time import separable_factors
+from src.SingleReference.GW.space_time import (separable_factors,
+                                               solve_qp_energy_space_time)
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.imaginary_frequency import \
     frequency_factor
@@ -73,7 +75,8 @@ from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
-from src.Solvers.qp_equation import QPNoRoot, solve_qp_equation_pole_strength
+from src.Solvers.qp_equation import (QPNoRoot, QPWeightOutside,
+                                     solve_qp_equation_pole_strength)
 
 from ..low_level import DownfoldingTerms
 from ..spin import BLOCKS, SPINS, channels_of, spin_block, spin_weight
@@ -1918,8 +1921,11 @@ def _plasmon(eps, nocc, factors, eri, numerics):
 # and `solve_qp_equation_pole_strength` takes the root of largest weight, as
 # calc_qp_energy does; no second Casida solve. An orbital without a root
 # (core orbitals, high virtuals: satellites) is NaN, not converged, and named
-# in one flag 'qp_no_root'; only an active orbital that Sigma^E needs at its
-# QP energy makes that an error (`downfold`).
+# in one flag 'qp_no_root'; a root kept with Z outside (0, 1] (a continuation
+# artifact of high virtuals) in 'qp_z_outside'. The root finder's own
+# per-orbital warnings are silenced over the spectrum, its named flags kept.
+# Only an active orbital that Sigma^E needs at its QP energy makes a missing
+# root an error (`downfold`).
 
 
 @dataclass(frozen=True)
@@ -1947,20 +1953,33 @@ class QuasiParticles:
 
 def quasiparticles(low):
     """The `QuasiParticles` of the low-level result `low`, on its route."""
-    if low.mode == 'casida':
-        qp = _qp_casida(low)
-    else:
-        raise NotImplementedError(
-            f"qp=True on mode={low.mode!r} is not built yet.")
-    missing = [f"{spin} {np.flatnonzero(~ok).tolist()}"
-               for spin, ok in zip(_spin_names(low), qp.converged)
-               if not ok.all()]
-    if missing:
-        flag('qp_no_root',
-             'qp=True: no quasiparticle root for the orbitals '
-             + '; '.join(missing) + ' (NaN in low.qp)', RuntimeWarning,
-             stacklevel=3)
+    route = {'casida': _qp_casida,
+             'imagfrequency': _qp_imaginary_axis,
+             'space-time': _qp_space_time}[low.mode]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', QPNoRoot)
+        warnings.simplefilter('ignore', QPWeightOutside)
+        energies, z = route(low)
+    qp = QuasiParticles(energies=tuple(energies), z=tuple(z),
+                        converged=tuple(np.isfinite(e) for e in energies))
+    spins = _spin_names(low)
+    _flag_orbitals('qp_no_root', 'no quasiparticle root (NaN in low.qp)',
+                   spins, [~ok for ok in qp.converged])
+    _flag_orbitals('qp_z_outside', 'a root kept with Z outside (0, 1]',
+                   spins, [np.isfinite(zs) & ((zs <= 0) | (zs > 1))
+                           for zs in qp.z])
     return qp
+
+
+def _flag_orbitals(name, what, spins, masks):
+    """One named flag for the orbitals of `masks` (one per spin channel),
+    if any: the summary of the root finder's per-orbital warnings, which
+    `quasiparticles` silences over the whole spectrum."""
+    listed = [f"{spin} {np.flatnonzero(m).tolist()}"
+              for spin, m in zip(spins, masks) if m.any()]
+    if listed:
+        flag(name, f"qp=True: {what} for the orbitals " + '; '.join(listed),
+             RuntimeWarning, stacklevel=4)
 
 
 def _spin_names(low):
@@ -1968,9 +1987,9 @@ def _spin_names(low):
 
 
 def _qp_casida(low):
-    """`quasiparticles` on casida: per spin channel and per block of
-    orbitals the residues of W with every orbital, then one QP equation per
-    orbital (QPNoRoot warnings are summed up in 'qp_no_root')."""
+    """(energies, z), one (nmo,) array per spin channel, on casida: per
+    block of orbitals the residues of W with every orbital, then one QP
+    equation per orbital (`_qp_root`)."""
     mf = low.mf
     sigma_x = static_exchange_mean_field_matrix(mf, mf.mol)
     eps = low.eps if low.unrestricted else (low.eps,)
@@ -1980,30 +1999,62 @@ def _qp_casida(low):
     nmo = len(eps[0])
     budget = _sigma_tile_gb(low.numerics) * BYTES_PER_GB
     width = max(1, int(budget // (8 * max(1, low.omega.size) * nmo)))
-    out = [np.full(nmo, np.nan) for _ in eps], [np.full(nmo, np.nan)
-                                                for _ in eps]
+    energies = [np.full(nmo, np.nan) for _ in eps]
+    z = [np.full(nmo, np.nan) for _ in eps]
     every = np.arange(nmo)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', QPNoRoot)
-        for start in range(0, nmo, width):
-            block = every[start:start + width]
-            spaces = [ActiveSpace.from_indices(nmo, n, block[block < n],
-                                               block[block >= n])
-                      for n in nocc]
-            if low.unrestricted:
-                w = screened_residues(low, tuple(spaces), (every, every))
-            else:
-                w = (screened_residues(low, spaces[0], every),)
-            for s in range(len(eps)):
-                xc = np.diag(sigma_x[s])
-                act = spaces[s].act
-                for j, p in enumerate(act):
-                    e, z = _qp_root(w[s][:, j, :] ** 2, low.omega, eps[s],
-                                    nocc[s], float(eps[s][p] + xc[p]))
-                    out[0][s][p], out[1][s][p] = e, z
-    energies, z = out
-    return QuasiParticles(energies=tuple(energies), z=tuple(z),
-                          converged=tuple(np.isfinite(e) for e in energies))
+    for start in range(0, nmo, width):
+        block = every[start:start + width]
+        spaces = [ActiveSpace.from_indices(nmo, n, block[block < n],
+                                           block[block >= n])
+                  for n in nocc]
+        if low.unrestricted:
+            w = screened_residues(low, tuple(spaces), (every, every))
+        else:
+            w = (screened_residues(low, spaces[0], every),)
+        for s in range(len(eps)):
+            xc = np.diag(sigma_x[s])
+            act = spaces[s].act
+            for j, p in enumerate(act):
+                energies[s][p], z[s][p] = _qp_root(
+                    w[s][:, j, :] ** 2, low.omega, eps[s], nocc[s],
+                    float(eps[s][p] + xc[p]))
+    return energies, z
+
+
+def _qp_imaginary_axis(low):
+    """(energies, z) on imagfrequency: `solve_qp_energy_imaginary_axis`, the
+    driver of calc_qp_energy(mode='imagfrequency'), on the run's numerics,
+    for every orbital of each spin channel."""
+    mf = low.mf
+    nmo = mf.mo_coeff.shape[-1]
+    energies, z = [], []
+    for spin in _spin_names(low):
+        kw = dict(spin_channel=spin) if low.unrestricted else {}
+        e, zs = solve_qp_energy_imaginary_axis(
+            mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
+            with_z=True, **kw)
+        energies.append(np.asarray(e, dtype=float))
+        z.append(np.asarray(zs, dtype=float))
+    return energies, z
+
+
+def _qp_space_time(low):
+    """(energies, z) on space-time: `solve_qp_energy_space_time`, the driver
+    of calc_qp_energy(mode='space-time'), on the run's numerics and, for a
+    restricted reference, on the run's ISDF factors (no second fit). The
+    driver gives Z for a restricted reference only, so z is NaN for an
+    unrestricted one, whose factors it builds itself."""
+    mf = low.mf
+    nmo = mf.mo_coeff.shape[-1]
+    if not low.unrestricted:
+        e, zs = solve_qp_energy_space_time(
+            mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
+            factors=low.cache['factors'], with_z=True)
+        return [np.asarray(e, dtype=float)], [np.asarray(zs, dtype=float)]
+    energies = [np.asarray(solve_qp_energy_space_time(
+        mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
+        spin_channel=spin), dtype=float) for spin in SPINS]
+    return energies, [np.full(nmo, np.nan) for _ in SPINS]
 
 
 def _qp_root(weights, omega, eps, nocc, anchor):

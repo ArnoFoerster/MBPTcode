@@ -7,6 +7,8 @@ every orbital of every spin on the run's own W; the numbers are those of
 field and route (casida at its default broadening). An orbital without a QP
 root is NaN and not converged, flagged once on the run ('qp_no_root').
 """
+import warnings
+
 import numpy as np
 import pytest
 from pyscf import gto, scf
@@ -15,6 +17,7 @@ from src.Base.numerics.constants import HARTREE_TO_EV
 from src.EffectiveHamiltonian.Downfolding import run_low_level
 from src.EffectiveHamiltonian.Downfolding.methods import rpa
 from src.SingleReference.GW.qp_energy import calc_qp_energy
+from src.Solvers.qp_equation import QPNoRoot, QPWeightOutside
 from tests.downfolding_oracle import OH, unrestricted, water
 
 
@@ -22,7 +25,10 @@ def _calc(mf, nmo, **kw):
     """calc_qp_energy for every orbital, Hartree; NaN where it has no root."""
     ref = calc_qp_energy(mf, selfenergy='GW', polarizability='RPA',
                          state=list(range(nmo)), **kw)
-    return np.array([ref[p]['GW'] for p in range(nmo)]) / HARTREE_TO_EV
+    # casida: {p: {method: eV}}; the imaginary-axis routes: one eV per state
+    ev = ([ref[p]['GW'] for p in range(nmo)] if isinstance(ref, dict)
+          else list(ref))
+    return np.array(ev, dtype=float) / HARTREE_TO_EV
 
 
 def _assert_converged_match(qp_e, ref, tol_ev):
@@ -103,3 +109,55 @@ def test_qp_arrays_are_read_only():
     low = run_low_level(water(), method='rpa', qp=True)
     with pytest.raises(ValueError):
         low.qp.energies[0][0] = 0.0
+
+
+# --- the imaginary-axis routes: the GW drivers on the run's settings --------
+
+def _fitted_water():
+    from tests.gw_density_routes import fitted, water as gw_water
+    return fitted(scf.RHF(gw_water()))
+
+
+def test_imagfrequency_qp_matches_calc_qp_energy():
+    from src.Base.numerics.numerics import Numerics
+    mf, num = _fitted_water(), Numerics()
+    nmo = mf.mo_coeff.shape[1]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        low = run_low_level(mf, method='rpa', mode='imagfrequency',
+                            numerics=num, qp=True)
+    _assert_converged_match(
+        low.qp.energies[0],
+        _calc(mf, nmo, mode='imagfrequency', numerics=num), 1e-10)
+    # the root finder's per-orbital warnings are summed up in named flags
+    assert not [w for w in caught
+                if issubclass(w.category, (QPNoRoot, QPWeightOutside))]
+    z = low.qp.z[0]
+    outside = np.isfinite(z) & ((z <= 0) | (z > 1))
+    flags = [f['flag'] for f in low.numerical_flags]
+    assert ('qp_z_outside' in flags) == bool(outside.any())
+
+
+def test_space_time_qp_matches_calc_qp_energy():
+    from tests.isdf_test_grid import g1_numerics
+    mf = _fitted_water()
+    num = g1_numerics(mf)
+    nmo = mf.mo_coeff.shape[1]
+    low = run_low_level(mf, method='rpa', mode='space-time', numerics=num,
+                        qp=True)
+    _assert_converged_match(
+        low.qp.energies[0], _calc(mf, nmo, mode='space-time', numerics=num),
+        1e-10)
+
+
+def test_imagfrequency_qp_unrestricted():
+    from src.Base.numerics.numerics import Numerics
+    mf, num = unrestricted(OH, 1, density_fit=True), Numerics()
+    nmo = mf.mo_coeff.shape[-1]
+    low = run_low_level(mf, method='rpa', mode='imagfrequency', numerics=num,
+                        qp=True)
+    for s, spin in enumerate(('alpha', 'beta')):
+        _assert_converged_match(
+            low.qp.energies[s],
+            _calc(mf, nmo, mode='imagfrequency', numerics=num,
+                  spin_channel=spin), 1e-10)
