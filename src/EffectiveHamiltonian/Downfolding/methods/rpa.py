@@ -359,17 +359,13 @@ def downfold(low, active_space, screening='crpa', sigma=None,
                                  ('z', low.qp.z))}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
-        # stacklevel 4: the near-pole warning points at the caller of
+        # stacklevel 4: the warnings point at the caller of
         # build_effective_hamiltonian, as the method's other warnings do
-        sigmas = _embedding(low, active_space, sigma, sigma_energies,
-                            stacklevel=4)
+        sigmas, checks = _environment_self_energy(
+            low, active_space, sigma, sigma_energies, stacklevel=4)
         sigma_bar, dc = tuple(s.sigma_bar for s in sigmas), 'hartree'
-        # the two checks of Sigma_bar always run and warn; `diagnostics`
-        # only decides whether their numbers are kept
-        checks = {'sigma_poles': _sigma_poles(low, chans, sigma, sigmas)}
-        if low.mode != 'casida':
-            checks['sigma_continuation'] = _sigma_continuation(
-                low, chans, sigma, sigmas)
+        # the checks of Sigma_bar always run and warn; `diagnostics` only
+        # decides whether their numbers are kept
         recorded.update({name: value for name, value in checks.items()
                          if name in names})
     return DownfoldingTerms(
@@ -918,6 +914,12 @@ def embedding_self_energy(low, active_space, sigma, numerics=None,
     Zero when the environment is empty. A Sigma_bar that is not finite (an
     active energy on a pole) is refused, FloatingPointError.
 
+    Its warnings and refusals are those of build_effective_hamiltonian with
+    the same sigma (`_check_sigma`): the near-pole warning above, the SRG
+    damping warning (SigmaDampingWarning) and, off casida, the spread of the
+    continuation (SigmaContinuationWarning). Their records ('sigma_poles',
+    'sigma_continuation') come only through the driver's `diagnostics`.
+
     For an unrestricted result `active_space` is the pair (alpha, beta) and the
     pair (Sigma_bar^alpha, Sigma_bar^beta) is returned: the same formulas per
     spin, with the residues between that spin's active and environment
@@ -932,35 +934,30 @@ def embedding_self_energy(low, active_space, sigma, numerics=None,
     """
     sigma_energies = require_choice(sigma_energies, SIGMA_ENERGIES,
                                     'sigma_energies')
-    records = _embedding(_with_settings(low, numerics), active_space, sigma,
-                         sigma_energies)
-    return _per_channel([r.sigma_bar for r in records])
+    sigmas, _ = _environment_self_energy(_with_settings(low, numerics),
+                                         active_space, sigma, sigma_energies)
+    return _per_channel([s.sigma_bar for s in sigmas])
 
 
-def _embedding(low, active_space, sigma, sigma_energies='mf', stacklevel=3):
-    """The `_SigmaE` of each spin channel of `active_space` (a list), built
-    by the route's builder at the active energies of `sigma_energies`
-    (`_active_energies`), after the pole warning and with Sigma_bar
-    required finite. stacklevel: where the pole warning points, counted
-    from this function as for warnings.warn (3: the caller of this
-    function's caller)."""
+def _environment_self_energy(low, active_space, sigma, sigma_energies='mf',
+                             stacklevel=3):
+    """(sigmas, checks): the `_SigmaE` of each spin channel of
+    `active_space` (a list), built by the route's builder at the active
+    energies of `sigma_energies` (`_active_energies`), and the records of
+    `_check_sigma`, which has warned and refused as it does for every entry
+    point. stacklevel: where the warnings point, counted from this function
+    as for warnings.warn (3: the caller of this function's caller)."""
     sigma = require_choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
     chans = _channels(low, active_space)
     eps_act = _active_energies(low, chans, sigma_energies)
-    # 'srg' at a finite s is bounded near a pole and needs no warning on
-    # casida; at srg_s = None it is as undamped as 'averaged'
-    if sigma == 'averaged' or low.mode != 'casida' or settings.srg_s is None:
-        _warn_near_poles(low, chans, eps_act, settings, sigma,
-                         stacklevel + 1)
     if low.mode == 'casida':
         sigmas = _sigma_pole_sum(low, active_space, chans, sigma, settings,
                                  eps_act)
     else:
         sigmas = _sigma_continued(low, active_space, chans, sigma, eps_act)
-    for chan, s in zip(chans, sigmas):
-        _require_finite(s.sigma_bar, chan, sigma)
-    return sigmas
+    return sigmas, _check_sigma(low, chans, sigma, settings, sigmas,
+                                stacklevel + 1)
 
 
 def _active_energies(low, chans, sigma_energies):
@@ -1643,6 +1640,28 @@ def _warn_near_poles(low, chans, eps_act, settings, sigma, stacklevel):
             SigmaNearPoleWarning, stacklevel=stacklevel)
 
 
+def _check_sigma(low, chans, sigma, settings, sigmas, stacklevel):
+    """Every check of Sigma_bar^E, in this order, for every entry point:
+    the near-pole warning (`_warn_near_poles`; not for 'srg' at a finite s
+    on casida, bounded near a pole), the refusal of a Sigma_bar that is not
+    finite (`_require_finite`), then the 'sigma_poles' record with the SRG
+    damping warning (`_sigma_poles`) and, off casida, the
+    'sigma_continuation' record with the spread warning
+    (`_sigma_continuation`). Returns those records by name. stacklevel:
+    where the warnings point, counted from this function."""
+    if sigma == 'averaged' or low.mode != 'casida' or settings.srg_s is None:
+        _warn_near_poles(low, chans, [s.eps_act for s in sigmas], settings,
+                         sigma, stacklevel + 1)
+    for chan, s in zip(chans, sigmas):
+        _require_finite(s.sigma_bar, chan, sigma)
+    checks = {'sigma_poles': _sigma_poles(low, chans, sigma, sigmas,
+                                          stacklevel + 1)}
+    if low.mode != 'casida':
+        checks['sigma_continuation'] = _sigma_continuation(
+            low, chans, sigma, sigmas, stacklevel + 1)
+    return checks
+
+
 def _require_finite(sigma_bar, chan, sigma):
     """Refuse (FloatingPointError) a Sigma_bar of one spin channel with an
     element that is not finite, naming the orbital pairs (and their spin):
@@ -1695,11 +1714,12 @@ def _continued_pole_weights(fit, eps_act):
     return 1.0 / (1.0 - np.einsum('ttt->t', step))
 
 
-def _sigma_poles(low, chans, sigma, sigmas):
+def _sigma_poles(low, chans, sigma, sigmas, stacklevel):
     """The 'sigma_poles' record, and a SigmaDampingWarning (the
     named flag 'sigma_srg_damping') naming the active orbitals whose row of
     Sigma_bar the SRG damping moves by more than DOWNFOLDING_SRG_DAMPING_WARN.
-    sigmas: the `_SigmaE` of each spin channel (`_embedding`).
+    sigmas: the `_SigmaE` of each spin channel; stacklevel as for `flag`,
+    counted from this function.
     For two channels window, pole_distance and z are pairs (alpha, beta);
     srg_s is the one s of both and srg_damping the largest over both.
 
@@ -1741,7 +1761,7 @@ def _sigma_poles(low, chans, sigma, sigmas):
             f", within a few 1/sqrt(2 s) = {1 / np.sqrt(2 * applied):.4f}"
             f" Ha of a pole of the environment self-energy (pole-free "
             f"{_window_text(chans, windows)}); Sigma_bar depends on srg_s "
-            f"there.", SigmaDampingWarning, stacklevel=4)
+            f"there.", SigmaDampingWarning, stacklevel=stacklevel)
     return {'window': _per_channel(windows),
             'pole_distance': _per_channel(distances),
             'z': _per_channel(weights), 'srg_s': applied,
@@ -1762,14 +1782,15 @@ def continuation_spread(z, samples, eps_act, sigma):
     return np.abs(even - odd)
 
 
-def _sigma_continuation(low, chans, sigma, sigmas):
+def _sigma_continuation(low, chans, sigma, sigmas, stacklevel):
     """The 'sigma_continuation' record: `continuation_spread` on
     the nodes Sigma_bar was continued from, and a SigmaContinuationWarning
     (the named flag 'sigma_continuation_spread') naming the elements (as
     orbital pairs) above DOWNFOLDING_SIGMA_CONTINUATION_WARN. Zero without
-    an environment. sigmas: the `_SigmaE` of each spin channel
-    (`_embedding`); for two channels the record is the pair (alpha, beta) and
-    the warning names the spin of each element."""
+    an environment. sigmas: the `_SigmaE` of each spin channel; for two
+    channels the record is the pair (alpha, beta) and the warning names the
+    spin of each element. stacklevel as for `flag`, counted from this
+    function."""
     spreads, named = [], []
     for chan, s in zip(chans, sigmas):
         n, act = chan.active_space.n_act, chan.active_space.act
@@ -1793,7 +1814,7 @@ def _sigma_continuation(low, chans, sigma, sigmas):
             f"elements {named} (orbital pairs, Ha); the continued Sigma_bar^E "
             f"there is uncertain. More nodes (numerics.quadrature.npade) or "
             f"mode='casida' avoid the continuation.",
-            SigmaContinuationWarning, stacklevel=4)
+            SigmaContinuationWarning, stacklevel=stacklevel)
     return _per_channel(spreads)
 
 

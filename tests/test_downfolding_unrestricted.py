@@ -969,7 +969,9 @@ def test_near_pole_warning_names_the_spin(oh, oh_low):
     In the asymmetric space the beta orbitals 6 and 7 lie above the beta
     window (distances -0.20 and -0.27 Ha) and every alpha orbital is at
     least 0.64 Ha inside the alpha one. 'srg' is finite everywhere and does
-    not warn; with no orbital near a pole neither does 'averaged'."""
+    not warn of the poles, only of its damping there (SigmaDampingWarning),
+    as build_effective_hamiltonian does; with no orbital near a pole
+    'averaged' does not warn."""
     low = oh_low[True]
     parts = _parts(oh, _asymmetric(oh))
     with pytest.warns(rpa.SigmaNearPoleWarning,
@@ -979,9 +981,12 @@ def test_near_pole_warning_names_the_spin(oh, oh_low):
     text = str(rec[0].message)
     assert 'alpha orbital' not in text
     assert 'windows alpha (' in text and ' and beta (' in text
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        rpa.embedding_self_energy(low, parts, 'srg')
+    assert [r.category for r in rec] == [rpa.SigmaDampingWarning]
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        rpa.embedding_self_energy(low, parts, 'srg')
         rpa.embedding_self_energy(low, _parts(oh, _unequal_cores(oh)),
                                   'averaged')
 

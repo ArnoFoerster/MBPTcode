@@ -1381,7 +1381,7 @@ def test_empty_environment_or_active_space_gives_zero_on_every_route(
                   ActiveSpace(len(eps), nocc, [], [])):
         with warnings.catch_warnings(record=True) as rec:
             warnings.simplefilter('always', RuntimeWarning)
-            records = rpa._embedding(low, space, 'averaged')
+            records, _ = rpa._environment_self_energy(low, space, 'averaged')
         assert [type(r) for r in records] == [rpa._SigmaE]
         (record,) = records
         n = space.n_act
@@ -1395,3 +1395,71 @@ def test_empty_environment_or_active_space_gives_zero_on_every_route(
             assert record.evaluation.fit is None
         assert not [r for r in rec
                     if r.category is rpa.SigmaContinuationWarning]
+
+
+def _coarse_imagfrequency(mf):
+    """The imagfrequency run of `mf` with npade = 4, whose two half fits
+    differ by more than the continuation warning's level."""
+    return run_low_level(mf, method='rpa', mode='imagfrequency',
+                         numerics=Numerics(quadrature={'npade': 4}))
+
+
+def _recorded(category, call):
+    """The warnings of `category` that `call()` raises, each one kept."""
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always', RuntimeWarning)
+        call()
+    return [r for r in rec if r.category is category]
+
+
+def test_public_function_warns_like_the_driver(wat, low_exact):
+    """`embedding_self_energy` gives the warnings `build_effective_hamiltonian`
+    gives for the same Sigma_bar: the SRG damping of the near-pole space on
+    casida and the Pade spread of a too-coarse node set on imagfrequency."""
+    mf, _, eps, nocc = wat
+    with pytest.warns(rpa.SigmaDampingWarning, match=r'orbital 7\b'):
+        rpa.embedding_self_energy(low_exact, _high_virtual(eps, nocc), 'srg')
+    with pytest.warns(rpa.SigmaContinuationWarning, match=r'\(\d+, \d+\)'):
+        rpa.embedding_self_energy(_coarse_imagfrequency(mf),
+                                  _contiguous_44(eps, nocc), 'srg')
+
+
+def test_driver_warns_once(wat, low_exact):
+    """Through `build_effective_hamiltonian` each Sigma^E warning comes
+    once: one SigmaDampingWarning on the near-pole space, one
+    SigmaContinuationWarning on the coarse node set."""
+    mf, _, eps, nocc = wat
+    damped = _recorded(rpa.SigmaDampingWarning,
+                       lambda: build_effective_hamiltonian(
+                           low_exact, _high_virtual(eps, nocc), sigma='srg'))
+    spread = _recorded(rpa.SigmaContinuationWarning,
+                       lambda: build_effective_hamiltonian(
+                           _coarse_imagfrequency(mf),
+                           _contiguous_44(eps, nocc), sigma='srg'))
+    assert len(damped) == 1 and len(spread) == 1
+
+
+def test_warnings_point_at_the_caller(wat, low_exact):
+    """The Sigma^E warnings of both entry points point at the line that
+    called them (this file), not into rpa.py."""
+    mf, _, eps, nocc = wat
+    near, coarse = _high_virtual(eps, nocc), _coarse_imagfrequency(mf)
+    space = _contiguous_44(eps, nocc)
+    calls = [
+        (rpa.SigmaDampingWarning,
+         lambda: rpa.embedding_self_energy(low_exact, near, 'srg')),
+        (rpa.SigmaDampingWarning,
+         lambda: build_effective_hamiltonian(low_exact, near, sigma='srg')),
+        (rpa.SigmaContinuationWarning,
+         lambda: rpa.embedding_self_energy(coarse, space, 'srg')),
+        (rpa.SigmaContinuationWarning,
+         lambda: build_effective_hamiltonian(coarse, space, sigma='srg')),
+        (rpa.SigmaNearPoleWarning,
+         lambda: rpa.embedding_self_energy(low_exact, near, 'averaged')),
+        (rpa.SigmaNearPoleWarning,
+         lambda: build_effective_hamiltonian(low_exact, near,
+                                             sigma='averaged')),
+    ]
+    for category, call in calls:
+        (rec,) = _recorded(category, call)
+        assert rec.filename == __file__, (category.__name__, rec.filename)
