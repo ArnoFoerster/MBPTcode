@@ -85,8 +85,9 @@ METHOD = 'rpa'
 MODES = ('casida', 'imagfrequency', 'space-time')
 SCREENINGS = ('bare', 'crpa', 'crpa_ph', 'mrpa')
 SIGMAS = (None, 'srg', 'averaged')
+SIGMA_ENERGIES = ('mf', 'qp')
 DIAGNOSTICS = ('static_defect', 'ec_active_casida', 'sigma_poles',
-               'sigma_continuation')
+               'sigma_continuation', 'qp_energies')
 
 
 class SigmaNearPoleWarning(RuntimeWarning):
@@ -241,8 +242,8 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
 
 
 def downfold(low, active_space, screening='crpa', sigma=None,
-          diagnostics=DIAGNOSTICS,
-          numerics=None, **opts):
+             sigma_energies='mf', diagnostics=DIAGNOSTICS, numerics=None,
+             **opts):
     """The DownfoldingTerms of the RPA on the active space `active_space`.
 
     `active_space` is one ActiveSpace for a restricted low-level result, and
@@ -272,6 +273,13 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         when it is not finite (`embedding_self_energy`). The
         names in any case and with '-' or '_' ('SRG', 'Averaged'), as
         screening; anything but None and those is refused.
+    sigma_energies: 'mf' | 'qp', the energies eps_t of the active orbitals
+        at which Sigma_bar^E is evaluated (both forms, every route): the
+        mean-field ones, or the run's G0W0 QP energies (low.qp, from
+        run_low_level(..., qp=True); refused without them, without sigma,
+        and when an active orbital has no QP root). Only the active
+        energies change; the poles of G^E stay at the mean-field energies.
+        The pole checks and the 'sigma_poles' record use the same eps_t.
     diagnostics: the DIAGNOSTICS to record in the result's diagnostics (None:
         none, as ()); a name that does not apply here (on casida
         'ec_active_casida' and 'sigma_continuation', and 'sigma_poles' and
@@ -289,7 +297,8 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         the keyword only decides whether the numbers are recorded.
         'ec_active_casida' (imagfrequency, space-time): {'casida': the
         dense-Casida E_c^A on the same v_eff, 'difference': the route's
-        quadrature value minus it}.
+        quadrature value minus it}. 'qp_energies' (whenever low.qp is set):
+        {'energies', 'z'} of the active orbitals, pairs for two channels.
     numerics: None, the settings of Sigma^E are those of the low-level run
         (low.numerics); or a Numerics whose downfolding section (srg_s,
         pole_margin, continuation_margin) is used for this Hamiltonian
@@ -313,6 +322,13 @@ def downfold(low, active_space, screening='crpa', sigma=None,
     names = _diagnostic_names(diagnostics)
     screening = require_choice(screening, SCREENINGS, 'screening')
     sigma = _sigma_name(sigma)
+    sigma_energies = require_choice(sigma_energies, SIGMA_ENERGIES,
+                                    'sigma_energies')
+    if sigma_energies != 'mf' and sigma is None:
+        raise ValueError(
+            f"sigma_energies={sigma_energies!r} chooses where Sigma_bar^E is "
+            f"evaluated, and sigma=None builds none: pass sigma='srg' or "
+            f"'averaged'.")
     chans = _channels(low, active_space)
     vt = _two_body_blocks(screening_correction(low, active_space, screening),
                           chans)
@@ -327,12 +343,18 @@ def downfold(low, active_space, screening='crpa', sigma=None,
         dense = _active_ec_casida(low, chans, v_eff) if pairs else 0.0
         recorded['ec_active_casida'] = {'casida': dense,
                                         'difference': e_c_active - dense}
+    if 'qp_energies' in names and low.qp is not None:
+        recorded['qp_energies'] = {
+            name: _per_channel([values[i][c.active_space.act]
+                                for i, c in enumerate(chans)])
+            for name, values in (('energies', low.qp.energies),
+                                 ('z', low.qp.z))}
     sigma_bar, dc = None, 'full'
     if sigma is not None:
         # stacklevel 4: the near-pole warning points at the caller of
         # build_effective_hamiltonian, as the method's other warnings do
-        s_bars, kept = _embedding(low, active_space, sigma, with_undamped=True,
-                                  stacklevel=4)
+        s_bars, kept = _embedding(low, active_space, sigma, sigma_energies,
+                                  with_undamped=True, stacklevel=4)
         sigma_bar, dc = tuple(s_bars), 'hartree'
         # the two checks of Sigma_bar always run and warn; `diagnostics`
         # only decides whether their numbers are kept
@@ -860,10 +882,12 @@ def static_defect(low, active_space, v_eff):
 # times the active orbitals.
 
 
-def embedding_self_energy(low, active_space, sigma, numerics=None):
+def embedding_self_energy(low, active_space, sigma, numerics=None,
+                          sigma_energies='mf'):
     """Sigma_bar^E (n_act, n_act), the static environment self-energy on
     active_space.act (occupied first): iG^E(W - v) with r over
-    active_space.env, the full RPA's W and the mean-field energies.
+    active_space.env, the full RPA's W and the mean-field energies, the
+    active orbitals' at their QP energies with sigma_energies='qp'.
 
     casida: the residues of W (`screened_residues`) and the RPA's Omega.
     sigma 'srg' is Eq. 44 at s = numerics.downfolding.srg_s, finite
@@ -896,32 +920,67 @@ def embedding_self_energy(low, active_space, sigma, numerics=None):
     numerics: None, or a Numerics whose downfolding section (srg_s,
         pole_margin, continuation_margin) is used here in place of the
         run's; the rest has to be the run's (`_with_settings`).
+    sigma_energies: 'mf' | 'qp', the energies of the active orbitals
+        (`downfold`).
     """
+    sigma_energies = require_choice(sigma_energies, SIGMA_ENERGIES,
+                                    'sigma_energies')
     return _per_channel(_embedding(_with_settings(low, numerics), active_space,
-                                   sigma)[0])
+                                   sigma, sigma_energies)[0])
 
 
-def _embedding(low, active_space, sigma, with_undamped=False, stacklevel=3):
+def _embedding(low, active_space, sigma, sigma_energies='mf',
+               with_undamped=False, stacklevel=3):
     """`_embedding_unchecked` after the pole warning and with the result
     required finite: (Sigma_bar, kept), each a list over the spin channels
-    of `active_space`. stacklevel: where the pole warning points, counted from
-    this function as for warnings.warn (3: the caller of this function's
-    caller)."""
+    of `active_space`, with the active energies of `sigma_energies`
+    (`_active_energies`) in every kept as 'eps_act'. stacklevel: where the
+    pole warning points, counted from this function as for warnings.warn
+    (3: the caller of this function's caller)."""
     sigma = require_choice(sigma, SIGMAS[1:], 'sigma')
     settings = numerics_or_default(low.numerics).downfolding
     chans = _channels(low, active_space)
+    eps_act = _active_energies(low, chans, sigma_energies)
     # 'srg' at a finite s is bounded near a pole and needs no warning on
     # casida; at srg_s = None it is as undamped as 'averaged'
     if sigma == 'averaged' or low.mode != 'casida' or settings.srg_s is None:
-        _warn_near_poles(low, chans, settings, sigma, stacklevel + 1)
+        _warn_near_poles(low, chans, eps_act, settings, sigma,
+                         stacklevel + 1)
     sigma_bar, kept = _embedding_unchecked(low, active_space, sigma, settings,
-                                           with_undamped)
+                                           with_undamped, eps_act)
     for chan, s_bar in zip(chans, sigma_bar):
         _require_finite(s_bar, chan, sigma)
+    for kept_s, e in zip(kept, eps_act):
+        kept_s['eps_act'] = e
     return sigma_bar, kept
 
 
-def _embedding_unchecked(low, active_space, sigma, settings, with_undamped):
+def _active_energies(low, chans, sigma_energies):
+    """The energies eps_t of the active orbitals of each channel at which
+    Sigma_bar^E is evaluated: the mean-field ones ('mf'), or the QP energies
+    of low.qp ('qp'), refused (ValueError) without them or where an active
+    orbital has no QP root."""
+    if sigma_energies == 'mf':
+        return [c.eps[c.active_space.act] for c in chans]
+    if low.qp is None:
+        raise ValueError(
+            "sigma_energies='qp' needs the QP spectrum of the low-level run:"
+            " run_low_level(mf, method='rpa', ..., qp=True).")
+    energies = []
+    for i, c in enumerate(chans):
+        act = c.active_space.act
+        missing = act[~low.qp.converged[i][act]]
+        if missing.size:
+            raise ValueError(
+                f"sigma_energies='qp': no QP root for the active "
+                f"{_orbital(c)} {missing.tolist()} (NaN in low.qp); choose "
+                f"another active space or sigma_energies='mf'.")
+        energies.append(low.qp.energies[i][act])
+    return energies
+
+
+def _embedding_unchecked(low, active_space, sigma, settings, with_undamped,
+                         eps_act):
     """(Sigma_bar, kept) of `embedding_self_energy`, each a list over the
     spin channels; kept is what the diagnostics read without building it
     again: on casida 'args' = (w, eps_t, eps_r, occupied_r, omega) of the
@@ -932,14 +991,14 @@ def _embedding_unchecked(low, active_space, sigma, settings, with_undamped):
     nodes and S^E there, and 'fit', the (Z, A) of `pade_fit_elementwise`
     (None without an environment)."""
     if low.mode != 'casida':
-        return _embedding_imag_axis(low, active_space, sigma)
+        return _embedding_imag_axis(low, active_space, sigma, eps_act)
     chans = _channels(low, active_space)
     residues = screened_residues(low, active_space)
     residues = [residues] if len(chans) == 1 else list(residues)
     sigma_bar, kept_per_channel = [], []
-    for chan, w in zip(chans, residues):
+    for chan, w, e_act in zip(chans, residues, eps_act):
         env = chan.active_space.env
-        args = (w, chan.eps[chan.active_space.act], chan.eps[env],
+        args = (w, e_act, chan.eps[env],
                 env < chan.nocc,
                 low.omega)
         kept = {'args': args, 'srg_s': settings.srg_s}
@@ -1134,7 +1193,7 @@ def averaged_self_energy(w, eps_t, eps_r, occupied_r, omega):
         return 0.5 * (half + half.T)
 
 
-def _embedding_imag_axis(low, active_space, sigma):
+def _embedding_imag_axis(low, active_space, sigma, eps_act):
     """`_embedding_unchecked` on imagfrequency and space-time, a list over
     the spin channels each: S^E on the Pade nodes of the run's numerics
     (`pade_nodes`, on the line mu + i w, mu the channel's own mid-gap),
@@ -1144,7 +1203,7 @@ def _embedding_imag_axis(low, active_space, sigma):
     samples = sigma_env_imag_axis(low, active_space, nodes)
     samples = [samples] if len(chans) == 1 else list(samples)
     sigma_bar, kept_per_channel = [], []
-    for chan, sampled in zip(chans, samples):
+    for chan, sampled, e_act in zip(chans, samples, eps_act):
         z = particle_hole_window(chan.eps, chan.nocc)[2] + 1j * nodes
         kept = {'z': z, 'samples': sampled, 'fit': None}
         n = chan.active_space.n_act
@@ -1152,8 +1211,7 @@ def _embedding_imag_axis(low, active_space, sigma):
             s_bar = np.zeros((n, n))
         else:
             kept['fit'] = pade_fit_elementwise(z, sampled, symmetric=True)
-            s_bar = _evaluate_continued(kept['fit'],
-                                        chan.eps[chan.active_space.act], sigma)
+            s_bar = _evaluate_continued(kept['fit'], e_act, sigma)
         sigma_bar.append(s_bar)
         kept_per_channel.append(kept)
     return sigma_bar, kept_per_channel
@@ -1475,7 +1533,7 @@ def _windows(low, chans):
     return windows
 
 
-def _warn_near_poles(low, chans, settings, sigma, stacklevel):
+def _warn_near_poles(low, chans, eps_act, settings, sigma, stacklevel):
     """Warn (SigmaNearPoleWarning, the named flag 'sigma_near_pole') of an
     active orbital whose energy is within the margin of an edge of
     `pole_window`, or outside it, in any spin channel (one warning, naming
@@ -1500,9 +1558,8 @@ def _warn_near_poles(low, chans, settings, sigma, stacklevel):
                f"which the Pade continuation from the imaginary axis is "
                f"accurate")
     named, windows = [], _windows(low, chans)
-    for chan, (lo, hi) in zip(chans, windows):
+    for chan, (lo, hi), eps in zip(chans, windows, eps_act):
         act = chan.active_space.act
-        eps = chan.eps[act]
         dist = np.minimum(eps - lo, hi - eps)
         bad = dist <= margin
         named += [f'{_orbital(chan)} {p} (eps = {e:.6f}, distance {x:.6f})'
@@ -1616,7 +1673,7 @@ def _sigma_poles(low, chans, sigma, sigma_bar, kept):
     for chan, (lo, hi), s_bar, kept_s in zip(chans, windows, sigma_bar,
                                              kept):
         act = chan.active_space.act
-        eps = chan.eps[act]
+        eps = kept_s['eps_act']
         dist = np.minimum(eps - lo, hi - eps)
         distances.append(dist)
         if low.mode != 'casida':
@@ -1676,7 +1733,7 @@ def _sigma_continuation(low, chans, sigma, kept):
             spreads.append(np.zeros((n, n)))
             continue
         spread = continuation_spread(kept_s['z'], kept_s['samples'],
-                                     chan.eps[act], sigma)
+                                     kept_s['eps_act'], sigma)
         spreads.append(spread)
         spin = '' if chan.spin is None else f'{chan.spin} '
         named += [f'{spin}({act[t]}, {act[u]}) {spread[t, u]:.2e}'
