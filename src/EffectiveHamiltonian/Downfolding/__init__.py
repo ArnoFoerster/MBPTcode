@@ -9,9 +9,9 @@ Usage: one low-level run, then one Hamiltonian per active space.
     h.solve(solver)
 
 The options (default first). Details: rpa.run and rpa.downfold in
-methods/rpa.py, whose tuples MODES, SCREENINGS, SIGMAS and DIAGNOSTICS are the
-valid values; every value is checked by `require_choice`
-(src/Base/utils/choices.py).
+methods/rpa.py, whose tuples MODES, SCREENINGS, SIGMAS, SIGMA_ENERGIES and
+DIAGNOSTICS are the valid values; every value is checked by
+`require_choice` (src/Base/utils/choices.py).
 
 run_low_level(mf, method, **method_opts)
     method      'rpa' | 'hf' ('hf' takes no further options)
@@ -20,6 +20,8 @@ run_low_level(mf, method, **method_opts)
                 separable ISDF factors, imaginary time, N^3
     df          True | False (the exact 4-centre integrals, casida only)
     numerics    None (the defaults) | a Numerics (space-time needs one)
+    qp          False | True: also the one-shot G0W0 QP spectrum of every
+                orbital on the run's W, kept as low.qp
 
 build_effective_hamiltonian(low, active_space, spin_free, **method_opts)
     spin_free   True | False: one spatial Hamiltonian, or the spin blocks
@@ -30,6 +32,8 @@ build_effective_hamiltonian(low, active_space, spin_free, **method_opts)
                 counting | the static environment self-energy in the SRG
                 form | in the averaged form; both with the Hartree-only
                 double counting
+    sigma_energies  'mf' | 'qp': Sigma_bar^E at the mean-field or at the QP
+                energies of the active orbitals ('qp' needs qp=True)
     diagnostics all of rpa.DIAGNOSTICS | a subset | None
     numerics    None (the run's) | a Numerics whose downfolding section
                 (srg_s, pole_margin, continuation_margin) replaces the run's

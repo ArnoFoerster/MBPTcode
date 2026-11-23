@@ -106,10 +106,12 @@ Options of the RPA:
 | `run_low_level` | `mode` | `'casida'`, `'imagfrequency'`, `'space-time'` |
 | | `df` | `True`: the screening from the mean field's density fit (an exact eigendecomposition of the MO integrals if it has none; ISDF factors on `'space-time'`); `False`: exact 4-centre integrals, `'casida'` only |
 | | `numerics` | a `Numerics`, or `None` for the defaults (`'space-time'` needs one naming the ISDF grid) |
+| | `qp` | `False` (default); `True`: also the G0W0 QP spectrum of every orbital, `low.qp` (below) |
 | `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS |
 | | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
 | | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'averaged'` (Sigma^E, below) |
+| | `sigma_energies` | `'mf'` (default): Sigma^E at the mean-field energies of the active orbitals; `'qp'`: at their QP energies (`low.qp`, needs `qp=True` and a `sigma`) |
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 
@@ -561,6 +563,42 @@ integrals: beyond the 0.26 Ha margin up to 4.2e-5 Eh on water, 8.2e-6 on
 NH3 and 8.5e-5 on benzene (G1 grid). The FCI energy of H_eff with
 `sigma='srg'` agrees to 1.2e-6 Eh on NH3.
 
+### Sigma^E at the QP energies (`qp=True`, `sigma_energies='qp'`)
+
+`run_low_level(mf, method='rpa', ..., qp=True)` also solves one-shot diagonal
+G0W0@RPA for every orbital of every spin on the run's own W,
+
+    eps_p = eps_p^mf + <p|Sigma_x - v_xc|p> + Re Sigma_c,pp(eps_p),
+
+and keeps it as `low.qp` (a `QuasiParticles` record: `energies`, `z`,
+`converged`, one array per spin channel; `None` without `qp`). The numbers
+are those of `calc_qp_energy(mf, selfenergy='GW', polarizability='RPA')` on
+the same route: on casida from the run's own Omega and X+Y (no second Casida
+solve) at the GW code's default broadening `DEFAULT_BROADENING_ETA`, on
+imagfrequency and space-time through the GW drivers on the run's numerics
+(space-time on the run's ISDF factors; Z for a restricted reference only).
+An orbital without a QP root (satellites of core orbitals and high virtuals)
+is NaN and not converged, named in the flag `'qp_no_root'`; a root kept with
+Z outside (0, 1] in `'qp_z_outside'`.
+
+`sigma_energies='qp'` then evaluates Sigma^E (`'srg'` or `'averaged'`) at the
+QP energies of the active orbitals instead of the mean-field ones; the poles
+of G^E stay at the mean-field energies, and the pole checks and the
+`'sigma_poles'` record use the same energies. Refused without `low.qp`,
+without `sigma`, and when an active orbital has no QP root. The
+`'qp_energies'` diagnostic records the active orbitals' QP energies and Z
+whenever `low.qp` is set.
+
+This is the energy choice of quantum defect embedding theory (Sheng, Vorwerk,
+Govoni and Galli, JCTC 18, 3512 (2022)): its static one-body term evaluates
+iG^R W0 (G^R = G0 - G0^A, the environment propagator, and W0 the full G0W0
+screened interaction) in the averaged form at the full system's G0W0 QP
+energies (their Eq. 29). Two differences remain: QDET makes iG^E W0 static
+including exchange, with V_xc subtracted (their Eq. 26), while here
+iG^E(W - v) is made static and the exchange enters through f and the
+double counting; and QDET starts from KS orbitals, as `mf` does here for a
+KS reference.
+
 ## Kohn-Sham references
 
 A restricted or unrestricted KS mean field (GGA or hybrid) runs, with the KS
@@ -640,6 +678,9 @@ imagfrequency and space-time all four:
 - `'ec_active_casida'` (imagfrequency, space-time): `{'casida': the
   dense-Casida E_c^A on the same v_eff, 'difference': the quadrature value
   minus it}`.
+- `'qp_energies'` (whenever `low.qp` is set, `qp=True`): `{'energies',
+  'z'}` of the active orbitals, pairs for UHF/UKS (see
+  [Sigma^E at the QP energies](#sigmae-at-the-qp-energies-qptrue-sigma_energiesqp)).
 - `'sigma_continuation'` (imagfrequency, space-time, with `sigma`): per
   element of Sigma_bar, the difference between two Pade fits on the even-
   and the odd-indexed nodes at the element's evaluation point. It is a
