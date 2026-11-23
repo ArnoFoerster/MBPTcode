@@ -15,9 +15,10 @@ Available now:
   `mode='imagfrequency'` (density fitted, imaginary frequency, N^4) or
   `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
   `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and on `mode='casida'`
-  also `'mrpa'` (the numerical routes refuse it and point to casida); and
-  optionally (every route) `sigma='srg'` or `'averaged'`: the static
-  environment self-energy Sigma^E that the paper drops (see below).
+  also `'mrpa'` (the numerical routes refuse it and point to casida); and,
+  by default on every route, the static environment self-energy Sigma^E
+  that the paper drops (`sigma='srg'`, or `'averaged'`; see below).
+  `sigma=None` is the paper's scheme.
 - E_0 always, term by term.
 - Restricted closed-shell (RHF/RKS) and unrestricted (UHF/UKS) references,
   on every route. An unrestricted one gives an H_eff with different alpha
@@ -40,10 +41,14 @@ active = ActiveSpace.from_population(mf, atoms=[0, 1], ao_type='p',
                                      n_occ=1, n_virt=1)
 
 low = run_low_level(mf, method='rpa', mode='casida', df=True, numerics=None)
-h = build_effective_hamiltonian(low, active, screening='crpa', sigma=None,
+h = build_effective_hamiltonian(low, active, screening='crpa', sigma='srg',
                                 spin_free=True)
 roots = h.solve('pyscf_fci', nroots=3)
 ```
+
+`sigma='srg'` is the default and could be left out: Sigma^E in the SRG form
+at the mean-field energies. `sigma=None` gives the paper's scheme, without
+Sigma^E and with the full double counting.
 
 `run_low_level` solves the low-level method on the whole system once and does
 not know the active space; `build_effective_hamiltonian` then makes the
@@ -110,8 +115,8 @@ Options of the RPA:
 | `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS |
 | | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
-| | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'averaged'` (Sigma^E, below) |
-| | `sigma_energies` | `'mf'` (default): Sigma^E at the mean-field energies of the active orbitals; `'qp'`: at their QP energies (`low.qp`, needs `qp=True` and a `sigma`) |
+| | `sigma` | `'srg'` (default) or `'averaged'` (Sigma^E, below); `None`, the paper's scheme, asked for explicitly. One default for every screening and route: on `'casida'` 'srg' is damped at `srg_s`, on `'imagfrequency'` and `'space-time'` it is s = inf, continued from the imaginary axis |
+| | `sigma_energies` | `'mf'` (default): Sigma^E at the mean-field energies of the active orbitals; `'qp'`: at their QP energies (`low.qp`, needs `qp=True`; refused with `sigma=None`) |
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 

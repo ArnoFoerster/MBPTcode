@@ -44,14 +44,14 @@ from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
 from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
 
 METHODS = (('HF (UCASCI)', 'hf', {}),
-           ('RPA bare', 'rpa', {'screening': 'bare'}),
-           ('RPA cRPA', 'rpa', {'screening': 'crpa'}),
-           ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph'}),
-           ('RPA mRPA', 'rpa', {'screening': 'mrpa'}),
+           ('RPA bare', 'rpa', {'screening': 'bare', 'sigma': None}),
+           ('RPA cRPA', 'rpa', {'screening': 'crpa', 'sigma': None}),
+           ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph', 'sigma': None}),
+           ('RPA mRPA', 'rpa', {'screening': 'mrpa', 'sigma': None}),
            ('cRPA+SRG', 'rpa', {'screening': 'crpa', 'sigma': 'srg'}),
-           ('cRPA if', 'rpa_if', {'screening': 'crpa'}),
+           ('cRPA if', 'rpa_if', {'screening': 'crpa', 'sigma': None}),
            ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}),
-           ('cRPA st', 'rpa_st', {'screening': 'crpa'}),
+           ('cRPA st', 'rpa_st', {'screening': 'crpa', 'sigma': None}),
            ('cRPA+SRG st', 'rpa_st', {'screening': 'crpa', 'sigma': 'srg'}))
 
 mol = gto.M(atom='O 0 0 0; H 0 0 0.97', basis='cc-pvdz', spin=1, cart=False,

@@ -47,16 +47,16 @@ BENZENE = [('C', (0, 1.39250319, 0)), ('C', (-1.20594314, 0.6962516, 0)),
            ('H', (2.14171677, 1.23652075, 0)), ('H', (0, 2.47304151, 0))]
 MOLECULES = (('ethylene (2,2)', ETHYLENE, 1), ('benzene (6,6)', BENZENE, 3))
 METHODS = (('HF (CASCI)', 'hf', {}),
-           ('RPA bare', 'rpa', {'screening': 'bare'}),
-           ('RPA cRPA', 'rpa', {'screening': 'crpa'}),
-           ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph'}),
-           ('RPA mRPA', 'rpa', {'screening': 'mrpa'}),
+           ('RPA bare', 'rpa', {'screening': 'bare', 'sigma': None}),
+           ('RPA cRPA', 'rpa', {'screening': 'crpa', 'sigma': None}),
+           ('RPA cRPA_ph', 'rpa', {'screening': 'crpa_ph', 'sigma': None}),
+           ('RPA mRPA', 'rpa', {'screening': 'mrpa', 'sigma': None}),
            ('cRPA+SRG', 'rpa', {'screening': 'crpa', 'sigma': 'srg'}),
            ('cRPA_ph+SRG', 'rpa', {'screening': 'crpa_ph', 'sigma': 'srg'}),
            ('mRPA+SRG', 'rpa', {'screening': 'mrpa', 'sigma': 'srg'}),
-           ('cRPA if', 'rpa_if', {'screening': 'crpa'}),
+           ('cRPA if', 'rpa_if', {'screening': 'crpa', 'sigma': None}),
            ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}),
-           ('cRPA st', 'rpa_st', {'screening': 'crpa'}),
+           ('cRPA st', 'rpa_st', {'screening': 'crpa', 'sigma': None}),
            ('cRPA+SRG st', 'rpa_st', {'screening': 'crpa', 'sigma': 'srg'}))
 
 
