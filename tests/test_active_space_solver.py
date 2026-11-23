@@ -169,3 +169,110 @@ def test_an_empty_active_space_with_electrons_is_refused():
     g_eff = {0: 0.0, 1: np.zeros((0, 0)), 2: np.zeros((0, 0, 0, 0))}
     with pytest.raises(ValueError, match='no active orbitals'):
         solve('pyscf_fci', g_eff, 0, 2, spin_free=True)
+
+
+def _h4_g_eff():
+    """(g_eff, norb, nelec) of H4/sto-3g, spatial and physicist, E_0 = 0."""
+    h1, eri, norb, nelec = _h4_hamiltonian()
+    return {0: 0.0, 1: h1, 2: eri.transpose(0, 2, 1, 3)}, norb, nelec
+
+
+def _h4_by_spin():
+    """The H4 spectrum at Sz = 0 split by <S^2>: {2S: ascending energies}."""
+    from pyscf import fci
+    h1, eri, norb, nelec = _h4_hamiltonian()
+    energies, vectors = PyscfFCISolver().roots(h1, eri, norb, nelec,
+                                               nroots=36, spin=None)
+    out = {}
+    for e, v in zip(energies, vectors):
+        ss = fci.spin_op.spin_square(v, norb, (nelec // 2, nelec // 2))[0]
+        two_s = int(round(np.sqrt(1 + 4 * ss) - 1))
+        out.setdefault(two_s, []).append(e)
+    return out
+
+
+@pytest.mark.parametrize('spin', [0, 2])
+def test_spin_gives_pure_spin_states(spin):
+    """solve('pyscf_fci', ..., spin=2S): the lowest nroots states of total
+    spin S. On H4/sto-3g the fifth root of the Ms = S sector without the
+    spin penalty is the quintet (-3.5078 Eh, <S^2> = 6), for the singlets
+    (direct_spin0 keeps every even S) and the triplets (Ms = 1) alike; with
+    it the five are the lowest five of the requested spin."""
+    g_eff, norb, nelec = _h4_g_eff()
+    want = _h4_by_spin()[spin][:5]
+    h1, eri = g_eff[1], g_eff[2].transpose(0, 2, 1, 3)
+    plain = PyscfFCISolver().roots(h1, eri, norb, nelec, nroots=5,
+                                   spin=spin)[0]
+    assert abs(plain[4] - _h4_by_spin()[4][0]) < 1e-8
+    got = solve('pyscf_fci', g_eff, norb, nelec, spin_free=True, nroots=5,
+                spin=spin)
+    assert np.abs(got - want).max() < 1e-8
+
+
+def test_spin_default_is_unchanged():
+    """Without spin the lowest roots at the active Sz, of any spin: the
+    singlet ground state, then the lowest triplet, on H4."""
+    g_eff, norb, nelec = _h4_g_eff()
+    got = solve('pyscf_fci', g_eff, norb, nelec, spin_free=True, nroots=2)
+    by_spin = _h4_by_spin()
+    assert np.abs(got - [by_spin[0][0], by_spin[2][0]]).max() < 1e-8
+
+
+@pytest.mark.parametrize('name', ['openfermion', 'ccsdt', 'ccsdtq'])
+def test_spin_is_refused_by_backends_without_it(name):
+    """A backend that cannot give states of one total spin refuses spin,
+    naming those that can."""
+    g_eff, norb, nelec = _h4_g_eff()
+    with pytest.raises(ValueError, match="'pyscf_fci' and 'dmrg'"):
+        solve(name, g_eff, norb, nelec, spin_free=True, spin=0)
+
+
+def test_spin_is_refused_for_a_spin_resolved_hamiltonian():
+    """Per-spin blocks (an unrestricted reference) conserve Sz alone: spin
+    is refused there."""
+    g_eff, norb, nelec = _h4_g_eff()
+    resolved = {0: 0.0, 1: (g_eff[1], g_eff[1]),
+                2: (g_eff[2], g_eff[2], g_eff[2])}
+    with pytest.raises(ValueError, match='spin-resolved'):
+        solve('pyscf_fci', resolved, norb, (2, 2), spin_free=True, spin=0)
+
+
+@pytest.mark.parametrize('spin', [-2, 1, 6, 2.5, True])
+def test_a_spin_the_electrons_cannot_have_is_refused(spin):
+    """2S must be an integer >= 0 of the electron count's parity, with
+    (N + 2S)/2 alpha electrons fitting in the active orbitals."""
+    g_eff, norb, nelec = _h4_g_eff()
+    with pytest.raises(ValueError, match='spin='):
+        solve('pyscf_fci', g_eff, norb, nelec, spin_free=True, spin=spin)
+
+
+def test_a_root_of_the_wrong_spin_is_refused(monkeypatch):
+    """Without the penalty (shift 0) the quintet is the fifth triplet root;
+    the <S^2> check refuses it rather than return it as a triplet."""
+    from src.EffectiveHamiltonian.solvers import solve as solve_module
+    monkeypatch.setattr(solve_module, 'FCI_SPIN_PENALTY_SHIFT', 0.0)
+    g_eff, norb, nelec = _h4_g_eff()
+    with pytest.raises(ValueError, match=r'<S\^2>'):
+        solve('pyscf_fci', g_eff, norb, nelec, spin_free=True, nroots=5,
+              spin=2)
+
+
+def test_downfolded_hamiltonian_solve_takes_spin():
+    """h.solve('pyscf_fci', nroots=..., spin=...) is the FCI of h.g_eff in
+    that spin, E_0 included: the singlets S0, S1 and the triplet T1 of
+    example 22's helper."""
+    from src.EffectiveHamiltonian.Downfolding import (
+        build_effective_hamiltonian, run_low_level)
+    from src.EffectiveHamiltonian.active_space import ActiveSpace
+    mf = scf.RHF(gto.M(atom=H2O, basis='6-31g', verbose=0)).run()
+    nocc = int(np.count_nonzero(mf.mo_occ))
+    h = build_effective_hamiltonian(run_low_level(mf, method='hf'),
+                                    ActiveSpace.from_counts(mf.mo_energy,
+                                                            nocc, 2, 2))
+    n, nelec = h.space['n_orbs'], h.space['n_elec_active']
+    h1, eri = h.g_eff[1], h.g_eff[2].transpose(0, 2, 1, 3)
+    for nroots, spin in ((2, 0), (1, 2)):
+        want = h.g_eff[0] + PyscfFCISolver().roots(
+            h1, eri, n, nelec, nroots=nroots, spin=spin)[0]
+        got = h.solve('pyscf_fci', nroots=nroots, spin=spin)
+        assert np.abs(got - want).max() < 1e-9

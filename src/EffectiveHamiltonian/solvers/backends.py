@@ -83,16 +83,30 @@ class PyscfFCISolver(ActiveSpaceSolver):
 
     max_roots = None
 
-    def __init__(self, conv_tol=FCI_CONV_TOL):
+    def __init__(self, conv_tol=FCI_CONV_TOL, spin_penalty=None):
+        """spin_penalty: None, or the shift (Eh) of pyscf's
+        fci.addons.fix_spin_ at <S^2> = S(S+1) for a request of spin 2S,
+        which lifts the states of other spin out of the lowest roots (the
+        Ms = S sector still holds every S' >= S, and direct_spin0 every even
+        S); then direct_spin1 is the engine for every spin, since
+        direct_spin0's singlet check rejects the penalized vectors
+        (benzene (6,6): 'State not singlet'). None leaves the engine
+        unpenalized, as before."""
         self.conv_tol = conv_tol
+        self.spin_penalty = spin_penalty
 
     def _engine(self, nelec, spin):
-        """The pyscf FCI module whose spin symmetry matches the request."""
+        """The pyscf FCI module whose spin symmetry matches the request,
+        with the spin penalty when one is set and spin is given."""
+        penalized = self.spin_penalty is not None and spin is not None
         module = (fci.direct_spin0 if spin == 0 and nelec[0] == nelec[1]
-                  else fci.direct_spin1)
+                  and not penalized else fci.direct_spin1)
         engine = module.FCI()
         engine.conv_tol = self.conv_tol
         engine.verbose = 0
+        if penalized:
+            fci.addons.fix_spin_(engine, shift=self.spin_penalty,
+                                 ss=0.25 * spin * (spin + 2))
         return engine
 
     def roots(self, h1, eri, norb, nelec, nroots=1, spin=0):

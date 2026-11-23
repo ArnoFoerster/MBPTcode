@@ -375,6 +375,19 @@ DOWNFOLDING_SIGMA_TILE_GB = 0.25
 # tight because its densities land in a gradient, not only its energy.
 FCI_CONV_TOL = 1e-13
 
+# The spin penalty of the active-space FCI at a requested total spin
+# (`solve(..., spin=2S)`), Eh: pyscf's fci.addons.fix_spin_ at Ms = S adds
+# shift (S^2 - S(S+1)), zero on the requested spin and lifting every higher
+# S' by shift [S'(S'+1) - S(S+1)]: 2 Eh from a singlet to a triplet, 4 Eh
+# from a triplet to a quintet. pyscf's default, 0.2, lifts a triplet by 0.4
+# Eh only, which on H4/sto-3g left the lowest triplet below the fourth
+# singlet (tests/test_active_space_solver.py); 0.5 sufficed there.
+# FCI_SPIN_SQUARE_TOL: how far <S^2> of a returned root may be from S(S+1);
+# a root beyond it is of another spin and is refused, its energy carrying the
+# penalty.
+FCI_SPIN_PENALTY_SHIFT = 1.0
+FCI_SPIN_SQUARE_TOL = 1e-6
+
 # The active-space DMRG (block2): bond dimension, sweep count, the noise added
 # in the sweeps and the tolerance of its Davidson.
 DMRG_BOND_DIM = 500

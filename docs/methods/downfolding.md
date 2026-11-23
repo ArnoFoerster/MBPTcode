@@ -123,8 +123,15 @@ Options of the RPA:
 reference `g_eff[1]` and `g_eff[2]` hold the per-spin blocks and the entries
 of `space` are pairs (see
 [Unrestricted references](#unrestricted-references)). Every backend of
-`solve` adds `g_eff[0]`, so the roots it returns are **total energies**. The
-`ActiveSpace` is the user's choice (`from_indices`, `from_counts`,
+`solve` adds `g_eff[0]`, so the roots it returns are **total energies**.
+`h.solve(solver, nroots=n)` gives the lowest `n` states at the active Sz, of
+any spin; `spin=2S` gives the lowest `n` of total spin S exactly
+(`'pyscf_fci'` with a spin penalty and an <S^2> check, `'dmrg'` as its SU2
+target; refused by the other backends and for an unrestricted reference).
+Excitation energies are differences of these roots, e.g. S0 and S1 from
+`h.solve('pyscf_fci', nroots=2, spin=0)` and T1 from
+`h.solve('pyscf_fci', nroots=1, spin=2)` (examples/22_rpa_downfolding.py).
+The `ActiveSpace` is the user's choice (`from_indices`, `from_counts`,
 `from_irreps`, `from_population`); nothing here selects orbitals.
 
 `energies` is a frozen record holding every term of E_0 on its own, and `e0`

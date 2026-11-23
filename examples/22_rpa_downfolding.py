@@ -18,8 +18,10 @@ rows by the ISDF fit, mostly in E_0, much less in the excitation energies.
 
 One run_low_level per method, route and molecule serves every screening. The pi
 orbitals are picked by Loewdin population on the carbons' p shell, and the
-lowest singlet and triplet excitation energies come from the singlet and
-triplet sectors of the active-space FCI."""
+lowest singlet and triplet excitation energies come from the active-space FCI
+at a fixed total spin, h.solve('pyscf_fci', nroots=..., spin=2S): the two
+lowest singlets S0 and S1 (spin=0) and the lowest triplet T1 (spin=2), E_0
+included."""
 import os
 import sys
 
@@ -32,7 +34,6 @@ from src.Base.numerics.numerics import Numerics
 from src.EffectiveHamiltonian.Downfolding import (build_effective_hamiltonian,
                                                   run_low_level)
 from src.EffectiveHamiltonian.active_space import ActiveSpace
-from src.EffectiveHamiltonian.solvers.backends import PyscfFCISolver
 
 # both molecules lie in the xy plane, so the pi orbitals are the carbon p_z
 ETHYLENE = [('C', (0, 0.6695, 0)), ('C', (0, -0.6695, 0)),
@@ -57,19 +58,6 @@ METHODS = (('HF (CASCI)', 'hf', {}),
            ('cRPA+SRG if', 'rpa_if', {'screening': 'crpa', 'sigma': 'srg'}),
            ('cRPA st', 'rpa_st', {'screening': 'crpa'}),
            ('cRPA+SRG st', 'rpa_st', {'screening': 'crpa', 'sigma': 'srg'}))
-
-
-def excitations(g_eff, space):
-    """(E_S0, S1 - S0, T1 - S0) in Eh of the effective Hamiltonian: the
-    singlet sector gives S0 and S1, the Ms = 1 sector the lowest triplet. The
-    FCI is run on h_eff and v_eff alone, so E_0 is added to S0 here (solve()
-    adds it itself)."""
-    n, nelec = space['n_orbs'], space['n_elec_active']
-    h1, eri = g_eff[1], g_eff[2].transpose(0, 2, 1, 3)   # chemist order
-    singlets = PyscfFCISolver().roots(h1, eri, n, nelec, nroots=2, spin=0)[0]
-    triplet = PyscfFCISolver().roots(h1, eri, n, nelec, nroots=1, spin=2)[0]
-    return (singlets[0] + g_eff[0], singlets[1] - singlets[0],
-            triplet[0] - singlets[0])
 
 
 for name, atoms, n_pi in MOLECULES:
@@ -100,7 +88,9 @@ for name, atoms, n_pi in MOLECULES:
     for label, method, opts in METHODS:
         h = build_effective_hamiltonian(lows[method], active, **opts)
         en = h.energies
-        e_s0, s1, t1 = excitations(h.g_eff, h.space)
+        s0, s1 = h.solve('pyscf_fci', nroots=2, spin=0)
+        (t1,) = h.solve('pyscf_fci', nroots=1, spin=2)
+        e_s0, s1, t1 = s0, s1 - s0, t1 - s0
         print(f'{label:<13}{en.e_core:12.6f}{en.eh:12.6f}{en.ex:11.6f}'
               f'{en.ec:10.6f}{0.0 - en.e_sigma_trace:10.6f}{en.e0:12.6f}'
               f'{e_s0:12.6f}{s1 * HARTREE_TO_EV:9.3f}{t1 * HARTREE_TO_EV:9.3f}')

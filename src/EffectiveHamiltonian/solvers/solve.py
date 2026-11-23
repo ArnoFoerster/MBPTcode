@@ -34,13 +34,17 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from pyscf import fci
 
 from src.Base.numerical_flags import flag
 from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL, DMRG_BOND_DIM,
-                                         DMRG_N_SWEEPS)
+                                         DMRG_N_SWEEPS,
+                                         FCI_SPIN_PENALTY_SHIFT,
+                                         FCI_SPIN_SQUARE_TOL)
 from src.EffectiveHamiltonian.solvers.backends import (
     Block2DMRGSolver, CoupledClusterSolver, ExactDiagonalizationSolver,
-    PyscfFCISolver, PyscfSpinResolvedFCISolver, total_spin_square)
+    PyscfFCISolver, PyscfSpinResolvedFCISolver, spin_sector,
+    total_spin_square)
 from src.EffectiveHamiltonian.solvers.determinants import (
     spatial_to_spin_orbitals)
 
@@ -132,6 +136,7 @@ class _Request:
     nroots: Optional[int]
     dmrg_bond_dim: int
     dmrg_n_sweeps: int
+    spin: Optional[int] = None
 
     def spatial(self, solver):
         return _spatial_active_hamiltonian(
@@ -141,19 +146,40 @@ class _Request:
 
 def _pyscf_fci(r):
     h1, eri, norb, nelec = r.spatial('pyscf_fci')
-    # spin=None: every state at this Sz, the space direct_spin1 spans here
-    return r.g_eff.get(0, 0.0) + PyscfFCISolver().roots(
-        h1, eri, norb, nelec, nroots=r.nroots, spin=None)[0]
+    if r.spin is None:
+        # every state at this Sz, the space direct_spin1 spans here
+        return r.g_eff.get(0, 0.0) + PyscfFCISolver().roots(
+            h1, eri, norb, nelec, nroots=r.nroots, spin=None)[0]
+    # the states of total spin S: Ms = S and the spin penalty, then every
+    # root's <S^2> checked, since one of another spin carries the penalty
+    energies, vectors = PyscfFCISolver(
+        spin_penalty=FCI_SPIN_PENALTY_SHIFT).roots(
+        h1, eri, norb, nelec, nroots=r.nroots, spin=r.spin)
+    want = 0.25 * r.spin * (r.spin + 2)
+    sector = spin_sector(nelec, r.spin)
+    got = [fci.spin_op.spin_square(v, norb, sector)[0] for v in vectors]
+    wrong = [(k, s) for k, s in enumerate(got)
+             if abs(s - want) > FCI_SPIN_SQUARE_TOL]
+    if wrong:
+        raise ValueError(
+            f"spin={r.spin}: roots {[k for k, _ in wrong]} of the penalized "
+            f"FCI have <S^2> = {[round(s, 6) for _, s in wrong]}, not "
+            f"S(S+1) = {want:g}: a state of another spin lies within the "
+            f"penalty (FCI_SPIN_PENALTY_SHIFT = {FCI_SPIN_PENALTY_SHIFT:g} "
+            f"Eh times the S^2 difference) of the requested ones, and its "
+            f"energy carries that penalty. Ask for fewer roots.")
+    return r.g_eff.get(0, 0.0) + energies
 
 
 def _dmrg(r):
     h1, eri, norb, nelec = r.spatial('dmrg')
     nocca, noccb = nelec
-    # spin = n_alpha - n_beta: the lowest total S consistent with this Sz
-    # (an SU2 target is a total spin, unlike pyscf_fci's spin=None).
+    # an SU2 target is a total spin, unlike pyscf_fci's spin=None: the
+    # requested one, else n_alpha - n_beta, the lowest S at this Sz
+    spin = nocca - noccb if r.spin is None else r.spin
     return r.g_eff.get(0, 0.0) + Block2DMRGSolver(
         bond_dim=r.dmrg_bond_dim, n_sweeps=r.dmrg_n_sweeps).roots(
-        h1, eri, norb, nelec, nroots=r.nroots, spin=nocca - noccb)[0]
+        h1, eri, norb, nelec, nroots=r.nroots, spin=spin)[0]
 
 
 def _coupled_cluster(name):
@@ -270,7 +296,8 @@ SPIN_RESOLVED_SOLVERS = {'pyscf_fci': _pyscf_fci_uhf}
 
 def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
           spin_free=False, nroots=1, dmrg_bond_dim=DMRG_BOND_DIM,
-          dmrg_n_sweeps=DMRG_N_SWEEPS, out=None, spin_overlap=None):
+          dmrg_n_sweeps=DMRG_N_SWEEPS, out=None, spin_overlap=None,
+          spin=None):
     """
     The lowest `nroots` energies of a downfolded effective Hamiltonian g_eff,
     ascending, its constant g_eff[0] included: the same contract for every
@@ -310,6 +337,17 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
     many as the sector has. The other backends refuse it; 'openfermion'
     takes the spin-orbital form of the same Hamiltonian (spin_free=False),
     at N_alpha = N_beta only.
+    spin: None (default), the lowest nroots states at the active Sz, of any
+    spin, as described above for each backend; or 2S (0 singlets, 2
+    triplets), the lowest nroots states of total spin S exactly. 'pyscf_fci'
+    solves at Ms = S with pyscf's spin penalty (fci.addons.fix_spin_,
+    FCI_SPIN_PENALTY_SHIFT), whose energies are those of the Hamiltonian
+    itself on that spin, and refuses a root whose <S^2> is not S(S+1);
+    'dmrg' takes it as its SU2 target. 'openfermion' and the coupled-cluster
+    backends refuse it, as does a spin-resolved g_eff (Sz alone is
+    conserved there; out['spin_square'] reports <S^2>). 2S must fit the
+    active electrons: an integer >= 0 of their parity, (N + 2S)/2 of them
+    alpha in the active orbitals.
     out, spin_overlap: with `out` a dict and `spin_overlap` the alpha-beta
     overlaps of the orbitals (the blocks 'core_core', 'core_active',
     'active_core', 'active_active', as `build_effective_hamiltonian` puts
@@ -344,6 +382,8 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
                 f"from its per-spin blocks (spin_free=True) with "
                 f"solver='pyscf_fci'.")
         n_elec_active = n_alpha + n_beta
+    _check_spin(solver, spin, resolved, n_spin_orbs, n_elec_active,
+                spin_free)
     if n_spin_orbs == 0:
         if sum(n_elec_active) if resolved else n_elec_active:
             raise ValueError(f"n_elec_active={n_elec_active} electrons with no "
@@ -373,4 +413,36 @@ def solve(solver, g_eff, n_spin_orbs, n_elec_active, symmetrize=True,
                      nroots, dmrg_bond_dim, dmrg_n_sweeps), out, spin_overlap)
     return SOLVERS[solver](_Request(g_eff, n_spin_orbs, n_elec_active,
                                     spin_free, symmetrize, nroots,
-                                    dmrg_bond_dim, dmrg_n_sweeps))
+                                    dmrg_bond_dim, dmrg_n_sweeps, spin))
+
+
+#: The backends that give the states of one total spin (`solve`'s spin).
+SPIN_SOLVERS = ('pyscf_fci', 'dmrg')
+
+
+def _check_spin(solver, spin, resolved, n_spin_orbs, n_elec_active,
+                spin_free):
+    """Refuse a spin (2S) that `solve` cannot honour: on a backend without
+    total spin, on a spin-resolved g_eff, or one the active electrons cannot
+    have (not an integer >= 0 of their parity, or more alpha electrons than
+    active orbitals). None passes."""
+    if spin is None:
+        return
+    if resolved:
+        raise ValueError(
+            f"spin={spin!r} asks for states of one total spin, which a "
+            f"spin-resolved g_eff (the per-spin blocks of an unrestricted "
+            f"reference) does not conserve: it conserves Sz alone. Solve "
+            f"without spin; out['spin_square'] reports <S^2> of each root.")
+    if solver not in SPIN_SOLVERS:
+        raise ValueError(
+            f"solver={solver!r} cannot give the states of one total spin; "
+            f"spin={spin!r} is taken by 'pyscf_fci' and 'dmrg'.")
+    norb = n_spin_orbs if spin_free else n_spin_orbs // 2
+    n = int(n_elec_active)
+    if (isinstance(spin, bool) or not isinstance(spin, (int, np.integer))
+            or spin < 0 or (n - spin) % 2 or (n + spin) // 2 > norb):
+        raise ValueError(
+            f"spin={spin!r} (2S) does not fit {n} active electrons in "
+            f"{norb} orbitals: 2S is an integer >= 0 of the electron "
+            f"count's parity, with (N + 2S)/2 <= {norb} alpha electrons.")
