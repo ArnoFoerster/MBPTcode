@@ -414,7 +414,7 @@ def test_sigma_bar_with_full_double_counting_is_refused(monkeypatch):
     mf = water()
     active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
 
-    def terms(low, active_space):
+    def downfold(low, active_space):
         n = active_space.n_act
         z = np.zeros((n,) * 4)
         return DownfoldingTerms(vtilde=(z, z, z),
@@ -422,7 +422,8 @@ def test_sigma_bar_with_full_double_counting_is_refused(monkeypatch):
                                 e_c_full=0.0, e_c_active=0.0, dc='full')
 
     probe = SimpleNamespace(
-        run=lambda mf: SimpleNamespace(method='probe', mf=mf), terms=terms)
+        run=lambda mf: SimpleNamespace(method='probe', mf=mf),
+        downfold=downfold)
     monkeypatch.setitem(LOW_LEVEL, 'probe', probe)
     low = run_low_level(mf, method='probe')
     with pytest.raises(ValueError, match="probe"):
@@ -848,7 +849,7 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
     monkeypatch.setattr(core, 'get_jk', counted_jk)
     monkeypatch.setattr(two_body.ao2mo, 'general', counted_general)
     active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    assert len(LOW_LEVEL[method].terms(low, active_space).vtilde) == 1
+    assert len(LOW_LEVEL[method].downfold(low, active_space).vtilde) == 1
     build_effective_hamiltonian(low, active_space)
     assert calls == {'jk': 1, 'ao2mo': 1}
 
@@ -856,13 +857,13 @@ def test_the_driver_builds_each_integral_once(monkeypatch, method):
 def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
     """A restricted reference is one spin channel, vtilde = (v,) and
     sigma_bar = (s,); an unrestricted one is two, (aa, ab, bb) and (a, b),
-    whose `terms` gets the pair of partitions. A method that hands back the
+    whose `downfold` gets the pair of partitions. A method that hands back the
     blocks of the other kind is refused by name."""
     mf = water()
     aspace = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
     seen = []
 
-    def terms(low, active_space, nblocks=1, nsigma=None):
+    def downfold(low, active_space, nblocks=1, nsigma=None):
         seen.append(active_space)
         z = np.zeros((aspace.n_act,) * 4)
         sigma = None if nsigma is None else (np.zeros((4, 4)),) * nsigma
@@ -870,7 +871,7 @@ def test_the_blocks_of_a_method_must_fit_the_reference(monkeypatch):
             vtilde=(z,) * nblocks, sigma_bar=sigma, e_c_full=0.0,
             e_c_active=0.0, dc='full' if nsigma is None else 'hartree')
 
-    monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(terms=terms))
+    monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(downfold=downfold))
     low = SimpleNamespace(mf=mf, method='probe')
     build_effective_hamiltonian(low, aspace)
     assert seen[-1].n_act == 4                    # one ActiveSpace, not a tuple
@@ -902,32 +903,32 @@ def test_named_flags_reach_the_results(monkeypatch):
     from src.Base.numerical_flags import flag
     mf = water()
     active_space = ActiveSpace.from_counts(mf.mo_energy, 5, 2, 2)
-    raise_in_terms = [True]
+    raise_in_downfold = [True]
 
     def run(mf):
         flag('probe_run', 'raised by run', RuntimeWarning)
         return SimpleNamespace(mf=mf, method='probe')
 
-    def terms(low, active_space):
-        if raise_in_terms[0]:
-            flag('probe_terms', 'raised by terms', RuntimeWarning)
-            flag('probe_terms', 'raised by terms', RuntimeWarning)
+    def downfold(low, active_space):
+        if raise_in_downfold[0]:
+            flag('probe_downfold', 'raised by downfold', RuntimeWarning)
+            flag('probe_downfold', 'raised by downfold', RuntimeWarning)
         z = np.zeros((active_space.n_act,) * 4)
         return DownfoldingTerms(vtilde=(z,), sigma_bar=None, e_c_full=0.0,
                                 e_c_active=0.0, dc='full')
 
     monkeypatch.setitem(LOW_LEVEL, 'probe', SimpleNamespace(run=run,
-                                                            terms=terms))
+                                                            downfold=downfold))
     with pytest.warns(RuntimeWarning, match='raised by run'):
         low = run_low_level(mf, method='probe')
     ran = {'flag': 'probe_run', 'message': 'raised by run'}
     assert low.numerical_flags == [ran]
-    with pytest.warns(RuntimeWarning, match='raised by terms'):
+    with pytest.warns(RuntimeWarning, match='raised by downfold'):
         ham = build_effective_hamiltonian(low, active_space)
         en = ham.energies
-    assert ham.numerical_flags == [
-        ran, {'flag': 'probe_terms', 'message': 'raised by terms'}]
-    raise_in_terms[0] = False
+    assert ham.numerical_flags == [   # sorted by name (`gathered`)
+        {'flag': 'probe_downfold', 'message': 'raised by downfold'}, ran]
+    raise_in_downfold[0] = False
     ham = build_effective_hamiltonian(low, active_space)
     en = ham.energies
     assert ham.numerical_flags == [ran]

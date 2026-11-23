@@ -192,7 +192,7 @@ def test_vtilde_matches_casida(ref, aspace):
             # crpa_ph has no ph element without an active virtual orbital
             assert np.abs(ref_vt).max() > 1e-3
         assert np.abs(vt - ref_vt).max() < 1e-8
-        t = rpa.terms(low_if, active_space, s, diagnostics=())
+        t = rpa.downfold(low_if, active_space, s, diagnostics=())
         assert all(np.array_equal(x, vt) for x in t.vtilde)
 
 
@@ -259,7 +259,7 @@ def test_all_active_ec_pair_cancels(s):
     basis)."""
     low = run_low_level(h2(), mode='imagfrequency')
     active_space = ActiveSpace.from_indices(4, 1, [0], [1, 2, 3])
-    t = rpa.terms(low, active_space, s)
+    t = rpa.downfold(low, active_space, s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-10
     assert np.abs(t.vtilde[0]).max() == 0.0
 
@@ -278,7 +278,7 @@ def test_all_active_ec_pair_cancels_on_a_coarse_grid(s):
     assert len(low.cache['grid'][0]) == 6
     assert abs(low.e_c_full - _low('hf', 'casida').e_c_full) > 1e-7
     active_space = ActiveSpace.from_indices(13, 5, range(5), range(5, 13))
-    t = rpa.terms(low, active_space, s)
+    t = rpa.downfold(low, active_space, s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-12
 
 
@@ -593,7 +593,7 @@ def test_active_part_cancels_exactly():
     w_r -= np.eye(len(p_a))
     assert np.abs(b_act.T @ w_r @ b_act).max() < 1e-10
     for s in SCREENINGS_1:
-        t = rpa.terms(low, active_space, s, diagnostics=())
+        t = rpa.downfold(low, active_space, s, diagnostics=())
         assert np.abs(t.vtilde[0]).max() == 0.0
 
 
@@ -626,7 +626,7 @@ def test_all_active_ec_pair_cancels_space_time(s):
     pushed through the energy's own tau -> omega transform, makes Pi^A U the
     full chi0 v at every frequency, so E_c^A = E_c[v] (measured 4.3e-13)."""
     low = _st_low('water', 'space-time')
-    t = rpa.terms(low, _all_active(low), s)
+    t = rpa.downfold(low, _all_active(low), s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-10
 
 
@@ -643,7 +643,7 @@ def test_all_active_ec_pair_cancels_on_a_coarse_space_time_grid(s):
     grid = low.cache['energy_grid']
     assert grid.ntau == 10 and grid.nfreq == 6
     assert abs(low.e_c_full - _st_low('water', 'space-time').e_c_full) > 1e-7
-    t = rpa.terms(low, _all_active(low), s)
+    t = rpa.downfold(low, _all_active(low), s)
     assert abs(t.e_c_full - t.e_c_active) < 1e-10
 
 
@@ -667,7 +667,7 @@ def test_space_time_vtilde_matches_casida(ref, aspace):
         if s == 'crpa' or active_space.n_act > active_space.n_act_occ:
             assert np.abs(ref_vt).max() > 1e-3
         assert np.abs(vt - ref_vt).max() < 1e-5
-        t = rpa.terms(low_st, active_space, s, diagnostics=())
+        t = rpa.downfold(low_st, active_space, s, diagnostics=())
         assert all(np.array_equal(x, vt) for x in t.vtilde)
 
 

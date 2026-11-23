@@ -207,7 +207,7 @@ def test_vtilde_matches_casida(ref, which):
         if screening == 'crpa':
             assert min(np.abs(block).max() for block in want) > 1e-2
             assert np.abs(want[0] - want[2]).max() > 1e-3
-        terms = rpa.terms(low_if, parts, screening, diagnostics=())
+        terms = rpa.downfold(low_if, parts, screening, diagnostics=())
         assert all(np.array_equal(x, y) for x, y in zip(terms.vtilde, vt))
     bare = rpa.screening_correction(low_if, parts, 'bare')
     assert len(bare) == 3 and not any(block.any() for block in bare)
@@ -270,7 +270,7 @@ def test_all_active_ec_pair_cancels(ref, screening):
     low = _low(ref, 'imagfrequency')
     every = tuple(space for space, eps in zip(
         _all_active(ref), _mean_field(ref).mo_energy))
-    terms = rpa.terms(low, every, screening)
+    terms = rpa.downfold(low, every, screening)
     assert terms.e_c_full < -1e-2
     assert abs(terms.e_c_full - terms.e_c_active) < 1e-10
     assert not any(block.any() for block in terms.vtilde)
@@ -290,7 +290,7 @@ def test_all_active_ec_pair_cancels_on_a_coarse_grid(screening):
     assert abs(low.e_c_full - _low('oh', 'casida').e_c_full) > 1e-7
     every = tuple(space for space, eps in zip(
         _all_active('oh'), mf.mo_energy))
-    terms = rpa.terms(low, every, screening)
+    terms = rpa.downfold(low, every, screening)
     assert abs(terms.e_c_full - terms.e_c_active) < 1e-12
 
 
@@ -865,7 +865,7 @@ def test_space_time_active_part_cancels(ref):
     p_a = rpa.active_polarizability_static(low, every)
     assert np.abs(low.cache['p0'] - p_a).max() < 1e-12
     for screening in SCREENINGS:
-        terms = rpa.terms(low, every, screening)
+        terms = rpa.downfold(low, every, screening)
         assert len(terms.vtilde) == 3
         assert max(np.abs(block).max() for block in terms.vtilde) < 1e-10
         assert abs(terms.e_c_full - terms.e_c_active) < 1e-10
@@ -884,7 +884,7 @@ def test_space_time_all_active_cancels_on_a_coarse_grid(screening):
     grid = low.cache['energy_grid']
     assert grid.ntau == 10 and grid.nfreq == 6
     assert abs(low.e_c_full - _st_low('oh').e_c_full) > 1e-7
-    terms = rpa.terms(low, _st_all_active('oh'), screening)
+    terms = rpa.downfold(low, _st_all_active('oh'), screening)
     assert abs(terms.e_c_full - terms.e_c_active) < 1e-10
 
 

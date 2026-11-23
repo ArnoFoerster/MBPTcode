@@ -41,7 +41,7 @@ def run(mf, **opts):
     return HFLowLevel(mf=mf)
 
 
-def terms(low, active_space, **opts):
+def downfold(low, active_space, **opts):
     """The DownfoldingTerms of HF: vtilde = 0 on the n_act active orbitals of
     `active_space`, one block for the ActiveSpace of a restricted reference and
     the three (aa, ab, bb) for the pair of an unrestricted one; no static

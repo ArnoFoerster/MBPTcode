@@ -22,7 +22,7 @@ refused. On the prototype's own orbitals 'averaged' is its Sigma_bar. The
 continuation_margin.
 
 A term of Eq. 44 exactly at a pole is 0, not NaN. The
-'sigma_poles' diagnostic of `terms` (window, pole distances, Z_t against
+'sigma_poles' diagnostic of `downfold` (window, pole distances, Z_t against
 the oracle's S^E, the s applied, the SRG damping) warns on the near-pole
 space only; along a short scan through a pole crossing 'srg' stays as
 smooth as on a space far from the poles, where Eq. 42 jumps.

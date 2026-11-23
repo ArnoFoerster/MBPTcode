@@ -8,9 +8,10 @@ Usage: one low-level run, then one Hamiltonian per active space.
                                     sigma='srg')
     h.solve(solver)
 
-The options (default first). Details: rpa.run and rpa.terms in methods/rpa.py,
-whose tuples MODES, SCREENINGS, SIGMAS and DIAGNOSTICS are the valid values;
-every value is checked by `require_choice` (src/Base/utils/choices.py).
+The options (default first). Details: rpa.run and rpa.downfold in
+methods/rpa.py, whose tuples MODES, SCREENINGS, SIGMAS and DIAGNOSTICS are the
+valid values; every value is checked by `require_choice`
+(src/Base/utils/choices.py).
 
 run_low_level(mf, method, **method_opts)
     method      'rpa' | 'hf' ('hf' takes no further options)

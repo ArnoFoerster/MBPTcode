@@ -3,14 +3,14 @@
 `run` solves the RPA of the whole system once, before any active space is
 known, on one of three routes: 'casida' (dense, every pole), 'imagfrequency'
 (density fitted, imaginary frequency, N^4) or 'space-time' (separable ISDF
-factors, imaginary time, N^3). `terms` then gives the DownfoldingTerms of
+factors, imaginary time, N^3). `downfold` then gives the DownfoldingTerms of
 any active space from that one result: the screening correction vtilde, the
 correlation-energy pair and, with `sigma`, the static environment
 self-energy Sigma_bar^E.
 
 After the constants and warnings, the file reads top-down: the low-level
-result with its two entry points (`RPALowLevel`, `run`, `terms`), then the
-sections in the order `terms` uses them, each opened by what holds on each
+result with its two entry points (`RPALowLevel`, `run`, `downfold`), then the
+sections in the order `downfold` uses them, each opened by what holds on each
 route:
   1. the screening correction (vtilde)
   2. the active correlation energy and the static defect
@@ -150,7 +150,7 @@ class RPALowLevel:
         with (pq|rs) = sum_Q B_Q,pq B_Q,rs, when df; else None, and None on
         space-time, which never builds it whole (`active_pair_factors`).
     eri: the exact chemist MO integrals (pq|rs) when not df; else None.
-    cache: what a later `terms` call builds the first time it needs it. On
+    cache: what a later `downfold` call builds the first time it needs it. On
         imagfrequency `run` puts there 'grid', the (points, weights) of the
         energy's minimax frequency quadrature, and 'p0', P(0) = 1 - W(0)^-1
         = chi0(0) = -4 B_ov diag(1/delta) B_ov^T (naux, naux) in the
@@ -261,7 +261,7 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         e_c_full=e_c, omega=omega, xpy=xpy, factors=factors, eri=eri)
 
 
-def terms(low, active_space, screening='crpa', sigma=None,
+def downfold(low, active_space, screening='crpa', sigma=None,
           diagnostics=DIAGNOSTICS,
           numerics=None, **opts):
     """The DownfoldingTerms of the RPA on the active space `active_space`.
@@ -328,7 +328,7 @@ def terms(low, active_space, screening='crpa', sigma=None,
     reads the orbitals from the mean field, and they would no longer be
     those of the screening kept here.
     """
-    _refuse_options(opts, 'terms')
+    _refuse_options(opts, 'downfold')
     low = _with_settings(low, numerics)
     _require_current_mean_field(low)
     names = _diagnostic_names(diagnostics)
@@ -374,7 +374,7 @@ def terms(low, active_space, screening='crpa', sigma=None,
 # an active space on the casida route: the active pairs deleted from A+B and
 # one Cholesky solve, or for 'mrpa' (casida only) the interaction that keeps
 # the full RPA's zeroth moment eta0 = (X+Y)(X+Y)^T on the active ph pairs
-# (Scott and Booth's Eq. 5, from the kept X+Y). `terms` assembles an active
+# (Scott and Booth's Eq. 5, from the kept X+Y). `downfold` assembles an active
 # space's DownfoldingTerms from it: vtilde, the correlation-energy pair
 # E_c[v] - E_c^A[v_eff] (both by the plasmon formula, on the same v) and the
 # static defect |W(0) - W^A[v_eff](0)|, zero for crpa.
@@ -858,7 +858,7 @@ def static_defect(low, active_space, v_eff):
 # between the active and the environment orbitals (`screened_residues`) and
 # the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
 # by Kotani's mode A at eta = 0 (Eq. 12, 'averaged', which warns near the
-# poles, `pole_window`). `terms(..., sigma=...)` hands it to the general layer in
+# poles, `pole_window`). `downfold(..., sigma=...)` hands it to the general layer in
 # both spin channels with the Hartree-only double counting (dc='hartree'), and
 # records the 'sigma_poles' diagnostic.
 #

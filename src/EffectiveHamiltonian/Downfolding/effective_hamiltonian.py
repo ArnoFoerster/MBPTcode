@@ -144,7 +144,7 @@ class DownfoldedHamiltonian:
 
 def run_low_level(mf, method='rpa', **method_opts):
     """The low-level result of `method` on the mean field `mf` (attributes
-    `method` and `mf`, plus whatever the method keeps for its `terms`).
+    `method` and `mf`, plus whatever the method keeps for its `downfold`).
 
     The result does not depend on an active space, so one run serves every
     active space built from it. A gas-phase, T = 0 mean field is taken,
@@ -223,7 +223,7 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     h_eff = f - t^DC (+ Sigma_bar) with f the Fock operator of the inactive
     core, v_eff = v + vtilde with v the exact active integrals; the method
     supplies vtilde, Sigma_bar, the correlation-energy pair and the
-    double-counting mode. method_opts go to the method's `terms`.
+    double-counting mode. method_opts go to the method's `downfold`.
 
     `numerical_flags` lists every named flag behind this
     Hamiltonian (src.Base.numerical_flags): those of the low-level run
@@ -238,9 +238,9 @@ def build_effective_hamiltonian(low, active_space, spin_free=True,
     method = require_choice(low.method, tuple(LOW_LEVEL), 'method')
     flags = []
     with collecting(flags):
-        # `terms` is called from this function itself, not from a helper:
+        # `downfold` is called from this function itself, not from a helper:
         # the method's warnings count the frames up to the caller of this one
-        terms = LOW_LEVEL[method].terms(
+        terms = LOW_LEVEL[method].downfold(
             low, spaces if unrestricted else spaces[0], **method_opts)
         _check_terms(terms, method, unrestricted)
 
