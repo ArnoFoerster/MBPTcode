@@ -578,11 +578,16 @@ solve) at the GW code's default broadening `DEFAULT_BROADENING_ETA`; on
 imagfrequency on the run's own W(i w) grid, the one Sigma^E uses (built once,
 by the run, and the grid and W of calc_qp_energy's driver), with the
 driver's own steps after it; on space-time through the GW driver on the
-run's numerics and ISDF factors, which builds its own W on its own grids
-(Z for a restricted reference only).
-An orbital without a QP root (satellites of core orbitals and high virtuals)
-is NaN and not converged, named in the flag `'qp_no_root'`; a root kept with
-Z outside (0, 1] in `'qp_z_outside'`.
+run's numerics, which builds its own W on its own grids (on the run's ISDF
+factors for a restricted reference; an unrestricted one fits its own, and
+has no Z).
+An orbital whose equation has no root at all is NaN and not converged,
+named in the flag `'qp_no_root'`; a root kept with Z outside (0, 1] is
+named in `'qp_z_outside'`. A satellite is not NaN: on casida the pole sum has
+a root between every pair of poles, and the root of largest weight is kept,
+as calc_qp_energy keeps it, even when its Z is small (O 1s and high virtuals
+of PBE water: Z = 0.29-0.42). `low.qp.z` shows which roots are
+quasiparticles.
 
 `sigma_energies='qp'` then evaluates Sigma^E (`'srg'` or `'averaged'`) at the
 QP energies of the active orbitals instead of the mean-field ones; the poles

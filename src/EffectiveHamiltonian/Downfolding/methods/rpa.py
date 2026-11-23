@@ -230,6 +230,9 @@ def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     _refuse_options(opts, 'run')
     mode = require_choice(mode, MODES, 'mode')
     df = bool(df)
+    if not isinstance(qp, (bool, np.bool_)):
+        raise TypeError(f"qp={qp!r}: True (the one-shot G0W0 spectrum) or "
+                        f"False.")
     eps, nocc, channels = _reference(mf)
     _require_route(mode, df, channels)
     route = {'casida': _casida_fields,
@@ -2022,15 +2025,15 @@ def quasiparticles(low):
     qp = QuasiParticles(energies=tuple(energies), z=tuple(z),
                         converged=tuple(np.isfinite(e) for e in energies))
     spins = _spin_names(low)
-    _flag_orbitals('qp_no_root', 'no quasiparticle root (NaN in low.qp)',
+    _flag('qp_no_root', 'no quasiparticle root (NaN in low.qp)',
                    spins, [~ok for ok in qp.converged])
-    _flag_orbitals('qp_z_outside', 'a root kept with Z outside (0, 1]',
+    _flag('qp_z_outside', 'a root kept with Z outside (0, 1]',
                    spins, [np.isfinite(zs) & ((zs <= 0) | (zs > 1))
                            for zs in qp.z])
     return qp
 
 
-def _flag_orbitals(name, what, spins, masks):
+def _flag(name, what, spins, masks):
     """One named flag for the orbitals of `masks` (one per spin channel),
     if any: the summary of the root finder's per-orbital warnings, which
     `quasiparticles` silences over the whole spectrum."""
@@ -2076,7 +2079,7 @@ def _qp_casida(low):
             for j, p in enumerate(act):
                 energies[s][p], z[s][p] = _qp_root(
                     w[s][:, j, :] ** 2, low.omega, eps[s], nocc[s],
-                    float(eps[s][p] + xc[p]))
+                    float(eps[s][p]), float(xc[p]))
     return energies, z
 
 
@@ -2126,20 +2129,43 @@ def _qp_space_time(low):
             mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
             factors=low.cache['factors'], with_z=True)
         return [np.asarray(e, dtype=float)], [np.asarray(zs, dtype=float)]
-    energies = [np.asarray(solve_qp_energy_space_time(
-        mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
-        spin_channel=spin), dtype=float) for spin in SPINS]
+    energies = [_space_time_window(mf, low, nmo, spin) for spin in SPINS]
     return energies, [np.full(nmo, np.nan) for _ in SPINS]
 
 
-def _qp_root(weights, omega, eps, nocc, anchor):
-    """(energy, Z) of w = anchor + Re Sigma_pp(w), Sigma_pp the pole sum of
-    `weights` (nexc, nmo) over (eps, omega) at DEFAULT_BROADENING_ETA; NaN,
-    NaN without a root. Z by a central difference of Sigma (h = 1e-5 Ha)."""
+def _space_time_window(mf, low, nmo, spin):
+    """The QP energies of one spin of an unrestricted reference on
+    space-time: one driver call for the whole window, and only if a state's
+    continuation fails there (ArithmeticError, LinAlgError; the driver
+    takes no `failures` without with_z, which it refuses for an
+    unrestricted reference), one call per orbital, the failed ones NaN."""
+    def solve(states):
+        return np.asarray(solve_qp_energy_space_time(
+            mf, mf.mol, low.nocc, states, numerics=low.numerics,
+            spin_channel=spin), dtype=float)
+    try:
+        return solve(np.arange(nmo))
+    except (ArithmeticError, np.linalg.LinAlgError):
+        out = np.full(nmo, np.nan)
+        for p in range(nmo):
+            try:
+                out[p] = solve(np.array([p]))[0]
+            except (ArithmeticError, np.linalg.LinAlgError):
+                pass
+        return out
+
+
+def _qp_root(weights, omega, eps, nocc, eps_p, static):
+    """(energy, Z) of w = eps_p + static + Re Sigma_pp(w), Sigma_pp the pole
+    sum of `weights` (nexc, nmo) over (eps, omega) at DEFAULT_BROADENING_ETA
+    and static = <p|Sigma_x - v_xc|p>; NaN, NaN without a root. The root
+    search is centred on eps_p, as calc_qp_energy's (its scan windows are),
+    so both find the same root. Z by a central difference of Sigma
+    (h = 1e-5 Ha)."""
     sigma = SigmaEvaluator([(weights, omega)], lambda sums: sums[0], eps,
                            nocc, DEFAULT_BROADENING_ETA, False)
     root = solve_qp_equation_pole_strength(
-        lambda x: x - anchor - sigma(x), anchor, vectorized=True)
+        lambda x: x - eps_p - static - sigma(x), eps_p, vectorized=True)
     if not np.isfinite(root):
         return np.nan, np.nan
     h = 1e-5

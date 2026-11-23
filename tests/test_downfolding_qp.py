@@ -333,3 +333,64 @@ def test_imagfrequency_qp_builds_w_once(monkeypatch):
         _quiet(rpa.downfold, low, aspace, sigma='averaged',
                sigma_energies=energies)
     assert len(calls) == 1
+
+
+# --- fixes of the final review ------------------------------------------------
+
+def test_casida_qp_matches_calc_qp_energy_on_a_ks_reference():
+    """On a KS reference <Sigma_x - v_xc> is not zero: the root search is
+    centred on eps_p, as calc_qp_energy's (review: a search centred on
+    eps_p + <Sigma_x - v_xc> found another root for O 1s)."""
+    from pyscf import dft
+    mol = gto.M(atom='O 0 0 0.1173; H 0 0.7572 -0.4692; H 0 -0.7572 -0.4692',
+                basis='6-31g', cart=False, verbose=0)
+    mf = dft.RKS(mol, xc='pbe')
+    mf.conv_tol = 1e-11
+    mf.run()
+    nmo = mf.mo_coeff.shape[1]
+    low = run_low_level(mf, method='rpa', mode='casida', qp=True)
+    ref = _calc(mf, nmo, mode='casida')
+    assert np.array_equal(np.isfinite(low.qp.energies[0]), np.isfinite(ref))
+    _assert_converged_match(low.qp.energies[0], ref, 1e-8)
+
+
+def test_qp_must_be_a_bool():
+    with pytest.raises(TypeError, match='qp'):
+        run_low_level(water(), method='rpa', qp='evGW')
+
+
+def test_space_time_qp_unrestricted():
+    from tests.isdf_test_grid import g1_numerics
+    mf = unrestricted(OH, 1, basis='cc-pvdz', density_fit=True)
+    num = g1_numerics(mf)
+    nmo = mf.mo_coeff.shape[-1]
+    low = run_low_level(mf, method='rpa', mode='space-time', numerics=num,
+                        qp=True)
+    for s, spin in enumerate(('alpha', 'beta')):
+        _assert_converged_match(
+            low.qp.energies[s],
+            _calc(mf, nmo, mode='space-time', numerics=num,
+                  spin_channel=spin), 1e-10)
+
+
+def test_space_time_unrestricted_failed_orbital_is_nan(monkeypatch):
+    """A failed continuation of one orbital on unrestricted space-time (the
+    driver has no `failures` there) is NaN and 'qp_no_root', not an abort."""
+    from tests.isdf_test_grid import g1_numerics
+    mf = unrestricted(OH, 1, basis='cc-pvdz', density_fit=True)
+    num = g1_numerics(mf)
+    real = rpa.solve_qp_energy_space_time
+
+    def fails_at_3(mf, mol, nocc, states, **kw):
+        if 3 in np.atleast_1d(states):
+            raise ArithmeticError('Pade fit failed')
+        return real(mf, mol, nocc, states, **kw)
+
+    monkeypatch.setattr(rpa, 'solve_qp_energy_space_time', fails_at_3)
+    with pytest.warns(RuntimeWarning, match='qp'):
+        low = run_low_level(mf, method='rpa', mode='space-time',
+                            numerics=num, qp=True)
+    for s in range(2):
+        assert np.isnan(low.qp.energies[s][3])
+        assert np.isfinite(low.qp.energies[s][2])
+    assert 'qp_no_root' in [f['flag'] for f in low.numerical_flags]
