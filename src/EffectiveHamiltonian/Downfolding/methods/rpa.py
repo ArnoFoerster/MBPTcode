@@ -58,8 +58,10 @@ from src.EffectiveHamiltonian.active_space import (ActiveSpace,
                                                    ph_element_mask)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid,
-    solve_qp_energy_imaginary_axis)
-from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
+    self_energy_diagonal_imaginary_axis)
+from src.SingleReference.GW.qp_solve import (
+    finish_qp, imaginary_axis_sample_points, static_exchange_mean_field_matrix)
+from src.SingleReference.GW.reaction_field import shift_after_solve
 from src.SingleReference.GW.self_energy import SigmaEvaluator
 from src.SingleReference.GW.space_time import (separable_factors,
                                                solve_qp_energy_space_time)
@@ -2079,17 +2081,33 @@ def _qp_casida(low):
 
 
 def _qp_imaginary_axis(low):
-    """(energies, z) on imagfrequency: `solve_qp_energy_imaginary_axis`, the
-    driver of calc_qp_energy(mode='imagfrequency'), on the run's numerics,
-    for every orbital of each spin channel."""
+    """(energies, z) on imagfrequency, on the run's own W: the W(i w) grid
+    of Sigma^E (`_screening_grid`, cached as 'w_grid', so it is built once
+    and every later Sigma^E reuses it) is the grid and the W of
+    calc_qp_energy(mode='imagfrequency') (numerics.imagfreq.nfreq minimax
+    points over the same window), and the GW driver's own steps follow it:
+    Sigma_c,pp(mu + i w) by `self_energy_diagonal_imaginary_axis` on the
+    run's three-index factors, then `finish_qp` (Pade continuation,
+    <Sigma_x - v_xc> and the root, Z), per spin channel."""
     mf = low.mf
-    nmo = mf.mo_coeff.shape[-1]
+    points, w = _screening_grid(low)
+    _, weights, _ = screening_fit_grid(low.eps, low.nocc, low.numerics)
+    eps = low.eps if low.unrestricted else (low.eps,)
+    nocc = low.nocc if low.unrestricted else (low.nocc,)
+    factors = low.factors if low.unrestricted else (low.factors,)
     energies, z = [], []
-    for spin in _spin_names(low):
-        kw = dict(spin_channel=spin) if low.unrestricted else {}
-        e, zs = solve_qp_energy_imaginary_axis(
-            mf, mf.mol, low.nocc, np.arange(nmo), numerics=low.numerics,
-            with_z=True, **kw)
+    for s, (eps_s, nocc_s, b) in enumerate(zip(eps, nocc, factors)):
+        states = np.arange(len(eps_s))
+        mu = particle_hole_window(eps_s, nocc_s)[2]
+        sigma = [self_energy_diagonal_imaginary_axis(
+            b[:, [p], :], eps_s - mu, nocc_s, 0, points, weights, w,
+            imaginary_axis_sample_points(points, nocc_s, int(p), mu)[1])
+            for p in states]
+        e, zs = finish_qp(sigma, eps_s, nocc_s, states, mu, points, mf,
+                          mf.mol, None, True, None,
+                          spin=s if low.unrestricted else None, with_z=True,
+                          after_solve=shift_after_solve(None),
+                          branch_sampled=True)
         energies.append(np.asarray(e, dtype=float))
         z.append(np.asarray(zs, dtype=float))
     return energies, z

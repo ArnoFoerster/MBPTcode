@@ -574,9 +574,12 @@ and keeps it as `low.qp` (a `QuasiParticles` record: `energies`, `z`,
 `converged`, one array per spin channel; `None` without `qp`). The numbers
 are those of `calc_qp_energy(mf, selfenergy='GW', polarizability='RPA')` on
 the same route: on casida from the run's own Omega and X+Y (no second Casida
-solve) at the GW code's default broadening `DEFAULT_BROADENING_ETA`, on
-imagfrequency and space-time through the GW drivers on the run's numerics
-(space-time on the run's ISDF factors; Z for a restricted reference only).
+solve) at the GW code's default broadening `DEFAULT_BROADENING_ETA`; on
+imagfrequency on the run's own W(i w) grid, the one Sigma^E uses (built once,
+by the run, and the grid and W of calc_qp_energy's driver), with the
+driver's own steps after it; on space-time through the GW driver on the
+run's numerics and ISDF factors, which builds its own W on its own grids
+(Z for a restricted reference only).
 An orbital without a QP root (satellites of core orbitals and high virtuals)
 is NaN and not converged, named in the flag `'qp_no_root'`; a root kept with
 Z outside (0, 1] in `'qp_z_outside'`.

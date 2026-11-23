@@ -309,3 +309,27 @@ def test_qp_diagnostic():
     assert np.array_equal(rec['z'], low.qp.z[0][aspace.act])
     plain = run_low_level(mf, method='rpa', mode='casida')
     assert 'qp_energies' not in rpa.downfold(plain, aspace).diagnostics
+
+
+def test_imagfrequency_qp_builds_w_once(monkeypatch):
+    """The QP spectrum and every later Sigma^E share one W grid."""
+    from src.Base.numerics.numerics import Numerics
+    calls = []
+    real = rpa._build_screening_grid
+
+    def counted(low):
+        calls.append(1)
+        return real(low)
+
+    monkeypatch.setattr(rpa, '_build_screening_grid', counted)
+    mf = _fitted_water()
+    low = run_low_level(mf, method='rpa', mode='imagfrequency',
+                        numerics=Numerics(), qp=True)
+    # the run's QP spectrum is computed on the W that Sigma^E reuses
+    assert 'w_grid' in low.cache and len(calls) == 1
+    aspace = ActiveSpace.from_counts(mf.mo_energy, mf.mol.nelectron // 2,
+                                     2, 2)
+    for energies in ('mf', 'qp'):
+        _quiet(rpa.downfold, low, aspace, sigma='averaged',
+               sigma_energies=energies)
+    assert len(calls) == 1
