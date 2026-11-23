@@ -17,8 +17,10 @@ route:
   3. the environment self-energy Sigma^E
   4. the checks of Sigma^E
   5. the routes of `run`
-  6. shared helpers
+  6. the quasiparticle spectrum of `run` (qp=True)
+  7. shared helpers
 """
+import warnings
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
@@ -30,6 +32,7 @@ from scipy.sparse.linalg import ArpackError, LinearOperator, eigsh
 from src.Base.factorization.sliced_factors import unpack_factors
 from src.Base.numerical_flags import collecting, flag
 from src.Base.numerics.constants import (BYTES_PER_GB,
+                                         DEFAULT_BROADENING_ETA,
                                          DOWNFOLDING_OMEGA_LANCZOS_SEED,
                                          DOWNFOLDING_SIGMA_CONTINUATION_WARN,
                                          DOWNFOLDING_SIGMA_TILE_GB,
@@ -50,10 +53,13 @@ from src.Base.utils.grids.analytic_continuation import (pade_eval_elementwise,
 from src.Base.utils.grids.grids import gap_scaled_w0, gauss_legendre_grid
 from src.Base.utils.grids.time_frequency import (TimeFrequencyGrid,
                                                  minimax_points_for_accuracy)
-from src.EffectiveHamiltonian.active_space import (active_pair_mask,
+from src.EffectiveHamiltonian.active_space import (ActiveSpace,
+                                                   active_pair_mask,
                                                    ph_element_mask)
 from src.SingleReference.GW.imaginary_axis import (
     fitted_self_energy_matrix_imaginary_axis, screening_fit_grid)
+from src.SingleReference.GW.qp_solve import static_exchange_mean_field_matrix
+from src.SingleReference.GW.self_energy import SigmaEvaluator
 from src.SingleReference.GW.space_time import separable_factors
 from src.SingleReference.LinearResponse.casida import CasidaSolver
 from src.SingleReference.LinearResponse.imaginary_frequency import \
@@ -67,6 +73,7 @@ from src.SingleReference.LinearResponse.space_time import (
     chi0_aux, chi0_imaginary_frequency, dielectric_log_determinant,
     dyson_screening, layout_tile_gb, rpa_correlation_energy_space_time,
     spin_summed, static_screening_grid)
+from src.Solvers.qp_equation import QPNoRoot, solve_qp_equation_pole_strength
 
 from ..low_level import DownfoldingTerms
 from ..spin import BLOCKS, SPINS, channels_of, spin_block, spin_weight
@@ -165,6 +172,8 @@ class RPALowLevel:
         space that uses the entry gets too (`_cached`).
     numerical_flags: the named flags raised during the run, filled by
         `run_low_level`.
+    qp: None, or with run(..., qp=True) the `QuasiParticles` of every
+        orbital of every spin channel: a result of the run, like e_c_full.
     """
     mf: object
     mode: str
@@ -180,6 +189,7 @@ class RPALowLevel:
     cache: dict = field(default_factory=dict)
     method: str = METHOD
     numerical_flags: list = field(default_factory=list)
+    qp: Optional['QuasiParticles'] = None
 
     @property
     def unrestricted(self):
@@ -187,7 +197,7 @@ class RPALowLevel:
         return isinstance(self.nocc, tuple)
 
 
-def run(mf, mode='casida', df=True, numerics=None, **opts):
+def run(mf, mode='casida', df=True, numerics=None, qp=False, **opts):
     """The RPALowLevel of `mf`: the full direct RPA of `mode`, solved once.
 
     mode: 'casida' | 'imagfrequency' | 'space-time'.
@@ -202,6 +212,9 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
         energy (imagfrequency, `rpa_quadrature`), or on space-time the ISDF
         grid (numerics.isdf, which has no default: None is refused there)
         and the tau and frequency counts of `_space_time`.
+    qp: False, or True for the quasiparticle spectrum as well: one-shot
+        diagonal G0W0 on this run's W for every orbital of every spin
+        channel, kept as low.qp (`quasiparticles`).
 
     On casida E_RPA,corr comes from the same solve as Omega and X+Y; on
     imagfrequency from `rpa_correlation_energy_imaginary_axis` on the
@@ -217,8 +230,11 @@ def run(mf, mode='casida', df=True, numerics=None, **opts):
              'imagfrequency': _imaginary_axis_fields,
              'space-time': _space_time_fields}[mode]
     fields = route(mf, eps, nocc, df, numerics)
-    return RPALowLevel(mf=mf, mode=mode, df=df, numerics=numerics, eps=eps,
-                       nocc=nocc, **fields)
+    low = RPALowLevel(mf=mf, mode=mode, df=df, numerics=numerics, eps=eps,
+                      nocc=nocc, **fields)
+    if qp:
+        low.qp = quasiparticles(low)
+    return low
 
 
 def downfold(low, active_space, screening='crpa', sigma=None,
@@ -818,9 +834,9 @@ def static_defect(low, active_space, v_eff):
 # between the active and the environment orbitals (`screened_residues`) and
 # the mean-field energies, reduced by Marie and Loos's SRG (Eq. 44, 'srg') or
 # by Kotani's mode A at eta = 0 (Eq. 12, 'averaged', which warns near the
-# poles, `pole_window`). `downfold(..., sigma=...)` hands it to the general layer in
-# both spin channels with the Hartree-only double counting (dc='hartree'), and
-# records the 'sigma_poles' diagnostic.
+# poles, `pole_window`). `downfold(..., sigma=...)` hands it to the general
+# layer in both spin channels with the Hartree-only double counting
+# (dc='hartree'), and records the 'sigma_poles' diagnostic.
 #
 # On imagfrequency there are no residues: S^E(mu + i w) comes from the
 # Lorentzian fit of W on the minimax W grid with the internal orbital
@@ -1892,7 +1908,120 @@ def _plasmon(eps, nocc, factors, eri, numerics):
     return float(0.5 * (np.sum(omega) - trace_a)), omega, xpy
 
 
-# ----------------------------------------------------------- 6. shared helpers
+# ------------------------------ 6. the quasiparticle spectrum of run (qp=True)
+# One-shot diagonal G0W0@RPA on the run's own W, for every orbital p of every
+# spin channel: eps_p = eps_p^mf + <p|Sigma_x - v_xc|p> + Re Sigma_c,pp(eps_p),
+# the quantity of calc_qp_energy(selfenergy='GW', polarizability='RPA') on
+# the same route. On casida the residues of the run's Omega and X+Y between
+# each block of orbitals and all orbitals (`screened_residues`) feed the GW
+# code's `SigmaEvaluator` at its default broadening DEFAULT_BROADENING_ETA,
+# and `solve_qp_equation_pole_strength` takes the root of largest weight, as
+# calc_qp_energy does; no second Casida solve. An orbital without a root
+# (core orbitals, high virtuals: satellites) is NaN, not converged, and named
+# in one flag 'qp_no_root'; only an active orbital that Sigma^E needs at its
+# QP energy makes that an error (`downfold`).
+
+
+@dataclass(frozen=True)
+class QuasiParticles:
+    """The quasiparticle spectrum of a low-level run, one entry per spin
+    channel ((restricted,) or (alpha, beta)), each an (nmo,) read-only array:
+
+    energies: the QP energies, Hartree; NaN where the equation has no root.
+    z: the pole strength 1/(1 - dRe Sigma_c,pp/dw) at the root; NaN there.
+    converged: True where a root was found.
+    """
+    energies: tuple
+    z: tuple
+    converged: tuple
+
+    def __post_init__(self):
+        for name in ('energies', 'z', 'converged'):
+            arrays = []
+            for a in getattr(self, name):
+                a = np.array(a)
+                a.flags.writeable = False
+                arrays.append(a)
+            object.__setattr__(self, name, tuple(arrays))
+
+
+def quasiparticles(low):
+    """The `QuasiParticles` of the low-level result `low`, on its route."""
+    if low.mode == 'casida':
+        qp = _qp_casida(low)
+    else:
+        raise NotImplementedError(
+            f"qp=True on mode={low.mode!r} is not built yet.")
+    missing = [f"{spin} {np.flatnonzero(~ok).tolist()}"
+               for spin, ok in zip(_spin_names(low), qp.converged)
+               if not ok.all()]
+    if missing:
+        flag('qp_no_root',
+             'qp=True: no quasiparticle root for the orbitals '
+             + '; '.join(missing) + ' (NaN in low.qp)', RuntimeWarning,
+             stacklevel=3)
+    return qp
+
+
+def _spin_names(low):
+    return SPINS if low.unrestricted else ('restricted',)
+
+
+def _qp_casida(low):
+    """`quasiparticles` on casida: per spin channel and per block of
+    orbitals the residues of W with every orbital, then one QP equation per
+    orbital (QPNoRoot warnings are summed up in 'qp_no_root')."""
+    mf = low.mf
+    sigma_x = static_exchange_mean_field_matrix(mf, mf.mol)
+    eps = low.eps if low.unrestricted else (low.eps,)
+    nocc = low.nocc if low.unrestricted else (low.nocc,)
+    if not low.unrestricted:
+        sigma_x = (sigma_x,)
+    nmo = len(eps[0])
+    budget = _sigma_tile_gb(low.numerics) * BYTES_PER_GB
+    width = max(1, int(budget // (8 * max(1, low.omega.size) * nmo)))
+    out = [np.full(nmo, np.nan) for _ in eps], [np.full(nmo, np.nan)
+                                                for _ in eps]
+    every = np.arange(nmo)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', QPNoRoot)
+        for start in range(0, nmo, width):
+            block = every[start:start + width]
+            spaces = [ActiveSpace.from_indices(nmo, n, block[block < n],
+                                               block[block >= n])
+                      for n in nocc]
+            if low.unrestricted:
+                w = screened_residues(low, tuple(spaces), (every, every))
+            else:
+                w = (screened_residues(low, spaces[0], every),)
+            for s in range(len(eps)):
+                xc = np.diag(sigma_x[s])
+                act = spaces[s].act
+                for j, p in enumerate(act):
+                    e, z = _qp_root(w[s][:, j, :] ** 2, low.omega, eps[s],
+                                    nocc[s], float(eps[s][p] + xc[p]))
+                    out[0][s][p], out[1][s][p] = e, z
+    energies, z = out
+    return QuasiParticles(energies=tuple(energies), z=tuple(z),
+                          converged=tuple(np.isfinite(e) for e in energies))
+
+
+def _qp_root(weights, omega, eps, nocc, anchor):
+    """(energy, Z) of w = anchor + Re Sigma_pp(w), Sigma_pp the pole sum of
+    `weights` (nexc, nmo) over (eps, omega) at DEFAULT_BROADENING_ETA; NaN,
+    NaN without a root. Z by a central difference of Sigma (h = 1e-5 Ha)."""
+    sigma = SigmaEvaluator([(weights, omega)], lambda sums: sums[0], eps,
+                           nocc, DEFAULT_BROADENING_ETA, False)
+    root = solve_qp_equation_pole_strength(
+        lambda x: x - anchor - sigma(x), anchor, vectorized=True)
+    if not np.isfinite(root):
+        return np.nan, np.nan
+    h = 1e-5
+    slope = (sigma(root + h) - sigma(root - h)) / (2 * h)
+    return float(root), float(1.0 / (1.0 - slope))
+
+
+# ----------------------------------------------------------- 7. shared helpers
 
 
 def _require_current_mean_field(low):
