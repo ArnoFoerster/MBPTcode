@@ -15,10 +15,11 @@ Available now:
   `mode='imagfrequency'` (density fitted, imaginary frequency, N^4) or
   `mode='space-time'` (separable ISDF factors, imaginary time, N^3), with
   `screening` `'bare'`, `'crpa'` or `'crpa_ph'`, and on `mode='casida'`
-  also `'mrpa'` (the numerical routes refuse it and point to casida); and,
-  by default on every route, the static environment self-energy Sigma^E
-  that the paper drops (`sigma='srg'`, or `'averaged'`; see below).
-  `sigma=None` is the paper's scheme.
+  also `'mrpa'` (the numerical routes refuse it and point to casida); and
+  optionally (every route) `sigma='srg'` or `'averaged'`: the static
+  environment self-energy Sigma^E that the paper drops (see below). The
+  default, `sigma=None`, is the paper's scheme; see
+  [Known difficulties](#known-difficulties) before switching Sigma^E on.
 - E_0 always, term by term.
 - Restricted closed-shell (RHF/RKS) and unrestricted (UHF/UKS) references,
   on every route. An unrestricted one gives an H_eff with different alpha
@@ -41,14 +42,16 @@ active = ActiveSpace.from_population(mf, atoms=[0, 1], ao_type='p',
                                      n_occ=1, n_virt=1)
 
 low = run_low_level(mf, method='rpa', mode='casida', df=True, numerics=None)
-h = build_effective_hamiltonian(low, active, screening='crpa', sigma='srg',
+h = build_effective_hamiltonian(low, active, screening='crpa', sigma=None,
                                 spin_free=True)
 roots = h.solve('pyscf_fci', nroots=3)
 ```
 
-`sigma='srg'` is the default and could be left out: Sigma^E in the SRG form
-at the mean-field energies. `sigma=None` gives the paper's scheme, without
-Sigma^E and with the full double counting.
+`screening='crpa'` and `sigma=None` are the defaults and could be left out:
+the paper's scheme, without Sigma^E and with the full double counting.
+`sigma='srg'` adds Sigma^E in the SRG form at the mean-field energies; with
+`crpa` on transition-metal active spaces read
+[Known difficulties](#known-difficulties) first.
 
 `run_low_level` solves the low-level method on the whole system once and does
 not know the active space; `build_effective_hamiltonian` then makes the
@@ -115,7 +118,7 @@ Options of the RPA:
 | `build_effective_hamiltonian` | `active_space` | one `ActiveSpace` for a restricted reference; the pair `(space_alpha, space_beta)` for UHF/UKS |
 | | `spin_free` | `True` (default): spatial-orbital `g_eff`, for UHF/UKS the per-spin blocks `(h_alpha, h_beta)` and `(aa, ab, bb)`; `False`: the 2 n_act interleaved spin orbitals |
 | | `screening` | `'bare'`, `'crpa'` (default), `'crpa_ph'`; `'mrpa'` on `'casida'` only |
-| | `sigma` | `'srg'` (default) or `'averaged'` (Sigma^E, below); `None`, the paper's scheme, asked for explicitly. One default for every screening and route: on `'casida'` 'srg' is damped at `srg_s`, on `'imagfrequency'` and `'space-time'` it is s = inf, continued from the imaginary axis |
+| | `sigma` | `None` (default, the paper's scheme), `'srg'` or `'averaged'` (Sigma^E, below). On `'casida'` 'srg' is damped at `srg_s`, on `'imagfrequency'` and `'space-time'` it is s = inf, continued from the imaginary axis. Not the default: with `crpa` it can be unreliable, see [Known difficulties](#known-difficulties) |
 | | `sigma_energies` | `'mf'` (default): Sigma^E at the mean-field energies of the active orbitals; `'qp'`: at their QP energies (`low.qp`, needs `qp=True`; refused with `sigma=None`) |
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
@@ -450,7 +453,7 @@ X + Y) with denominators D_tr = eps_t - eps_r - sgn(eps_r - eps_F) Omega_n.
 Every energy (eps_t, eps_r, Omega_n) is the mean field's. It is made static
 in one of two ways (Marie and Loos, JCTC 19, 3943 (2023)):
 
-- `'srg'` (recommended): Eq. 44 at s = `numerics.downfolding.srg_s`
+- `'srg'` (the preferred of the two forms, when Sigma^E is used): Eq. 44 at s = `numerics.downfolding.srg_s`
   (default 500 Ha^-2),
   Sigma_bar_tu = sum_rn (D_tr + D_ur)/(D_tr^2 + D_ur^2) w_tr w_ur
   [1 - exp(-(D_tr^2 + D_ur^2) s)].
@@ -769,6 +772,76 @@ imagfrequency and space-time all four:
 
 Use spherical basis functions (`cart=False`, the PySCF default) when comparing
 with the paper: Cartesian ones are far further from its numbers.
+
+## Choosing the active space and what to expect
+
+The code checks that H_eff is built as defined; it cannot check that the
+active space is a good one, or that a combination of options suits a
+system. What follows comes from using it (the MOBH35 transition-metal
+barriers, def2-TZVP, imagfrequency, PBE-type hybrids with alpha = 0 to 1 of
+exact exchange), not from a derivation.
+
+**Where a gain over the RPA comes from.** With every screening the energy is
+E_HF + E_c[v] - E_c^A + E_act (plus the Sigma^E terms): the solver replaces
+the RPA's description of the correlation inside the active space, and
+nothing else. A gain over the RPA of the whole system can therefore only
+come from correlation that the RPA gets wrong *and* that lies inside the
+active space: near-degenerate (static) correlation, or the RPA's missing
+exchange among the active electrons. For a single-reference system expect
+the RPA's quality, not better; an error of the RPA that sits in orbitals
+outside the active space stays as it is. The active space has to contain
+the orbitals whose correlation the RPA gets wrong, which is a choice of the
+user.
+
+**Canonical orbitals only.** The active space is a set of canonical
+orbitals of `mf` (see [Not yet available](#not-yet-available)). A selection
+by character (`from_population`, or a score on the reacting atoms) then
+picks orbitals spread over the spectrum, with environment orbitals of the
+same kind between them, and an orbital of the right character can be
+spread over several canonical orbitals, none of which is picked. Look at
+the orbitals (a Molden file) and at how much of the chosen character the
+picked orbitals hold before trusting a result; along a reaction path or a
+scan keep the same size and the same character at every point, since a
+change of the space from one point to the next goes straight into the
+energy difference.
+
+**The starting point.** All screenings start from the orbitals and energies
+of `mf`. The RPA of the whole system and the downfolded energy need not be
+best on the same mean field: on GGA (PBE) orbitals the active-space part can
+add error that a hybrid with more exact exchange does not, while the RPA of
+the whole system may be best near the GGA. Compare a few starting points
+before fixing one.
+
+### Known difficulties
+
+**cRPA with Sigma^E can be unreliable** (`screening='crpa'` with
+`sigma='srg'` or `'averaged'`), which is why `sigma=None` is the default.
+On transition-metal complexes, mostly 3d ones (Mn, Fe), the Sigma^E
+correction came out at tens of kcal/mol, differed between the structures of
+one reaction and jumped with the starting point; it did not go away with
+another choice of the active space. With `crpa_ph` and `bare` it stayed at
+a few kcal/mol. If you use Sigma^E with `crpa`, compare with `sigma=None`
+on every structure.
+
+**No gain over the RPA where the active space misses the correlation.** See
+"Where a gain over the RPA comes from" above: on single-reference reactions
+expect the RPA's accuracy, and a better one only where the active space
+holds the orbitals whose correlation the RPA gets wrong. With canonical
+orbitals, selecting them is the hard part; natural orbitals are not
+available yet.
+
+**Results depend on the starting point.** See above; the downfolded energy
+and the RPA of the whole system can be best at different alpha.
+
+**The Sigma^E warnings on large molecules.** `SigmaContinuationWarning`
+(threshold 1e-4 Ha, imagfrequency and space-time) and `SigmaNearPoleWarning`
+come on most transition-metal complexes of a few hundred to a thousand
+basis functions, also where Sigma^E changes the energy little and smoothly
+from one structure to the next. They mark Sigma_bar elements that are
+uncertain at the 1e-4 Ha level, not results that are wrong: read them
+together with the size of the Sigma^E contribution (the total energy with
+and without `sigma`, and `h.energies.e_sigma_trace`) and how it varies over
+the structures being compared.
 
 ## Not yet available
 

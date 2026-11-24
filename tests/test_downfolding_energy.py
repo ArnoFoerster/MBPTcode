@@ -457,8 +457,8 @@ def test_default_method_is_rpa(wat_rpa):
     ham = build_effective_hamiltonian(low, active_space)
     g, space, en = ham.g_eff, ham.space, ham.energies
     assert g[0] == en.e0 and en.e_c_full == low.e_c_full
-    # the default sigma='srg' adds its 'sigma_poles' record
-    assert set(ham.diagnostics) == {'static_defect', 'sigma_poles'}
+    # the default sigma=None (the paper's scheme) has no 'sigma_poles'
+    assert set(ham.diagnostics) == {'static_defect'}
 
 
 @pytest.mark.parametrize('s', SCREENINGS_1)
@@ -963,7 +963,7 @@ def test_the_result_is_one_record_that_solves_itself():
     low = run_low_level(mf, method='rpa')
     h = build_effective_hamiltonian(low, active_space)
     assert isinstance(h, effective_hamiltonian.DownfoldedHamiltonian)
-    assert set(h.diagnostics) == {'static_defect', 'sigma_poles'}
+    assert set(h.diagnostics) == {'static_defect'}
     assert h.numerical_flags == []
     assert not hasattr(h.energies, 'diagnostics')
     assert not hasattr(h.energies, 'numerical_flags')
@@ -1017,12 +1017,14 @@ def _identical(a, b):
 
 
 @pytest.mark.parametrize('mode', ['casida', 'imagfrequency'])
-def test_the_default_sigma_is_srg(wat_rpa, mode):
-    """Without sigma the RPA downfolding includes the static environment
-    self-energy: build_effective_hamiltonian(low, a) is the one with
-    sigma='srg' bit for bit, with its 'sigma_poles' record and a nonzero
-    Tr[Sigma_bar gamma]; on casida and imagfrequency, and for the pair of
-    an unrestricted reference (OH, casida)."""
+def test_the_default_sigma_is_none(wat_rpa, mode):
+    """Without sigma the RPA downfolding is the paper's scheme:
+    build_effective_hamiltonian(low, a) is the one with sigma=None bit for
+    bit, no 'sigma_poles' record, Tr[Sigma_bar gamma] and the exchange term
+    zero; on casida and imagfrequency, and for the pair of an unrestricted
+    reference (OH, casida). Sigma^E is asked for by name (sigma='srg' or
+    'averaged'): it is unreliable with cRPA on 3d-metal active spaces
+    (docs/methods/downfolding.md)."""
     import warnings
     from src.EffectiveHamiltonian.active_space import unrestricted_from_counts
     from tests.downfolding_oracle import OH, unrestricted
@@ -1031,9 +1033,10 @@ def test_the_default_sigma_is_srg(wat_rpa, mode):
         low = run_low_level(mf, mode=mode)
     default = build_effective_hamiltonian(low, active_space)
     _identical(default, build_effective_hamiltonian(low, active_space,
-                                                    sigma='srg'))
-    assert 'sigma_poles' in default.diagnostics
-    assert default.energies.e_sigma_trace != 0.0
+                                                    sigma=None))
+    assert 'sigma_poles' not in default.diagnostics
+    assert default.energies.e_sigma_trace == 0.0
+    assert default.energies.e_exchange_term == 0.0
     if mode == 'casida':
         uhf = unrestricted(OH, 1)
         nocc = tuple(int(np.count_nonzero(o)) for o in uhf.mo_occ)
@@ -1042,27 +1045,25 @@ def test_the_default_sigma_is_srg(wat_rpa, mode):
             warnings.simplefilter('ignore', RuntimeWarning)
             low_u = run_low_level(uhf)
             default = build_effective_hamiltonian(low_u, pair)
-            explicit = build_effective_hamiltonian(low_u, pair, sigma='srg')
+            explicit = build_effective_hamiltonian(low_u, pair, sigma=None)
         _identical(default, explicit)
-        assert default.energies.e_sigma_trace != 0.0
+        assert default.energies.e_sigma_trace == 0.0
 
 
-def test_sigma_none_is_the_papers_scheme(wat_rpa):
-    """sigma=None, asked for explicitly: no Sigma_bar, full double
-    counting, no 'sigma_poles' record."""
+def test_srg_is_asked_for_by_name(wat_rpa):
+    """sigma='srg' named: Sigma_bar in the SRG form, its 'sigma_poles'
+    record and a nonzero Tr[Sigma_bar gamma]."""
     _, low, active_space = wat_rpa
-    ham = build_effective_hamiltonian(low, active_space, sigma=None)
-    assert ham.energies.e_sigma_trace == 0.0
-    assert ham.energies.e_exchange_term == 0.0
-    assert 'sigma_poles' not in ham.diagnostics
+    ham = build_effective_hamiltonian(low, active_space, sigma='srg')
+    assert ham.energies.e_sigma_trace != 0.0
+    assert 'sigma_poles' in ham.diagnostics
 
 
-def test_qp_energies_need_no_sigma_keyword(wat_rpa):
-    """sigma_energies='qp' alone is Sigma^E ('srg', the default) at the QP
-    energies: the same as with sigma='srg' named."""
+def test_qp_energies_need_a_sigma(wat_rpa):
+    """sigma_energies='qp' chooses where Sigma_bar^E is evaluated, so with
+    the default sigma=None it is refused, pointing to 'srg' and
+    'averaged'."""
     mf, _, active_space = wat_rpa
     low = run_low_level(mf, qp=True)
-    _identical(build_effective_hamiltonian(low, active_space,
-                                           sigma_energies='qp'),
-               build_effective_hamiltonian(low, active_space, sigma='srg',
-                                           sigma_energies='qp'))
+    with pytest.raises(ValueError, match="pass sigma='srg' or 'averaged'"):
+        build_effective_hamiltonian(low, active_space, sigma_energies='qp')
