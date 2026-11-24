@@ -123,6 +123,48 @@ Options of the RPA:
 | | `diagnostics` | a tuple of names, default all; see below |
 | | `numerics` | `None` (default): the Sigma^E settings of the run; a `Numerics` whose `downfolding` section (`srg_s`, `pole_margin`, `continuation_margin`) is used for this Hamiltonian instead, the rest equal to the run's |
 
+What the two calls return is in [What you get back](#what-you-get-back).
+
+A restricted reference is one spin channel throughout: the general layer
+builds the exact J and K of the environment once and transforms the active
+integrals once, and the result goes to the restricted (spin-free) solver.
+An unrestricted reference is two channels, alpha and beta, through the same
+code; a restricted calculation computes nothing twice and gives the numbers
+it gave before the second channel existed.
+
+## What you get back
+
+`run_low_level` and `build_effective_hamiltonian` each return a record. The
+low-level one holds the calculation of the whole system, independent of the
+active space, and can be used for more than building H_eff; the effective
+Hamiltonian holds H_eff, every term of its energy, and the checks.
+
+### From `run_low_level`
+
+`method='hf'` gives `low.mf` and `low.method` only. `method='rpa'` gives an
+`RPALowLevel` (the docstring in `methods/rpa.py` has the conventions); for a
+UHF/UKS reference `eps`, `nocc`, `factors` and `qp` hold one entry per spin
+and `eri` the blocks (aa, ab, bb):
+
+| field | what it holds | routes |
+|---|---|---|
+| `mf`, `mode`, `df`, `numerics`, `method` | the mean field and the settings of the run | all |
+| `eps`, `nocc` | the orbital energies and the occupied count of `mf` | all |
+| `e_c_full` | the RPA correlation energy of the whole system, E_c[v] (so E_RPA = E_HF[mf orbitals] + `e_c_full`) | all |
+| `omega` | every RPA excitation energy, ascending | `'casida'` |
+| `xpy` | X+Y of every excitation, the (i, a) pairs over all occupied and virtual orbitals in C order; with `omega` the static density response chi(0) = -4 xpy diag(1/omega) xpy^T and the transition densities | `'casida'` |
+| `factors` | the three-index tensor B[Q, p, q] of the MOs, (pq\|rs) = sum_Q B_Q,pq B_Q,rs | `df=True`, not `'space-time'` |
+| `eri` | the exact MO integrals (pq\|rs) | `'casida'`, `df=False` |
+| `qp` | the one-shot G0W0 spectrum of every orbital: `energies`, `z`, `converged`, `quasiparticle` ([below](#sigmae-at-the-qp-energies-qptrue-sigma_energiesqp)) | `qp=True` |
+| `cache` | what the run and later builds keep: on `'imagfrequency'` the minimax grid and P(0) = chi0(0) in the fitting basis; on `'space-time'` the ISDF factors, grids and P(0); after a Sigma^E build also the lowest excitation energy and W on the grid. Internal: names and contents may change | numerical routes |
+| `numerical_flags` | the named flags raised during the run | all |
+
+Not kept: the one-particle density or natural orbitals of the RPA, and on
+the numerical routes W away from their grids (on `'casida'` `omega` and
+`xpy` give it at any frequency).
+
+### From `build_effective_hamiltonian`
+
 `build_effective_hamiltonian` returns one `DownfoldedHamiltonian` `h`, with
 `h.g_eff`, `h.space`, `h.energies`, `h.diagnostics` and `h.numerical_flags`;
 `h.solve(solver, ...)` solves it. `g_eff = {0: E_0, 1: h_eff, 2: v_eff}` and
@@ -162,12 +204,24 @@ Three properties give the sums per kind, `eh = e_hartree + e_hartree_dc`,
 `e0 = e_nuc + e_core + eh + ex + ec - e_sigma_trace`. These are the `Enuc`,
 `Ecore`, `Eh`, `Ex`, `Ec` columns of the paper's supporting data.
 
-A restricted reference is one spin channel throughout: the general layer
-builds the exact J and K of the environment once and transforms the active
-integrals once, and the result goes to the restricted (spin-free) solver.
-An unrestricted reference is two channels, alpha and beta, through the same
-code; a restricted calculation computes nothing twice and gives the numbers
-it gave before the second channel existed.
+The diagnostics (`h.diagnostics`, keyed by name: `'static_defect'`,
+`'ec_active_casida'`, `'sigma_poles'`, `'sigma_continuation'`,
+`'qp_energies'`, each where it applies) and the named flags
+(`h.numerical_flags`) are described in
+[Checks that are always on](#checks-that-are-always-on).
+
+### From the solver
+
+`h.solve(...)` returns the total energies of the roots, and with `out=` a
+dict also <S^2> of each root for an unrestricted reference
+(`out['spin_square']`). It returns no wavefunctions or density matrices;
+for those, call the backend on `h.g_eff` directly, e.g.
+`PyscfFCISolver().roots(h1, eri, n_orbs, (n_alpha, n_beta), nroots=n)`
+of `solvers/backends.py` returns the energies without E_0 and the CI
+vectors (for a spin-free restricted `h`: `h1 = h.g_eff[1]`,
+`eri = h.g_eff[2].transpose(0, 2, 1, 3)`, chemist notation), from which
+pyscf's `fci.direct_spin1.make_rdm1` gives the active one-particle
+density.
 
 ## What is built
 
