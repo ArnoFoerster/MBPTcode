@@ -113,6 +113,11 @@ def test_qp_arrays_are_read_only():
 
 # --- the imaginary-axis routes: the GW drivers on the run's settings --------
 
+# both sides solve the same QP equation with the same root finder, but the
+# roots agree only to its convergence: 6e-9 Ha (2e-7 eV) on the highest
+# virtual with ADA's Linux BLAS, 0 on macOS Accelerate
+IMAG_AXIS_TOL_EV = 1e-6
+
 def _fitted_water():
     from tests.gw_density_routes import fitted, water as gw_water
     return fitted(scf.RHF(gw_water()))
@@ -128,7 +133,7 @@ def test_imagfrequency_qp_matches_calc_qp_energy():
                             numerics=num, qp=True)
     _assert_converged_match(
         low.qp.energies[0],
-        _calc(mf, nmo, mode='imagfrequency', numerics=num), 1e-10)
+        _calc(mf, nmo, mode='imagfrequency', numerics=num), IMAG_AXIS_TOL_EV)
     # the root finder's per-orbital warnings are summed up in named flags
     assert not [w for w in caught
                 if issubclass(w.category, (QPNoRoot, QPWeightOutside))]
@@ -147,7 +152,7 @@ def test_space_time_qp_matches_calc_qp_energy():
                         qp=True)
     _assert_converged_match(
         low.qp.energies[0], _calc(mf, nmo, mode='space-time', numerics=num),
-        1e-10)
+        IMAG_AXIS_TOL_EV)
 
 
 def test_imagfrequency_qp_unrestricted():
@@ -160,7 +165,7 @@ def test_imagfrequency_qp_unrestricted():
         _assert_converged_match(
             low.qp.energies[s],
             _calc(mf, nmo, mode='imagfrequency', numerics=num,
-                  spin_channel=spin), 1e-10)
+                  spin_channel=spin), IMAG_AXIS_TOL_EV)
 
 
 # --- sigma_energies: Sigma^E at the QP energies -----------------------------
@@ -374,7 +379,7 @@ def test_space_time_qp_unrestricted():
         _assert_converged_match(
             low.qp.energies[s],
             _calc(mf, nmo, mode='space-time', numerics=num,
-                  spin_channel=spin), 1e-10)
+                  spin_channel=spin), IMAG_AXIS_TOL_EV)
         # no Z there: every root counts as a quasiparticle
         assert np.array_equal(low.qp.quasiparticle[s], low.qp.converged[s])
 

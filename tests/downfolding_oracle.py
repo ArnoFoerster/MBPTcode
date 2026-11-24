@@ -68,7 +68,10 @@ def unrestricted(atom, spin, basis='6-31g', xc=None, density_fit=False):
     mf = scf.UHF(mol) if xc is None else dft.UKS(mol, xc=xc)
     if density_fit:
         mf = mf.density_fit()
-    mf.conv_tol = 1e-12
+    # 1e-10, not 1e-12: the open-shell SCFs stall short of 1e-12 with other
+    # BLAS builds (OH / UKS-PBE0 on ADA's Linux nodes); every test compares
+    # quantities of this one mean field, not against a second SCF
+    mf.conv_tol = 1e-10
     mf.verbose = 0
     mf.kernel()
     assert mf.converged
