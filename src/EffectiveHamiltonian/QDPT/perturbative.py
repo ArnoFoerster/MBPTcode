@@ -2,14 +2,14 @@
 space via the generated evaluators in generated_evaluators(_spinfree).py.
 
 Only builds effective Hamiltonians; solving (FCI, exact diagonalization,
-DMRG, ...) lives in src/Solvers/active_space.py.
+DMRG, ...) lives in src/EffectiveHamiltonian/solvers/solve.py.
 """
 import importlib
 
 import numpy as np
 
 from src.Base.pyscf.pyscf_interface import get_system_data, get_system_data_spatial
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.solvers.solve import solve
 
 
 def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
@@ -23,7 +23,7 @@ def build_effective_hamiltonian(mol, mf, n_occ_spatial=0, n_act_spatial=2,
     act_vir_idx, spin_free, active_space.
     shift: Brillouin-Wigner energy shift in the PT denominators (None = plain).
 
-    active_space: an src.SingleReference.common.active_space.ActiveSpace in place of the two
+    active_space: an src.EffectiveHamiltonian.active_space.ActiveSpace in place of the two
     contiguous window counts; its MOs are permuted to match, which is the only
     way to downfold onto a window the energy ordering does not produce.
     """
@@ -71,7 +71,7 @@ def _get_evaluator(max_pt_order, max_vertex, spin_free):
             f"{sorted(available)} are available.")
     suffix = '_spinfree' if spin_free else ''
     module = importlib.import_module(
-        f'src.MultiReference.QDPT.generated_evaluators{suffix}')
+        f'src.EffectiveHamiltonian.QDPT.generated_evaluators{suffix}')
     return getattr(module, f'eval_pt{max_pt_order}_v{max_vertex}{suffix}')
 
 
@@ -81,7 +81,7 @@ def run_pipeline(max_pt_order=2, max_vertex=3, symmetrize=True, mol=None,
                  spin_free=False, nroots=1,
                  active_space=None, dmrg_bond_dim=500, dmrg_n_sweeps=20):
     """Downfold and solve in one call (build_effective_hamiltonian +
-    src.Solvers.active_space.solve).
+    src.EffectiveHamiltonian.solvers.solve.solve).
 
     nroots is passed to the solver, so a dynamical (Brillouin-Wigner) solve
     can follow an excited root."""

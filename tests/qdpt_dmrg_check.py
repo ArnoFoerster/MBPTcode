@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from pyscf import gto, scf
 
-from src.MultiReference.QDPT.perturbative import run_pipeline
+from src.EffectiveHamiltonian.QDPT.perturbative import run_pipeline
 
 H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'
 

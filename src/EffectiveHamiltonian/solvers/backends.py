@@ -13,13 +13,14 @@ and two-particle density matrices of a state in pyscf's make_rdm12 convention,
 
 which is the pair a Hellmann-Feynman derivative of the active space contracts
 with. Four engines satisfy the interface: pyscf's FCI, the determinant basis
-of exact_diagonalization.py (the only one that carries a three-body vertex),
+of determinants.py (the only one that carries a three-body vertex),
 DMRG through block2, whose cost is polynomial in the number of orbitals at
 fixed bond dimension and so reaches active spaces the two exact engines cannot,
 and high-order coupled cluster (CCSDT, CCSDTQ) on a Hartree-Fock reference in
 the active space, a ground-state energy per spin sector at a cost polynomial in
 the number of orbitals and electrons.
 """
+import math
 import os
 import tempfile
 import types
@@ -36,8 +37,8 @@ from src.Base.numerics.constants import (ACTIVE_SPACE_VERTEX_TOL,
                                          CC_ACTIVE_SCF_TOL, DMRG_BOND_DIM,
                                          DMRG_DAVIDSON_TOL, DMRG_N_SWEEPS,
                                          DMRG_NOISE, FCI_CONV_TOL)
-from src.Solvers.exact_diagonalization import (build_explicit_hamiltonian,
-                                               spatial_to_spin_orbitals)
+from src.EffectiveHamiltonian.solvers.determinants import (
+    build_explicit_hamiltonian, spatial_to_spin_orbitals)
 
 
 class ActiveSpaceSolver:
@@ -82,16 +83,30 @@ class PyscfFCISolver(ActiveSpaceSolver):
 
     max_roots = None
 
-    def __init__(self, conv_tol=FCI_CONV_TOL):
+    def __init__(self, conv_tol=FCI_CONV_TOL, spin_penalty=None):
+        """spin_penalty: None, or the shift (Eh) of pyscf's
+        fci.addons.fix_spin_ at <S^2> = S(S+1) for a request of spin 2S,
+        which lifts the states of other spin out of the lowest roots (the
+        Ms = S sector still holds every S' >= S, and direct_spin0 every even
+        S); then direct_spin1 is the engine for every spin, since
+        direct_spin0's singlet check rejects the penalized vectors
+        (benzene (6,6): 'State not singlet'). None leaves the engine
+        unpenalized, as before."""
         self.conv_tol = conv_tol
+        self.spin_penalty = spin_penalty
 
     def _engine(self, nelec, spin):
-        """The pyscf FCI module whose spin symmetry matches the request."""
+        """The pyscf FCI module whose spin symmetry matches the request,
+        with the spin penalty when one is set and spin is given."""
+        penalized = self.spin_penalty is not None and spin is not None
         module = (fci.direct_spin0 if spin == 0 and nelec[0] == nelec[1]
-                  else fci.direct_spin1)
+                  and not penalized else fci.direct_spin1)
         engine = module.FCI()
         engine.conv_tol = self.conv_tol
         engine.verbose = 0
+        if penalized:
+            fci.addons.fix_spin_(engine, shift=self.spin_penalty,
+                                 ss=0.25 * spin * (spin + 2))
         return engine
 
     def roots(self, h1, eri, norb, nelec, nroots=1, spin=0):
@@ -106,6 +121,76 @@ class PyscfFCISolver(ActiveSpaceSolver):
 
     def rdms(self, vector, norb, nelec, spin=0):
         return fci.direct_spin1.make_rdm12(vector, norb, spin_sector(nelec, spin))
+
+
+class PyscfSpinResolvedFCISolver(ActiveSpaceSolver):
+    """pyscf's fci.direct_uhf: a Hamiltonian whose alpha and beta blocks
+    differ (an unrestricted reference's orbitals), at fixed (N_alpha, N_beta).
+
+    h1 = (h_a, h_b); eri = (aa, ab, bb) in chemist notation, the opposite-spin
+    block (p_a q_a | r_b s_b), each block symmetric inside its two pairs,
+    (pq|rs) = (qp|rs) = (pq|sr), which direct_uhf assumes when it packs them.
+    No spin adaptation: in spin-polarized orbitals the Hamiltonian conserves
+    S_z alone, so the roots are the lowest states at that S_z, of any spin.
+    """
+
+    max_roots = None
+
+    def roots(self, h1, eri, norb, nelec, nroots=1, spin=None):
+        """As ActiveSpaceSolver.roots, nelec the pair (N_alpha, N_beta); at
+        most as many roots as the sector has determinants."""
+        if nroots is None:
+            raise ValueError('a Davidson solve needs a root count; the whole '
+                             'spectrum comes from ExactDiagonalizationSolver')
+        engine = fci.direct_uhf.FCI()
+        engine.conv_tol = FCI_CONV_TOL
+        engine.verbose = 0
+        size = math.comb(norb, nelec[0]) * math.comb(norb, nelec[1])
+        energies, vectors = engine.kernel(
+            h1, eri, norb, nelec, ecore=0.0,
+            nroots=min(self._check_roots(nroots), size))
+        energies = np.atleast_1d(energies)
+        return energies, [vectors] if np.ndim(vectors) == 2 else list(vectors)
+
+    def rdms(self, vector, norb, nelec, spin=None):
+        """((dm1a, dm1b), (dm2aa, dm2ab, dm2bb)) of one root, pyscf's
+        make_rdm12s: dm2ab[p, q, r, s] = <p_a^+ r_b^+ s_b q_a>."""
+        return fci.direct_uhf.make_rdm12s(vector, norb, nelec)
+
+
+def total_spin_square(dm1a, dm1b, dm2ab, overlap):
+    """<S^2> of an active-space state together with its core determinant:
+    the whole molecule's state, in orbitals that differ between the spins.
+
+    dm1a, dm1b, dm2ab: the active-space density matrices of
+    `PyscfSpinResolvedFCISolver.rdms`. overlap: the alpha-beta overlaps
+    O_pq = <phi^alpha_p | phi^beta_q> of the orbitals, as the blocks
+    'core_core' (inactive alpha x inactive beta), 'core_active' (inactive
+    alpha x active beta), 'active_core' (active alpha x inactive beta) and
+    'active_active'.
+
+    S^2 = S_z (S_z + 1) + S_- S_+ with S_+ = sum_pq O_pq a^+_{p alpha}
+    a_{q beta}, and, the alpha orbitals being complete,
+
+        <S_- S_+> = N_beta - sum_{p in I_a} sum_sq O_ps O_pq gamma^b_sq
+                    - sum_{s in I_b} sum_{pr in A_a} O_rs O_ps gamma^a_pr
+                    - sum_{pr in A_a, qs in A_b} O_rs O_pq
+                      <a^+_{p a} a^+_{s b} a_{q b} a_{r a}>,
+
+    s, q over the inactive and the active beta orbitals, gamma^b the identity
+    on the inactive ones. With identical alpha and beta orbitals (identity
+    overlaps) this is pyscf's own spin_square, which assumes them.
+    """
+    o_cc, o_ca = overlap['core_core'], overlap['core_active']
+    o_ac, o_aa = overlap['active_core'], overlap['active_active']
+    n_alpha = o_cc.shape[0] + float(np.trace(dm1a))
+    n_beta = o_cc.shape[1] + float(np.trace(dm1b))
+    s_z = 0.5 * (n_alpha - n_beta)
+    flip = (n_beta - float(np.sum(o_cc * o_cc))
+            - float(np.einsum('ps,pq,sq->', o_ca, o_ca, dm1b))
+            - float(np.einsum('rs,ps,pr->', o_ac, o_ac, dm1a))
+            - float(np.einsum('rs,pq,prsq->', o_aa, o_aa, dm2ab)))
+    return s_z * (s_z + 1.0) + flip
 
 
 class ExactDiagonalizationSolver(ActiveSpaceSolver):

@@ -23,6 +23,7 @@ from src.SingleReference.GW.imaginary_axis import (
 from src.SingleReference.GW.space_time import self_energy_matrix_space_time
 from src.SingleReference.GW.self_energy import SelfEnergySolver
 from src.Base.numerics.numerics import required_numerics
+from src.Base.utils.choices import require_choice
 
 MODES = ('casida', 'imagfrequency', 'space-time')
 RELAXATIONS = ('none', 'dyson', 'zvector')
@@ -58,8 +59,8 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
     relaxation='none'.
     auxbasis, screen_r_cut: the space-time mode's; refused with any other mode.
     """
-    mode = _choice(mode, MODES, 'mode')
-    relaxation = _choice(relaxation, RELAXATIONS, 'relaxation')
+    mode = require_choice(mode, MODES, 'mode')
+    relaxation = require_choice(relaxation, RELAXATIONS, 'relaxation')
     for name, value in (('auxbasis', auxbasis), ('screen_r_cut', screen_r_cut)):
         if value is not None and mode != 'space-time':
             raise ValueError(f"{name} is a 'space-time' mode setting; got mode={mode!r}.")
@@ -104,17 +105,6 @@ def compute_gw_density_matrix(mf, mol=None, polarizability='RPA', df=True,
 
 
 # Shared by every mode.
-
-
-def _choice(value, choices, keyword):
-    """`value` normalized as calc_qp_energy's mode (lower case, '_' -> '-',
-    'imag-frequency' -> 'imagfrequency'), refused unless one of `choices`."""
-    name = str(value).lower().replace('_', '-')
-    name = {'imag-frequency': 'imagfrequency'}.get(name, name)
-    if name not in choices:
-        raise ValueError(f"Unknown {keyword}={value!r}; choose one of "
-                         + ', '.join(repr(c) for c in choices) + '.')
-    return name
 
 
 def static_ov_term_unrelaxed(mf, mol, eps, nocc):

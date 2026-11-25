@@ -4,8 +4,10 @@
 nothing else. Its constructors are the selection rules -- an energy window,
 counts around the Fermi level, irrep character, Loewdin population on a set of
 atoms -- and its views are the conventions consumers expect: the spatial
-(core | active | external) partition, its interleaved spin-orbital twin, and
-the permuted mean field that makes a non-contiguous selection contiguous.
+(core | active | external) partition, its interleaved spin-orbital twin, the
+permuted mean field that makes a non-contiguous selection contiguous, and the
+particle-hole masks the downfolding reads (`active_pair_mask`,
+`ph_element_mask`).
 
 Why selection by character exists
 ----------------------------------
@@ -37,8 +39,14 @@ matrix stays diagonal and eps stays exact. (ROTATING orbitals -- localizing,
 natural orbitals, anything mixing them -- would break that assumption and is
 NOT what this module does.)
 """
+from dataclasses import dataclass
+from functools import cached_property
+
 import numpy as np
 from pyscf import symm
+
+from src.Base.numerics.constants import QP_DEGENERACY_TOL
+from src.Base.orbital_spaces import closed_shell_nocc
 
 class ReorderedMF:
     """Minimal mean-field shim with the MOs permuted to
@@ -80,22 +88,54 @@ class ReorderedMF:
                 f'external={len(self.mo_occ) - self.n_occ_spatial - self.n_act_spatial}>')
 
 
+@dataclass(frozen=True, eq=False)
 class ActiveSpace:
-    """Which canonical spatial MOs of a closed-shell reference are active, and every index view of that choice.
+    """Which canonical spatial MOs of one spin channel are active, and every index view of that choice.
+
+    One spin channel: the one channel of a closed-shell reference, or one
+    spin of an unrestricted one, which takes a pair (alpha, beta) of these
+    (`unrestricted_from_counts`). norb and nocc are that channel's orbital and
+    occupied counts.
 
     occ_active / virt_active are spatial MO indices in the original canonical
     order, strictly increasing, occupied in [0, nocc) and virtual in
     [nocc, norb), so two selection rules that pick the same orbitals compare
-    equal whatever route built them. No constructor here ever mixes orbitals:
-    the reference stays canonical, the Fock matrix stays diagonal, and every
-    perturbative denominator stays a sum of orbital energies.
-    """
+    equal, and hash alike, whatever route built them. No constructor here
+    ever mixes orbitals: the reference stays canonical, the Fock matrix stays
+    diagonal, and every perturbative denominator stays a sum of orbital
+    energies.
 
-    def __init__(self, norb, nocc, occ_active, virt_active):
-        self.norb, self.nocc = int(norb), int(nocc)
-        self.occ_active = _index_array(occ_active, 0, self.nocc, 'occ_active')
-        self.virt_active = _index_array(virt_active, self.nocc, self.norb,
-                                        'virt_active')
+    Immutable: the fields cannot be reassigned, and every index array, given
+    or derived (computed once), is read-only. That holds for an ActiveSpace
+    built by its constructors, which a record of this form reads back
+    through; an older record that stored the plain object, pickle and
+    deepcopy restore its arrays writeable.
+    """
+    norb: int
+    nocc: int
+    occ_active: np.ndarray
+    virt_active: np.ndarray
+
+    def __post_init__(self):
+        norb, nocc = int(self.norb), int(self.nocc)
+        object.__setattr__(self, 'norb', norb)
+        object.__setattr__(self, 'nocc', nocc)
+        object.__setattr__(self, 'occ_active', _read_only(
+            _index_array(self.occ_active, 0, nocc, 'occ_active')))
+        object.__setattr__(self, 'virt_active', _read_only(
+            _index_array(self.virt_active, nocc, norb, 'virt_active')))
+
+    def _key(self):
+        return (self.norb, self.nocc, tuple(self.occ_active.tolist()),
+                tuple(self.virt_active.tolist()))
+
+    def __eq__(self, other):
+        if not isinstance(other, ActiveSpace):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __hash__(self):
+        return hash(self._key())
 
     @classmethod
     def from_counts(cls, eps, nocc, n_occ_active, n_virt_active):
@@ -184,20 +224,26 @@ class ActiveSpace:
             picked.append(idx)
         return cls(norb, nocc, picked[0], picked[1])
 
-    @property
+    @cached_property
     def env_occ(self):
-        """Occupied orbitals outside the window (the frozen core)."""
-        return np.setdiff1d(np.arange(self.nocc), self.occ_active)
+        """Occupied orbitals outside the window: the frozen inactive core."""
+        return _read_only(np.setdiff1d(np.arange(self.nocc), self.occ_active))
 
-    @property
+    @cached_property
     def env_virt(self):
         """Virtual orbitals outside the window."""
-        return np.setdiff1d(np.arange(self.nocc, self.norb), self.virt_active)
+        return _read_only(np.setdiff1d(np.arange(self.nocc, self.norb),
+                                       self.virt_active))
 
-    @property
+    @cached_property
     def act(self):
         """Active orbitals, occupied first: the order the active-space Hamiltonian's rows are in."""
-        return np.concatenate([self.occ_active, self.virt_active])
+        return _read_only(np.concatenate([self.occ_active, self.virt_active]))
+
+    @cached_property
+    def env(self):
+        """The environment orbitals: the inactive occupied, then the environment virtual."""
+        return _read_only(np.concatenate([self.env_occ, self.env_virt]))
 
     @property
     def n_act_occ(self):
@@ -209,8 +255,35 @@ class ActiveSpace:
 
     @property
     def nelec_active(self):
-        """Electrons in the window: doubly occupied active orbitals only."""
+        """Electrons in the window of a closed-shell reference, two per active
+        occupied orbital; one spin of an unrestricted pair holds n_act_occ."""
         return 2 * self.n_act_occ
+
+    def require_no_degenerate_cut(self, eps, spin=None):
+        """Refuse a boundary that splits a degenerate set.
+
+        An active and an environment orbital of the same kind (both occupied
+        or both virtual) closer than QP_DEGENERACY_TOL would make the energy
+        denominators between the two sets vanish, so the active space has to
+        take the whole degenerate set or none of it. An occupied orbital close
+        to a virtual one is not a cut and is never compared. `eps` are the
+        orbital energies of this space's channel; `spin` ('alpha' or 'beta')
+        names that channel in the message for an unrestricted reference.
+        """
+        eps = np.asarray(eps)
+        which = 'the active space' if spin is None else f'the {spin} active space'
+        for act, env in ((self.occ_active, self.env_occ),
+                         (self.virt_active, self.env_virt)):
+            for a in act:
+                for e in env:
+                    if abs(eps[a] - eps[e]) < QP_DEGENERACY_TOL:
+                        raise ValueError(
+                            f"{which} cuts a degenerate pair: active "
+                            f"orbital {a} (eps = {eps[a]:.8f}) and environment "
+                            f"orbital {e} (eps = {eps[e]:.8f}) differ by less "
+                            f"than {QP_DEGENERACY_TOL:g}. Take the whole set, "
+                            f"e.g. with ActiveSpace.from_irreps or "
+                            f"ActiveSpace.from_population.")
 
     @property
     def is_contiguous(self):
@@ -254,42 +327,48 @@ class ActiveSpace:
                 f'{"contiguous" if self.is_contiguous else "character-selected"}>')
 
 
+def unrestricted_from_counts(eps, nocc, n_act, nelec_active):
+    """(space_alpha, space_beta): the contiguous active spaces of an
+    unrestricted reference with n_act orbitals per spin and nelec_active =
+    (N_alpha, N_beta) active electrons.
+
+    Per spin, the N highest occupied and the n_act - N lowest virtual
+    orbitals of that spin (pyscf UCASCI's convention), from eps = (eps_alpha,
+    eps_beta) and nocc = (nocc_alpha, nocc_beta): `ActiveSpace.from_counts`
+    once per spin. Any other choice is two `ActiveSpace.from_indices`, one
+    per spin."""
+    if not (len(eps) == 2 and np.ndim(eps[0]) == 1
+            and np.ndim(nocc) == np.ndim(nelec_active) == 1
+            and len(nocc) == len(nelec_active) == 2):
+        raise ValueError('eps, nocc and nelec_active hold one entry per spin, '
+                         '(alpha, beta).')
+    spaces = []
+    for spin, eps_s, nocc_s, nelec in zip(('alpha', 'beta'), eps, nocc,
+                                          nelec_active):
+        if not 0 <= nelec <= n_act:
+            raise ValueError(f'{spin}: {nelec} active electrons in {n_act} '
+                             f'active orbitals.')
+        try:
+            spaces.append(ActiveSpace.from_counts(eps_s, nocc_s, nelec,
+                                                  n_act - nelec))
+        except ValueError as err:
+            raise ValueError(f'{spin}: {err}') from None
+    return tuple(spaces)
+
+
+def _read_only(array):
+    """`array` with its writeable flag cleared."""
+    array.flags.writeable = False
+    return array
+
+
 def _index_array(idx, lo, hi, name):
-    """A strictly increasing int index array inside [lo, hi); raises otherwise."""
-    out = np.asarray(idx, dtype=int).ravel()
+    """A copy of `idx` as a strictly increasing int array inside [lo, hi); raises otherwise."""
+    out = np.array(idx, dtype=int).ravel()   # a copy: never the caller's array
     if len(out) and (out[0] < lo or out[-1] >= hi or np.any(np.diff(out) <= 0)):
         raise ValueError(f'{name} must be strictly increasing indices in '
                          f'[{lo}, {hi}); got {out}')
     return out
-
-
-def frozen_core(mol):
-    """Doubly occupied core orbitals: 1s past He, 1s2s2p past Ne, 1s..3d past Ar
-    (the last only for Ga onwards; K-Zn keep their 3s3p frozen too). Not
-    pyscf's `chemcore`, which freezes the shell of the previous noble gas only
-    from the third element of a period on (Li, Be none; Na, Mg the 1s; K-Zn
-    1s..2p; Ga-Kr 1s..3p)."""
-    n = 0
-    for a in range(mol.natm):
-        z = mol.atom_charge(a)
-        n += (z > 2) + 4 * (z > 10) + 4 * (z > 18) + 5 * (z > 30)
-    return int(n)
-
-
-def closed_shell_nocc(mo_occ):
-    """Doubly occupied orbital count; raises unless the occupations are the aufbau [2 ... 2 0 ... 0].
-
-    Every view here indexes the occupied block as [0, nocc), so a hole in the
-    occupation list would label a virtual orbital as core."""
-    mo_occ = np.asarray(mo_occ)
-    if mo_occ.ndim != 1:
-        raise ValueError('ActiveSpace describes a restricted closed-shell '
-                         'reference; mo_occ is not a single occupation vector')
-    nocc = int(np.count_nonzero(mo_occ > 0))
-    if np.any(mo_occ[nocc:] > 0):
-        raise ValueError('the occupied orbitals are not the lowest ones; a '
-                         'non-aufbau reference has no [0, nocc) occupied block')
-    return nocc
 
 
 def irrep_labels(mol, mo_coeff):
@@ -313,3 +392,35 @@ def lowdin_populations(mf, atoms=None, ao_type='p'):
     w, v = np.linalg.eigh(mf.get_ovlp())
     c_orth = (v * np.sqrt(w)) @ v.T @ np.asarray(mf.mo_coeff)
     return np.einsum('mp,mp->p', c_orth[keep], c_orth[keep])
+
+
+def active_pair_mask(space):
+    """Boolean mask over the nocc*nvirt (i, a) pairs, True where i and a are both active.
+
+    The order is C order over (i, a), i over all occupied orbitals and a over
+    all virtual orbitals counted from nocc.
+    """
+    occ = np.zeros(space.nocc, dtype=bool)
+    occ[space.occ_active] = True
+    virt = np.zeros(space.norb - space.nocc, dtype=bool)
+    virt[space.virt_active - space.nocc] = True
+    return np.outer(occ, virt).ravel()
+
+
+def ph_element_mask(space, second=None):
+    """Boolean (n_act,)*4 mask over chemist elements (tu|vw), True where both pairs are particle-hole.
+
+    t, u, v, w are local indices into `space.act` (occupied first). A pair is
+    particle-hole when it holds one active occupied and one active virtual
+    index, in either order, so all of (ia|jb), (ai|jb), (ia|bj) and (ai|bj)
+    are covered. `second`: the ActiveSpace of the spin channel of the second
+    pair, v and w, for the opposite-spin block of an unrestricted reference
+    (default: both pairs in the channel of `space`).
+    """
+    def pair(p):
+        is_occ = np.arange(p.n_act) < p.n_act_occ
+        return is_occ[:, None] ^ is_occ[None, :]
+
+    first = pair(space)
+    last = first if second is None else pair(second)
+    return first[:, :, None, None] & last[None, None, :, :]

@@ -30,6 +30,7 @@ The fields:
     layout      memory and tiling: recorded, not in the identity
     adc         the excitation-energy ADC solve of a state model
     properties  the spin-orbit operator of the properties pass
+    downfolding the static environment self-energy of the RPA downfolding
 
 The excited-state chain and the composed surfaces hold one and read every
 setting from it (`chain_settings.chain_setting`); the drivers build it
@@ -37,6 +38,7 @@ setting from it (`chain_settings.chain_setting`); the drivers build it
 its fields, `Numerics(bse={'solver': 'dense'})`, which the constructor turns
 into the section's record.
 """
+import math
 from dataclasses import asdict, dataclass, field, fields, replace
 from numbers import Integral
 from typing import Optional
@@ -47,6 +49,8 @@ from src.Base.numerics.constants import (BSE_ADJOINTS, BSE_DAVIDSON_CONV_TOL,
                                          DAVIDSON_GUESS_FACTOR,
                                          DEFAULT_BROADENING_ETA,
                                          DEFAULT_NPADE, DEFAULT_TAU_TARGET,
+                                         DOWNFOLDING_CONTINUATION_MARGIN,
+                                         DOWNFOLDING_POLE_MARGIN, DOWNFOLDING_SRG_S,
                                          EVGW_DAMPING, EVGW_DIIS_SIZE, EVGW_DIIS_START,
                                          EVGW_MAX_CYCLE, EVGW_TOL, IMAGFREQ_NFREQ, GW_DENSITY_NFREQ,
                                          GW_DENSITY_GRID, IMAGINARY_FREQUENCY_GRIDS,
@@ -506,6 +510,41 @@ class GWDensityNumerics:
 
 
 @dataclass(frozen=True)
+class DownfoldingNumerics:
+    """The static environment self-energy of the RPA downfolding
+    (`EffectiveHamiltonian.Downfolding.methods.rpa.environment_self_energy`):
+    srg_s, the SRG flow parameter s of sigma='srg', Hartree^-2, None for
+    s = inf (Eq. 42, no damping); pole_margin, how close, in units of
+    1/sqrt(2 s), an active orbital energy may come to the edge of the
+    pole-free window before an undamped form warns, sigma='averaged' and 'srg'
+    at srg_s = None (s = DOWNFOLDING_SRG_S when srg_s is None);
+    continuation_margin, Hartree, the least such distance on the numerical
+    routes (imagfrequency, space-time), where both forms are continued from
+    the imaginary axis and warn within max(pole_margin/sqrt(2 s),
+    continuation_margin). The margins decide the warning alone
+    (SigmaNearPoleWarning); Sigma_bar is computed either way.
+
+    Refused when built: srg_s that is not a finite positive number or None,
+    and a negative pole_margin or continuation_margin."""
+    srg_s: Optional[float] = DOWNFOLDING_SRG_S
+    pole_margin: float = DOWNFOLDING_POLE_MARGIN
+    continuation_margin: float = DOWNFOLDING_CONTINUATION_MARGIN
+
+    def __post_init__(self):
+        if self.srg_s is not None and not (math.isfinite(self.srg_s)
+                                           and self.srg_s > 0):
+            raise ValueError(f'srg_s={self.srg_s!r}: a finite positive flow '
+                             'parameter, Hartree^-2, or None for s = inf')
+        if not self.pole_margin >= 0:
+            raise ValueError(f'pole_margin={self.pole_margin!r}: a '
+                             'non-negative multiple of 1/sqrt(2 s)')
+        if not self.continuation_margin >= 0:
+            raise ValueError(f'continuation_margin='
+                             f'{self.continuation_margin!r}: a non-negative '
+                             'distance, Hartree')
+
+
+@dataclass(frozen=True)
 class ADCNumerics:
     """The excitation-energy ADC solve of a state model
     (`gradients.adc.ee_state_model.ADC2State`, `eeADC.solve.solve_ee_adc`):
@@ -561,7 +600,8 @@ SECTIONS = {'isdf': IsdfNumerics, 'scf': ScfNumerics, 'span': SpanNumerics,
             'evgw': EvGWNumerics, 'qsgw': QsGWNumerics,
             'imagfreq': ImagFreqNumerics,
             'gwdensity': GWDensityNumerics, 'adc': ADCNumerics,
-            'properties': PropertiesNumerics}
+            'properties': PropertiesNumerics,
+            'downfolding': DownfoldingNumerics}
 
 #: The chain's flat setting names (the keywords a `SurfaceSpec` row and the
 #: chain's attributes use) and the field of `Numerics` each one is.
@@ -814,6 +854,7 @@ class Numerics:
     gwdensity: GWDensityNumerics = field(default_factory=GWDensityNumerics)
     adc: ADCNumerics = field(default_factory=ADCNumerics)
     properties: PropertiesNumerics = field(default_factory=PropertiesNumerics)
+    downfolding: DownfoldingNumerics = field(default_factory=DownfoldingNumerics)
     parent: Optional[str] = None
     change: tuple = ()
     reason: Optional[str] = None

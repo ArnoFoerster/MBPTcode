@@ -9,7 +9,7 @@ layers below it, never from a layer above:
 | physics | `src/photophysics` | composite runs of a molecule: rates, the staged TADF run, solvated spectra |
 | properties | `src/properties`, `src/autograd_oracle` | geometry optimization, vibrations, couplings, band shapes: anything computed from a potential-energy surface; the torch reference for the GW-BSE forces |
 | gradients | `src/gradients` and its `rpa/`, `gwbse/`, `adc/` | the surfaces and their analytic forces |
-| electronic structure | `src/SingleReference`, `src/MultiReference`, `src/fragments` | the methods: ADC, CC, GW, BSE, linear response, ... |
+| electronic structure | `src/SingleReference`, `src/EffectiveHamiltonian`, `src/fragments` | the methods: ADC, CC, GW, BSE, linear response, ... |
 | environments | `src/environments` | solvent continua, point charges, polarizable sites |
 | foundation | `src/Base`, `src/Solvers` | the pySCF interface, numerical settings, factorizations, grids, eigensolvers |
 
@@ -75,13 +75,14 @@ src/Base/                      the foundation
                                short warns and raises a flag, which the
                                function returning the record collects (see
                                warnings.md)
-    orbital_spaces.py          the occupied/virtual split
+    orbital_spaces.py          the occupied/virtual split, the checked
+                               occupied counts of a mean field, the
+                               frozen-core count
     step_failed.py             StepFailed, which a walk catches to shorten a
                                step
 src/Solvers/                   the quasiparticle root finder (one for every
                                route), the symmetric Davidson eigensolver,
-                               and the active-space solvers (FCI,
-                               determinant basis, DMRG, coupled cluster)
+                               DIIS
 src/environments/              medium.py (a medium by name or by eps and
                                n^2, and the cavity conventions),
                                solvent_screening.py (PCM reaction field and
@@ -117,10 +118,21 @@ src/SingleReference/
     Periodic/                  k-point RPA, BSE and GW (see
                                methods/periodic.md)
     common/                    pieces several methods share: MP1 amplitudes,
-                               ERI blocks, DF amplitudes, ActiveSpace
-src/MultiReference/QDPT/       active-space downfolding: generated MP2/MP3
+                               ERI blocks, DF amplitudes
+src/EffectiveHamiltonian/
+    active_space.py            ActiveSpace: which canonical orbitals are
+                               active, chosen by energy, irrep or population
+    QDPT/                      active-space downfolding: generated MP2/MP3
                                diagram evaluators and the effective
                                Hamiltonian built from them
+    solvers/                   the many-body solvers of g_eff: solve.py
+                               (the dispatcher), backends.py (FCI, the
+                               determinant basis, DMRG, coupled cluster),
+                               determinants.py
+    Downfolding/               static effective Hamiltonians of an active
+                               space downfolded from HF or RPA (see
+                               methods/downfolding.md); builds on
+                               LinearResponse and GW
 src/fragments/                 fragment-localized orbitals and the fragment
                                partition of any Hermitian singles operator
                                (GW-BSE, ADC(2): diabats, A_eff(Omega_0)),
