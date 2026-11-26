@@ -97,7 +97,7 @@ def unpack_G(x, G_shape):
     return x.view(np.complex128).reshape(G_shape)
 
 def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kind='IR', save_file=None,
-                          save_sigma=False, **kwargs):
+                          save_sigma=False, save_W0=False, **kwargs):
     """Self-consistent GW on IR grids, up to (not including) the real axis.
 
     Starts from the mean-field G0 and iterates Sigma and F to
@@ -116,6 +116,12 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
     save_sigma: also write the converged Sigma (sigma_mo, on omega_points)
         to the h5. Off by default: it is (n_omega, nmo, nmo) complex and
         can be very large for large systems. Ignored without save_file.
+    save_W0: also write the static screened interaction W(i omega = 0) of
+        the converged G (W0_aux, (naux, naux) in the auxiliary basis of the
+        ISDF factor D or the RI tensor B, for BSE). Every Sigma build returns
+        its W0, a naux^2 copy, and only the latest is kept, so the one
+        written is that of the last Sigma build, from the converged G.
+        Ignored without save_file.
     method: 'ISDF' (separable factors) or 'RI' (plain RI three-index
         tensor, needs `auxbasis`); see `calc_new_sigma`.
     kwargs: `factors` (precomputed output of `separable_factors`) or
@@ -284,12 +290,22 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
 
     print(f'\n----SCF (mixing {mix})----\n')
 
+    # W0 = W(i omega = 0) of the latest Sigma build, overwritten each
+    # iteration; at the break it is that of the converged G.
+    want_W0 = save_W0 and save_file is not None
+
+    def sigma_and_W0(G):
+        if want_W0:
+            return calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B,
+                                  method=method, return_W0=True)
+        return calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method), None
+
     residual = np.inf
     for it in range(MAX_SCF_ITER):
         mu_old = mu
         if mix == 'sigma_F':
             # 1. Outputs from the current G
-            sigma_out = calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method)
+            sigma_out, W0 = sigma_and_W0(G)
             F_out = build_new_F(gamma, mf, h_mo)
             x_out = pack_sigma_F(sigma_out, F_out)
             del sigma_out, F_out
@@ -307,7 +323,7 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
             error[:n_sigma] *= sigma_weight
         else:
             # 1. G_out from the current G_in
-            sigma_in = calc_new_sigma(G, grid_f, grid_b, X_mo=X_mo, D=D, B=B, method=method)
+            sigma_in, W0 = sigma_and_W0(G)
             F_in = build_new_F(gamma, mf, h_mo)
             mu, G_out, gamma_out = mu_cycle(mu, F_in, nocc, sigma_mo=sigma_in,
                                             grid_f=grid_f, grid_kind='IR')
@@ -396,6 +412,8 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
             'method': method}
         if save_sigma:
             data['sigma_mo'] = sigma_new
+        if want_W0:
+            data['W0_aux'] = W0
         lib.chkfile.save(save_file + '.h5', 'scgw', data)
         lib.chkfile.save_mol(mol, save_file + '.h5')
 
@@ -418,7 +436,7 @@ def solve_qp_energy_scgw(mf, mol, nocc, ref_file=None, method='ISDF', grid_kind=
         the saved 'scgw/sigma_mo' (refitted), or else from 'scgw/pade'
         (the saved fit, used as is). mf and mol must be those of that run.
     save_file: if given, (w_real, A, mu) is also written there as CSV.
-    save_sigma: passed on to `_solve_qp_energy_scgw` through kwargs.
+    save_sigma, save_W0: passed on to `_solve_qp_energy_scgw` through kwargs.
     save_pade: also write the Pade fit of Sigma to save_file + '.h5' under
         'scgw/pade' (see `pack_pade`), enough to redo A(omega), e.g. at a
         smaller eta, without Sigma. Smaller than sigma_mo, but fixes the

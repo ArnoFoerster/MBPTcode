@@ -87,7 +87,18 @@ def W_minus_I_inplace(chi_omega):
         chi_omega[k] = Wc
     return chi_omega
 
-def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
+def static_W(Wc_omega, grid_b):
+    """W(i.omega = 0) in the auxiliary basis, a new (naux, naux) array, from
+    W - I on the boson grid (`W_minus_I_inplace`). The boson IR sampling
+    always contains omega = 0; it is looked up rather than assumed first."""
+    k0 = int(np.argmin(np.abs(grid_b.omega_points)))
+    if grid_b.omega_points[k0] != 0.0:
+        raise ValueError('boson grid has no omega = 0 point')
+    W0 = Wc_omega[k0].copy()
+    W0[np.diag_indices_from(W0)] += 1.0
+    return W0
+
+def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False, return_W0=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega).
 
     Steps: G -> chi = G*G -> W = [I - chi]^-1 -> Sigma = G*W. The products
@@ -111,8 +122,12 @@ def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
     X_mo, D: separable (ISDF/THC) factors from `separable_factors`.
     return_all: also return the intermediates; otherwise only sigma_new is
         returned and chi, W and G(tau) are freed as soon as they are used.
+    return_W0: also return the static W(i.omega = 0), (naux, naux) in the
+        auxiliary basis of D (`static_W`). It costs one naux^2 copy, so it
+        can be asked for on every call.
 
-    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new):
+    Returns sigma_new, (sigma_new, W0) with return_W0=True, or with
+    return_all=True (G_tau, chi_omega, W_omega, sigma_new):
       G_tau      G_lesser + 1j*G_greater, on grid_f.tau_points
       chi_omega  on grid_b.omega_points, auxiliary basis
       W_omega    on grid_b.omega_points, auxiliary basis
@@ -161,6 +176,7 @@ def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
         chi_out = chi_omega.copy()
     Wc_omega = W_minus_I_inplace(chi_omega)
     del chi_omega
+    W0 = static_W(Wc_omega, grid_b) if return_W0 else None
 
     # Sigma(tau) = G(tau) * Z(tau) elementwise on the ISDF/THC grid, with
     # Z = D (W - I) D^T; unlike chi, no extra sign is needed. G is taken at
@@ -193,7 +209,7 @@ def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
     del Z_t, buf_a, buf_b, Wt
 
     if not return_all:
-        return sigma_new
+        return (sigma_new, W0) if return_W0 else sigma_new
 
     G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
     G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
@@ -201,7 +217,8 @@ def calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=False):
     G_greater_f = G_even_f + G_odd_f
     return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
 
-def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
+def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None,
+                      return_W0=False):
     """Correlation self-energy Sigma(i.omega) from a dressed G(i.omega), with
     the Coulomb interaction in plain RI instead of the ISDF/THC factors.
 
@@ -227,10 +244,11 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
         contracted with the Coulomb metric, (pq|rs) = sum_P B[P,p,q] B[P,r,s].
     return_all: also return the intermediates; otherwise only sigma_new is
         returned.
+    return_W0: also return the static W(i.omega = 0), (naux, naux) in the
+        auxiliary basis of B, so that (pq|W(0)|rs) = sum_PQ B[P,p,q] W0[P,Q] B[Q,r,s].
     block_size: P per block; default from RI_BLOCK_MB.
 
-    Returns sigma_new, or with return_all=True (G_tau, chi_omega, W_omega, sigma_new),
-    as `calc_new_sigma_isdf`.
+    Returns as `calc_new_sigma_isdf`.
     """
     nmo = G.shape[-1]
     naux = B.shape[0]
@@ -270,6 +288,7 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
 
     Wc_omega = W_minus_I_inplace(chi_omega)
     del chi_omega
+    W0 = static_W(Wc_omega, grid_b) if return_W0 else None
 
     # Sigma(tau): V_P = sum_Q (W - I)[P,Q] B_Q, then
     #     even = sum_P B_P G_even V_P,  odd = sum_P B_P G_odd V_P,
@@ -296,7 +315,7 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
     del V, Wt
 
     if not return_all:
-        return sigma_new
+        return (sigma_new, W0) if return_W0 else sigma_new
 
     G_even_f = np.einsum('tk,kpq->tpq', grid_f.cosft_tw, G.real)
     G_odd_f = np.einsum('tk,kpq->tpq', grid_f.sinft_tw, G.imag)
@@ -305,7 +324,7 @@ def calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=False, block_size=None):
     return (G_lesser_f + 1j * G_greater_f), chi_out, Wc_omega + np.eye(naux), sigma_new
 
 def calc_new_sigma(G, grid_f, grid_b, X_mo=None, D=None, B=None, method='ISDF',
-                   return_all=False):
+                   return_all=False, return_W0=False):
     """Correlation self-energy Sigma(i.omega), by `calc_new_sigma_isdf`
     (method='ISDF', needs X_mo and D) or `calc_new_sigma_ri` (method='RI',
     needs B). Returns what the chosen routine returns.
@@ -314,9 +333,11 @@ def calc_new_sigma(G, grid_f, grid_b, X_mo=None, D=None, B=None, method='ISDF',
     if method == 'ISDF':
         if X_mo is None or D is None:
             raise ValueError("method='ISDF' needs X_mo and D")
-        return calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=return_all)
+        return calc_new_sigma_isdf(G, grid_f, grid_b, X_mo, D, return_all=return_all,
+                                   return_W0=return_W0)
     if method == 'RI':
         if B is None:
             raise ValueError("method='RI' needs B")
-        return calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=return_all)
+        return calc_new_sigma_ri(G, grid_f, grid_b, B, return_all=return_all,
+                                 return_W0=return_W0)
     raise ValueError(f"Unknown method {method!r}, expected 'ISDF' or 'RI'")
