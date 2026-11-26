@@ -183,7 +183,7 @@ import time
 
 from pyscf import dft, gto, lib, scf
 
-from src.SingleReference.common.active_space import frozen_core
+from src.Base.orbital_spaces import frozen_core
 from src.Base.basis.basis_map import atom_basis_names, molecule_basis, parse_basis_for
 from src.Base.basis.ri_fallback import paired_auxbasis, paired_jk_auxbasis
 from src.Base.numerics.constants import (ADC2_SPIN_SCALING, HARTREE_TO_EV,

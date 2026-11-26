@@ -1,6 +1,6 @@
 """QDPT effective-Hamiltonian evaluator generator: turns the Wick-contracted
 MP2/MP3 downfolding terms of qdpt_wick into the committed
-src/MultiReference/QDPT/generated_evaluators[_spinfree].py
+src/EffectiveHamiltonian/QDPT/generated_evaluators[_spinfree].py
 (eval_pt{2,3}_v{2,3}[_spinfree], called by perturbative.build_effective_hamiltonian).
 
 Every multi-vertex term is contracted pairwise in the operator order that
@@ -937,7 +937,7 @@ COMBINATIONS = ((2, 2), (2, 3), (3, 2), (3, 3))   # (PT order, max vertex rank)
 def generate(out_dir=None):
     """Write generated_evaluators.py and generated_evaluators_spinfree.py
     (eval_pt{pt}_v{v}[_spinfree] for every COMBINATIONS entry) into out_dir
-    (default: src/MultiReference/QDPT)."""
+    (default: src/EffectiveHamiltonian/QDPT)."""
     # every denominator gets its own variable d0, d1, ...: a shared name could be
     # hoisted out of a sliced-index loop by the dependency classifier while a
     # later same-named occurrence stayed inside it

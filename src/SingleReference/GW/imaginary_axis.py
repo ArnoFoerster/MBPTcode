@@ -29,7 +29,8 @@ from src.Base.pyscf.pyscf_interface import (get_orbital_energies,
                                      require_gas_phase_ground_state, spin_index)
 from src.SingleReference.LinearResponse.linear_response import LinearResponseSolver
 from src.Base.orbital_spaces import (get_occ_virt_indices,
-                                     particle_hole_window, transition_range)
+                                     particle_hole_window, response_range,
+                                     transition_range)
 from src.SingleReference.GW.reaction_field import (
     bare_self_energy, environment_quasiparticle_shift, shift_after_solve)
 from src.SingleReference.GW.qp_solve import (finish_qp,
@@ -130,6 +131,31 @@ def fitted_self_energy_matrix_imaginary_axis(df_coeff, eps_mu, freq_points, W_gr
     return sigma
 
 
+def screening_fit_grid(eps, nocc, numerics=None):
+    """(points, weights, poles) of the Lorentzian fit of W on the imaginary
+    axis: the numerics.imagfreq.nfreq minimax frequency points over the
+    particle-hole window (gap, span) of eps, on which W(i w) is sampled,
+    with their minimax
+    weights (which a TimeFrequencyGrid on these points carries; the fit
+    itself does not use them), and as many fit poles log-spaced over
+    [GW_DENSITY_W_FIT_LOW * gap, GW_DENSITY_W_FIT_HIGH * span]. For an
+    unrestricted reference eps and nocc are the pairs of both spins, and
+    gap and span the smallest gap and the largest span over the two
+    (`response_range`): W is one object, built from both.
+
+    The one recipe of `self_energy_matrix_imaginary_axis` and of the RPA
+    downfolding's environment self-energy
+    (`EffectiveHamiltonian.Downfolding.methods.rpa.`
+    `environment_self_energy_samples`), whose samples go to
+    `fitted_self_energy_matrix_imaginary_axis`."""
+    nfreq = numerics_or_default(numerics).imagfreq.nfreq
+    e_min, e_max = response_range(eps, nocc)
+    points, weights = minimax_frequency_grid(nfreq, e_min, e_max)
+    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min,
+                         GW_DENSITY_W_FIT_HIGH * e_max, len(points))
+    return points, weights, poles
+
+
 def self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
     """(Sigma_c,pq(mu + i*query_freqs), mu) of a restricted gas-phase mean
     field at T = 0. The three-index object of all orbitals (the mean field's
@@ -142,16 +168,13 @@ def self_energy_matrix_imaginary_axis(mf, mol, nocc, query_freqs, numerics):
     one per W-grid point, regularized by GW_DENSITY_W_FIT_TIKHONOV."""
     where = 'self_energy_matrix_imaginary_axis'
     require_gas_phase_ground_state(mf, where, mol=mol)
-    nfreq = numerics.imagfreq.nfreq
     eps = np.asarray(get_orbital_energies(mf, representation='spatial'), float)
     df_coeff = get_density_fitting_coefficients(mol, mf, representation='spatial')
     lr = LinearResponseSolver(eps, coeff_df=df_coeff, spin_mode='restricted',
                               eta=DEFAULT_BROADENING_ETA)
-    e_min, e_max, mu = particle_hole_window(eps, nocc)
-    freq_points, _ = minimax_frequency_grid(nfreq, e_min, e_max)
+    mu = particle_hole_window(eps, nocc)[2]
+    freq_points, _, poles = screening_fit_grid(eps, nocc, numerics)
     W_grid = lr.solve_rpa_screening(freq_points, nocc, is_imaginary=True)
-    poles = np.geomspace(GW_DENSITY_W_FIT_LOW * e_min, GW_DENSITY_W_FIT_HIGH * e_max,
-                         len(freq_points))
     sigma = fitted_self_energy_matrix_imaginary_axis(df_coeff, eps - mu, freq_points, W_grid,
                                                      query_freqs, poles,
                                                      GW_DENSITY_W_FIT_TIKHONOV)

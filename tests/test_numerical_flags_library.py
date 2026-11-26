@@ -25,6 +25,8 @@ object the caller records:
 
 Stand-ins and tiny molecules (H2, H atom); each runs in well under a second.
 """
+import warnings
+
 import numpy as np
 import pytest
 from pyscf import gto, scf
@@ -185,6 +187,63 @@ def test_a_spin_contaminated_reference_is_flagged(monkeypatch):
     assert out['spin_contaminated'] is True
     assert [f['flag'] for f in block] == ['uhf_spin_contaminated']
     assert mf.reference_diagnostics is out
+
+
+def test_reference_flags_reach_every_record_of_one_mean_field(monkeypatch):
+    """The diagnostics are computed once per converged mean field and warn
+    then; a later call on the same mean field does not warn again but hands
+    the named flags to its own collecting block, worded for its own caller:
+    every record built on that reference carries them."""
+    mf = scf.UHF(gto.M(atom='H 0 0 0', spin=1, basis='sto-3g',
+                       verbose=0)).run()
+    mf.spin_square = lambda: (1.5, 3.0)
+    calls = []
+    monkeypatch.setattr(pyscf_interface.scf_stability, 'uhf_internal',
+                        lambda *args, **kwargs: calls.append(1))
+    first, second = [], []
+    with collecting(first), pytest.warns(RuntimeWarning,
+                                         match='quasiparticle energies'):
+        out = pyscf_interface.unrestricted_reference_diagnostics(mf, 'one')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        with collecting(second):
+            again = pyscf_interface.unrestricted_reference_diagnostics(
+                mf, 'two', what='effective Hamiltonians')
+    assert again is out
+    assert [f['flag'] for f in first] == ['uhf_spin_contaminated']
+    assert [f['flag'] for f in second] == ['uhf_spin_contaminated']
+    assert first[0]['message'].startswith('one: ')
+    assert second[0]['message'].startswith('two: ')
+    assert 'its effective Hamiltonians describe' in second[0]['message']
+    # one orbital: no occupied-virtual rotation, so nothing to analyse
+    assert calls == [] and out['stable'] is True
+
+
+def test_an_unstable_reference_is_flagged(monkeypatch):
+    """An internally unstable determinant carries the named flag
+    'uhf_reference_unstable', worded for the caller. A reference without
+    any occupied-virtual pair (triplet H2 in a minimal basis) has no orbital
+    rotation and is stable without asking pyscf, whose analysis divides by
+    zero there."""
+    mol = gto.M(atom='H 0 0 0; H 0 0 0.74', spin=2, basis='sto-3g',
+                verbose=0)
+    block = []
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        with collecting(block):
+            out = pyscf_interface.unrestricted_reference_diagnostics(
+                scf.UHF(mol).run(), 'test')
+    assert out['stable'] is True and block == []
+    mf = scf.UHF(gto.M(atom='H 0 0 0; H 0 0 0.74', spin=2, basis='6-31g',
+                       verbose=0)).run()
+    monkeypatch.setattr(pyscf_interface.scf_stability, 'uhf_internal',
+                        lambda mf, return_status, verbose: (None, False))
+    with collecting(block), pytest.warns(
+            RuntimeWarning, match='the densities start from a saddle point'):
+        out = pyscf_interface.unrestricted_reference_diagnostics(
+            mf, 'test', what='densities')
+    assert out['stable'] is False
+    assert [f['flag'] for f in block] == ['uhf_reference_unstable']
 
 
 def test_an_ill_conditioned_ir_fit_is_kept_on_the_basis(monkeypatch):

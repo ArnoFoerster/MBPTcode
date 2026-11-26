@@ -1,5 +1,5 @@
-"""The QDPT downfolding driver (src/MultiReference/QDPT/perturbative.py) and
-its solver dispatcher (src/Solvers/active_space.py).
+"""The QDPT downfolding driver (src/EffectiveHamiltonian/QDPT/perturbative.py)
+and its solver dispatcher (src/EffectiveHamiltonian/solvers/solve.py).
 
 Run: python tests/test_qdpt_perturbative.py, or under pytest.
 
@@ -26,9 +26,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import numpy as np
 from pyscf import gto, scf
 
-from src.SingleReference.common.active_space import ActiveSpace
-from src.MultiReference.QDPT.perturbative import build_effective_hamiltonian, run_pipeline
-from src.Solvers.active_space import solve
+from src.EffectiveHamiltonian.active_space import ActiveSpace
+from src.EffectiveHamiltonian.QDPT.perturbative import build_effective_hamiltonian, run_pipeline
+from src.EffectiveHamiltonian.solvers.solve import solve
 from tests.blas_bar import same
 
 H4 = 'H 0 0 0; H 1.8 0 0; H 0.54 2.34 0; H 2.52 1.62 0.9'

@@ -1302,10 +1302,23 @@ def static_screening_grid(eps, nocc, ntau=None, tau_target=DEFAULT_TAU_TARGET):
 
     ntau: None or 'auto' sizes the grid from the chi0 transition range through
     `minimax_points_for_bse`.
+
+    eps and nocc are one spectrum and its occupied count, or the pairs of an
+    unrestricted reference: the grid then covers the transitions of both
+    spins, the smallest gap and the largest span of the two spectra
+    (`transition_range`), and its automatic size is the minimax count of
+    that range.
     """
-    e_min, e_max, _ = particle_hole_window(eps, nocc)
-    if ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto'):
-        ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
+    auto = ntau is None or (isinstance(ntau, str) and ntau.lower() == 'auto')
+    if np.ndim(nocc) == 0:
+        e_min, e_max, _ = particle_hole_window(eps, nocc)
+        if auto:
+            ntau, _ = minimax_points_for_bse(eps, nocc, tau_target=tau_target)
+    else:
+        e_min, e_max = transition_range(eps, nocc)
+        if auto:
+            ntau, _ = minimax_points_for_accuracy(e_min, e_max,
+                                                  target=tau_target)
     return TimeFrequencyGrid.minimax_split(ntau, e_min, e_max, [0.0], [1.0],
                                            with_sine=False, with_inverse=False)
 
@@ -1449,7 +1462,24 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
     flags: a dict, or None: receives under 'nonpositive_det' the frequencies,
     on every rank, whose det(1 - chi0) was not positive
     (`dielectric_log_determinant`).
+
+    An unrestricted reference: X, eps and nocc are the pairs (X_alpha,
+    X_beta) of collocations X_s = X_ao C_s, of spectra and of occupied
+    counts, on the one D. chi0 is then chi0_alpha + chi0_beta
+    (`spin_summed`), each spin at its own mid-gap, so `mu` is not taken
+    (ValueError); `grid` has to cover the transitions of both spins
+    (`transition_range`). There is no tape for two channels: the reverse
+    pass that reads it is restricted (want_tape is refused).
     """
+    two_spin = np.ndim(nocc) != 0
+    if two_spin and mu is not None:
+        raise ValueError(
+            'rpa_correlation_energy_space_time with two spin channels puts '
+            'each spin at its own mid-gap; mu is for one channel.')
+    if two_spin and want_tape:
+        raise NotImplementedError(
+            'rpa_correlation_energy_space_time: want_tape is for one spin '
+            'channel; the reverse pass that reads the tape is restricted.')
     n_mat, g = (None, None) if screening is None else screening
     comm = current_comm() if comm is None else comm
     rank, nranks = ((comm.Get_rank(), comm.Get_size()) if comm is not None
@@ -1459,9 +1489,14 @@ def rpa_correlation_energy_space_time(X, D, eps, nocc, grid, mu=None,
                   label='rpa_correlation_energy_space_time inputs')
     tau_mine = partition(grid.ntau, rank, nranks) if nranks > 1 else None
     nu_mine = partition(grid.nfreq, rank, nranks) if nranks > 1 else None
-    proj_tau = polarizability_projected_sweep(X, D, eps, nocc, grid.tau_points,
-                                              mu=mu, tau_indices=tau_mine,
-                                              tile_memory_gb=tile_gb)
+    if two_spin:
+        proj_tau = spin_summed(polarizability_projected_sweep, X, D, eps, nocc,
+                               grid.tau_points, tau_indices=tau_mine,
+                               tile_memory_gb=tile_gb)
+    else:
+        proj_tau = polarizability_projected_sweep(
+            X, D, eps, nocc, grid.tau_points, mu=mu, tau_indices=tau_mine,
+            tile_memory_gb=tile_gb)
     if nranks > 1:
         reduce_sum(proj_tau, comm)            # the others' slots are zero
     terms, mine = [], {}

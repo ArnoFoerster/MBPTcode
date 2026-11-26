@@ -2,6 +2,7 @@ pytest test_ac_quasiparticle_shifts.py
 pytest test_active_space.py
 pytest test_active_space_cc.py
 pytest test_active_space_solver.py
+pytest test_active_space_solver_unrestricted.py
 pytest test_adaptive_partition_carried.py
 pytest test_adaptive_posteriori.py
 script test_adc2x_df.py
@@ -76,6 +77,17 @@ pytest test_docs_parallel_example.py
 pytest test_df_check.py
 pytest test_df_ladder.py
 pytest test_downfolded_seeds.py
+pytest test_downfolding_energy.py
+pytest test_downfolding_layout.py
+pytest test_downfolding_one_body.py
+pytest test_downfolding_masks.py
+pytest test_downfolding_qp.py
+pytest test_downfolding_reference.py
+pytest test_downfolding_routes.py
+pytest test_downfolding_sigma.py
+pytest test_downfolding_two_body.py
+pytest test_downfolding_unrestricted.py
+pytest test_downfolding_unrestricted_routes.py
 pytest test_ee_adc_davidson_max_memory.py
 pytest test_ee_adc_driver.py
 pytest test_ee_adc_en.py
@@ -216,6 +228,7 @@ pytest test_df_jk_block_rows.py
 pytest test_xc_block_cap.py
 pytest test_row_fit_frozen_layout.py
 script test_rpa_correlation_energy.py
+pytest test_rpa_energy_unrestricted.py
 pytest test_rpa_qp_surface.py
 pytest test_run_tadf_resume.py
 pytest test_runtime_radii.py

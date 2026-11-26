@@ -16,9 +16,10 @@ under [Threads](parallel.md#threads).
 the tree pulls in, so it is not optional.
 
 The restricted coupled-cluster integral path and the determinant-basis
-active-space solver (`Solvers.active_space_solver.ExactDiagonalizationSolver`,
-the default backend of `Solvers.active_space.solve`) need `openfermion`, which
-is imported only when they are reached:
+active-space solver
+(`EffectiveHamiltonian.solvers.backends.ExactDiagonalizationSolver`, the
+default backend of `EffectiveHamiltonian.solvers.solve.solve`) need
+`openfermion`, which is imported only when they are reached:
 
 ```bash
 pip install openfermion
@@ -34,7 +35,8 @@ pip install pyscf-dispersion # D3/D4 empirical dispersion
 pip install torch            # src/autograd_oracle: a torch reference for the GW-BSE forces, tests only
 ```
 
-`Solvers.active_space_solver.Block2DMRGSolver` additionally needs `block2`:
+`EffectiveHamiltonian.solvers.backends.Block2DMRGSolver` additionally needs
+`block2`:
 
 ```bash
 pip install block2
@@ -48,8 +50,8 @@ uses both. `KMP_DUPLICATE_LIB_OK=TRUE` suppresses the abort but can deadlock
 the DMRG sweep.
 
 The coupled-cluster active-space solver
-(`Solvers.active_space_solver.CoupledClusterSolver`) uses pyscf's CCSDT and
-CCSDTQ, which ship with recent pyscf (2.12.1 has them). Its tensor
+(`EffectiveHamiltonian.solvers.backends.CoupledClusterSolver`) uses pyscf's
+CCSDT and CCSDTQ, which ship with recent pyscf (2.12.1 has them). Its tensor
 contractions run on `pytblis` when that is installed (`pip install pytblis`),
 else on pyscf's own einsum; the results are the same.
 

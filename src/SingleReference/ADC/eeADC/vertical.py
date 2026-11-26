@@ -63,7 +63,7 @@ import warnings
 import numpy as np
 from pyscf import df, gto, scf
 
-from src.SingleReference.common.active_space import frozen_core
+from src.Base.orbital_spaces import frozen_core
 from src.Base.numerics.constants import (ADC2_SPIN_SCALING, BYTES_PER_GB,
                                          EE_RI_AMPLITUDE_CACHE_GB, EE_RI_FOLD_TILE_ARRAYS,
                                          EE_RI_TILE_GB, HARTREE_TO_EV, MB_PER_GB)
