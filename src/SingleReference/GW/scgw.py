@@ -112,7 +112,10 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
     save_file: if given, the converged F_mo, mu, density (dm_ao, gamma_mo),
         mo_coeff, the Matsubara frequencies omega_points, E_gm, E_c, e_hf
         and method are written to save_file + '.h5' (pyscf chkfile, key
-        'scgw', with mol).
+        'scgw', with mol), together with what rebuilds the three-index
+        factor in the gauge of W0_aux: nocc, mo_energy (of mf), frozen_core,
+        auxbasis (when given) and, for ISDF, the factors isdf_D and
+        isdf_X_ao.
     save_sigma: also write the converged Sigma (sigma_mo, on omega_points)
         to the h5. Off by default: it is (n_omega, nmo, nmo) complex and
         can be very large for large systems. Ignored without save_file.
@@ -202,7 +205,7 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
 
     method = method.upper()
     if method == 'ISDF':
-        X_mo, D, _, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
+        X_mo, D, X_ao, _ = (kwargs.get('factors') if kwargs.get('factors') is not None
                                     else separable_factors(mf, mol, auxbasis=kwargs.get('auxbasis'),
                                                         grid_accuracy=kwargs.get('grid_accuracy',
                                                                                     SURFACE_GRID_ACCURACY)))
@@ -213,7 +216,7 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
         B = build_B_ri(mol, mf.mo_coeff, kwargs.get('auxbasis'))
 
         X_mo = None
-        D = None
+        D = X_ao = None
     else:
         raise ValueError(f"Unknown method {method!r}, expected 'ISDF' or 'RI'")
 
@@ -409,7 +412,23 @@ def _solve_qp_energy_scgw(mf, mol, nocc, skip_scf=False, method='ISDF', grid_kin
             'gamma_mo': gamma, 'mo_coeff': mf.mo_coeff, 'F_mo': F,
             'omega_points': grid_f.omega_points,
             'mu': mu, 'E_gm': E_gm, 'E_c': E_c, 'e_hf': mf.e_tot,
-            'method': method}
+            'method': method,
+            # What a later step (e.g. BSE on W0_aux) needs to rebuild the
+            # three-index factor in the same auxiliary gauge, and the mean
+            # field it started from. The orbital basis is in the saved mol.
+            'nocc': nocc, 'mo_energy': eps,
+            'frozen_core': int(getattr(mf, 'frozen_core', 0))}
+        if kwargs.get('auxbasis') is not None:
+            # a basis name; a dict basis is stored by its repr
+            aux = kwargs['auxbasis']
+            data['auxbasis'] = aux if isinstance(aux, str) else repr(aux)
+        if method == 'ISDF':
+            # The ISDF gauge is the fit itself (grid and auxbasis), so the
+            # factors are stored rather than the keywords that made them:
+            # B[P,p,q] = sum_k (X_ao C)[k,p] (X_ao C)[k,q] D[k,P].
+            data['isdf_D'] = D
+            if X_ao is not None:
+                data['isdf_X_ao'] = X_ao
         if save_sigma:
             data['sigma_mo'] = sigma_new
         if want_W0:
